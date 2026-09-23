@@ -67,3 +67,80 @@ fn try_slice_reports_bounds_error() {
         Err(RopeError::IntervalOutOfBounds { start: 0, end: 10, len: 5 })
     );
 }
+
+#[test]
+fn str_utf16_helpers_match_std() {
+    for s in ["", "abc", "aé", "😀🐸", "Hello みんなさん 🐸\n"] {
+        assert_eq!(count_utf16_code_units(s), s.encode_utf16().count(), "{s:?}");
+        assert_eq!(utf16_cu_to_byte_idx(s, count_utf16_code_units(s)), Some(s.len()), "{s:?}");
+    }
+}
+
+#[test]
+fn byte_to_utf16_cu_idx_rounds_mid_char_down() {
+    let s = "a😀x";
+    // '😀' occupies bytes 1..=4 (4 bytes, 2 UTF-16 units).
+    assert_eq!(byte_to_utf16_cu_idx(s, 0), 0);
+    assert_eq!(byte_to_utf16_cu_idx(s, 1), 1);
+    assert_eq!(byte_to_utf16_cu_idx(s, 2), 1); // mid-char rounds down
+    assert_eq!(byte_to_utf16_cu_idx(s, 3), 1);
+    assert_eq!(byte_to_utf16_cu_idx(s, 4), 1); // still inside the char
+    assert_eq!(byte_to_utf16_cu_idx(s, 5), 3);
+    assert_eq!(byte_to_utf16_cu_idx(s, 6), 4);
+    assert_eq!(byte_to_utf16_cu_idx(s, 99), 4);
+    assert_eq!(byte_to_utf16_cu_idx("", 0), 0);
+}
+
+#[test]
+fn utf16_cu_to_byte_idx_accumulation_semantics() {
+    let s = "a😀x"; // 1 + 2 + 1 = 4 UTF-16 units, 6 bytes
+    assert_eq!(utf16_cu_to_byte_idx(s, 0), Some(0));
+    assert_eq!(utf16_cu_to_byte_idx(s, 1), Some(1));
+    // Target splits the surrogate pair: resolves to the end of the char (byte 5).
+    assert_eq!(utf16_cu_to_byte_idx(s, 2), Some(5));
+    assert_eq!(utf16_cu_to_byte_idx(s, 3), Some(5));
+    assert_eq!(utf16_cu_to_byte_idx(s, 4), Some(6));
+    assert_eq!(utf16_cu_to_byte_idx(s, 5), None);
+    assert_eq!(utf16_cu_to_byte_idx("abc", 3), Some(3));
+    assert_eq!(utf16_cu_to_byte_idx("abc", 4), None);
+    assert_eq!(utf16_cu_to_byte_idx("", 0), Some(0));
+    assert_eq!(utf16_cu_to_byte_idx("", 1), None);
+}
+
+#[test]
+fn utf16_helpers_parity_with_chars_loop() {
+    // Pin the helpers against the classic accumulation loop they replaced in
+    // the LSP client conversions, across all targets and byte offsets.
+    let corpus = ["", "abc", "aé😀x\n", "Hello みんなさん 🐸", "\r\n", "🌊🌊"];
+    for s in corpus {
+        let total = s.encode_utf16().count();
+        for target in 0..=total + 2 {
+            let mut seen = 0;
+            let mut bytes = 0;
+            for ch in s.chars() {
+                if seen >= target {
+                    break;
+                }
+                seen += ch.len_utf16();
+                bytes += ch.len_utf8();
+            }
+            let expected = if seen >= target { Some(bytes) } else { None };
+            assert_eq!(
+                utf16_cu_to_byte_idx(s, target),
+                expected,
+                "utf16_cu_to_byte_idx({target}) in {s:?}"
+            );
+        }
+        for b in 0..=s.len() {
+            let mut clamped = b.min(s.len());
+            while clamped > 0 && !s.is_char_boundary(clamped) {
+                clamped -= 1;
+            }
+            assert_eq!(
+                byte_to_utf16_cu_idx(s, b),
+                s[..clamped].encode_utf16().count(),
+                "byte_to_utf16_cu_idx({b}) in {s:?}"
+            );
+        }
+    }
+}

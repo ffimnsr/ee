@@ -135,6 +135,53 @@ fn try_lines_at_out_of_bounds() {
 }
 
 #[test]
+fn char_indices_match_model() {
+    let text = "aé🐸\nみんな";
+    let rope = Rope::from(text);
+    // Ropey-style: char indices (not std's byte indices).
+    let collected: Vec<(usize, char)> = rope.char_indices().collect();
+    let expected: Vec<(usize, char)> = text.chars().enumerate().collect();
+    assert_eq!(collected, expected);
+    // Absolute indices preserved when starting mid-rope.
+    let skip = 2;
+    let collected: Vec<(usize, char)> = rope.char_indices_at(skip).collect();
+    let expected: Vec<(usize, char)> = text.chars().enumerate().skip(skip).collect();
+    assert_eq!(collected, expected, "char_indices_at({skip})");
+    assert!(rope.char_indices_at(text.chars().count()).next().is_none());
+}
+
+#[test]
+fn byte_indices_match_model() {
+    let text = "aé🐸\nみんな";
+    let rope = Rope::from(text);
+    let collected: Vec<(usize, u8)> = rope.byte_indices().collect();
+    let expected: Vec<(usize, u8)> =
+        text.as_bytes().iter().enumerate().map(|(i, &b)| (i, b)).collect();
+    assert_eq!(collected, expected);
+    let skip = 3;
+    let collected: Vec<(usize, u8)> = rope.byte_indices_at(skip).collect();
+    let expected: Vec<(usize, u8)> =
+        text.as_bytes().iter().enumerate().skip(skip).map(|(i, &b)| (i, b)).collect();
+    assert_eq!(collected, expected, "byte_indices_at({skip})");
+    assert!(rope.byte_indices_at(text.len()).next().is_none());
+}
+
+#[test]
+fn indices_out_of_bounds() {
+    let rope = Rope::from("hello");
+    assert!(matches!(
+        rope.try_char_indices_at(6),
+        Err(RopeError::CharOffsetOutOfBounds { offset: 6, len: 5 })
+    ));
+    assert!(matches!(
+        rope.try_byte_indices_at(6),
+        Err(RopeError::OffsetOutOfBounds { offset: 6, len: 5 })
+    ));
+    assert!(Rope::from("").char_indices().next().is_none());
+    assert!(Rope::from("").byte_indices().next().is_none());
+}
+
+#[test]
 fn chunks_matches_iter_chunks() {
     let rope = Rope::from("あ".repeat(700) + "xé🐸");
     let a: Vec<&str> = rope.chunks().collect();
@@ -247,6 +294,13 @@ fn randomized_iterators_match_model() {
         let skip_byte = rng.below(model.len() as u64 + 1) as usize;
         let got: Vec<u8> = rope.bytes_at(skip_byte).collect();
         assert_eq!(got, &model.as_bytes()[skip_byte..], "bytes_at({skip_byte})");
+
+        let got: Vec<(usize, char)> = rope.char_indices().collect();
+        let expected: Vec<(usize, char)> = model.chars().enumerate().collect();
+        assert_eq!(got, expected);
+        let got: Vec<(usize, u8)> = rope.byte_indices().collect();
+        let expected: Vec<(usize, u8)> = model.bytes().enumerate().collect();
+        assert_eq!(got, expected);
 
         let newlines = model.bytes().filter(|&b| b == b'\n').count();
         let skip_line = rng.below(newlines as u64 + 2) as usize;

@@ -26,7 +26,7 @@ impl Leaf for String {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RopeInfo {
     pub(crate) lines: usize,
     pub(crate) utf16_size: usize,
@@ -329,7 +329,8 @@ pub fn count_chars(s: &str) -> usize {
     s.bytes().filter(|&b| b & 0b1100_0000 != 0b1000_0000).count()
 }
 
-pub(crate) fn count_utf16_code_units(s: &str) -> usize {
+/// Number of UTF-16 code units in `s`.
+pub fn count_utf16_code_units(s: &str) -> usize {
     let mut utf16_count = 0;
     for &b in s.as_bytes() {
         if (b as i8) >= -0x40 {
@@ -340,6 +341,35 @@ pub(crate) fn count_utf16_code_units(s: &str) -> usize {
         }
     }
     utf16_count
+}
+
+/// Number of UTF-16 code units before `byte_idx`, rounding a mid-char byte
+/// offset down to the start of the containing char.
+pub fn byte_to_utf16_cu_idx(s: &str, byte_idx: usize) -> usize {
+    let mut end = byte_idx.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    count_utf16_code_units(&s[..end])
+}
+
+/// Byte offset reached after consuming up to `target_utf16` UTF-16 code units.
+///
+/// A target that splits a surrogate pair resolves to the end of the char
+/// containing it, mirroring the classic `chars()` accumulation loop used by
+/// LSP client conversions. Returns `None` when the target exceeds the
+/// string's UTF-16 length.
+pub fn utf16_cu_to_byte_idx(s: &str, target_utf16: usize) -> Option<usize> {
+    let mut utf16_seen = 0;
+    let mut utf8_seen = 0;
+    for ch in s.chars() {
+        if utf16_seen >= target_utf16 {
+            return Some(utf8_seen);
+        }
+        utf16_seen += ch.len_utf16();
+        utf8_seen += ch.len_utf8();
+    }
+    if utf16_seen >= target_utf16 { Some(utf8_seen) } else { None }
 }
 
 pub(crate) fn clamp_to_char_boundary(s: &str, splitpoint: usize) -> usize {

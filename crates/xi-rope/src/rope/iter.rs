@@ -93,6 +93,70 @@ impl<'a> Iterator for Chars<'a> {
     }
 }
 
+/// An iterator over the bytes of a byte interval of a rope, yielding
+/// `(byte_idx, u8)` with byte indices in the reference coordinate system of
+/// the underlying rope.
+pub struct ByteIndices<'a> {
+    inner: Bytes<'a>,
+    index: usize,
+}
+
+impl<'a> ByteIndices<'a> {
+    /// Byte indices are absolute (relative to the rope).
+    pub(crate) fn new(rope: &'a Rope, start: usize, end: usize) -> Self {
+        ByteIndices { inner: Bytes::new(rope, start, end), index: start }
+    }
+
+    /// Byte indices are relative to `start` (e.g. within a slice view).
+    pub(crate) fn new_at(rope: &'a Rope, start: usize, end: usize) -> Self {
+        ByteIndices { inner: Bytes::new(rope, start, end), index: 0 }
+    }
+}
+
+impl<'a> Iterator for ByteIndices<'a> {
+    type Item = (usize, u8);
+
+    fn next(&mut self) -> Option<(usize, u8)> {
+        let index = self.index;
+        let byte = self.inner.next()?;
+        self.index += 1;
+        Some((index, byte))
+    }
+}
+
+/// An iterator over the chars of a char-aligned interval of a rope, yielding
+/// `(char_idx, char)` with char indices in the reference coordinate system of
+/// the underlying rope (absolute by default).
+pub struct CharIndices<'a> {
+    inner: Chars<'a>,
+    index: usize,
+}
+
+impl<'a> CharIndices<'a> {
+    /// Char indices are absolute (relative to the rope).
+    pub(crate) fn new(rope: &'a Rope, start: usize, end: usize) -> Self {
+        let index = rope.count::<CharsMetric>(start);
+        CharIndices { inner: Chars::new(rope, start, end), index }
+    }
+
+    /// Char indices are relative to the interval start (e.g. within a slice
+    /// view), starting at 0.
+    pub(crate) fn new_at(rope: &'a Rope, start: usize, end: usize) -> Self {
+        CharIndices { inner: Chars::new(rope, start, end), index: 0 }
+    }
+}
+
+impl<'a> Iterator for CharIndices<'a> {
+    type Item = (usize, char);
+
+    fn next(&mut self) -> Option<(usize, char)> {
+        let index = self.index;
+        let ch = self.inner.next()?;
+        self.index += 1;
+        Some((index, ch))
+    }
+}
+
 impl Rope {
     /// An iterator over all the chars of the rope.
     pub fn chars(&self) -> Chars<'_> {
@@ -239,5 +303,61 @@ impl Rope {
     ) -> Result<(ChunkIter<'_>, usize, usize, usize), RopeError> {
         let byte_idx = self.try_char_to_byte(char_idx)?;
         self.try_chunks_at_byte(byte_idx)
+    }
+
+    /// An iterator over the bytes of the rope, yielding `(byte_idx, u8)` with
+    /// absolute byte indices.
+    pub fn byte_indices(&self) -> ByteIndices<'_> {
+        ByteIndices::new(self, 0, self.len())
+    }
+
+    /// An iterator over the bytes of the rope, starting at `byte_idx`,
+    /// yielding `(byte_idx, u8)` with absolute byte indices.
+    ///
+    /// Time complexity: O(log n).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `byte_idx > len()`.
+    pub fn byte_indices_at(&self, byte_idx: usize) -> ByteIndices<'_> {
+        self.try_byte_indices_at(byte_idx)
+            .expect("Rope::byte_indices_at callers must validate bounds")
+    }
+
+    /// Non-panicking version of [`Rope::byte_indices_at`].
+    pub fn try_byte_indices_at(&self, byte_idx: usize) -> Result<ByteIndices<'_>, RopeError> {
+        self.validate_offset(byte_idx)?;
+        Ok(ByteIndices::new(self, byte_idx, self.len()))
+    }
+
+    /// An iterator over the chars of the rope, yielding `(char_idx, char)`
+    /// with absolute char indices.
+    pub fn char_indices(&self) -> CharIndices<'_> {
+        CharIndices::new(self, 0, self.len())
+    }
+
+    /// An iterator over the chars of the rope, starting at `char_idx`,
+    /// yielding `(char_idx, char)` with absolute char indices.
+    ///
+    /// Time complexity: O(log n).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `char_idx > len_chars()`.
+    pub fn char_indices_at(&self, char_idx: usize) -> CharIndices<'_> {
+        self.try_char_indices_at(char_idx)
+            .expect("Rope::char_indices_at callers must validate bounds")
+    }
+
+    /// Non-panicking version of [`Rope::char_indices_at`].
+    pub fn try_char_indices_at(&self, char_idx: usize) -> Result<CharIndices<'_>, RopeError> {
+        if char_idx > self.len_chars() {
+            return Err(RopeError::CharOffsetOutOfBounds {
+                offset: char_idx,
+                len: self.len_chars(),
+            });
+        }
+        let byte_idx = self.count_base_units::<CharsMetric>(char_idx);
+        Ok(CharIndices::new(self, byte_idx, self.len()))
     }
 }

@@ -2,6 +2,36 @@
 use super::*;
 
 #[test]
+fn is_instance_tracks_shared_storage() {
+    let rope = Rope::from("hello");
+    let clone = rope.clone();
+    assert!(rope.is_instance(&clone));
+    assert!(clone.is_instance(&rope));
+
+    let mut edited = clone;
+    edited.insert(0, "X");
+    assert!(!rope.is_instance(&edited));
+
+    // Equal content stored separately is not an instance.
+    let other = Rope::from("hello");
+    assert!(!rope.is_instance(&other));
+}
+
+#[test]
+fn is_instance_after_split_append() {
+    let text = "あ".repeat(700) + "xé🐸\n" + &"あ".repeat(700);
+    let mut rope = Rope::from(text.as_str());
+    let right = rope.split_off(350);
+    // After split, the halves share subtrees off the split path.
+    assert!(rope.is_instance(&rope.clone()));
+    assert!(!rope.is_instance(&right));
+    rope.append(right);
+    let rebuilt = Rope::from(text.as_str());
+    assert_eq!(rope, rebuilt);
+    assert!(!rope.is_instance(&rebuilt));
+}
+
+#[test]
 #[allow(clippy::eq_op)]
 fn eq_small() {
     let a = Rope::from("a");

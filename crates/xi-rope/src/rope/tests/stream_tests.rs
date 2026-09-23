@@ -99,3 +99,112 @@ fn rope_builder_append_streams_existing_rope() {
     assert_eq!(String::from(&built), format!("prefix-{suffix_text}"));
     assert_eq!(built.measure::<LinesMetric>(), suffix.measure::<LinesMetric>());
 }
+
+struct OneByteReader {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl io::Read for OneByteReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.data.len() {
+            return Ok(0);
+        }
+        buf[0] = self.data[self.pos];
+        self.pos += 1;
+        Ok(1)
+    }
+}
+
+struct FailingReader {
+    kind: io::ErrorKind,
+}
+
+impl io::Read for FailingReader {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(self.kind, "reader interrupted"))
+    }
+}
+
+#[test]
+fn from_reader_loads_utf8() {
+    let text = "Hello みんなさん 🐸\nline2";
+    let rope = Rope::from_reader(std::io::Cursor::new(text.as_bytes())).unwrap();
+    assert_eq!(String::from(&rope), text);
+    assert_matches_str(&rope, text);
+    rope.assert_integrity();
+}
+
+#[test]
+fn from_reader_empty() {
+    let rope = Rope::from_reader(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
+    assert!(rope.is_empty());
+    rope.assert_integrity();
+}
+
+#[test]
+fn from_reader_rejects_invalid_utf8() {
+    let err = Rope::from_reader(std::io::Cursor::new(vec![0xff, 0xfe, b'a'])).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn from_reader_handles_byte_at_a_time() {
+    let text = "aé🐸\nこんにちは";
+    let rope = Rope::from_reader(OneByteReader { data: text.as_bytes().to_vec(), pos: 0 }).unwrap();
+    assert_eq!(String::from(&rope), text);
+    rope.assert_integrity();
+}
+
+#[test]
+fn from_reader_handles_char_straddling_buffer() {
+    // Force a 4-byte char to straddle the 2*MAX_LEAF buffer boundary.
+    let text = format!("{}🐸tail", "a".repeat(MAX_LEAF * 2 - 1));
+    let rope = Rope::from_reader(std::io::Cursor::new(text.as_bytes())).unwrap();
+    assert_eq!(String::from(&rope), text);
+    rope.assert_integrity();
+}
+
+#[test]
+fn from_reader_propagates_read_errors() {
+    let err = Rope::from_reader(FailingReader { kind: io::ErrorKind::TimedOut }).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn capacity_and_shrink_to_fit() {
+    let mut builder = RopeBuilder::new();
+    let mut model = String::new();
+    // Small pushes force leaf growth, leaving over-allocation to reclaim.
+    for i in 0..800 {
+        let piece = format!("{i},");
+        builder.push_str(&piece);
+        model.push_str(&piece);
+    }
+    let rope = builder.finish();
+    assert_matches_str(&rope, &model);
+    let cap_before = rope.capacity();
+    assert!(cap_before >= rope.len());
+
+    let mut rope = rope;
+    let snapshot = rope.clone();
+    rope.shrink_to_fit();
+    assert_matches_str(&rope, &model);
+    assert!(!rope.is_instance(&snapshot));
+    let cap_after = rope.capacity();
+    assert!(cap_after <= cap_before);
+
+    // Idempotent: a second shrink changes nothing.
+    rope.shrink_to_fit();
+    assert_eq!(rope.capacity(), cap_after);
+    assert_matches_str(&rope, &model);
+}
+
+#[test]
+fn capacity_empty_and_tiny() {
+    assert_eq!(Rope::from("").capacity(), 0);
+    let mut rope = Rope::from("abc");
+    assert!(rope.capacity() >= 3);
+    rope.shrink_to_fit();
+    assert_matches_str(&rope, "abc");
+}

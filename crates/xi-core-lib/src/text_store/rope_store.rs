@@ -19,6 +19,7 @@
 //! normal-mode behaviour is byte-for-byte compatible with previous direct
 //! `Rope` access.
 
+use xi_rope::rope::{byte_to_utf16_cu_idx, utf16_cu_to_byte_idx};
 use xi_rope::{LinesMetric, Rope};
 
 use crate::text_store::{
@@ -117,29 +118,15 @@ fn line_offset_in_chunk(chunk: &str, relative_line: usize) -> Option<usize> {
 }
 
 fn utf16_prefix_in_chunk(chunk: &str, end: usize) -> usize {
-    chunk[..end].encode_utf16().count()
+    byte_to_utf16_cu_idx(chunk, end)
 }
 
 fn byte_offset_for_utf16_in_chunk(chunk: &str, target_utf16: usize) -> Option<usize> {
-    if target_utf16 == 0 {
-        return Some(0);
-    }
-    let mut utf16_seen = 0;
-    let mut utf8_seen = 0;
-    for ch in chunk.chars() {
-        if utf16_seen >= target_utf16 {
-            break;
-        }
-        utf16_seen += ch.len_utf16();
-        utf8_seen += ch.len_utf8();
-        if utf16_seen == target_utf16 {
-            return Some(utf8_seen);
-        }
-        if utf16_seen > target_utf16 {
-            return None;
-        }
-    }
-    if utf16_seen == target_utf16 { Some(utf8_seen) } else { None }
+    // Resolve like the legacy accumulation loop, then reject targets that
+    // split a surrogate pair: `utf16_cu_to_byte_idx` lands on the containing
+    // char's end, but this store requires an exact char-boundary match.
+    let byte_idx = utf16_cu_to_byte_idx(chunk, target_utf16)?;
+    if byte_to_utf16_cu_idx(chunk, byte_idx) == target_utf16 { Some(byte_idx) } else { None }
 }
 
 struct RopeChunkIter<'a> {
@@ -269,10 +256,38 @@ mod tests {
         LogicalLine, TextChunkResult, TextStore, Utf16Lookup, Utf16Offset,
     };
 
-    use super::RopeTextStore;
+    use super::{RopeTextStore, byte_offset_for_utf16_in_chunk, utf16_prefix_in_chunk};
 
     fn store(s: &str) -> RopeTextStore {
         RopeTextStore::new(Rope::from(s), 0)
+    }
+
+    // ---- utf16 chunk helpers -------------------------------------------------
+
+    #[test]
+    fn utf16_prefix_matches_encode_utf16() {
+        let s = "aé😀x";
+        for end in 0..=s.len() {
+            let mut clamped = end.min(s.len());
+            while clamped > 0 && !s.is_char_boundary(clamped) {
+                clamped -= 1;
+            }
+            assert_eq!(utf16_prefix_in_chunk(s, end), s[..clamped].encode_utf16().count());
+        }
+    }
+
+    #[test]
+    fn utf16_byte_lookup_is_exact_boundary_only() {
+        let s = "a😀x"; // 1 + 2 + 1 = 4 utf16 units
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 0), Some(0));
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 1), Some(1)); // after 'a'
+        // Mid-surrogate targets must be rejected (strict Exact semantics).
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 2), None);
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 3), Some(5)); // after '😀'
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 4), Some(6));
+        assert_eq!(byte_offset_for_utf16_in_chunk(s, 5), None); // beyond
+        assert_eq!(byte_offset_for_utf16_in_chunk("", 0), Some(0));
+        assert_eq!(byte_offset_for_utf16_in_chunk("", 1), None);
     }
 
     // ---- mode ---------------------------------------------------------------

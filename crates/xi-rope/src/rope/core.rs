@@ -1,7 +1,7 @@
 //! Core Rope edit/slice/metric operations.
 use super::impls::ChunkIter;
 use super::metrics::{BaseMetric, LinesMetric, Utf16CodeUnitsMetric};
-use super::slice::Lines;
+use super::slice::{Lines, RopeSlice};
 use super::*;
 
 impl Rope {
@@ -61,6 +61,31 @@ impl Rope {
 
     pub fn try_slice<T: IntervalBounds>(&self, iv: T) -> Result<Rope, RopeError> {
         Ok(self.subseq(self.validate_interval(iv)?))
+    }
+
+    /// Returns a borrowed view over the byte range, validating that both
+    /// boundaries lie on Unicode scalar-value (char) boundaries.
+    ///
+    /// This is the safe entry point for byte-based slices: it rejects ranges
+    /// that would split a multi-byte char, which the raw [`Rope::slice_view`]
+    /// entry point does not. Views from [`Rope::byte_slice`] are guaranteed
+    /// char-aligned, so all char-indexed view operations are safe on them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interval is reversed, out of bounds, or does not align
+    /// with char boundaries.
+    pub fn byte_slice<T: IntervalBounds>(&self, iv: T) -> RopeSlice<'_> {
+        self.try_byte_slice(iv).expect("Rope::byte_slice callers must provide char-aligned bounds")
+    }
+
+    /// Non-panicking version of [`Rope::byte_slice`].
+    pub fn try_byte_slice<T: IntervalBounds>(&self, iv: T) -> Result<RopeSlice<'_>, RopeError> {
+        let iv = self.validate_interval(iv)?;
+        if !self.is_codepoint_boundary(iv.start()) || !self.is_codepoint_boundary(iv.end()) {
+            return Err(RopeError::IntervalNotCharBoundary { start: iv.start(), end: iv.end() });
+        }
+        Ok(RopeSlice::new(self, iv))
     }
 
     /// Returns borrowed read-only view over provided range.

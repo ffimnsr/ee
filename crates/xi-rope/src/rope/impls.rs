@@ -10,6 +10,101 @@ impl FromStr for Rope {
     }
 }
 
+impl Rope {
+    /// Creates a `Rope` by streaming UTF-8 data from a reader.
+    ///
+    /// Data is appended to a [`RopeBuilder`] in bounded chunks as it is read,
+    /// so large inputs are never materialized as a single `String`. Runs in
+    /// O(N) time.
+    ///
+    /// # Errors
+    ///
+    /// - If the reader returns an error, `from_reader` stops and returns that
+    ///   error.
+    /// - If non-UTF-8 data is encountered, an [`io::Error`] with kind
+    ///   `InvalidData` is returned.
+    ///
+    /// Note: some data from the reader is likely consumed even on error.
+    pub fn from_reader<T: io::Read>(mut reader: T) -> io::Result<Rope> {
+        const BUFFER_SIZE: usize = MAX_LEAF * 2;
+        let mut builder = RopeBuilder::new();
+        let mut buffer = [0u8; BUFFER_SIZE];
+        let mut fill_idx = 0; // How much of `buffer` currently holds valid data.
+        loop {
+            match reader.read(&mut buffer[fill_idx..]) {
+                Ok(read_count) => {
+                    fill_idx += read_count;
+
+                    // Determine how much of the buffer is valid utf8.
+                    let valid_count = match str::from_utf8(&buffer[..fill_idx]) {
+                        Ok(_) => fill_idx,
+                        Err(e) => e.valid_up_to(),
+                    };
+
+                    // Append the valid part of the buffer to the rope.
+                    if valid_count > 0 {
+                        // SAFETY is proven here: `valid_count` comes from a
+                        // validated utf8 prefix, so the slice cannot split a
+                        // multi-byte char.
+                        builder.push_str(
+                            str::from_utf8(&buffer[..valid_count])
+                                .expect("bytes validated as utf8 by valid_up_to above"),
+                        );
+                    }
+
+                    // Shift the un-read part of the buffer to the front.
+                    if valid_count < fill_idx {
+                        buffer.copy_within(valid_count..fill_idx, 0);
+                    }
+                    fill_idx -= valid_count;
+
+                    if fill_idx == BUFFER_SIZE {
+                        // Buffer is full and none of it could be consumed;
+                        // utf8 code points are at most 4 bytes, so this
+                        // cannot be valid text.
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "stream did not contain valid UTF-8",
+                        ));
+                    }
+
+                    // If we're done reading.
+                    if read_count == 0 {
+                        if fill_idx > 0 {
+                            // We couldn't consume all data.
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "stream contained invalid UTF-8",
+                            ));
+                        } else {
+                            return Ok(builder.finish());
+                        }
+                    }
+                }
+
+                Err(e) => {
+                    // Read error.
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Returns true if this rope and `other` point to precisely the same
+    /// in-memory data.
+    ///
+    /// This holds when one is a clone of the other and neither has been
+    /// modified since. Clones initially share all data, so this can detect
+    /// whether two ropes have diverged (e.g. whether a buffer has been edited
+    /// since an async save snapshot was taken). It is distinct from equality:
+    /// equal-content ropes stored separately are not instances.
+    ///
+    /// Runs in O(1) time.
+    pub fn is_instance(&self, other: &Rope) -> bool {
+        self.ptr_eq(other)
+    }
+}
+
 pub struct ChunkIter<'a> {
     pub(crate) cursor: Cursor<'a, RopeInfo>,
     pub(crate) end: usize,
@@ -39,6 +134,67 @@ impl From<Rope> for String {
     // maybe explore grabbing leaf? would require api in tree
     fn from(r: Rope) -> String {
         String::from(&r)
+    }
+}
+
+impl<'a> From<RopeSlice<'a>> for Rope {
+    /// Converts a view into an owned rope, sharing as much backing storage as
+    /// possible (`RopeSlice::to_rope` semantics); only leaves at the view
+    /// edges are copied.
+    ///
+    /// Runs in O(log n) time.
+    fn from(slice: RopeSlice<'a>) -> Rope {
+        slice.to_rope()
+    }
+}
+
+impl Rope {
+    /// Total size of the rope's backing text buffer space, in bytes.
+    ///
+    /// Sums the allocated capacity of every backing leaf `String`, including
+    /// unoccupied over-allocation. The unoccupied space is
+    /// `capacity() - len()`.
+    ///
+    /// Runs in O(n) time.
+    pub fn capacity(&self) -> usize {
+        let mut cursor = Cursor::new(self, 0);
+        let mut total = 0;
+        while let Some((leaf, _)) = cursor.get_leaf() {
+            total += leaf.capacity();
+            if cursor.next_leaf().is_none() {
+                break;
+            }
+        }
+        total
+    }
+
+    /// Shrinks every backing leaf `String` to fit its content exactly.
+    ///
+    /// Content and all metrics are unchanged. **NOTE:** calling this on a
+    /// clone breaks shared storage with its other clones, which can
+    /// _increase_ total memory usage despite shrinking this rope's own
+    /// capacity.
+    ///
+    /// Runs in O(n) time.
+    pub fn shrink_to_fit(&mut self) {
+        let leaves = {
+            let mut cursor = Cursor::new(self, 0);
+            let mut leaves = Vec::new();
+            while let Some((leaf, _)) = cursor.get_leaf() {
+                let mut leaf = leaf.clone();
+                leaf.shrink_to_fit();
+                leaves.push(leaf);
+                if cursor.next_leaf().is_none() {
+                    break;
+                }
+            }
+            leaves
+        };
+        let mut builder = TreeBuilder::new();
+        for leaf in leaves {
+            builder.push_leaf(leaf);
+        }
+        *self = builder.build();
     }
 }
 

@@ -243,6 +243,79 @@ impl<N: NodeInfo> Node<N> {
     }
 }
 
+impl<N: NodeInfo + fmt::Debug + PartialEq> Node<N> {
+    /// Debugging tool: panic if stored metadata or structural invariants are
+    /// inconsistent with the actual tree contents.
+    ///
+    /// Checks, for every node:
+    /// - leaf length and info match `compute_info`, leaves are at height 0,
+    ///   and only the root may be an empty leaf;
+    /// - interior nodes have 2..=MAX_CHILDREN children of uniform height, and
+    ///   their stored length and info match the accumulated children.
+    ///
+    /// Runs in O(n). Intended for tests and fuzzing.
+    #[doc(hidden)]
+    pub fn assert_integrity(&self) {
+        self.assert_integrity_inner(0);
+    }
+
+    /// Alias of [`Node::assert_integrity`] for ropey parity.
+    #[doc(hidden)]
+    pub fn assert_invariants(&self) {
+        self.assert_integrity();
+    }
+
+    fn assert_integrity_inner(&self, depth: usize) {
+        match &self.0.val {
+            NodeVal::Leaf(l) => {
+                if depth > 0 && l.len() == 0 {
+                    panic!("non-root leaf is empty (len 0) at depth {depth}");
+                }
+                if self.0.height != 0 {
+                    panic!("leaf has non-zero height {}", self.0.height);
+                }
+                if self.0.len != l.len() {
+                    panic!("leaf metadata length {} != actual {}", self.0.len, l.len());
+                }
+                let computed = N::compute_info(l);
+                if self.0.info != computed {
+                    panic!("leaf metadata info {:?} != computed {:?}", self.0.info, computed);
+                }
+            }
+            NodeVal::Internal(children) => {
+                if self.0.height == 0 {
+                    panic!("interior node has height 0");
+                }
+                if children.len() < 2 || children.len() > MAX_CHILDREN {
+                    panic!(
+                        "interior node has {} children, expected 2..={MAX_CHILDREN}",
+                        children.len()
+                    );
+                }
+                let mut len = 0;
+                let mut info = N::identity();
+                for child in children {
+                    if child.0.height + 1 != self.0.height {
+                        panic!(
+                            "child height {} != parent height {} - 1",
+                            child.0.height, self.0.height
+                        );
+                    }
+                    len += child.0.len;
+                    info.accumulate(&child.0.info);
+                    child.assert_integrity_inner(depth + 1);
+                }
+                if self.0.len != len {
+                    panic!("interior metadata length {} != sum of children {len}", self.0.len);
+                }
+                if self.0.info != info {
+                    panic!("interior metadata info {:?} != accumulated {:?}", self.0.info, info);
+                }
+            }
+        }
+    }
+}
+
 impl<N: DefaultMetric> Node<N> {
     /// Measures the length of the text bounded by ``DefaultMetric::measure(offset)`` with another metric.
     ///

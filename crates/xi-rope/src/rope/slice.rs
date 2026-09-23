@@ -10,8 +10,22 @@ pub struct RopeSlice<'a> {
 
 impl<'a> RopeSlice<'a> {
     /// Create a borrowed view for `interval` within `rope`.
+    ///
+    /// Debug builds panic if either boundary is not on a char boundary; use
+    /// [`Rope::byte_slice`] for a validated, non-panicking entry point.
     pub fn new<T: IntervalBounds>(rope: &'a Rope, interval: T) -> Self {
-        RopeSlice { rope, interval: interval.into_interval(rope.len()) }
+        let interval = interval.into_interval(rope.len());
+        debug_assert!(
+            rope.is_codepoint_boundary(interval.start()),
+            "RopeSlice start {} is not a char boundary",
+            interval.start()
+        );
+        debug_assert!(
+            rope.is_codepoint_boundary(interval.end()),
+            "RopeSlice end {} is not a char boundary",
+            interval.end()
+        );
+        RopeSlice { rope, interval }
     }
 
     /// Borrow underlying rope.
@@ -57,6 +71,79 @@ impl<'a> RopeSlice<'a> {
     /// Iterate borrowed chunks in this view.
     pub fn iter_chunks(&self) -> ChunkIter<'a> {
         self.rope.iter_chunks(self.interval)
+    }
+
+    /// Number of chars (Unicode scalar values) in this view.
+    ///
+    /// Time complexity: O(log n).
+    pub fn len_chars(&self) -> usize {
+        self.rope.count::<CharsMetric>(self.interval.end())
+            - self.rope.count::<CharsMetric>(self.interval.start())
+    }
+
+    /// Byte position (relative to this view) of the char at relative char
+    /// index `char_pos`. One-past-the-end returns the view length in bytes.
+    ///
+    /// Time complexity: O(log n).
+    pub fn char_to_byte(&self, char_pos: usize) -> usize {
+        let start_char = self.rope.byte_to_char(self.interval.start());
+        self.rope.char_to_byte(start_char + char_pos) - self.interval.start()
+    }
+
+    /// Char index (relative to this view) of the given byte position
+    /// (relative to this view). A mid-char byte position rounds down to the
+    /// start of the char containing it.
+    ///
+    /// Time complexity: O(log n).
+    pub fn byte_to_char(&self, byte_pos: usize) -> usize {
+        self.rope.byte_to_char(self.interval.start() + byte_pos)
+            - self.rope.byte_to_char(self.interval.start())
+    }
+
+    /// Returns the char at relative char index `char_pos`, or `None` if it
+    /// is out of bounds of the view.
+    ///
+    /// Time complexity: O(log n).
+    pub fn get_char(&self, char_pos: usize) -> Option<char> {
+        if char_pos >= self.len_chars() {
+            return None;
+        }
+        let start_char = self.rope.byte_to_char(self.interval.start());
+        self.rope.get_char(start_char + char_pos)
+    }
+
+    /// Returns the char at relative char index `char_pos`.
+    ///
+    /// Time complexity: O(log n).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `char_pos >= len_chars()`.
+    pub fn char_at(&self, char_pos: usize) -> char {
+        self.get_char(char_pos)
+            .unwrap_or_else(|| panic!("RopeSlice::char_at callers must validate bounds"))
+    }
+
+    /// An iterator over the chars of this view.
+    pub fn chars(&self) -> Chars<'a> {
+        Chars::new(self.rope, self.interval.start(), self.interval.end())
+    }
+
+    /// An iterator over the bytes of this view.
+    pub fn bytes(&self) -> Bytes<'a> {
+        Bytes::new(self.rope, self.interval.start(), self.interval.end())
+    }
+
+    /// An iterator over the chars of this view, yielding `(char_idx, char)`
+    /// with indices relative to the view (starting at 0).
+    pub fn char_indices(&self) -> CharIndices<'a> {
+        CharIndices::new_at(self.rope, self.interval.start(), self.interval.end())
+    }
+
+    /// An iterator over the bytes of this view, yielding `(byte_idx, u8)`
+    /// with indices relative to the view (starting at 0).
+    pub fn byte_indices(&self) -> ByteIndices<'a> {
+        ByteIndices::new_at(self.rope, self.interval.start(), self.interval.end())
     }
 
     /// Iterate raw lines in this view.

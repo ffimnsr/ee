@@ -413,6 +413,8 @@ fn randomized_split_append_roundtrip() {
         if rng.below(4) == 0 && !model.is_empty() {
             let k = rng.below(rope.len_chars() as u64 + 1) as usize;
             let mut right = rope.split_off(k);
+            rope.assert_integrity();
+            right.assert_integrity();
             let k_byte = char_to_byte_idx_model(&model, k);
             let mut right_model = model[k_byte..].to_string();
             model.truncate(k_byte);
@@ -430,8 +432,36 @@ fn randomized_split_append_roundtrip() {
             rope.append(right);
             model.push_str(&right_model);
             assert_matches_str(&rope, &model);
+            rope.assert_integrity();
         }
     }
+}
+
+#[test]
+fn assert_integrity_passes_on_common_shapes() {
+    for text in ["", "x", "Hello みんなさん 🐸\n", &("あ".repeat(700) + "xé🐸\n")] {
+        let rope = Rope::from(text);
+        rope.assert_integrity();
+        rope.assert_invariants();
+    }
+    // After edit chains.
+    let mut rope = Rope::from("Hello みんなさん");
+    for _ in 0..20 {
+        rope.insert(rope.len_chars() / 2, "x🐸");
+        rope.assert_integrity();
+    }
+    for _ in 0..20 {
+        rope.remove(0..1);
+        rope.assert_integrity();
+    }
+    // After split/append, on both halves.
+    let text = "あ".repeat(700) + "xé🐸\n" + &"あ".repeat(700);
+    let mut rope = Rope::from(text.as_str());
+    let right = rope.split_off(350);
+    rope.assert_integrity();
+    right.assert_integrity();
+    rope.append(right);
+    rope.assert_integrity();
 }
 
 #[test]
@@ -468,6 +498,7 @@ fn randomized_char_edits_match_string() {
             }
         }
         assert_matches_str(&rope, &model);
+        rope.assert_integrity();
         // Spot-check conversions against the model on the current tree shape;
         // random edits build varied multi-leaf trees, exercising the metric
         // traversal. The model may be empty, hence +1.

@@ -44,6 +44,7 @@ pub enum RopeError {
     CharOffsetOutOfBounds { offset: usize, len: usize },
     CharReversedInterval { start: usize, end: usize },
     CharIntervalOutOfBounds { start: usize, end: usize, len: usize },
+    IntervalNotCharBoundary { start: usize, end: usize },
 }
 
 impl RopeError {
@@ -87,6 +88,9 @@ impl fmt::Display for RopeError {
             }
             Self::CharIntervalOutOfBounds { start, end, len } => {
                 write!(f, "char interval [{start}, {end}) beyond rope char length {len}")
+            }
+            Self::IntervalNotCharBoundary { start, end } => {
+                write!(f, "byte interval [{start}, {end}) does not align with char boundaries")
             }
         }
     }
@@ -151,8 +155,11 @@ pub type RopeDelta = Delta<RopeInfo>;
 pub type RopeDeltaElement = DeltaElement<RopeInfo>;
 
 pub use builder::RopeBuilder;
-pub use iter::{Bytes, Chars};
-pub use metrics::{LinesMetric, RopeInfo, count_chars, count_newlines};
+pub use iter::{ByteIndices, Bytes, CharIndices, Chars};
+pub use metrics::{
+    LinesMetric, RopeInfo, byte_to_utf16_cu_idx, count_chars, count_newlines,
+    count_utf16_code_units, utf16_cu_to_byte_idx,
+};
 pub use slice::{Lines, LinesRaw, RopeSlice, RopeSliceCursor};
 
 pub(crate) use impls::ChunkIter;

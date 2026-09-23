@@ -31,3 +31,4 @@ fn eq_rope_with_pieces() {
 }
 
 mod cursor_tests;
+mod integrity_tests;

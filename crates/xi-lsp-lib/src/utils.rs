@@ -27,6 +27,7 @@ use lsp_server::Message as LspServerMessage;
 use url::Url;
 use xi_plugin_lib::{Cache, ChunkCache, CoreProxy, Error as PluginLibError, PluginEditAck, View};
 use xi_rope::rope::RopeDelta;
+use xi_rope::rope::count_utf16_code_units;
 use xi_rope::{DeltaBuilder, Interval, Rope};
 
 use crate::conversion_utils::*;
@@ -99,7 +100,8 @@ fn position_of_offset_in_document(text: &str, offset: usize) -> Result<Position,
     let prefix = text.get(..offset).ok_or(PluginLibError::BadRequest)?;
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
     let line_start = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-    let character = count_utf16(text.get(line_start..offset).ok_or(PluginLibError::BadRequest)?);
+    let character =
+        count_utf16_code_units(text.get(line_start..offset).ok_or(PluginLibError::BadRequest)?);
 
     Ok(Position {
         line: u32::try_from(line).map_err(|_| PluginLibError::BadRequest)?,

@@ -25,6 +25,7 @@ use xi_plugin_lib::{
     Cache, Diagnostic as CoreDiagnostic, DiagnosticSeverity as CoreDiagnosticSeverity,
     Error as PluginLibError, Hover as CoreHover, Range as CoreRange, View,
 };
+use xi_rope::rope::{byte_to_utf16_cu_idx, utf16_cu_to_byte_idx};
 
 pub(crate) fn marked_string_to_string(marked_string: &MarkedString) -> String {
     match *marked_string {
@@ -47,20 +48,6 @@ pub(crate) fn markdown_from_hover_contents(
     if res.is_empty() { Err(LanguageResponseError::FallbackResponse) } else { Ok(res) }
 }
 
-/// Counts the number of utf-16 code units in the given string.
-pub(crate) fn count_utf16(s: &str) -> usize {
-    let mut utf16_count = 0;
-    for &b in s.as_bytes() {
-        if (b as i8) >= -0x40 {
-            utf16_count += 1;
-        }
-        if b >= 0xf0 {
-            utf16_count += 1;
-        }
-    }
-    utf16_count
-}
-
 /// Get LSP Style Utf-16 based position given the xi-core style utf-8 offset
 pub(crate) fn get_position_of_offset<C: Cache>(
     view: &mut View<C>,
@@ -68,8 +55,9 @@ pub(crate) fn get_position_of_offset<C: Cache>(
 ) -> Result<Position, PluginLibError> {
     let line_num = view.line_of_offset(offset)?;
     let line_offset = view.offset_of_line(line_num)?;
+    let line_text = view.get_line(line_num)?;
 
-    let char_offset = count_utf16(&(view.get_line(line_num)?[0..(offset - line_offset)]));
+    let char_offset = byte_to_utf16_cu_idx(line_text, offset - line_offset);
 
     Ok(Position {
         line: u32::try_from(line_num).expect("line number should fit in u32"),
@@ -82,19 +70,14 @@ pub(crate) fn offset_of_position<C: Cache>(
     position: Position,
 ) -> Result<usize, PluginLibError> {
     let line_offset = view.offset_of_line(position.line as usize);
+    let line_text = view.get_line(position.line as usize)?;
 
-    let mut cur_len_utf16 = 0;
-    let mut cur_len_utf8 = 0;
+    // A character index past the end of the line clamps to the line end,
+    // matching the previous accumulate-and-return loop.
+    let within_line =
+        utf16_cu_to_byte_idx(line_text, position.character as usize).unwrap_or(line_text.len());
 
-    for u in view.get_line(position.line as usize)?.chars() {
-        if cur_len_utf16 >= (position.character as usize) {
-            break;
-        }
-        cur_len_utf16 += u.len_utf16();
-        cur_len_utf8 += u.len_utf8();
-    }
-
-    Ok(cur_len_utf8 + line_offset?)
+    Ok(line_offset? + within_line)
 }
 
 fn offset_of_position_in_document_impl(
@@ -136,28 +119,14 @@ fn offset_of_position_in_document_impl(
     };
     let line_without_newline = line_text.strip_suffix('\n').unwrap_or(line_text);
 
-    let mut utf16_units = 0usize;
-    let mut utf8_units = 0usize;
-    for ch in line_without_newline.chars() {
-        if utf16_units >= target_character {
-            break;
-        }
-        utf16_units += ch.len_utf16();
-        utf8_units += ch.len_utf8();
+    match utf16_cu_to_byte_idx(line_without_newline, target_character) {
+        Some(within_line) => Ok(offset + within_line),
+        None if clamp => Ok(offset + line_without_newline.len()),
+        None => Err(LanguageResponseError::Transport(format!(
+            "character {} out of bounds for diagnostics line {}",
+            position.character, position.line
+        ))),
     }
-
-    if utf16_units < target_character {
-        return if clamp {
-            Ok(offset + line_without_newline.len())
-        } else {
-            Err(LanguageResponseError::Transport(format!(
-                "character {} out of bounds for diagnostics line {}",
-                position.character, position.line
-            )))
-        };
-    }
-
-    Ok(offset + utf8_units)
 }
 
 pub(crate) fn offset_of_position_in_document(
