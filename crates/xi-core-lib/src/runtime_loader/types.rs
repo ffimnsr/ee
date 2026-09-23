@@ -59,19 +59,77 @@ impl RuntimeQueryKind {
 // ---------------------------------------------------------------------------
 // IndentQueryCapture
 // ---------------------------------------------------------------------------
+//
+// Supported captures in indents queries:
+//
+// - `@indent`: indent one level when a newline is inserted on the node's
+//   opening line (the line the node starts on, with the caret inside it).
+// - `@indent.always`: same behavior as `@indent` in this engine. The line-based
+//   delta model computes a single `+1/0/-1` relative to the caret's line, so it
+//   cannot distinguish Helix's absolute `always` scope (which also fires on
+//   lines *inside* a node); keeping the name valid lets Helix-sourced queries
+//   (e.g. yaml) compile unchanged while staying behaviorally correct.
+// - `@dedent`, `@outdent`, `@outdent.always`: dedent one level when the caret
+//   sits at the start of a line whose leading token belongs to the node. The
+//   three spellings share a gate: outdent/outdent.always are Helix names for
+//   the same token-style dedent, kept for query compatibility.
+// - `@extend`: accepted for query compatibility (Helix uses it to reposition
+//   its upward walk). This engine evaluates every match against the caret
+//   position, so no repositioning is needed and the capture is a no-op.
+// - `@extend.prevent-once`: same no-op treatment as `@extend`; Helix uses it to
+//   stop extend propagation at statement boundaries.
+// - `@anchor`: marks the node whose start column an `@align` in the same match
+//   aligns to; by itself it produces no signal.
+// - `@align`: when paired with `@anchor` in the same match and the anchor node
+//   starts on the caret's line, the new line is aligned to the anchor's start
+//   column (absolute, not a delta).
+// - `@opaque`: lines strictly inside an opaque node (started on an earlier
+//   line) are literal content; no indent/dedent/align signal applies there.
+//
+// User-defined predicates `#one-line?`/`#not-one-line?` and
+// `#same-line?`/`#not-same-line?` gate matches, and quotes in `(ERROR ...)`
+// recovery rules work like any other node. `#set! "scope" ...` properties are
+// accepted but ignored: the delta model has no all/tail scope distinction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndentQueryCapture {
     Indent,
+    IndentAlways,
     Dedent,
+    Outdent,
+    OutdentAlways,
+    Extend,
+    ExtendPreventOnce,
+    Anchor,
+    Align,
+    Opaque,
 }
 
 impl IndentQueryCapture {
-    pub const ALL: [Self; 2] = [Self::Indent, Self::Dedent];
+    pub const ALL: [Self; 10] = [
+        Self::Indent,
+        Self::IndentAlways,
+        Self::Dedent,
+        Self::Outdent,
+        Self::OutdentAlways,
+        Self::Extend,
+        Self::ExtendPreventOnce,
+        Self::Anchor,
+        Self::Align,
+        Self::Opaque,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Indent => "indent",
+            Self::IndentAlways => "indent.always",
             Self::Dedent => "dedent",
+            Self::Outdent => "outdent",
+            Self::OutdentAlways => "outdent.always",
+            Self::Extend => "extend",
+            Self::ExtendPreventOnce => "extend.prevent-once",
+            Self::Anchor => "anchor",
+            Self::Align => "align",
+            Self::Opaque => "opaque",
         }
     }
 

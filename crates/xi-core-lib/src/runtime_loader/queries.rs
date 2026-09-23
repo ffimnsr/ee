@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tree_sitter::Query;
+use tree_sitter::{Query, QueryPredicateArg};
 
 use super::errors::RuntimeLoaderError;
 use super::helpers::{canonicalize_or_original, current_source_mtimes};
@@ -41,7 +41,23 @@ pub fn validate_indent_query_contract(
     source_paths: &[PathBuf],
     query: &Query,
 ) -> Result<(), RuntimeLoaderError> {
-    for capture in query.capture_names() {
+    // Captures referenced only by user-defined predicates (e.g. `@item` in
+    // `(#not-one-line? @item)`) never produce indent signals; exempt them so
+    // Helix-style predicate-helper captures (yaml's `@key`/`@val`/`@item`)
+    // keep compiling.
+    let predicate_capture_ids: std::collections::HashSet<u32> = (0..query.pattern_count())
+        .flat_map(|pattern| query.general_predicates(pattern))
+        .flat_map(|predicate| predicate.args.iter())
+        .filter_map(|arg| match arg {
+            QueryPredicateArg::Capture(id) => Some(*id),
+            QueryPredicateArg::String(_) => None,
+        })
+        .collect();
+
+    for (index, capture) in query.capture_names().iter().enumerate() {
+        if predicate_capture_ids.contains(&(index as u32)) {
+            continue;
+        }
         if IndentQueryCapture::from_capture_name(capture).is_none() {
             return Err(RuntimeLoaderError::InvalidQueryCapture {
                 kind: RuntimeQueryKind::Indents,

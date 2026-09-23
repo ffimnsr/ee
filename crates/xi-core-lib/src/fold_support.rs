@@ -156,6 +156,49 @@ mod tests {
     }
 
     #[test]
+    fn yaml_blocks_fold_by_indentation_structure() {
+        let _guard = runtime_loader_test_guard();
+        let source = "a:\n  b: 1\n  c:\n    - 2\n    - 3\nd: |\n  x\n  y\n";
+
+        let folds = fold_ranges_for_text(
+            Some("yaml"),
+            Some(Path::new("config.yaml")),
+            source,
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            folds,
+            vec![
+                // Pair `a`: folds its value block (rows 1-4).
+                FoldRange { header_line: 0, body_start: 1, body_end: 4 },
+                // Nested pair `c:` folds its sequence value (rows 3-4).
+                FoldRange { header_line: 2, body_start: 3, body_end: 4 },
+                // The sequence itself folds the remaining items.
+                FoldRange { header_line: 3, body_start: 4, body_end: 4 },
+                // Pair `d` with a block scalar value; the scalar starts on the
+                // same header line (at `|`), so it dedups against this range.
+                FoldRange { header_line: 5, body_start: 6, body_end: 7 },
+            ]
+        );
+    }
+
+    #[test]
+    fn yaml_single_line_nodes_do_not_fold() {
+        let _guard = runtime_loader_test_guard();
+        let source = "a: b\n- c\n- d\n";
+
+        let folds = fold_ranges_for_text(
+            Some("yaml"),
+            Some(Path::new("config.yaml")),
+            source,
+            Duration::from_secs(1),
+        );
+
+        assert!(folds.is_empty());
+    }
+
+    #[test]
     fn markdown_sections_fold_content_by_heading_level() {
         let _guard = runtime_loader_test_guard();
         let source = "# Parent\nparent body\n\n## Child\nchild body\n\n### Grandchild\ngrandchild body\n\n## Sibling\nsibling body\n\n# Next\nnext body\n";

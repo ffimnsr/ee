@@ -1,11 +1,14 @@
 ; Python newline indentation signals.
-; Conservative Helix-inspired subset adapted to ee's current MVP contract.
-; Supported captures today:
-; - @indent
-; - @dedent
+; Conservative subset of ee's indent contract. Supported captures: @indent,
+; @indent.always (same opening-line behavior as @indent), @dedent and its
+; Helix spellings @outdent/@outdent.always, @extend and @extend.prevent-once
+; (no-ops in ee's caret-gated engine), @align + @anchor (absolute column
+; alignment), and @opaque (lines strictly inside the node keep their indent).
 ;
-; Exclude Helix-only richer captures such as @align, @extend, @opaque, and
-; grammar-error recovery rules until ee indent engine supports them.
+; Grammar-error recovery rules (Helix-sourced) are supported: while the tree
+; is broken mid-edit, the (ERROR ...) rules below keep newlines indenting for
+; typical incomplete constructs. `#set! scope ...` settings are ignored by ee
+; (no scope distinction in the delta model).
 
 [
   (list)
@@ -44,3 +47,17 @@
 (else_clause "else" @dedent)
 (except_clause "except" @dedent)
 (finally_clause "finally" @dedent)
+
+; Grammar-error recovery rules (Helix-sourced). The python grammar folds many
+; incomplete constructs into a single (ERROR) node; keep newlines indenting
+; while the user is mid-typing.
+(ERROR
+  "try"
+  .
+  ":" @indent @extend)
+(ERROR
+  .
+  "def") @indent @extend
+(ERROR
+  (block) @indent @extend
+  (#set! "scope" "all"))

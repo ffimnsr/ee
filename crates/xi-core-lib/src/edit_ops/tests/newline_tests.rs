@@ -144,6 +144,205 @@ fn insert_newline_multiline_selection_falls_back_to_baseline_indent() {
 }
 
 #[test]
+fn insert_newline_markdown_continues_bullet_marker() {
+    let text: Rope = "- foo".into();
+    let config = test_config();
+    let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+
+    let delta = insert_newline_with_context(
+        &text,
+        &[SelRegion::caret(text.len())],
+        &config,
+        Some(&context),
+    );
+
+    assert_eq!(String::from(delta.apply(&text)), "- foo\n- ");
+}
+
+#[test]
+fn insert_newline_markdown_keeps_nested_list_indentation() {
+    let text: Rope = "  - foo".into();
+    let config = test_config();
+    let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+
+    let delta = insert_newline_with_context(
+        &text,
+        &[SelRegion::caret(text.len())],
+        &config,
+        Some(&context),
+    );
+
+    assert_eq!(String::from(delta.apply(&text)), "  - foo\n  - ");
+}
+
+#[test]
+fn insert_newline_markdown_continues_blockquote_and_nested_markers() {
+    let cases = [
+        ("  1. one", "  1. one\n  2. "), // ordered increments
+        ("> quoted", "> quoted\n> "),    // blockquote
+        ("> > deep", "> > deep\n> > "),  // nested quotes
+        ("> - foo", "> - foo\n> - "),    // quote + bullet
+        ("* star", "* star\n* "),        // alternate bullet
+    ];
+
+    let config = test_config();
+    for (input, expected) in cases {
+        let text: Rope = input.into();
+        let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+        assert_eq!(String::from(delta.apply(&text)), expected, "input={input:?}");
+    }
+}
+
+#[test]
+fn insert_newline_markdown_ordered_markers_increment() {
+    let cases = [
+        ("1. one", "1. one\n2. "),      // basic increment
+        ("10) item", "10) item\n11) "), // paren style
+        ("0. zero", "0. zero\n1. "),    // zero-based
+        ("> 1. x", "> 1. x\n> 2. "),    // quote + ordered
+        ("9. ", "9. \n"),               // bare number marker ends the list
+    ];
+
+    let config = test_config();
+    for (input, expected) in cases {
+        let text: Rope = input.into();
+        let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+        assert_eq!(String::from(delta.apply(&text)), expected, "input={input:?}");
+    }
+}
+
+#[test]
+fn insert_newline_markdown_task_items_continue_as_unchecked_checkbox() {
+    let cases = [
+        ("- [ ] task", "- [ ] task\n- [ ] "), // unchecked continues unchecked
+        ("- [x] done", "- [x] done\n- [ ] "), // checked resets to unchecked
+        ("- [X] done", "- [X] done\n- [ ] "), // uppercase checked
+        ("- [ ] ", "- [ ] \n"),               // bare checkbox ends the list
+    ];
+
+    let config = test_config();
+    for (input, expected) in cases {
+        let text: Rope = input.into();
+        let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+        assert_eq!(String::from(delta.apply(&text)), expected, "input={input:?}");
+    }
+}
+
+#[test]
+fn insert_newline_markdown_empty_item_ends_list_or_quote() {
+    // A bare marker ends the block: no marker on the new line. Nested items
+    // keep their line's leading indentation (carried below the marker).
+    let cases = [("- ", "- \n"), ("> ", "> \n"), ("  - ", "  - \n  ")];
+
+    let config = test_config();
+    for (input, expected) in cases {
+        let text: Rope = input.into();
+        let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+        assert_eq!(String::from(delta.apply(&text)), expected, "input={input:?}");
+    }
+}
+
+#[test]
+fn insert_newline_markdown_does_not_continue_marker_mid_line_or_plain_text() {
+    let cases = [
+        ("- foo", 2, "- \nfoo"), // caret inside the item: plain split
+        ("- foo", 3, "- f\noo"), // caret after the marker: still plain
+        ("plain", 5, "plain\n"), // no marker at all
+    ];
+
+    let config = test_config();
+    for (input, offset, expected) in cases {
+        let text: Rope = input.into();
+        let context = SyntaxIndentContext::new("markdown", None, DocumentMode::Normal);
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(offset)],
+            &config,
+            Some(&context),
+        );
+        assert_eq!(String::from(delta.apply(&text)), expected, "input={input:?} offset={offset}");
+    }
+}
+
+#[test]
+fn insert_newline_marker_continuation_is_markdown_only() {
+    let text: Rope = "- foo".into();
+    let config = test_config();
+    // Non-markdown languages keep the plain carried indent.
+    let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+
+    let delta = insert_newline_with_context(
+        &text,
+        &[SelRegion::caret(text.len())],
+        &config,
+        Some(&context),
+    );
+
+    assert_eq!(String::from(delta.apply(&text)), "- foo\n");
+}
+
+#[test]
+fn insert_newline_with_syntax_align_outcome_aligns_to_anchor_column() {
+    let _guard = runtime_loader_test_guard();
+    let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+    install_indent_query("rust", "(call_expression (identifier) @anchor) @align");
+
+    let text: Rope = "  foo()".into();
+    let config = test_config();
+    let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+    let anchor = text.len();
+
+    let delta =
+        insert_newline_with_context(&text, &[SelRegion::caret(anchor)], &config, Some(&context));
+
+    // The new line is aligned to the anchor identifier's column (2) instead of
+    // carrying the opening line's indent.
+    assert_eq!(String::from(delta.apply(&text)), "  foo()\n  ");
+}
+
+#[test]
+fn insert_newline_with_syntax_align_outcome_supports_space_indent_policy() {
+    let _guard = runtime_loader_test_guard();
+    let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+    install_indent_query("rust", "(call_expression (identifier) @anchor) @align");
+
+    let text: Rope = "    foo()".into();
+    let mut config = test_config();
+    config.translate_tabs_to_spaces = true;
+    let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+    let anchor = text.len();
+
+    let delta =
+        insert_newline_with_context(&text, &[SelRegion::caret(anchor)], &config, Some(&context));
+
+    assert_eq!(String::from(delta.apply(&text)), "    foo()\n    ");
+}
+
+#[test]
 fn insert_newline_with_syntax_context_uses_indent_query_outcome() {
     let _guard = runtime_loader_test_guard();
     let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);

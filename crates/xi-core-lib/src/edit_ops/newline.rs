@@ -45,9 +45,117 @@ pub(crate) fn newline_indent_for_region(
         }
     }
     if config.smart_indent {
+        if let Some(marker_indent) = markdown_list_marker_indent(base, region, syntax_context) {
+            return marker_indent;
+        }
         apply_smart_indent_heuristic(base, region, config, &mut indent);
     }
     indent
+}
+
+/// Markdown list/quote continuation: pressing Enter at the end of a line whose
+/// content starts with a blockquote marker, a bullet (`-`/`*`/`+`), or an
+/// ordered-list marker (`1.`/`1)`) starts the new line with the same marker
+/// prefix, so typing lists and quotes does not lose the marker.
+///
+/// - Empty items (`- `, `> ` with nothing after the marker) do not continue:
+///   Enter ends the block instead.
+/// - Marker-only prefixes are normalized to marker + single space (`>  x`
+///   continues as `> `).
+/// - Task-list checkboxes continue as an unchecked `[ ]` item in either state
+///   (`- [x] done` continues `- [ ] `).
+/// - Ordered markers increment: `1. one` continues as `2. `, `10) item` as
+///   `11) `.
+/// - Only end-of-line Enter continues; splitting mid-line keeps the plain
+///   carried indent.
+fn markdown_list_marker_indent(
+    base: &Rope,
+    region: &SelRegion,
+    syntax_context: Option<&SyntaxIndentContext<'_>>,
+) -> Option<String> {
+    let context = syntax_context?;
+    if !context.language_name.eq_ignore_ascii_case("markdown") {
+        return None;
+    }
+
+    let anchor = region.min().min(base.len());
+    let line = base.line_of_offset(anchor);
+    let (line_start, content) = logical_line_contents(base, line);
+    let anchor_in_line = anchor.saturating_sub(line_start).min(content.len());
+    if anchor_in_line != content.len() {
+        return None;
+    }
+
+    let mut rest = content.as_str();
+    let mut prefix = String::new();
+    // Keep leading indentation (list nesting, indented quotes).
+    let indent_len = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    prefix.push_str(&rest[..indent_len]);
+    rest = &rest[indent_len..];
+
+    // Blockquote markers may repeat (`> > nested quote`).
+    let mut has_quote = false;
+    while let Some(after) = rest.strip_prefix('>') {
+        has_quote = true;
+        prefix.push_str("> ");
+        rest = after.trim_start_matches(' ');
+    }
+
+    // Bullet marker, optionally with a task-list checkbox.
+    if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+        let marker = &rest[..1];
+        let body = &rest[2..];
+        if let Some(after) = body
+            .strip_prefix("[ ] ")
+            .or_else(|| body.strip_prefix("[x] "))
+            .or_else(|| body.strip_prefix("[X] "))
+        {
+            if after.trim().is_empty() {
+                return None;
+            }
+            prefix.push_str(marker);
+            prefix.push_str(" [ ] ");
+            return Some(prefix);
+        }
+        if body.trim().is_empty() {
+            return None;
+        }
+        prefix.push_str(marker);
+        prefix.push(' ');
+        return Some(prefix);
+    }
+
+    // Ordered list marker: digits followed by `.` or `)` and a space; the new
+    // item increments the number.
+    let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits > 0 {
+        let separator =
+            match rest[digits..].strip_prefix(". ").or_else(|| rest[digits..].strip_prefix(") ")) {
+                Some(_) => rest.as_bytes()[digits] as char,
+                None => {
+                    if has_quote && !rest.trim().is_empty() {
+                        return Some(prefix);
+                    }
+                    return None;
+                }
+            };
+        let body = &rest[digits + 2..];
+        if body.trim().is_empty() {
+            return None;
+        }
+        // Saturating: absurdly long numbers keep their own width.
+        let next = rest[..digits].parse::<u64>().unwrap_or(u64::MAX).saturating_add(1);
+        prefix.push_str(&next.to_string());
+        prefix.push(separator);
+        prefix.push(' ');
+        return Some(prefix);
+    }
+
+    // Quote-only line (`> text`): continue the quote without a list marker.
+    if has_quote && !rest.trim().is_empty() {
+        return Some(prefix);
+    }
+    None
 }
 
 pub(crate) fn carried_indent_for_region(base: &Rope, region: &SelRegion) -> String {
@@ -77,6 +185,18 @@ pub(crate) fn apply_indent_outcome(
         IndentOutcome::Inherit => {}
         IndentOutcome::IndentOneLevel => indent.push_str(get_tab_text(config, None)),
         IndentOutcome::DedentOneLevel => trim_one_indent_level(indent, config),
+        IndentOutcome::AlignTo(column) => *indent = indent_string_for_column(config, column),
+    }
+}
+
+/// Build an indent string that reaches the given visual column, honoring the
+/// config's tab/space choice (`@align`/`@anchor` absolute alignment).
+fn indent_string_for_column(config: &BufferItems, column: usize) -> String {
+    if config.translate_tabs_to_spaces {
+        " ".repeat(column)
+    } else {
+        let tab_size = config.tab_size.max(1);
+        "\t".repeat(column / tab_size) + &" ".repeat(column % tab_size)
     }
 }
 

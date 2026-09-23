@@ -4,9 +4,40 @@ use super::*;
 #[test]
 fn indent_query_capture_contract_round_trips_names() {
     assert_eq!(IndentQueryCapture::from_capture_name("indent"), Some(IndentQueryCapture::Indent));
+    assert_eq!(
+        IndentQueryCapture::from_capture_name("indent.always"),
+        Some(IndentQueryCapture::IndentAlways)
+    );
     assert_eq!(IndentQueryCapture::from_capture_name("dedent"), Some(IndentQueryCapture::Dedent));
+    assert_eq!(IndentQueryCapture::from_capture_name("outdent"), Some(IndentQueryCapture::Outdent));
+    assert_eq!(
+        IndentQueryCapture::from_capture_name("outdent.always"),
+        Some(IndentQueryCapture::OutdentAlways)
+    );
+    assert_eq!(IndentQueryCapture::from_capture_name("extend"), Some(IndentQueryCapture::Extend));
+    assert_eq!(
+        IndentQueryCapture::from_capture_name("extend.prevent-once"),
+        Some(IndentQueryCapture::ExtendPreventOnce)
+    );
+    assert_eq!(IndentQueryCapture::from_capture_name("anchor"), Some(IndentQueryCapture::Anchor));
+    assert_eq!(IndentQueryCapture::from_capture_name("align"), Some(IndentQueryCapture::Align));
+    assert_eq!(IndentQueryCapture::from_capture_name("opaque"), Some(IndentQueryCapture::Opaque));
     assert_eq!(IndentQueryCapture::from_capture_name("branch"), None);
-    assert_eq!(IndentQueryCapture::allowed_names(), vec!["indent", "dedent"]);
+    assert_eq!(
+        IndentQueryCapture::allowed_names(),
+        vec![
+            "indent",
+            "indent.always",
+            "dedent",
+            "outdent",
+            "outdent.always",
+            "extend",
+            "extend.prevent-once",
+            "anchor",
+            "align",
+            "opaque"
+        ]
+    );
 }
 
 #[test]
@@ -74,14 +105,28 @@ fn invalid_indent_query_capture_reports_clear_error() {
             assert_eq!(kind, RuntimeQueryKind::Indents);
             assert_eq!(file.as_deref(), Some(indents_path.as_path()));
             assert_eq!(capture, "branch");
-            assert_eq!(allowed, vec!["indent", "dedent"]);
+            assert_eq!(
+                allowed,
+                vec![
+                    "indent",
+                    "indent.always",
+                    "dedent",
+                    "outdent",
+                    "outdent.always",
+                    "extend",
+                    "extend.prevent-once",
+                    "anchor",
+                    "align",
+                    "opaque"
+                ]
+            );
         }
         other => panic!("unexpected error: {other:?}"),
     }
 }
 
 #[test]
-fn bundled_runtime_indent_queries_compile_for_rust_json_and_python() {
+fn bundled_runtime_indent_queries_compile() {
     let temp_dir = TempDir::new().unwrap();
     let bundled_root = temp_dir.path().join("bundle");
     let repo_runtime =
@@ -91,6 +136,7 @@ fn bundled_runtime_indent_queries_compile_for_rust_json_and_python() {
         ("rust", vec!["rs"], test_grammars::rust(), "tree_sitter_rust"),
         ("json", vec!["json"], test_grammars::json(), "tree_sitter_json"),
         ("python", vec!["py"], test_grammars::python(), "tree_sitter_python"),
+        ("yaml", vec!["yaml"], test_grammars::yaml(), "tree_sitter_yaml"),
     ] {
         let source = repo_runtime.join("queries").join(language).join("indents.scm");
         assert!(source.exists(), "missing bundled indent query {}", source.display());

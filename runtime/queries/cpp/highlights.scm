@@ -324,11 +324,13 @@
   "<=>"
   "[]"
   "()"
-  "^^" ; C++26 reflection operator (reflect_expression)
+  ; C++26 reflection operator `^^` (reflect_expression) is not yet produced by
+  ; tree-sitter-cpp 0.23.4; re-add here when the grammar is upgraded.
 ] @operator
 
-; C++26 splice brackets `[: reflection :]` (splice_specifier / splice_type_specifier).
-(splice_specifier ["[:" ":]"] @punctuation.bracket)
+; C++26 splice brackets `[: reflection :]` (splice_specifier /
+; splice_type_specifier) not yet produced by tree-sitter-cpp 0.23.4; re-add
+; when the grammar is upgraded.
 
 
 ; These casts are parsed as function calls, but are not.

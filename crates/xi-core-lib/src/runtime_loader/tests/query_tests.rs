@@ -90,8 +90,26 @@ fn bundled_builtin_highlights_queries_compile() {
     ensure_default_runtime_loader_has_test_grammars();
 
     for language in [
-        "bash", "c", "csharp", "css", "elixir", "go", "haskell", "html", "java", "json", "php",
-        "python", "ruby", "rust", "scala", "yaml",
+        "bash",
+        "c",
+        "cpp",
+        "csharp",
+        "css",
+        "elixir",
+        "go",
+        "haskell",
+        "html",
+        "java",
+        "javascript",
+        "json",
+        "markdown",
+        "php",
+        "python",
+        "ruby",
+        "rust",
+        "scala",
+        "typescript",
+        "yaml",
     ] {
         with_default_runtime_loader_mut(|loader| {
             loader.invalidate_language(language);
@@ -102,6 +120,28 @@ fn bundled_builtin_highlights_queries_compile() {
             assert!(
                 !compiled.source_text.trim().is_empty(),
                 "expected non-empty bundled highlights for {language}",
+            );
+        });
+    }
+}
+
+#[test]
+fn bundled_builtin_indents_queries_compile_for_registered_languages() {
+    let _guard = runtime_loader_test_guard();
+    ensure_default_runtime_loader_has_test_grammars();
+
+    // All registered languages with an indents query, including the JS/TS
+    // family whose files are `; inherits: ecma` stubs (merged by the loader).
+    for language in ["javascript", "json", "python", "rust", "typescript", "yaml"] {
+        with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language(language);
+            let compiled = loader
+                .compile_query_kind(language, RuntimeQueryKind::Indents)
+                .unwrap_or_else(|error| panic!("failed compiling {language} indents: {error}"))
+                .unwrap_or_else(|| panic!("missing bundled indents query for {language}"));
+            assert!(
+                !compiled.source_text.trim().is_empty(),
+                "expected non-empty bundled indents for {language}",
             );
         });
     }
