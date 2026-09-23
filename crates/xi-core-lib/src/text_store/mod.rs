@@ -26,7 +26,10 @@
 //! storage backend. If performance profiling later shows vtable overhead is
 //! significant, a thin enum wrapper can be added without changing public APIs.
 
+pub mod render_source;
 pub mod rope_store;
+
+pub use render_source::{ReadResult, RenderLineCount, RenderSource};
 
 // ---------------------------------------------------------------------------
 // Document mode

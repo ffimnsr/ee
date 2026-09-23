@@ -17,6 +17,7 @@ impl View {
             first_line: 0,
             height: 10,
             lines: Lines::default(),
+            vlf_wrap: false,
             lc_shadow: LineCacheShadow::default(),
             find: Vec::new(),
             find_id_counter: Counter::default(),
@@ -46,6 +47,10 @@ impl View {
 
     pub(crate) fn get_replace(&self) -> Option<Replace> {
         self.replace.clone()
+    }
+
+    pub(crate) fn set_vlf_wrap(&mut self, vlf_wrap: bool) {
+        self.vlf_wrap = vlf_wrap;
     }
 
     pub(crate) fn set_has_pending_render(&mut self, pending: bool) {
@@ -125,7 +130,7 @@ impl View {
         if self.lines.is_converged() {
             false
         } else {
-            let visible_region = self.interval_of_visible_region(text);
+            let visible_region = self.interval_of_visible_region(&rope_render_source(text));
             self.lines.interval_needs_wrap(visible_region)
         }
     }

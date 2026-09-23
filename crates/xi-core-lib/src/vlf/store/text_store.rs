@@ -20,20 +20,14 @@ impl TextStore for VlfStore {
         let progress = index.scan_progress();
         if progress.is_complete() {
             // Sum all scanned newlines + 1 for the final partial line.
-            let total_nl: u64 = index.descriptors.values().map(|d| d.newline_count).sum();
-            let exact_count = total_nl + 1;
+            let exact_count = index.scanned_newlines_total() + 1;
             self.exact_line_count.set(Some(exact_count));
             KnownLineCount::Exact(exact_count)
         } else if index.is_empty() {
             KnownLineCount::Unknown
         } else {
-            // Extrapolate from scanned bytes.
-            let scanned_nl: u64 = index
-                .descriptors
-                .values()
-                .filter(|d| d.scan_state == ScanState::Scanned)
-                .map(|d| d.newline_count)
-                .sum();
+            // Extrapolate from scanned bytes (cached O(1) newline total).
+            let scanned_nl: u64 = index.scanned_newlines_total();
             if progress.scanned_bytes == 0 {
                 return KnownLineCount::Unknown;
             }

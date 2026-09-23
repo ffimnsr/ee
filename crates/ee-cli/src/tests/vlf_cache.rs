@@ -10,7 +10,7 @@ use crate::backend::{
     BackendEvent, CachedLine, CoreLine, CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot,
     coalesce_backend_events, invalid_line_ranges_bounded, parse_notification,
 };
-use crate::buffer::{BufferManager, VlfChunkUpdate};
+use crate::buffer::BufferManager;
 use crate::tests::helpers::*;
 use crate::ui;
 
@@ -102,232 +102,307 @@ fn render_source_fixture_under_one_frame_budget() {
     );
 }
 
-// ── VLF viewport protocol ──────────────────────────────────────────────────
+// ── VLF update-window protocol (Stage A Phase 3) ───────────────────────────
 
-#[test]
-fn apply_vlf_chunks_populates_line_cache() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.vlf_generation = 7;
-    buf.line_cache = vec![LineSlot::Invalid; 3];
+fn vlf_update(ops: Vec<CoreUpdateOp>, count: u64, exact: bool) -> CoreUpdate {
+    CoreUpdate {
+        ops,
+        pristine: true,
+        annotations: Vec::new(),
+        vlf_total_lines: Some(crate::backend::VlfTotalLines { count, exact, index_progress: 1.0 }),
+    }
+}
 
-    let lines = vec![String::from("alpha"), String::from("beta")];
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 7,
-        line_start: 0,
-        lines: &lines,
-        syntax_spans: &[],
-        approximate_line_count: 3,
-        line_count_exact: true,
-    });
+fn inserted(text: &str, ln: usize) -> CoreUpdateOp {
+    CoreUpdateOp {
+        op: CoreUpdateKind::Insert,
+        n: 1,
+        lines: vec![CoreLine {
+            text: Some(text.to_owned()),
+            cursor: Vec::new(),
+            syntax_spans: Some(Vec::new()),
+            logical_line: Some(ln),
+        }],
+    }
+}
 
-    assert_eq!(
-        buf.line_slot(0).cloned().unwrap(),
-        LineSlot::Known(CachedLine {
-            text: String::from("alpha"),
-            cursors: vec![],
-            syntax_spans: vec![],
-            logical_line: None,
-        })
-    );
-    assert_eq!(
-        buf.line_slot(1).cloned().unwrap(),
-        LineSlot::Known(CachedLine {
-            text: String::from("beta"),
-            cursors: vec![],
-            syntax_spans: vec![],
-            logical_line: None,
-        })
-    );
-    assert_eq!(buf.line_count(), 3);
-    assert!(buf.line_slot(2).is_none());
+fn inserted_row(text: &str, ln: Option<usize>) -> CoreUpdateOp {
+    CoreUpdateOp {
+        op: CoreUpdateKind::Insert,
+        n: 1,
+        lines: vec![CoreLine {
+            text: Some(text.to_owned()),
+            cursor: Vec::new(),
+            syntax_spans: Some(Vec::new()),
+            logical_line: ln,
+        }],
+    }
 }
 
 #[test]
-fn apply_vlf_chunks_normalizes_crlf_line_endings() {
+fn vlf_wrapped_window_slots_dense_rows_past_heads() {
+    // Wrapped VLF (Phase 4): continuation rows omit `ln` — only logical-line
+    // heads carry it. The window must slot dense display rows; a naive ln
+    // fallback would collide continuations with the next head and drop rows.
     let mut buf = test_buf_state();
     buf.is_vlf = true;
-    buf.vlf_generation = 2;
+    buf.line_cache = vec![LineSlot::Invalid; 3];
 
-    let lines = vec![String::from("alpha\r"), String::from("beta\r")];
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 2,
-        line_start: 0,
-        lines: &lines,
-        syntax_spans: &[],
-        approximate_line_count: 2,
-        line_count_exact: true,
-    });
+    buf.apply_update(vlf_update(
+        vec![
+            inserted_row("alpha ", Some(0)),
+            inserted_row("alpha 2", None),
+            inserted_row("beta\n", Some(1)),
+            inserted_row("gamma x", Some(2)),
+            inserted_row("gamma y", None),
+        ],
+        3,
+        true,
+    ))
+    .unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 0);
+    assert_eq!(buf.get_line(0), Some("alpha "));
+    assert_eq!(buf.get_line(1), Some("alpha 2"));
+    assert_eq!(buf.get_line(2), Some("beta"));
+    assert_eq!(buf.get_line(3), Some("gamma x"));
+    assert_eq!(buf.get_line(4), Some("gamma y"));
+}
+
+#[test]
+fn vlf_wrapped_window_anchors_at_mid_file_head() {
+    // Dense-row slotting when a wrapped window starts mid-file: anchored at
+    // the first head's ln, rows fill sequentially after it.
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+
+    buf.apply_update(vlf_update(
+        vec![
+            inserted_row("line 10 ", Some(10)),
+            inserted_row("line 10 cont", None),
+            inserted_row("line 11\n", Some(11)),
+        ],
+        1000,
+        false,
+    ))
+    .unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 10);
+    assert_eq!(buf.get_line(10), Some("line 10 "));
+    assert_eq!(buf.get_line(11), Some("line 10 cont"));
+    assert_eq!(buf.get_line(12), Some("line 11"));
+}
+
+#[test]
+fn vlf_update_window_populates_line_cache() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.line_cache = vec![LineSlot::Invalid; 3];
+
+    buf.apply_update(vlf_update(vec![inserted("alpha", 0), inserted("beta", 1)], 3, true)).unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 0);
+    assert_eq!(
+        buf.line_slot(0).cloned().unwrap(),
+        LineSlot::from(CoreLine {
+            text: Some(String::from("alpha")),
+            cursor: vec![],
+            syntax_spans: Some(Vec::new()),
+            logical_line: Some(0),
+        })
+    );
+    assert_eq!(buf.get_line(0), Some("alpha"));
+    assert_eq!(buf.get_line(1), Some("beta"));
+    assert_eq!(buf.vlf_approx_line_count, 3);
+    assert!(buf.vlf_line_count_exact);
+}
+
+#[test]
+fn vlf_update_window_positions_at_insert_ln() {
+    // The window starts at the first inserted line's logical number, not 0:
+    // scrolling down replaces the window with the new visible range.
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.line_cache = vec![LineSlot::Invalid; 2];
+
+    buf.apply_update(vlf_update(
+        vec![inserted("line 10", 10), inserted("line 11", 11)],
+        1000,
+        false,
+    ))
+    .unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 10);
+    assert_eq!(buf.get_line(10), Some("line 10"));
+    assert_eq!(buf.get_line(11), Some("line 11"));
+    assert_eq!(buf.line_cache.len(), 2);
+    assert_eq!(buf.line_count(), 1000, "cache stays window-local");
+}
+
+#[test]
+fn vlf_update_normalizes_crlf_line_endings() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+
+    // Core line text carries the terminator (rope-parity wire shape); the
+    // frontend strips `\r\n` like every other update line.
+    buf.apply_update(vlf_update(vec![inserted("alpha\r\n", 0), inserted("beta\r\n", 1)], 2, true))
+        .unwrap();
 
     assert_eq!(buf.get_line(0), Some("alpha"));
     assert_eq!(buf.get_line(1), Some("beta"));
 }
 
 #[test]
-fn apply_vlf_chunks_empty_response_preserves_loaded_cache() {
+fn vlf_update_without_insert_keeps_window_but_refreshes_count() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
-    buf.vlf_generation = 3;
     buf.vlf_cache_start_line = 40;
-    buf.line_cache = vec![
-        LineSlot::Known(CachedLine {
-            text: String::from("line 40"),
-            cursors: vec![],
-            syntax_spans: vec![],
-            logical_line: None,
-        }),
-        LineSlot::Known(CachedLine {
-            text: String::from("line 41"),
-            cursors: vec![],
-            syntax_spans: vec![],
-            logical_line: None,
-        }),
-    ];
+    buf.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("line 40"),
+        cursors: vec![],
+        syntax_spans: vec![],
+        logical_line: Some(40),
+    })];
 
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 3,
-        line_start: 100,
-        lines: &[],
-        syntax_spans: &[],
-        approximate_line_count: 1_000,
-        line_count_exact: false,
-    });
+    buf.apply_update(vlf_update(Vec::new(), 1_000, false)).unwrap();
 
     assert_eq!(buf.vlf_cache_start_line, 40);
     assert_eq!(buf.get_line(40), Some("line 40"));
-    assert_eq!(buf.get_line(41), Some("line 41"));
     assert_eq!(buf.vlf_approx_line_count, 1_000);
 }
 
 #[test]
-fn apply_vlf_chunks_empty_response_keeps_tail_jump_pending() {
+fn vlf_update_keeps_tail_jump_pending_until_window_lands() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
-    buf.vlf_generation = 4;
     buf.pending_vlf_tail_jump = true;
 
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 4,
-        line_start: u64::MAX - 1,
-        lines: &[],
-        syntax_spans: &[],
-        approximate_line_count: 10_000,
-        line_count_exact: false,
-    });
-
+    // Copy-only update (no insert): tail not here yet; jump stays pending.
+    buf.apply_update(vlf_update(Vec::new(), 10_000, false)).unwrap();
     assert!(buf.pending_vlf_tail_jump);
-    assert_eq!((buf.cursor_line, buf.cursor_col), (0, 0));
-}
 
-#[test]
-fn apply_vlf_chunks_stale_generation_discarded() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.vlf_generation = 5;
-    buf.line_cache = vec![LineSlot::Invalid; 2];
+    // Inexact window lands: the cursor follows the returned tail while the
+    // jump stays pending (the index can still move the true end).
+    buf.apply_update(vlf_update(
+        vec![inserted("line 998\n", 998), inserted("line 999\n", 999)],
+        10_000,
+        false,
+    ))
+    .unwrap();
 
-    let lines = vec![String::from("stale")];
-    // Send with generation 3 (older than current 5) — must be ignored.
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 3,
-        line_start: 0,
-        lines: &lines,
-        syntax_spans: &[],
-        approximate_line_count: 2,
-        line_count_exact: false,
-    });
+    assert!(buf.pending_vlf_tail_jump, "inexact tail must not settle the jump");
+    assert_eq!((buf.cursor_line, buf.cursor_col), (999, 0));
 
-    assert_eq!(buf.line_cache[0], LineSlot::Invalid, "stale response must not update cache");
-}
+    // Exact count settles the jump.
+    buf.apply_update(vlf_update(
+        vec![inserted("line 9998\n", 9998), inserted("line 9999\n", 9999)],
+        10_000,
+        true,
+    ))
+    .unwrap();
 
-#[test]
-fn apply_vlf_chunks_does_not_grow_cache_to_approximate_count() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.vlf_generation = 1;
-    buf.line_cache = Vec::new(); // start empty
-
-    let lines: Vec<String> = Vec::new();
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 1,
-        line_start: 0,
-        lines: &lines,
-        syntax_spans: &[],
-        approximate_line_count: 1000,
-        line_count_exact: false,
-    });
-
-    assert_eq!(buf.line_cache.len(), 0, "cache must stay viewport-local");
-    assert_eq!(buf.line_count(), 1000);
-    assert_eq!(buf.vlf_approx_line_count, 1000);
-}
-
-#[test]
-fn apply_vlf_chunks_exact_count_replaces_stale_window() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.vlf_generation = 1;
-    buf.line_cache = vec![LineSlot::Invalid; 1000];
-
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 1,
-        line_start: 10,
-        lines: &[String::from("tail")],
-        syntax_spans: &[],
-        approximate_line_count: 25,
-        line_count_exact: true,
-    });
-
-    assert_eq!(buf.line_count(), 25);
-    assert_eq!(buf.line_cache.len(), 1);
-    assert_eq!(buf.vlf_cache_start_line, 10);
-    assert_eq!(buf.get_line(10), Some("tail"));
-    assert!(buf.vlf_line_count_exact);
-}
-
-#[test]
-fn vlf_line_count_uses_exact_report_over_stale_cache() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.line_cache = vec![LineSlot::Invalid; 1000];
-    buf.vlf_approx_line_count = 25;
-    buf.vlf_line_count_exact = true;
-
-    assert_eq!(buf.line_count(), 25);
-}
-
-#[test]
-fn vlf_line_count_keeps_sparse_cache_when_exact_report_missing() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.line_cache = vec![LineSlot::Invalid; 500];
-    buf.vlf_line_count_exact = true;
-
-    assert_eq!(buf.line_count(), 500);
-}
-
-#[test]
-fn apply_vlf_chunks_tail_jump_moves_cursor_to_returned_last_line() {
-    let mut buf = test_buf_state();
-    buf.is_vlf = true;
-    buf.vlf_generation = 1;
-    buf.pending_vlf_tail_jump = true;
-
-    buf.apply_vlf_chunks(VlfChunkUpdate {
-        generation: 1,
-        line_start: 995,
-        lines: &[String::from("line 998"), String::from("line 999")],
-        syntax_spans: &[],
-        approximate_line_count: 1000,
-        line_count_exact: false,
-    });
-
-    assert_eq!((buf.cursor_line, buf.cursor_col), (996, 0));
     assert!(!buf.pending_vlf_tail_jump);
+    assert_eq!((buf.cursor_line, buf.cursor_col), (9999, 0));
 }
 
 #[test]
-fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
+fn vlf_update_gap_between_inserts_stays_invalid() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+
+    buf.apply_update(vlf_update(vec![inserted("head", 0), inserted("tail", 3)], 4, true)).unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 0);
+    assert_eq!(buf.get_line(0), Some("head"));
+    assert!(matches!(buf.line_slot(2), Some(LineSlot::Invalid)), "gap stays invalid");
+    assert_eq!(buf.get_line(3), Some("tail"));
+}
+
+#[test]
+fn vlf_copy_only_update_keeps_window_and_cursor() {
+    // Bug regression: the core's "nothing changed" shortcut answers a scroll
+    // with a whole-document copy. The bounded window must stay exactly as-is
+    // (including the cursor, which VLF navigation owns locally) instead of
+    // rebuilding slots from stale rows.
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_cache_start_line = 40;
+    buf.cursor_line = 52;
+    buf.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("line 40"),
+        cursors: vec![0], // would re-anchor the cursor if sync ran
+        syntax_spans: vec![],
+        logical_line: Some(40),
+    })];
+
+    buf.apply_update(vlf_update(
+        vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() }],
+        1_000,
+        false,
+    ))
+    .unwrap();
+
+    assert_eq!((buf.cursor_line, buf.cursor_col), (52, 0), "copy-only reframe keeps cursor");
+    assert_eq!(buf.vlf_cache_start_line, 40);
+    assert_eq!(buf.get_line(40), Some("line 40"));
+}
+
+#[test]
+fn vlf_mixed_insert_copy_window_keeps_copied_rows() {
+    // Bug regression: a scroll near the tail re-renders only the changed
+    // span; the core copies the overlap back from the client cache. The new
+    // window must keep those copied rows at their absolute positions instead
+    // of shrinking to the insert span, which stranded the viewport above the
+    // tail as Loading rows (core shadow then claims them cached, so the
+    // frontend stops re-requesting).
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_cache_start_line = 10;
+    buf.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("line 10"),
+            cursors: vec![],
+            syntax_spans: vec![],
+            logical_line: Some(10),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("line 11"),
+            cursors: vec![],
+            syntax_spans: vec![],
+            logical_line: Some(11),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("line 12"),
+            cursors: vec![],
+            syntax_spans: vec![],
+            logical_line: Some(12),
+        }),
+    ];
+
+    // Insert the newly rendered span, then copy the 3-row overlap back.
+    buf.apply_update(vlf_update(
+        vec![
+            inserted("line 8", 8),
+            inserted("line 9", 9),
+            CoreUpdateOp { op: CoreUpdateKind::Copy, n: 3, lines: Vec::new() },
+        ],
+        100,
+        true,
+    ))
+    .unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 8);
+    assert_eq!(buf.get_line(8), Some("line 8"));
+    assert_eq!(buf.get_line(9), Some("line 9"));
+    assert_eq!(buf.get_line(10), Some("line 10"), "copied overlap stays cached");
+    assert_eq!(buf.get_line(11), Some("line 11"));
+    assert_eq!(buf.get_line(12), Some("line 12"));
+    assert_eq!(buf.line_cache.len(), 5, "window covers insert span plus copied overlap");
+}
+
+#[test]
+fn vlf_document_mode_clears_stale_normal_cache_and_scrolls() {
     let (tx, rx) = mpsc::channel();
     let (backend_tx, backend_rx) = mpsc::channel();
     let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
@@ -340,48 +415,33 @@ fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
     mgr.drain_events().unwrap();
     assert!(mgr.active().is_vlf);
     assert!(mgr.active().lines.is_empty());
-    assert_eq!(mgr.active().line_cache.len(), 200);
-    assert!(mgr.active().line_cache.iter().all(|slot| matches!(slot, LineSlot::Invalid)));
 
     mgr.notify_scroll(0, 4).unwrap();
     let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("vlf viewport notification should be json");
-    assert_eq!(first["params"]["method"], "vlf_viewport");
-    assert_eq!(first["params"]["params"]["line_start"], 0);
-    assert_eq!(first["params"]["params"]["line_end"], 200);
-    assert_eq!(first["params"]["params"]["generation"], 1);
+        .expect("scroll notification should be json");
+    assert_eq!(first["params"]["method"], "scroll");
+    assert_eq!(first["params"]["params"], json!([0, 4]));
 
+    // Same range dedupes: no second scroll.
     mgr.notify_scroll(0, 4).unwrap();
     assert!(matches!(
         rx.recv_timeout(Duration::from_millis(50)),
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
 
+    // Copy-only update leaves the window untouched (no request line spam).
     backend_tx
-        .send(BackendEvent::VlfChunks {
+        .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
-            generation: 1,
-            line_start: 0,
-            lines: Vec::new(),
-            syntax_spans: Vec::new(),
-            approximate_line_count: 1000,
-            line_count_exact: false,
-            index_progress: 0.1,
+            update: vlf_update(Vec::new(), 1000, false),
         })
         .unwrap();
     mgr.drain_events().unwrap();
-
-    mgr.notify_scroll(0, 4).unwrap();
-    let retry: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("vlf viewport retry after empty response should be json");
-    assert_eq!(retry["params"]["method"], "vlf_viewport");
-    assert_eq!(retry["params"]["params"]["line_start"], 0);
-    assert_eq!(retry["params"]["params"]["line_end"], 204);
-    assert_eq!(retry["params"]["params"]["generation"], 2);
+    assert_eq!(mgr.active().vlf_approx_line_count, 1000);
 }
 
 #[test]
-fn vlf_notify_scroll_prefetches_beyond_ready_visible_rows() {
+fn vlf_notify_scroll_sends_scroll_without_overscan() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
@@ -402,11 +462,10 @@ fn vlf_notify_scroll_prefetches_beyond_ready_visible_rows() {
 
     mgr.notify_scroll(0, 4).unwrap();
     let scroll: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("vlf viewport notification should be json");
+        .expect("scroll notification should be json");
 
-    assert_eq!(scroll["params"]["method"], "vlf_viewport");
-    assert_eq!(scroll["params"]["params"]["line_start"], 0);
-    assert_eq!(scroll["params"]["params"]["line_end"], 204);
+    assert_eq!(scroll["params"]["method"], "scroll");
+    assert_eq!(scroll["params"]["params"], json!([0, 4]));
 }
 
 #[test]
@@ -419,15 +478,9 @@ fn vlf_invalid_cache_does_not_request_normal_lines() {
         .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
         .unwrap();
     backend_tx
-        .send(BackendEvent::VlfChunks {
+        .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
-            generation: 0,
-            line_start: 0,
-            lines: Vec::new(),
-            syntax_spans: Vec::new(),
-            approximate_line_count: 1000,
-            line_count_exact: false,
-            index_progress: 0.1,
+            update: vlf_update(vec![inserted("alpha\n", 0)], 1000, false),
         })
         .unwrap();
     mgr.drain_events().unwrap();
@@ -450,7 +503,7 @@ fn vlf_git_diff_command_reports_clear_status() {
 }
 
 #[test]
-fn vlf_ignores_normal_update_after_document_mode() {
+fn vlf_applies_insert_updates_after_document_mode() {
     let (tx, _rx) = mpsc::channel();
     let (backend_tx, backend_rx) = mpsc::channel();
     let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
@@ -461,68 +514,44 @@ fn vlf_ignores_normal_update_after_document_mode() {
     backend_tx
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
-            update: CoreUpdate {
-                ops: vec![CoreUpdateOp {
-                    op: CoreUpdateKind::Insert,
-                    n: 1,
-                    lines: vec![CoreLine {
-                        text: Some(String::from("stale normal line")),
-                        cursor: Vec::new(),
-                        syntax_spans: Some(Vec::new()),
-                        logical_line: None,
-                    }],
-                }],
-                pristine: true,
-                annotations: Vec::new(),
-            },
+            update: vlf_update(vec![inserted("frame line\n", 0)], 50, true),
         })
         .unwrap();
 
     mgr.drain_events().unwrap();
     assert!(mgr.active().is_vlf);
-    assert!(
-        mgr.active().line_cache.iter().all(|slot| matches!(slot, LineSlot::Invalid)),
-        "VLF must ignore normal update payloads"
+    assert_eq!(
+        mgr.active().line_slot(0).cloned().unwrap(),
+        LineSlot::Known(CachedLine {
+            text: String::from("frame line"),
+            cursors: vec![],
+            syntax_spans: vec![],
+            logical_line: Some(0),
+        })
     );
 }
 
 // ── Backend event parsing ──────────────────────────────────────────────────
 
 #[test]
-fn vlf_chunks_backend_event_parsed() {
+fn update_with_vlf_total_lines_backend_event_parsed() {
     let params = json!({
         "view_id": "view-1",
-        "generation": 42,
-        "line_start": 10,
-        "lines": ["hello", "world"],
-        "syntax_spans": [[{ "start_byte": 0, "end_byte": 5, "scope": "keyword.control" }], []],
-        "approximate_line_count": 500,
-        "line_count_exact": false,
-        "index_progress": 0.42,
+        "update": {
+            "ops": [],
+            "pristine": true,
+            "vlf_total_lines": { "count": 500, "exact": false, "index_progress": 0.42 },
+        },
     });
-    let event = parse_notification("vlf_chunks", params).expect("should parse vlf_chunks");
+    let event = parse_notification("update", params).expect("should parse update");
     match event {
-        BackendEvent::VlfChunks {
-            view_id,
-            generation,
-            line_start,
-            lines,
-            syntax_spans,
-            approximate_line_count,
-            line_count_exact,
-            index_progress,
-        } => {
+        BackendEvent::Update { view_id, update } => {
             assert_eq!(view_id, "view-1");
-            assert_eq!(generation, 42);
-            assert_eq!(line_start, 10);
-            assert_eq!(lines, vec!["hello", "world"]);
-            assert_eq!(syntax_spans.len(), 2);
-            assert_eq!(syntax_spans[0][0].scope, "keyword.control");
-            assert_eq!(approximate_line_count, 500);
-            assert!(!line_count_exact);
-            assert!((index_progress - 0.42).abs() < 1e-9);
+            let total = update.vlf_total_lines.expect("vlf_total_lines present");
+            assert_eq!(total.count, 500);
+            assert!(!total.exact);
         }
-        other => panic!("expected VlfChunks, got {:?}", other),
+        other => panic!("expected Update, got {:?}", other),
     }
 }
 
@@ -538,16 +567,7 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
             stored_match_count: 1,
             ranges: Vec::new(),
         },
-        BackendEvent::VlfChunks {
-            view_id: String::from("view-1"),
-            generation: 1,
-            line_start: 0,
-            lines: vec![String::from("old")],
-            syntax_spans: Vec::new(),
-            approximate_line_count: 10,
-            line_count_exact: false,
-            index_progress: 0.1,
-        },
+        BackendEvent::DocumentMode { view_id: String::from("view-1"), is_vlf: true },
         BackendEvent::VlfSearchStatus {
             view_id: String::from("view-1"),
             query: String::from("needle"),
@@ -557,36 +577,18 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
             stored_match_count: 4,
             ranges: Vec::new(),
         },
-        BackendEvent::VlfChunks {
-            view_id: String::from("view-1"),
-            generation: 2,
-            line_start: 5,
-            lines: vec![String::from("new")],
-            syntax_spans: Vec::new(),
-            approximate_line_count: 10,
-            line_count_exact: false,
-            index_progress: 0.2,
-        },
     ];
 
     let coalesced = coalesce_backend_events(events);
 
-    assert_eq!(coalesced.len(), 3);
-    assert!(matches!(&coalesced[0], BackendEvent::VlfChunks { generation: 1, line_start: 0, .. }));
+    assert_eq!(coalesced.len(), 2);
+    assert!(matches!(&coalesced[0], BackendEvent::DocumentMode { is_vlf: true, .. }));
     match &coalesced[1] {
         BackendEvent::VlfSearchStatus { complete, scanned_bytes, .. } => {
             assert!(*complete);
             assert_eq!(*scanned_bytes, 100);
         }
         other => panic!("expected latest search status, got {other:?}"),
-    }
-    match &coalesced[2] {
-        BackendEvent::VlfChunks { generation, line_start, lines, .. } => {
-            assert_eq!(*generation, 2);
-            assert_eq!(*line_start, 5);
-            assert_eq!(lines, &vec![String::from("new")]);
-        }
-        other => panic!("expected latest vlf chunks, got {other:?}"),
     }
 }
 
@@ -716,6 +718,7 @@ fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
     state
         .apply_update(CoreUpdate {
             pristine: true,
+            vlf_total_lines: None,
             annotations: Vec::new(),
             ops: vec![
                 // Copy entire existing cache — must not scan non-copy lines.
@@ -760,6 +763,7 @@ fn invalidate_op_large_count_does_not_allocate_text() {
     state
         .apply_update(CoreUpdate {
             pristine: true,
+            vlf_total_lines: None,
             annotations: Vec::new(),
             ops: vec![CoreUpdateOp {
                 op: CoreUpdateKind::Invalidate,

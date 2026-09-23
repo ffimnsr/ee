@@ -148,6 +148,12 @@ const fn default_true() -> bool {
     true
 }
 
+/// VLF wrapping is opt-in (Stage A Phase 4, config-gated until the
+/// performance gate passes); `false` keeps 1:1 visual/logical rows.
+const fn default_false() -> bool {
+    false
+}
+
 /// The concrete type for buffer-related settings.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BufferItems {
@@ -167,6 +173,11 @@ pub struct BufferItems {
     pub autodetect_whitespace: bool,
     pub surrounding_pairs: Vec<(String, String)>,
     pub save_with_newline: bool,
+    /// Opt-in word wrap for VLF buffers (Stage A Phase 4): a width pass over
+    /// the visible window only, byte-column (`wrap_width`) based; `Width`
+    /// (frontend-measured, `word_wrap`) stays unwrapped for VLF.
+    #[serde(default = "default_false")]
+    pub vlf_wrap: bool,
 }
 
 impl Default for BufferItems {
@@ -191,6 +202,7 @@ impl Default for BufferItems {
                 ("[".to_owned(), "]".to_owned()),
             ],
             save_with_newline: true,
+            vlf_wrap: false,
         }
     }
 }

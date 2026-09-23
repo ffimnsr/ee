@@ -293,6 +293,7 @@ pub(crate) fn ts_language_for_path(path: &Path) -> Option<Language> {
 /// VLF file contents. This path also avoids warming runtime query caches so
 /// query inheritance and runtime reload only affect whole-buffer query
 /// consumers, not viewport-bounded syntax work.
+#[cfg(test)]
 pub(crate) fn visible_syntax_spans(
     language_name: &str,
     visible_text: &str,

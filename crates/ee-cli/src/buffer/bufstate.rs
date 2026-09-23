@@ -2,12 +2,10 @@
 use super::*;
 
 impl BufState {
-    pub(super) const VLF_PREVIOUS_VIEWPORT_MAX_BYTES: usize = 32 * 1024 * 1024;
-
     /// Logical line number of the visual row at `idx` (0-based); `None` on
     /// wrapped continuation rows and on lines the backend has not reported.
     pub(crate) fn row_logical_line(&self, idx: usize) -> Option<usize> {
-        match self.line_cache.get(idx)? {
+        match self.line_slot(idx)? {
             LineSlot::Known(line) => line.logical_line,
             LineSlot::Invalid => None,
         }
@@ -26,7 +24,15 @@ impl BufState {
     }
 
     pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
-        let CoreUpdate { ops, pristine, annotations } = update;
+        if self.is_vlf {
+            // Stage A Phase 3: VLF buffers consume the same `update` stream as
+            // rope buffers, but the frontend keeps a bounded window (the core
+            // shadow may cover the whole visited range). Insert segments
+            // replace the window; copy/skip-only updates (scroll within the
+            // window) leave it untouched.
+            return self.apply_vlf_update_window(update);
+        }
+        let CoreUpdate { ops, pristine, annotations, vlf_total_lines: _ } = update;
         let previous = std::mem::take(&mut self.line_cache);
         let previous_lines = std::mem::take(&mut self.lines);
         let mut next_cache = Vec::new();
@@ -118,6 +124,52 @@ impl BufState {
         Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })
     }
 
+    /// VLF window application: take the inserted line segments from the core
+    /// `update` stream and replace the bounded frontend window.
+    ///
+    /// The core's render plan always inserts the visible window (the shadow
+    /// is re-seeded on any height drift), so one insert segment covers the
+    /// new window and its `ln` fields position it exactly. Skip/copy-only
+    /// updates (scrolling within the current window) keep the window as-is;
+    /// only cursors/annotations refresh.
+    fn apply_vlf_update_window(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
+        let CoreUpdate { ops, pristine, annotations, vlf_total_lines } = update;
+        self.pristine = pristine;
+        self.annotations = annotations;
+        if let Some(total) = vlf_total_lines {
+            self.vlf_approx_line_count = total.count;
+            self.vlf_line_count_exact = total.exact;
+            self.vlf_index_progress = total.index_progress;
+        }
+
+        // The previous window feeds copy/update ops (rows the core expects
+        // the client to already hold); take it before the cache is replaced.
+        let old_cache = std::mem::take(&mut self.line_cache);
+        let Some((start, end, cache)) =
+            vlf_window_from_ops(ops, &old_cache, self.vlf_cache_start_line)
+        else {
+            self.line_cache = old_cache;
+            return Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO });
+        };
+        self.line_cache = cache;
+        self.lines = self.line_cache.iter().map(line_text_for_slot).collect();
+        self.vlf_cache_start_line = start;
+        self.last_scroll = Some((start, end));
+        if self.pending_vlf_tail_jump {
+            self.cursor_line = end.saturating_sub(1);
+            self.cursor_col = 0;
+            // Settle only when the landing actually reached the exact tail: an
+            // inexact tail moves as the index scans, and a delayed response to
+            // an older scroll can land mid-file while carrying a fresh exact
+            // count.
+            let at_tail = self.vlf_line_count_exact
+                && usize::try_from(self.vlf_approx_line_count).is_ok_and(|count| end >= count);
+            self.pending_vlf_tail_jump = !at_tail;
+        }
+        self.sync_cursor_from_cache();
+        Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })
+    }
+
     pub(crate) fn rebuild_lines(&mut self) {
         // VLF mode: skip full-buffer clone; `lines` stays empty.
         // Rendering reads `line_cache` directly for the visible viewport range.
@@ -143,14 +195,20 @@ impl BufState {
     }
 
     pub(super) fn sync_cursor_from_cache(&mut self) {
+        // VLF keeps the cursor frontend-authoritative: navigation, tail jumps,
+        // and edits move it locally, while the core's caret annotation stays at
+        // the last core-side edit and would re-anchor the cursor whenever an
+        // update window happens to include that row (most visibly the row-0
+        // caret snapping the cursor back to line 1 while paging down at the
+        // top of the file via copied rows).
+        if self.is_vlf {
+            self.clamp_cursor();
+            return;
+        }
         for (line_index, slot) in self.line_cache.iter().enumerate() {
             let LineSlot::Known(line) = slot else { continue };
             if let Some(&cursor_col) = line.cursors.first() {
-                self.cursor_line = if self.is_vlf {
-                    self.vlf_cache_start_line.saturating_add(line_index)
-                } else {
-                    line_index
-                };
+                self.cursor_line = line_index;
                 self.cursor_col = previous_char_boundary(&line.text, cursor_col);
                 self.clamp_cursor();
                 return;
@@ -344,101 +402,5 @@ impl BufState {
         }
 
         true
-    }
-
-    pub(super) fn save_current_vlf_viewport(&mut self) {
-        if self.line_cache.is_empty()
-            || vlf_cache_text_bytes(&self.line_cache) > Self::VLF_PREVIOUS_VIEWPORT_MAX_BYTES
-        {
-            self.vlf_previous_viewport = None;
-            return;
-        }
-        self.vlf_previous_viewport = Some((self.vlf_cache_start_line, self.line_cache.clone()));
-    }
-
-    pub(super) fn restore_previous_vlf_viewport_if_ready(
-        &mut self,
-        first_line: usize,
-        last_line: usize,
-    ) -> bool {
-        let Some((previous_start, previous_cache)) = self.vlf_previous_viewport.as_ref() else {
-            return false;
-        };
-        if !vlf_cache_ready(previous_start, previous_cache, first_line, last_line) {
-            return false;
-        }
-
-        let Some((previous_start, previous_cache)) = self.vlf_previous_viewport.take() else {
-            return false;
-        };
-        let current_start = self.vlf_cache_start_line;
-        let current_cache = std::mem::replace(&mut self.line_cache, previous_cache);
-        self.vlf_cache_start_line = previous_start;
-        self.last_scroll =
-            Some((previous_start, previous_start.saturating_add(self.line_cache.len())));
-
-        if !current_cache.is_empty()
-            && vlf_cache_text_bytes(&current_cache) <= Self::VLF_PREVIOUS_VIEWPORT_MAX_BYTES
-        {
-            self.vlf_previous_viewport = Some((current_start, current_cache));
-        }
-        true
-    }
-
-    /// Apply a `vlf_chunks` response to the line cache.
-    ///
-    /// Silently drops the response when `generation` does not match
-    /// `vlf_generation`; this prevents an out-of-order reply from a superseded
-    /// viewport scroll from overwriting data for the current position.
-    pub(crate) fn apply_vlf_chunks(&mut self, update: VlfChunkUpdate<'_>) {
-        let VlfChunkUpdate {
-            generation,
-            line_start,
-            lines,
-            syntax_spans,
-            approximate_line_count,
-            line_count_exact,
-        } = update;
-
-        if generation != self.vlf_generation {
-            return;
-        }
-
-        self.vlf_approx_line_count = approximate_line_count;
-        self.vlf_line_count_exact = line_count_exact;
-        let tail_jump = self.pending_vlf_tail_jump;
-
-        if lines.is_empty() {
-            return;
-        }
-
-        let Ok(start) = usize::try_from(line_start) else {
-            self.line_cache.clear();
-            return;
-        };
-        if start != self.vlf_cache_start_line {
-            self.save_current_vlf_viewport();
-        }
-        self.vlf_cache_start_line = start;
-
-        self.line_cache = lines
-            .iter()
-            .enumerate()
-            .map(|(i, text)| {
-                let spans = syntax_spans.get(i).cloned().unwrap_or_default();
-                LineSlot::Known(CachedLine {
-                    text: normalize_line_text(Some(text.clone())),
-                    cursors: Vec::new(),
-                    syntax_spans: spans,
-                    logical_line: None,
-                })
-            })
-            .collect();
-        self.last_scroll = Some((start, start.saturating_add(lines.len())));
-        if tail_jump && !lines.is_empty() {
-            self.pending_vlf_tail_jump = false;
-            self.cursor_line = start + lines.len() - 1;
-            self.cursor_col = 0;
-        }
     }
 }

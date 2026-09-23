@@ -13,7 +13,7 @@ use crate::rpc::SelectionModifier;
 use crate::selection::SelRegion;
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
-use crate::text_store::{LineLookup, LogicalLine, TextStore};
+use crate::text_store::TextStore;
 use crate::vlf::store::VlfStore;
 use serde_json::{Value, json};
 use std::io::Write;

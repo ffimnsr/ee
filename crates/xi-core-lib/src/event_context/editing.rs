@@ -35,8 +35,26 @@ impl<'a> EventContext<'a> {
             ed.document_mode(),
         );
         let syntax_enabled = capabilities.syntax_spans && !ed.is_vlf();
+        if ed.is_vlf()
+            && let Some(store) = ed.vlf_store.as_ref()
+        {
+            // Stage A Phase 3+: VLF invalid-slot repairs go through the
+            // unified render path (the rope snapshot would be the empty
+            // placeholder).
+            view.request_lines(
+                store.as_ref(),
+                self.client,
+                first,
+                last,
+                ed.is_pristine(),
+                self.language.as_ref(),
+                syntax_enabled,
+            );
+            return;
+        }
+        let store = ed.text_store_snapshot();
         view.request_lines(
-            ed.get_buffer(),
+            &store,
             self.client,
             first,
             last,

@@ -62,7 +62,6 @@ mod terminal;
 mod text;
 mod theme;
 mod ui;
-mod vlf_viewport;
 mod window;
 
 #[cfg(test)]

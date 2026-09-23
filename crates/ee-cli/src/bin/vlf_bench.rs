@@ -43,9 +43,9 @@ fn main() -> io::Result<()> {
     fs::create_dir_all(&fixture_root)?;
 
     let specs = [
-        FixtureSpec { label: "100mb", size_bytes: 100 * ONE_MIB },
-        FixtureSpec { label: "1gb", size_bytes: 1024 * ONE_MIB },
-        FixtureSpec { label: "10gb", size_bytes: 10 * 1024 * ONE_MIB },
+        FixtureSpec::new("100mb", 100 * ONE_MIB, false),
+        FixtureSpec::new("1gb", 1024 * ONE_MIB, false),
+        FixtureSpec::new("10gb", 10 * 1024 * ONE_MIB, false),
     ];
 
     let mut fixtures = Vec::with_capacity(specs.len());

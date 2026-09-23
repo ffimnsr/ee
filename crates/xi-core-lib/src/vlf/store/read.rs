@@ -12,9 +12,14 @@ impl VlfStore {
         range: ByteRange,
         token: CancelGeneration,
     ) -> io::Result<SeamResult> {
-        // Check decoded cache first.
+        // Check decoded cache first. A hit only serves when the cached decode
+        // fully covers the requested range: the cache is keyed by range start,
+        // so a later wider request must not see a truncated seam (the render
+        // path depends on exact-range reads).
         if let Some((text, decoded_range)) = self.decoded_cache.borrow_mut().get(range.start.0) {
-            return Ok(SeamResult { text, original_range: range, decoded_range });
+            if decoded_range.start.0 <= range.start.0 && decoded_range.end.0 >= range.end.0 {
+                return Ok(SeamResult { text, original_range: range, decoded_range });
+            }
         }
 
         let file_size = self.pager.file_size();
@@ -70,33 +75,6 @@ impl VlfStore {
         Ok(SeamResult { text, original_range: range, decoded_range })
     }
 
-    /// Returns syntax spans for the visible window text, reusing the previous
-    /// result when the same (window text, language) pair is requested again.
-    ///
-    /// Spans are window-relative, so identical window text means identical
-    /// spans even at different byte offsets. `compute` runs only on a cache
-    /// miss, or when an editable overlay is active (overlay content can
-    /// change between requests).
-    pub(crate) fn cached_visible_syntax_spans(
-        &self,
-        window_text: &str,
-        language: &str,
-        compute: impl FnOnce() -> Vec<Vec<VisibleSyntaxSpan>>,
-    ) -> Vec<Vec<VisibleSyntaxSpan>> {
-        if self.overlay_read_enabled() {
-            return compute();
-        }
-        let mut cache = self.syntax_cache.borrow_mut();
-        if cache.window_text == window_text && cache.language == language {
-            return cache.spans.clone();
-        }
-        let spans = compute();
-        cache.window_text = window_text.to_owned();
-        cache.language = language.to_owned();
-        cache.spans = spans.clone();
-        spans
-    }
-
     pub(super) fn read_raw_range_token(
         &self,
         range: ByteRange,
@@ -139,31 +117,19 @@ impl VlfStore {
     /// Walk the page index to count lines before `byte_offset`, loading the
     /// relevant page if needed.
     pub(super) fn byte_to_line_internal(&self, offset: u64) -> Option<LogicalLine> {
-        // Phase 1: find page + accumulated line count under borrow.
-        let (file_range_opt, acc_lines) = {
-            let index = self.index.borrow();
-            let mut acc: u64 = 0;
-            let mut found: Option<ByteRange> = None;
-            for desc in index.descriptors.values() {
-                if desc.scan_state != ScanState::Scanned {
-                    break;
-                }
-                if desc.file_range.start.0 <= offset && offset < desc.file_range.end.0 {
-                    found = Some(desc.file_range);
-                    break;
-                }
-                acc += desc.newline_count;
-            }
-            (found, acc)
-        };
-
-        let fr = file_range_opt?;
-        let offset_in_page = (offset - fr.start.0) as usize;
+        // O(log pages): page via the BTreeMap, lines before it via the
+        // cumulative prefix (contiguous scanned run only — the same page
+        // visibility the old linear walk had).
+        let index = self.index.borrow();
+        let page = index.page_at_byte(offset)?;
+        let acc_lines = index.cum_lines_before(page.file_range.start.0)?;
+        let fr = page.file_range;
+        drop(index);
 
         let token = self.pager.current_generation();
         let pb = self.pager.read_at(fr, token).ok()?;
         let bytes = pb.as_bytes();
-        let count_end = offset_in_page.min(bytes.len());
+        let count_end = (offset - fr.start.0).min(bytes.len() as u64) as usize;
         let nl_count = bytes[..count_end].iter().filter(|&&b| b == b'\n').count() as u64;
         Some(LogicalLine(acc_lines + nl_count))
     }
@@ -173,6 +139,30 @@ impl VlfStore {
         // Fast path: line 0 always starts at byte 0 for non-empty files.
         if line == 0 && self.pager.file_size() > 0 {
             return LineLookup::Exact(ByteOffset(0));
+        }
+
+        // Consecutive-lookup fast path: renders resolve ascending lines two
+        // per visual row inside one page. Counting the page from byte 0 per
+        // lookup would be O(page) per line (~1 MiB scans per rendered row);
+        // resume from the previously resolved line start instead, forwarding
+        // across pages when the window spans page boundaries.
+        let cursor_opt = {
+            let cursor = self.base_line_cursor.borrow();
+            *cursor
+        };
+        if let Some((cursor_line, cursor_byte)) = cursor_opt {
+            if line == cursor_line {
+                // The cursor already resolved this exact line (the facade's
+                // (line, line+1) pair re-queries the previous row's end).
+                return LineLookup::Exact(ByteOffset(cursor_byte));
+            }
+            let ahead = line.saturating_sub(cursor_line);
+            if ahead > 0 && ahead <= 4096 {
+                if let Some(found) = self.count_forward_from(cursor_byte, ahead) {
+                    *self.base_line_cursor.borrow_mut() = Some((line, found.0));
+                    return LineLookup::Exact(found);
+                }
+            }
         }
 
         // Phase 1: find the page and its line base, under borrow.
@@ -196,27 +186,84 @@ impl VlfStore {
 
         let line_within_page = line - lines_before;
         if line_within_page == 0 {
+            *self.base_line_cursor.borrow_mut() = Some((line, fr.start.0));
             return LineLookup::Exact(fr.start);
         }
 
         // Phase 2: load page bytes and count newlines to find the exact offset.
         let token = self.pager.current_generation();
-        match self.pager.read_at(fr, token) {
+        let result = match self.pager.read_at(fr, token) {
             Err(_) => LineLookup::Pending,
             Ok(pb) => {
                 let bytes = pb.as_bytes();
+                // Sniff `\r` line endings while the page is in hand; a lone
+                // `\r` invalidates the unedited overlay fast path beyond this
+                // point.
+                self.mark_crlf_state(bytes);
                 let mut nl = 0u64;
                 for (i, &b) in bytes.iter().enumerate() {
                     if b == b'\n' {
                         nl += 1;
                         if nl == line_within_page {
-                            return LineLookup::Exact(ByteOffset(fr.start.0 + i as u64 + 1));
+                            let found = ByteOffset(fr.start.0 + i as u64 + 1);
+                            // Update the resume cursor on this early return:
+                            // the trailing cursor write below is unreachable
+                            // here, and without it every lookup re-scans the
+                            // page from byte 0 (O(page) per rendered line).
+                            *self.base_line_cursor.borrow_mut() = Some((line, found.0));
+                            return LineLookup::Exact(found);
                         }
                     }
                 }
                 // Descriptor claimed more newlines than bytes contain.
                 LineLookup::OutOfRange
             }
+        };
+        if let LineLookup::Exact(byte) = result {
+            *self.base_line_cursor.borrow_mut() = Some((line, byte.0));
         }
+        result
+    }
+
+    /// Count `ahead` line endings forward from `start_byte`, returning the
+    /// byte right after the last counted ending. Stops at the file end
+    /// (returns `None`) when the count cannot be satisfied.
+    fn count_forward_from(&self, start_byte: u64, ahead: u64) -> Option<ByteOffset> {
+        let file_size = self.pager.file_size();
+        let mut pos = start_byte;
+        let mut remaining = ahead;
+        while pos < file_size {
+            let index = self.index.borrow();
+            let page = index.page_at_byte(pos)?;
+            if page.scan_state != crate::vlf::page_index::ScanState::Scanned {
+                return None;
+            }
+            let fr = page.file_range;
+            let token = self.pager.current_generation();
+            let pb = self.pager.read_at(fr, token).ok()?;
+            let bytes = pb.as_bytes();
+            let rel = (pos - fr.start.0) as usize;
+            for (i, &b) in bytes.iter().enumerate().skip(rel) {
+                if b == b'\n' {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        let found = ByteOffset(fr.start.0 + i as u64 + 1);
+                        // Only the resume-point-to-end slice is fresh evidence:
+                        // earlier bytes were already judged by prior lookups.
+                        // (Marking `bytes[..i + 1]` made every lookup O(position
+                        // in page) — multi-hundred-KB scans per rendered line.)
+                        self.mark_crlf_state(&bytes[rel..i + 1]);
+                        return Some(found);
+                    }
+                }
+            }
+            // Page crossed with the target still ahead: judge the whole page
+            // (the next scan resumes inside a fresh page).
+            if remaining > 0 {
+                self.mark_crlf_state(bytes);
+            }
+            pos = fr.end.0;
+        }
+        None
     }
 }

@@ -19,7 +19,7 @@ impl View {
             _ => return,
         };
 
-        self.set_dirty(text);
+        self.set_dirty(&rope_render_source(text));
 
         // set selection as search query for first find if no additional search queries are used
         // otherwise add new find with selection as search query
@@ -72,7 +72,7 @@ impl View {
         }
 
         if find_changed {
-            self.set_dirty(text);
+            self.set_dirty(&rope_render_source(text));
             self.find_progress = FindProgress::Started;
         }
     }
@@ -249,7 +249,7 @@ impl View {
             _ => return,
         };
 
-        self.set_dirty(text);
+        self.set_dirty(&rope_render_source(text));
         self.do_set_replace(replacement.into_owned(), false);
     }
 

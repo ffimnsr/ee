@@ -95,4 +95,5 @@ fn warm_syntax_queries(languages: &[&str]) {
 }
 
 mod render_find_tests;
+mod render_source_tests;
 mod selection_tests;

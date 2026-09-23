@@ -22,6 +22,9 @@ members = [
 default-members = ["crates/ee-cli"]
 exclude = ["fuzz"]
 
+[profile.dev]
+opt-level = 2
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.95"

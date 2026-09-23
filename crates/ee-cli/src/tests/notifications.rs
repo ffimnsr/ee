@@ -170,6 +170,7 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
     client
         .apply_update(CoreUpdate {
             pristine: false,
+            vlf_total_lines: None,
             annotations: vec![CoreAnnotation {
                 annotation_type: String::from("selection"),
                 ranges: vec![[1, 1, 1, 3]],
@@ -281,6 +282,7 @@ fn pristine_external_reload_update_clears_changed_flag_for_trailing_blank_line_r
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
                 ops: vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 2, lines: Vec::new() }],
@@ -315,6 +317,7 @@ fn stale_view_updates_are_ignored() {
         .send(BackendEvent::Update {
             view_id: String::from("stale-view"),
             update: CoreUpdate {
+                vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
                 ops: vec![CoreUpdateOp { op: CoreUpdateKind::Skip, n: 2, lines: Vec::new() }],
@@ -338,6 +341,7 @@ fn core_update_keeps_invalid_lines_lazy() {
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
                 ops: vec![

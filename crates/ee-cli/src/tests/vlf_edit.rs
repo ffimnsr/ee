@@ -9,9 +9,13 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use crate::app::{App, Mode};
-use crate::backend::{BackendEvent, CachedLine, CoreSyntaxSpan, LineSlot};
+use crate::backend::{
+    BackendEvent, CachedLine, CoreLine, CoreSyntaxSpan, CoreUpdate, CoreUpdateKind, CoreUpdateOp,
+    LineSlot,
+};
 use crate::buffer::BufferManager;
 use crate::tests::helpers::*;
+use serde_json::json;
 
 #[test]
 fn vlf_local_navigation_moves_cursor_without_core_edit() {
@@ -93,7 +97,7 @@ fn vlf_insert_key_uses_overlay_edit_rpc_without_cursor_jump() {
         &rx.recv_timeout(Duration::from_secs(1)).expect("viewport refresh should follow vlf edit"),
     )
     .expect("message should be json");
-    assert_eq!(second["params"]["method"], "vlf_viewport");
+    assert_eq!(second["params"]["method"], "scroll");
 }
 
 #[test]
@@ -201,9 +205,8 @@ fn vlf_insert_forces_viewport_refresh_when_current_range_is_already_cached() {
             .expect("forced viewport refresh should be sent for cached range"),
     )
     .expect("message should be json");
-    assert_eq!(second["params"]["method"], "vlf_viewport");
-    assert_eq!(second["params"]["params"]["line_start"], 40);
-    assert_eq!(second["params"]["params"]["line_end"], 46);
+    assert_eq!(second["params"]["method"], "scroll");
+    assert_eq!(second["params"]["params"], json!([40, 46]));
 }
 
 #[test]
@@ -254,7 +257,7 @@ fn vlf_insert_newline_updates_local_cache_before_viewport_reply() {
         &rx.recv_timeout(Duration::from_secs(1)).expect("viewport refresh should follow"),
     )
     .expect("message should be json");
-    assert_eq!(second["params"]["method"], "vlf_viewport");
+    assert_eq!(second["params"]["method"], "scroll");
 }
 
 #[test]
@@ -308,7 +311,7 @@ fn vlf_backspace_updates_local_cache_before_viewport_reply() {
         &rx.recv_timeout(Duration::from_secs(1)).expect("viewport refresh should follow"),
     )
     .expect("message should be json");
-    assert_eq!(second["params"]["method"], "vlf_viewport");
+    assert_eq!(second["params"]["method"], "scroll");
 }
 
 #[test]
@@ -363,7 +366,7 @@ fn vlf_delete_char_forward_command_uses_overlay_edit_rpc() {
         &rx.recv_timeout(Duration::from_secs(1)).expect("viewport refresh should follow"),
     )
     .expect("message should be json");
-    assert_eq!(second["params"]["method"], "vlf_viewport");
+    assert_eq!(second["params"]["method"], "scroll");
 }
 
 #[test]
@@ -423,7 +426,7 @@ fn vlf_goto_last_line_uses_reported_line_count_without_core_edit() {
 }
 
 #[test]
-fn vlf_goto_last_line_requests_tail_viewport_when_count_is_approximate() {
+fn vlf_goto_last_line_requests_tail_scroll_when_count_is_approximate() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
@@ -438,15 +441,14 @@ fn vlf_goto_last_line_requests_tail_viewport_when_count_is_approximate() {
 
     assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 0));
     let message: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("tail viewport request should be json");
-    assert_eq!(message["params"]["method"], "vlf_viewport");
-    assert_eq!(message["params"]["params"]["line_start"], u64::MAX);
-    assert_eq!(message["params"]["params"]["line_end"], 4095);
+        .expect("tail scroll request should be json");
+    assert_eq!(message["params"]["method"], "scroll");
+    assert_eq!(message["params"]["params"], json!([9_000_000_000i64 - 40, 9_000_000_000i64]));
     assert!(app.backend.pending_vlf_tail_jump);
 }
 
 #[test]
-fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_request() {
+fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_jump() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
@@ -460,8 +462,8 @@ fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_request() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
     let tail_request: Value =
         serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-            .expect("tail viewport request should be json");
-    assert_eq!(tail_request["params"]["params"]["line_start"], u64::MAX);
+            .expect("tail scroll request should be json");
+    assert_eq!(tail_request["params"]["method"], "scroll");
     assert!(app.backend.pending_vlf_tail_jump);
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
@@ -475,13 +477,12 @@ fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_request() {
     let top_request: Value =
         serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
             .expect("top viewport request should be json");
-    assert_eq!(top_request["params"]["method"], "vlf_viewport");
-    assert_eq!(top_request["params"]["params"]["line_start"], 0);
-    assert_eq!(top_request["params"]["params"]["line_end"], 240);
+    assert_eq!(top_request["params"]["method"], "scroll");
+    assert_eq!(top_request["params"]["params"], json!([0, 40]));
 }
 
 #[test]
-fn vlf_pending_tail_jump_blocks_regular_viewport_scroll() {
+fn vlf_tail_jump_lands_cursor_when_tail_window_update_arrives() {
     let (tx, rx) = mpsc::channel();
     let (backend_tx, backend_rx) = mpsc::channel();
     let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
@@ -490,85 +491,50 @@ fn vlf_pending_tail_jump_blocks_regular_viewport_scroll() {
 
     mgr.request_vlf_tail_viewport(40).unwrap();
     let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("tail viewport request should be json");
-    assert_eq!(first["params"]["params"]["line_start"], u64::MAX);
-
-    mgr.notify_scroll(9_950, 9_990).unwrap();
-    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        .expect("tail scroll request should be json");
+    assert_eq!(first["params"]["method"], "scroll");
     assert!(mgr.pending_vlf_tail_jump);
 
-    let tail_lines = (0..40).map(|idx| format!("tail {idx}")).collect::<Vec<_>>();
+    // The tail window lands through the unified update channel.
+    let ops = (0..40)
+        .map(|idx| CoreUpdateOp {
+            op: CoreUpdateKind::Insert,
+            n: 1,
+            lines: vec![CoreLine {
+                text: Some(format!("tail {idx}\n")),
+                cursor: Vec::new(),
+                syntax_spans: Some(Vec::new()),
+                logical_line: Some(9_960 + idx),
+            }],
+        })
+        .collect::<Vec<_>>();
     backend_tx
-        .send(BackendEvent::VlfChunks {
+        .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
-            generation: 1,
-            line_start: 9_960,
-            lines: tail_lines,
-            syntax_spans: Vec::new(),
-            approximate_line_count: 10_000,
-            line_count_exact: false,
-            index_progress: 0.1,
+            update: CoreUpdate {
+                ops,
+                pristine: true,
+                annotations: Vec::new(),
+                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                    count: 10_000,
+                    exact: false,
+                    index_progress: 0.1,
+                }),
+            },
         })
         .unwrap();
     mgr.drain_events().unwrap();
 
-    assert!(!mgr.pending_vlf_tail_jump);
+    // Inexact landing follows the tail but keeps the jump pending until the
+    // count is exact (the index can still move the true end).
+    assert!(mgr.pending_vlf_tail_jump);
     assert_eq!(mgr.cursor_line, 9_999);
-    mgr.notify_scroll(9_960, 10_000).unwrap();
-    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
-}
-
-#[test]
-fn vlf_completed_tail_jump_then_top_restores_cached_top_viewport() {
-    let (tx, rx) = mpsc::channel();
-    let (backend_tx, backend_rx) = mpsc::channel();
-    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
-    mgr.is_vlf = true;
-    mgr.vlf_approx_line_count = 10_000;
-    mgr.line_cache = (0..240)
-        .map(|line| {
-            LineSlot::Known(CachedLine {
-                text: format!("top {line}"),
-                cursors: Vec::new(),
-                syntax_spans: Vec::new(),
-                logical_line: None,
-            })
-        })
-        .collect();
-
-    mgr.request_vlf_tail_viewport(40).unwrap();
-    let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
-        .expect("tail viewport request should be json");
-    assert_eq!(first["params"]["params"]["line_start"], u64::MAX);
-
-    let tail_lines = (0..40).map(|idx| format!("tail {idx}")).collect::<Vec<_>>();
-    backend_tx
-        .send(BackendEvent::VlfChunks {
-            view_id: String::from("view-id-1"),
-            generation: 1,
-            line_start: 9_960,
-            lines: tail_lines,
-            syntax_spans: Vec::new(),
-            approximate_line_count: 10_000,
-            line_count_exact: false,
-            index_progress: 0.1,
-        })
-        .unwrap();
-    mgr.drain_events().unwrap();
-
     assert_eq!(mgr.vlf_cache_start_line, 9_960);
     assert_eq!(mgr.get_line(9_960), Some("tail 0"));
-
-    mgr.cursor_line = 0;
-    mgr.notify_scroll(0, 40).unwrap();
-
-    assert_eq!(mgr.vlf_cache_start_line, 0);
-    assert_eq!(mgr.get_line(0), Some("top 0"));
-    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 }
 
 #[test]
-fn vlf_startup_pump_requests_initial_viewport_after_document_mode() {
+fn vlf_startup_pump_requests_initial_scroll_after_document_mode() {
     let path = unique_temp_path("ee-cli-vlf-startup");
     fs::write(&path, "alpha\nbeta\n").unwrap();
 
@@ -584,13 +550,12 @@ fn vlf_startup_pump_requests_initial_viewport_after_document_mode() {
     mgr.pump_init().unwrap();
 
     let message: Value = serde_json::from_str(
-        &rx.recv_timeout(Duration::from_secs(1)).expect("initial VLF viewport should be sent"),
+        &rx.recv_timeout(Duration::from_secs(1)).expect("initial VLF scroll should be sent"),
     )
-    .expect("viewport request should be json");
-    assert_eq!(message["params"]["method"], "vlf_viewport");
-    assert_eq!(message["params"]["params"]["line_start"], 0);
-    assert_eq!(message["params"]["params"]["line_end"], 200);
-    assert!(mgr.pending_line_request);
+    .expect("scroll request should be json");
+    assert_eq!(message["params"]["method"], "scroll");
+    assert_eq!(message["params"]["params"], json!([0, 200]));
+    assert_eq!(mgr.last_scroll, Some((0, 200)));
 
     fs::remove_file(path).unwrap();
 }
@@ -598,9 +563,13 @@ fn vlf_startup_pump_requests_initial_viewport_after_document_mode() {
 #[test]
 #[ignore = "manual real-fixture check; requires test_assets/vbig-100.txt"]
 fn vlf_goto_vbig_100_matches_wc_last_line() {
+    let _guard = large_fixture_test_lock();
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/vbig-100.txt");
     if !path.exists() {
         eprintln!("missing {}", path.display());
+        return;
+    }
+    if skip_large_fixture_if_low_memory(&path) {
         return;
     }
 
@@ -647,9 +616,13 @@ fn vlf_goto_vbig_100_matches_wc_last_line() {
 #[test]
 #[ignore = "manual real-fixture check; requires test_assets/vbig-2gb.txt"]
 fn vlf_open_vbig_2gb_populates_initial_and_tail_scroll_cache() {
+    let _guard = large_fixture_test_lock();
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/vbig-2gb.txt");
     if !path.exists() {
         eprintln!("missing {}", path.display());
+        return;
+    }
+    if skip_large_fixture_if_low_memory(&path) {
         return;
     }
 
@@ -685,15 +658,15 @@ fn vlf_open_vbig_2gb_populates_initial_and_tail_scroll_cache() {
     }
 
     assert_eq!(app.backend.get_line(app.backend.cursor_line), Some(expected_text.as_str()));
-    let scroll_up_line = app.backend.cursor_line.saturating_sub(80);
+    // The tail jump preloads the page above the tail (the cursor's viewport).
+    let scroll_up_line = app.backend.cursor_line.saturating_sub(40);
     assert!(
         app.backend.get_line(scroll_up_line).is_some(),
-        "tail prefetch should cover nearby scroll-up line {scroll_up_line}"
+        "tail preload should cover one page above the tail line {scroll_up_line}"
     );
 }
 
 #[test]
-#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
 fn vlf_open_world92_populates_initial_viewport() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
     if !path.exists() {
@@ -722,7 +695,92 @@ fn vlf_open_world92_populates_initial_viewport() {
 }
 
 #[test]
-#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
+fn vlf_world_fixture_open_populates_first_page_quickly() {
+    // Regression: VLF open used to spend seconds before the first page
+    // rendered. The core's "nothing changed" shortcut answers the startup
+    // scroll with a whole-document copy sized by the *approximate* line count;
+    // the window builder materialized those rows before the insert gate, so
+    // every open paid O(approximate lines) per update cycle (~1-6 s on the
+    // world fixtures). A generous wall-clock bound keeps the regression
+    // caught without being flaky on slow machines.
+    for name in ["world92.txt", "world03.txt", "world09.txt"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets").join(name);
+        if !path.exists() {
+            eprintln!("missing {}", path.display());
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let mut app = App::from_path(Some(path)).unwrap();
+        for _ in 0..400 {
+            app.backend.pump().unwrap();
+            if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let elapsed = started.elapsed();
+        assert!(app.backend.is_vlf, "{name} should open in VLF");
+        assert!(app.backend.get_line(0).is_some(), "{name} first page should populate");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "{name} first page took {elapsed:?}; expected sub-second"
+        );
+    }
+}
+
+#[test]
+fn vlf_world92_page_down_keeps_cursor_monotone() {
+    // Regression: paging down near the top snapped the cursor back to line 1.
+    // The update window keeps the row-0 caret annotation (copied rows), and
+    // the cursor sync chased it; VLF navigation owns the cursor locally.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+    let mut app = App::from_path(Some(path)).unwrap();
+    app.last_editor_height = 40;
+    for _ in 0..80 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+
+    let tick = |app: &mut App| {
+        app.backend.pump().unwrap();
+        app.backend.drain_events().unwrap();
+        app.scroll_into_view(40, 100);
+        let active = app.backend.active();
+        let range = app.folds.line_range_for_rendered_rows(
+            active.id,
+            app.viewport.top_line,
+            40,
+            active.line_count(),
+        );
+        app.backend.notify_scroll(range.0, range.1).unwrap();
+    };
+
+    let mut previous = app.backend.cursor_line;
+    for press in 1..=6 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        for _ in 0..20 {
+            tick(&mut app);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cursor = app.backend.cursor_line;
+        assert!(
+            cursor > previous || (press == 1 && cursor >= previous),
+            "page-down {press}: cursor must not snap back (was {previous}, now {cursor})"
+        );
+        previous = cursor;
+    }
+    assert_eq!(previous, 120, "six half-page downs from the top land on line 120 (0-based)");
+}
+
+#[test]
 fn vlf_world92_populates_top_and_line_100_viewports() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
     if !path.exists() {
@@ -768,7 +826,6 @@ fn vlf_world92_populates_top_and_line_100_viewports() {
 }
 
 #[test]
-#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
 fn vlf_world92_tail_scroll_back_populates_full_viewport() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
     if !path.exists() {
@@ -799,10 +856,25 @@ fn vlf_world92_tail_scroll_back_populates_full_viewport() {
     assert!(app.backend.is_vlf, "fixture should open in VLF");
 
     app.last_editor_height = 40;
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
-    for _ in 0..120 {
+    let tick = |app: &mut App| {
         app.backend.pump().unwrap();
-        if !app.backend.pending_vlf_tail_jump && app.backend.cursor_line > 65_000 {
+        app.backend.drain_events().unwrap();
+        app.scroll_into_view(40, 100);
+        let active = app.backend.active();
+        let range = app.folds.line_range_for_rendered_rows(
+            active.id,
+            app.viewport.top_line,
+            40,
+            active.line_count(),
+        );
+        app.backend.notify_scroll(range.0, range.1).unwrap();
+    };
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+    for _ in 0..600 {
+        tick(&mut app);
+        if !app.backend.pending_vlf_tail_jump
+            && app.backend.cursor_line == expected_logical_line_count.saturating_sub(1)
+        {
             break;
         }
         thread::sleep(Duration::from_millis(10));
@@ -812,7 +884,7 @@ fn vlf_world92_tail_scroll_back_populates_full_viewport() {
     assert_eq!(app.backend.cursor_line, expected_logical_line_count.saturating_sub(1));
     let top = app.backend.cursor_line.saturating_sub(40);
     app.backend.notify_scroll(top, top + 40).unwrap();
-    for _ in 0..120 {
+    for _ in 0..600 {
         app.backend.pump().unwrap();
         if (top..top + 40).all(|line| app.backend.get_line(line).is_some()) {
             break;
@@ -826,11 +898,104 @@ fn vlf_world92_tail_scroll_back_populates_full_viewport() {
 }
 
 #[test]
+fn vlf_world03_tail_gutter_and_page_up_render() {
+    // Bug regressions on the real interactive loop (world03: CRLF, BOM,
+    // trailing newline; 279,813 logical lines):
+    //   1. after `G`, the tail page must render gutter numbers (the gutter
+    //      lookup previously ignored `vlf_cache_start_line`, blanking every
+    //      number once the window moved off row 0);
+    //   2. one `PageUp` from the tail must not strand rows as Loading (the
+    //      window previously shrank to the insert span, dropping the copied
+    //      overlap the core re-emits over the client cache).
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world03.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    app.last_editor_height = 40;
+    for _ in 0..80 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+
+    let tick = |app: &mut App| {
+        app.backend.pump().unwrap();
+        app.backend.drain_events().unwrap();
+        app.scroll_into_view(40, 100);
+        let active = app.backend.active();
+        let viewport_range = app.folds.line_range_for_rendered_rows(
+            active.id,
+            app.viewport.top_line,
+            40,
+            active.line_count(),
+        );
+        app.backend.notify_scroll(viewport_range.0, viewport_range.1).unwrap();
+    };
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+    for _ in 0..200 {
+        tick(&mut app);
+        if !app.backend.pending_vlf_tail_jump
+            && app.backend.cursor_line > 200_000
+            && app.backend.get_line(app.backend.cursor_line).is_some()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.backend.cursor_line > 200_000, "goto-end should land on the tail");
+
+    // Bug 1: the tail page renders gutter numbers, including the last row.
+    let screen = render_editor_screen(&app, 100, 42);
+    let rows: Vec<&str> = screen.lines().collect();
+    assert!(rows.len() >= 2, "screen should have editor rows");
+    assert!(
+        rows.last().is_some_and(|row| row.contains("279813")),
+        "last tail row should render its gutter number, got {:?}",
+        rows.last()
+    );
+
+    // Bug 2: one page up from the tail keeps every viewport row cached.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)));
+    for _ in 0..120 {
+        tick(&mut app);
+        let top = app.viewport.top_line;
+        if (0..40).all(|k| app.backend.get_line(top + k).is_some()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let top = app.viewport.top_line;
+    let missing: Vec<usize> =
+        (0..40).filter(|&k| app.backend.get_line(top + k).is_none()).collect();
+    assert!(
+        missing.is_empty(),
+        "missing VLF rows after tail page-up: {missing:?} \
+         (top={top} start={} len={} last_scroll={:?} cursor={})",
+        app.backend.vlf_cache_start_line,
+        app.backend.line_cache.len(),
+        app.backend.last_scroll,
+        app.backend.cursor_line
+    );
+    assert!(top > 200_000, "page-up viewport should stay near the tail, got top={top}");
+}
+
+#[test]
 #[ignore = "manual real-fixture check; requires test_assets/vbig-10gb.txt"]
 fn vlf_goto_vbig_10gb_tail_returns_without_full_count() {
+    let _guard = large_fixture_test_lock();
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/vbig-10gb.txt");
     if !path.exists() {
         eprintln!("missing {}", path.display());
+        return;
+    }
+    if skip_large_fixture_if_low_memory(&path) {
         return;
     }
 

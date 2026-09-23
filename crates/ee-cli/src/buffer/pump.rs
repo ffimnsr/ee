@@ -120,11 +120,11 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
-            vlf_previous_viewport: None,
-            vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
+            vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
+            vlf_tail_jump_viewport: None,
             vlf_search_ranges: Vec::new(),
         };
         let mut view_to_idx = HashMap::new();
@@ -142,6 +142,7 @@ impl BufferManager {
             access_history: Vec::new(),
             modified_history: Vec::new(),
             last_resize: None,
+            render_updates: 0,
             next_buf_id: 2,
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -152,7 +153,6 @@ impl BufferManager {
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile::default(),
             startup_profile_active: false,
-            vlf_viewports: VlfViewportScheduler::default(),
         }
     }
 
@@ -214,7 +214,6 @@ impl BufferManager {
         let old_view_id = self.bufs[idx].view_id.clone();
 
         // Close the old xi view.
-        self.vlf_viewports.cancel_view(&old_view_id);
         let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": old_view_id }));
         self.view_to_idx.remove(&old_view_id);
 
@@ -262,7 +261,6 @@ impl BufferManager {
         buf.last_scroll = None;
         buf.is_vlf = false;
         buf.vlf_cache_start_line = 0;
-        buf.vlf_generation = 0;
         buf.vlf_approx_line_count = 0;
         buf.vlf_line_count_exact = false;
         buf.pending_vlf_tail_jump = false;

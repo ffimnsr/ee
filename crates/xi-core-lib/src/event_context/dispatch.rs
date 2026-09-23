@@ -203,10 +203,7 @@ impl<'a> EventContext<'a> {
     fn do_special(&mut self, cmd: SpecialEvent) -> Option<Selection> {
         if self.editor.borrow().is_vlf()
             && let Some(feature) = super::vlf_special_feature_name(&cmd)
-            && !matches!(
-                cmd,
-                SpecialEvent::VlfViewport { .. } | SpecialEvent::VlfReplaceRange { .. }
-            )
+            && !matches!(cmd, SpecialEvent::VlfReplaceRange { .. })
         {
             self.client.alert(self.vlf_edit_dispatch_reason(feature, true));
             return None;
@@ -322,10 +319,6 @@ impl<'a> EventContext<'a> {
             }
             SpecialEvent::GotoParagraph { forward } => {
                 self.do_goto_paragraph(forward);
-                None
-            }
-            SpecialEvent::VlfViewport { line_start, line_end, generation } => {
-                self.do_vlf_viewport(line_start, line_end, generation);
                 None
             }
             SpecialEvent::VlfReplaceRange { start_line, start_col, end_line, end_col, text } => {
@@ -465,6 +458,21 @@ impl<'a> EventContext<'a> {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
         if ed.is_vlf() {
+            // Stage A Phase 2+: unified render through `RenderSource` — the
+            // `vlf_viewport`/`vlf_chunks` channel is gone (frontend migrated
+            // in Phase 3, legacy handler removed in the cleanup). Backend
+            // syntax stays on the VLF windowed path (`do_vlf_syntax`), and
+            // annotations are gated for non-rope sources in Stage A.
+            if let Some(store) = ed.vlf_store.as_ref() {
+                self.view.borrow_mut().set_vlf_wrap(self.config.vlf_wrap);
+                self.view.borrow_mut().render_if_dirty(
+                    store.as_ref(),
+                    self.client,
+                    ed.is_pristine(),
+                    self.language.as_ref(),
+                    false,
+                );
+            }
             return;
         }
         let file_path = self.info.map(|info| info.path.as_path());
@@ -474,8 +482,9 @@ impl<'a> EventContext<'a> {
             ed.document_mode(),
         );
         let syntax_enabled = capabilities.syntax_spans && !ed.is_vlf();
+        let store = ed.text_store_snapshot();
         self.view.borrow_mut().render_if_dirty(
-            ed.get_buffer(),
+            &store,
             self.client,
             ed.is_pristine(),
             self.language.as_ref(),

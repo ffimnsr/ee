@@ -55,7 +55,7 @@ impl View {
             HighlightFind { visible } => {
                 self.highlight_find = visible;
                 self.find_changed = FindStatusChange::All;
-                self.set_dirty(text);
+                self.set_dirty(&rope_render_source(text));
             }
             SelectionForFind { case_sensitive } => self.do_selection_for_find(text, case_sensitive),
             Replace { chars, preserve_case } => self.do_set_replace(chars, preserve_case),

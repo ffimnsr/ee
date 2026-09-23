@@ -5,6 +5,7 @@ use xi_rope::{Cursor, Rope};
 
 use crate::plugins::rpc::ClientPluginInfo;
 use crate::tabs::{FIND_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK};
+use crate::view::rope_render_source;
 use crate::width_cache::WidthCache;
 
 use super::EventContext;
@@ -45,9 +46,6 @@ impl<'a> EventContext<'a> {
 
         let is_vlf = self.editor.borrow().is_vlf();
         self.client.document_mode_changed(self.view_id, is_vlf);
-        if is_vlf {
-            self.do_vlf_viewport(0, 199, 0);
-        }
 
         self.rewrap();
 
@@ -55,7 +53,7 @@ impl<'a> EventContext<'a> {
             self.schedule_rewrap();
         }
 
-        self.with_view(|view, text| view.set_dirty(text));
+        self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         self.render()
     }
 
@@ -68,7 +66,7 @@ impl<'a> EventContext<'a> {
         self.plugins.iter().for_each(|plugin| plugin.did_save(self.view_id, path));
 
         self.editor.borrow_mut().set_pristine_if_equivalent_revision(saved_rev_id);
-        self.with_view(|view, text| view.set_dirty(text));
+        self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         self.render()
     }
 
@@ -98,7 +96,7 @@ impl<'a> EventContext<'a> {
         self.language = new_language_id.clone();
         self.client.language_changed(self.view_id, new_language_id);
         self.plugins.iter().for_each(|plug| plug.language_changed(self.view_id, new_language_id));
-        self.with_view(|view, text| view.set_dirty(text));
+        self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         self.render();
     }
 
@@ -149,7 +147,7 @@ impl<'a> EventContext<'a> {
         self.with_view(|view, text| view.update_wrap_settings(text, wrap_width, word_wrap));
         if rewrap_immediately {
             self.rewrap();
-            self.with_view(|view, text| view.set_dirty(text));
+            self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         }
         if self.view.borrow().needs_more_wrap() {
             self.schedule_rewrap();
@@ -197,9 +195,10 @@ impl<'a> EventContext<'a> {
         self.find();
         if self.view.borrow().find_in_progress() {
             let ed = self.editor.borrow();
+            let store = ed.text_store_snapshot();
             self.client.find_status(
                 self.view_id,
-                &serde_json::json!(self.view.borrow().find_status(ed.get_buffer(), true)),
+                &serde_json::json!(self.view.borrow().find_status(&store, true)),
             );
             self.schedule_find();
         }

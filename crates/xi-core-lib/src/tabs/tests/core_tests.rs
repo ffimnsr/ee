@@ -291,6 +291,7 @@ fn edit_notification_vlf_replace_range_updates_search_and_viewport() {
     let notifications = peer.take_notifications();
     let (_, scroll) = notifications
         .iter()
+        .rev()
         .find(|(method, _)| method == "scroll_to")
         .expect("expected scroll_to after VLF edit");
     assert_eq!(scroll["line"], 1u64);
@@ -319,25 +320,30 @@ fn edit_notification_vlf_replace_range_updates_search_and_viewport() {
     assert_eq!(status["ranges"][0]["start_col"], 5u64);
     assert_eq!(status["ranges"][0]["end_col"], 11u64);
 
-    core.handle_notification(
-        &ctx,
-        crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
-            view_id,
-            cmd: crate::rpc::EditNotification::VlfViewport {
-                line_start: 1,
-                line_end: 1,
-                generation: 17,
-            },
-        }),
-    );
+    // The legacy `vlf_viewport` fetch is gone: mark dirty and repaint so the
+    // unified render serves the edited line through the `update` channel.
+    {
+        let core_state = core.inner();
+        let editor = core_state.editors.get(&buffer_id).expect("editor").borrow();
+        let store = editor.vlf_store.as_ref().expect("vlf store").as_ref();
+        core_state.views.get(&view_id).unwrap().borrow_mut().set_dirty(store);
+    }
+    core.inner().handle_idle(crate::tabs::RENDER_VIEW_IDLE_MASK | usize::from(view_id));
 
     let notifications = peer.take_notifications();
-    let (_, viewport) = notifications
+    let (_, update) = notifications
         .iter()
-        .find(|(method, _)| method == "vlf_chunks")
-        .expect("expected vlf_chunks after VLF edit");
-    assert_eq!(viewport["generation"], 17u64);
-    let lines = viewport["lines"].as_array().expect("lines array");
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].as_str(), Some("beta needle"));
+        .find(|(method, _)| method == "update")
+        .expect("expected update after VLF scroll");
+    let texts = update["update"]["ops"]
+        .as_array()
+        .expect("ops")
+        .iter()
+        .flat_map(|op| op["lines"].as_array().cloned().unwrap_or_default())
+        .filter_map(|line| line["text"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        texts.iter().any(|text| text == "beta needle\n"),
+        "unified render must carry the edited line: {texts:?}"
+    );
 }

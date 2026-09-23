@@ -58,6 +58,9 @@ impl VlfStore {
         let mut ov = self.overlay.borrow_mut();
         let overlay = ov.as_mut().ok_or(VlfEditError::EditingNotEnabled)?;
         overlay.insert_in_group(at, text, ctx).map_err(VlfEditError::Overlay)?;
+        // Any edit can shift line starts; the resumable line cursors are stale.
+        *self.line_cursor.borrow_mut() = None;
+        self.base_line_cursor.borrow_mut().take();
         // Update peak overlay bytes tracking.
         let overlay_bytes = overlay.overlay_bytes();
         drop(ov);
@@ -81,6 +84,9 @@ impl VlfStore {
         let mut ov = self.overlay.borrow_mut();
         let overlay = ov.as_mut().ok_or(VlfEditError::EditingNotEnabled)?;
         overlay.delete_in_group(range, ctx).map_err(VlfEditError::Overlay)?;
+        // Any edit can shift line starts; the resumable line cursors are stale.
+        *self.line_cursor.borrow_mut() = None;
+        self.base_line_cursor.borrow_mut().take();
         Ok(())
     }
 
@@ -203,7 +209,12 @@ impl VlfStore {
 
         *self.index.get_mut() = PageIndex::new(file_size);
         *self.decoded_cache.get_mut() = DecodedTextCache::new(decoded_cache_byte_cap);
-        *self.syntax_cache.get_mut() = ViewportSyntaxCache::new();
+        // Overlay content changed: any resumable line cursors are stale and
+        // line-ending evidence must be re-sniffed.
+        *self.line_cursor.get_mut() = None;
+        self.base_line_cursor.get_mut().take();
+        self.crlf_state.set(overlay::CrlfState::Unknown);
+        self.crlf_prefix_sniffed.set(false);
 
         let window_start = viewport.window_start.0.min(file_size);
         let window_end = viewport.window_end.0.min(file_size).max(window_start);

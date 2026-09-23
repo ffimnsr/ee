@@ -71,11 +71,11 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
-            vlf_previous_viewport: None,
-            vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
+            vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
+            vlf_tail_jump_viewport: None,
             vlf_search_ranges: Vec::new(),
         });
         Ok(buf_id)
@@ -104,7 +104,6 @@ impl BufferManager {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
 
         let view_id = self.bufs[pos].view_id.clone();
-        self.vlf_viewports.cancel_view(&view_id);
         let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": view_id }));
 
         self.bufs.remove(pos);
@@ -301,11 +300,11 @@ mod tests {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
-            vlf_previous_viewport: None,
-            vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
+            vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
+            vlf_tail_jump_viewport: None,
             vlf_search_ranges: Vec::new(),
         }
     }

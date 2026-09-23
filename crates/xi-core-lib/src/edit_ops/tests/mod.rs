@@ -97,6 +97,7 @@ fn test_config() -> BufferItems {
         autodetect_whitespace: false,
         surrounding_pairs: Vec::new(),
         save_with_newline: false,
+        vlf_wrap: false,
     }
 }
 

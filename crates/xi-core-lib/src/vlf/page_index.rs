@@ -179,6 +179,15 @@ impl ScanProgress {
 pub struct PageIndex {
     /// Keyed by `file_range.start.0` for O(log n) range lookups.
     pub(crate) descriptors: BTreeMap<u64, PageDescriptor>,
+    /// Cumulative newline prefixes, one entry per descriptor in key order,
+    /// covering the contiguous scanned run from the file start: entry `i` is
+    /// `(page_start, newlines before that page)`. An unscanned gap ends the
+    /// run. Lets `find_page_for_line` / `byte_to_line_internal` answer in
+    /// O(log pages) instead of walking every descriptor.
+    lines_prefix: Vec<(u64, u64)>,
+    /// Total `newline_count` across all scanned descriptors; O(1) line-count
+    /// queries (mirrors `progress.scanned_bytes`).
+    scanned_newlines_total: u64,
     progress: ScanProgress,
     cancel_gen: u64,
 }
@@ -188,6 +197,8 @@ impl PageIndex {
     pub fn new(total_bytes: u64) -> Self {
         PageIndex {
             descriptors: BTreeMap::new(),
+            lines_prefix: Vec::new(),
+            scanned_newlines_total: 0,
             progress: ScanProgress { scanned_bytes: 0, total_bytes },
             cancel_gen: 0,
         }
@@ -196,18 +207,65 @@ impl PageIndex {
     /// Insert or replace a descriptor, updating `scanned_bytes` when the
     /// descriptor's `scan_state` is `Scanned`.
     pub fn insert(&mut self, desc: PageDescriptor) {
+        let key = desc.file_range.start.0;
+        let old = self.descriptors.get(&key).cloned();
+        let old_was_scanned = old.as_ref().is_some_and(|d| d.scan_state == ScanState::Scanned);
         if desc.scan_state == ScanState::Scanned {
             // Avoid double-counting if we are replacing an already-scanned page.
-            let already_scanned = self
-                .descriptors
-                .get(&desc.file_range.start.0)
-                .is_some_and(|old| old.scan_state == ScanState::Scanned);
+            let already_scanned = old_was_scanned;
             if !already_scanned {
                 self.progress.scanned_bytes =
                     self.progress.scanned_bytes.saturating_add(desc.byte_len);
             }
+            let delta = if already_scanned {
+                desc.newline_count.saturating_sub(old.as_ref().map_or(0, |d| d.newline_count))
+            } else {
+                desc.newline_count
+            };
+            self.scanned_newlines_total = self.scanned_newlines_total.saturating_add(delta);
+        } else if old_was_scanned {
+            // Defensive: a scanned page demoted to a placeholder drops its
+            // newlines from the totals (never happens in production scans).
+            self.scanned_newlines_total = self
+                .scanned_newlines_total
+                .saturating_sub(old.as_ref().map_or(0, |d| d.newline_count));
         }
-        self.descriptors.insert(desc.file_range.start.0, desc);
+        self.descriptors.insert(key, desc);
+        // The prefix shifts on every scan-state/line-count change; a rebuild
+        // is O(run) and runs at most once per scanned page (2048 pages at
+        // 1 MiB per 2 GiB file), so incremental bookkeeping is not worth the
+        // correctness risk of interleaved viewport-first inserts.
+        if old_was_scanned != (self.descriptors[&key].scan_state == ScanState::Scanned)
+            || self.descriptors[&key].scan_state == ScanState::Scanned
+        {
+            self.rebuild_lines_prefix();
+        }
+    }
+
+    /// Rebuild the cumulative prefix over the contiguous scanned run.
+    fn rebuild_lines_prefix(&mut self) {
+        self.lines_prefix.clear();
+        let mut cum = 0u64;
+        for d in self.descriptors.values() {
+            if d.scan_state != ScanState::Scanned {
+                break;
+            }
+            self.lines_prefix.push((d.file_range.start.0, cum));
+            cum = cum.saturating_add(d.newline_count);
+        }
+    }
+
+    /// Total newlines across all scanned descriptors (O(1)).
+    pub fn scanned_newlines_total(&self) -> u64 {
+        self.scanned_newlines_total
+    }
+
+    /// Newlines before `page_start` when that page is inside the contiguous
+    /// scanned run (line numbering is exact there); `None` when the page is a
+    /// placeholder or sits beyond an unscanned gap.
+    pub fn cum_lines_before(&self, page_start: u64) -> Option<u64> {
+        let idx = self.lines_prefix.partition_point(|&(start, _)| start < page_start);
+        self.lines_prefix.get(idx).filter(|(start, _)| *start == page_start).map(|(_, cum)| *cum)
     }
 
     /// Return a reference to the descriptor for the page that contains
@@ -246,31 +304,48 @@ impl PageIndex {
     /// Returns `Ok(PageLineLocation)` on success or `Err(LineLookup)` with
     /// `Pending` / `OutOfRange` when the lookup cannot be resolved.
     pub fn find_page_for_line(&self, line: u64) -> Result<PageLineLocation<'_>, LineLookup> {
-        let mut accumulated: u64 = 0;
-
-        for desc in self.descriptors.values() {
-            if desc.scan_state != ScanState::Scanned {
-                // Unscanned gap before or at the target line.
-                if accumulated <= line {
-                    return Err(LineLookup::Pending);
-                }
-                break;
-            }
-
-            // Lines covered by this page: [accumulated, accumulated + newline_count].
-            // The last "line" in the page is the partial fragment after the last \n;
-            // it belongs here until the next page's prefix.
-            let page_end_line = accumulated + desc.newline_count;
-            if line <= page_end_line {
-                return Ok(PageLineLocation { page: desc, lines_before_page: accumulated });
-            }
-            accumulated += desc.newline_count;
+        let n = self.lines_prefix.len();
+        if n == 0 {
+            // Nothing scanned yet; the walk's per-page checks are vacuous.
+            return if self.progress.is_complete() {
+                Err(LineLookup::OutOfRange)
+            } else {
+                Err(LineLookup::Pending)
+            };
         }
-
-        if !self.progress.is_complete() {
+        // `page_end(i)` is the next entry's cum (the scanned total for the
+        // last entry) and is non-decreasing, so the first page covering
+        // `line` is the first i with `line <= page_end(i)`.
+        let page_end = |i: usize| {
+            if i + 1 < n { self.lines_prefix[i + 1].1 } else { self.scanned_newlines_total }
+        };
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if page_end(mid) < line {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo < n {
+            let (page_start, lines_before_page) = self.lines_prefix[lo];
+            return Ok(PageLineLocation {
+                page: &self.descriptors[&page_start],
+                lines_before_page,
+            });
+        }
+        // Line is beyond the scanned run: an unscanned gap follows when
+        // another descriptor exists, otherwise the scan completion decides.
+        if self.lines_prefix.len() < self.descriptors.len() {
             return Err(LineLookup::Pending);
         }
-        Err(LineLookup::OutOfRange)
+        if self.progress.is_complete() {
+            Err(LineLookup::OutOfRange)
+        } else {
+            Err(LineLookup::Pending)
+        }
     }
 
     /// Current scan progress.
@@ -291,12 +366,7 @@ impl PageIndex {
         if self.progress.scanned_bytes == 0 || self.progress.total_bytes == 0 {
             return None;
         }
-        let scanned_nl: u64 = self
-            .descriptors
-            .values()
-            .filter(|d| d.scan_state == ScanState::Scanned)
-            .map(|d| d.newline_count)
-            .sum();
+        let scanned_nl = self.scanned_newlines_total;
         if scanned_nl == 0 {
             // No newlines yet; can't interpolate meaningfully beyond byte 0.
             return Some(crate::text_store::ByteOffset(0));
@@ -567,5 +637,73 @@ mod tests {
         idx.insert(scanned_desc(0, 100, 5));
         let approx = idx.approximate_byte_for_line(9999).unwrap();
         assert!(approx.0 <= 100);
+    }
+
+    // ---- cumulative prefix ---------------------------------------------
+
+    #[test]
+    fn prefix_matches_linear_walk_across_out_of_order_scans() {
+        // Viewport-first order: pages 400/500 scan before page 100 arrives.
+        let mut idx = PageIndex::new(2000);
+        idx.insert(scanned_desc(400, 500, 4));
+        idx.insert(scanned_desc(500, 600, 1));
+        idx.insert(scanned_desc(100, 200, 3)); // backward pass
+        // Answers must match the old linear walk: the run starts at the first
+        // descriptor in key order.
+        assert_eq!(idx.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(100)));
+        assert_eq!(idx.line_to_byte(LogicalLine(3)), LineLookup::Exact(ByteOffset(100)));
+        assert_eq!(idx.line_to_byte(LogicalLine(4)), LineLookup::Exact(ByteOffset(400)));
+        assert_eq!(idx.line_to_byte(LogicalLine(7)), LineLookup::Exact(ByteOffset(400)));
+        assert_eq!(idx.line_to_byte(LogicalLine(8)), LineLookup::Exact(ByteOffset(500)));
+        // Beyond the scanned run, index still building → Pending.
+        assert_eq!(idx.line_to_byte(LogicalLine(9)), LineLookup::Pending);
+    }
+
+    #[test]
+    fn prefix_rescans_shift_cumulative_lines() {
+        let mut idx = PageIndex::new(200);
+        idx.insert(scanned_desc(0, 100, 3));
+        idx.insert(scanned_desc(100, 200, 2));
+        assert_eq!(idx.line_to_byte(LogicalLine(4)), LineLookup::Exact(ByteOffset(100)));
+        // Re-scanning page 0 with a different line count shifts later cums.
+        idx.insert(scanned_desc(0, 100, 5));
+        assert_eq!(idx.line_to_byte(LogicalLine(4)), LineLookup::Exact(ByteOffset(0)));
+        assert_eq!(idx.line_to_byte(LogicalLine(5)), LineLookup::Exact(ByteOffset(0)));
+        assert_eq!(idx.line_to_byte(LogicalLine(6)), LineLookup::Exact(ByteOffset(100)));
+        assert_eq!(idx.scanned_newlines_total(), 7);
+    }
+
+    #[test]
+    fn zero_newline_pages_resolve_to_first_covering_page() {
+        // Giant-line layout: pages 0..2 contain no newlines; page 3 has 4.
+        let mut idx = PageIndex::new(400);
+        idx.insert(scanned_desc(0, 100, 0));
+        idx.insert(scanned_desc(100, 200, 0));
+        idx.insert(scanned_desc(200, 300, 0));
+        idx.insert(scanned_desc(300, 400, 4));
+        assert_eq!(idx.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
+        assert_eq!(idx.line_to_byte(LogicalLine(1)), LineLookup::Exact(ByteOffset(300)));
+    }
+
+    #[test]
+    fn cum_lines_before_respects_scanned_run() {
+        let mut idx = PageIndex::new(300);
+        idx.insert(scanned_desc(0, 100, 3));
+        idx.insert(PageDescriptor::placeholder(ByteRange::new(100, 200)));
+        idx.insert(scanned_desc(200, 300, 5)); // scanned but beyond the gap
+        assert_eq!(idx.cum_lines_before(0), Some(0));
+        assert_eq!(idx.cum_lines_before(100), None); // placeholder
+        assert_eq!(idx.cum_lines_before(200), None); // beyond the gap
+    }
+
+    #[test]
+    fn scanned_newlines_total_tracks_placeholders_and_rescans() {
+        let mut idx = PageIndex::new(300);
+        assert_eq!(idx.scanned_newlines_total(), 0);
+        idx.insert(scanned_desc(0, 100, 3));
+        idx.insert(PageDescriptor::placeholder(ByteRange::new(100, 200)));
+        assert_eq!(idx.scanned_newlines_total(), 3);
+        idx.insert(scanned_desc(0, 100, 4)); // re-scan of page 0
+        assert_eq!(idx.scanned_newlines_total(), 4);
     }
 }

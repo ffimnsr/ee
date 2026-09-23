@@ -39,6 +39,8 @@ pub(crate) use crate::rpc::{
 };
 pub(crate) use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};
 pub(crate) use crate::tabs::{BufferId, Counter, ViewId};
+pub(crate) use crate::text_store::rope_store::RopeTextStore;
+pub(crate) use crate::text_store::{LineLookup, ReadResult, RenderLineCount, RenderSource};
 pub(crate) use crate::tree_sitter_support::{
     VisibleSyntaxLimits, VisibleSyntaxSpan, chunk_syntax_spans,
 };
@@ -88,6 +90,11 @@ pub struct View {
     /// height of visible portion
     height: usize,
     lines: Lines,
+
+    /// Opt-in VLF wrapping (Stage A Phase 4): a windowed width pass over the
+    /// visible logical lines emits wrapped rows instead of 1:1 rows. Set from
+    /// the `vlf_wrap` config before each render.
+    vlf_wrap: bool,
 
     /// Front end's line cache state for this view. See the `LineCacheShadow`
     /// description for the invariant.
@@ -198,6 +205,13 @@ impl View {
         self.update_wrap_settings(text, cols, false);
         self.rewrap(text, &mut width_cache, &client);
     }
+}
+
+/// Cheap (O(1)) rope snapshot for view paths that still operate on `&Rope`
+/// (selection/edit internals, `Lines` wrap machinery) but must satisfy the
+/// `RenderSource` facade.
+pub(crate) fn rope_render_source(text: &Rope) -> RopeTextStore {
+    RopeTextStore::new(text.clone(), 0)
 }
 
 impl LineOffset for View {

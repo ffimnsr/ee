@@ -19,14 +19,13 @@ pub(crate) use xi_rpc::RpcLoop;
 
 pub(crate) use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreSyntaxSpan,
-    CoreUpdate, CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
-    VlfSearchRange, block_for_response, checked_advance, coalesce_backend_events,
+    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, PendingRequests,
+    PendingUiAction, VlfSearchRange, block_for_response, checked_advance, coalesce_backend_events,
     drain_sync_notifications, invalid_line_ranges, invalid_line_ranges_bounded,
     normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
     send_rpc_request, startup_render_ready, xi_reader_thread,
 };
 pub(crate) use crate::text::previous_char_boundary;
-pub(crate) use crate::vlf_viewport::{VlfViewportRequest, VlfViewportScheduler};
 
 pub(crate) type BufferId = u32;
 
@@ -102,32 +101,23 @@ pub(crate) struct BufState {
     /// VLF keeps only the loaded viewport window here; `vlf_approx_line_count`
     /// carries document size so huge files do not allocate one slot per line.
     pub(crate) vlf_cache_start_line: usize,
-    pub(crate) vlf_previous_viewport: Option<(usize, Vec<LineSlot>)>,
-    /// Monotone counter incremented on every VLF viewport scroll.
-    ///
-    /// Each `vlf_viewport` request carries this counter; `vlf_chunks` responses
-    /// with a different generation are discarded so stale out-of-order data
-    /// never overwrites a newer scroll position in the line cache.
-    pub(crate) vlf_generation: u64,
-    /// Last approximate total line count reported by a `vlf_chunks` response.
+    /// Last approximate total line count reported by a VLF `update` payload.
     /// Used for reported document size while the background index is still
     /// scanning the file.
     pub(crate) vlf_approx_line_count: u64,
     /// True when `vlf_approx_line_count` is backend-confirmed exact.
     pub(crate) vlf_line_count_exact: bool,
-    /// True when the next matching VLF response should move cursor to returned tail.
+    /// Page-index scan fraction (0..1) reported by the core render; 1.0 when
+    /// every page is scanned and exact base-index lookups are available.
+    pub(crate) vlf_index_progress: f64,
+    /// True when the next matching VLF window update should move the cursor to
+    /// the returned tail (goto-end with an inexact line count).
     pub(crate) pending_vlf_tail_jump: bool,
+    /// Viewport height the pending tail jump was issued with; consumed when
+    /// the tail window lands to preload the page above the tail.
+    pub(crate) vlf_tail_jump_viewport: Option<usize>,
     /// Backend-authoritative visible VLF match ranges for current search.
     pub(crate) vlf_search_ranges: Vec<VlfSearchRange>,
-}
-
-pub(crate) struct VlfChunkUpdate<'a> {
-    pub(crate) generation: u64,
-    pub(crate) line_start: u64,
-    pub(crate) lines: &'a [String],
-    pub(crate) syntax_spans: &'a [Vec<CoreSyntaxSpan>],
-    pub(crate) approximate_line_count: u64,
-    pub(crate) line_count_exact: bool,
 }
 fn build_optimistic_vlf_spans(
     first_line: &CachedLine,
@@ -187,55 +177,120 @@ impl PartialEq for BufState {
             && self.annotations == other.annotations
             && self.is_vlf == other.is_vlf
             && self.vlf_cache_start_line == other.vlf_cache_start_line
-            && self.vlf_generation == other.vlf_generation
             && self.vlf_approx_line_count == other.vlf_approx_line_count
             && self.vlf_line_count_exact == other.vlf_line_count_exact
+            && self.vlf_index_progress == other.vlf_index_progress
             && self.pending_vlf_tail_jump == other.pending_vlf_tail_jump
+            && self.vlf_tail_jump_viewport == other.vlf_tail_jump_viewport
             && self.vlf_search_ranges == other.vlf_search_ranges
     }
 }
 
 impl Eq for BufState {}
 
-fn vlf_cache_text_bytes(cache: &[LineSlot]) -> usize {
-    cache
-        .iter()
-        .map(|slot| match slot {
-            LineSlot::Known(line) => line.text.len(),
-            LineSlot::Invalid => 0,
-        })
-        .sum()
-}
-
-fn vlf_cache_ready(
-    cache_start_line: &usize,
-    cache: &[LineSlot],
-    first_line: usize,
-    last_line: usize,
-) -> bool {
-    if first_line >= last_line {
-        return true;
-    }
-    let Some(start) = first_line.checked_sub(*cache_start_line) else {
-        return false;
-    };
-    let Some(end) = last_line.checked_sub(*cache_start_line) else {
-        return false;
-    };
-    if end > cache.len() {
-        return false;
-    }
-    cache[start..end].iter().all(|slot| matches!(slot, LineSlot::Known(_)))
-}
-
-fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bool {
-    vlf_cache_ready(&buf.vlf_cache_start_line, &buf.line_cache, first_line, last_line)
-}
-
-fn line_text_for_slot(slot: &LineSlot) -> String {
+pub(crate) fn line_text_for_slot(slot: &LineSlot) -> String {
     match slot {
         LineSlot::Known(line) => line.text.clone(),
         LineSlot::Invalid => String::new(),
+    }
+}
+
+/// Extract the VLF window from an `update` op stream, positioned as a dense
+/// cache slice over absolute logical lines.
+///
+/// Inserted rows carry absolute `ln` fields; `copy`/`update`/`skip` ops
+/// reference rows the frontend already holds (the core shadow is
+/// authoritative), so copied rows are re-slotted from the previous window at
+/// their absolute positions. Gaps (unreferenced lines) stay `Invalid`.
+///
+/// Returns `None` when the update carries no inserted lines (copy/skip-only:
+/// the window is preserved, only cursors/annotations refresh). Shared by
+/// `BufState` and the `XiClient` active-view mirror.
+pub(crate) fn vlf_window_from_ops(
+    ops: Vec<CoreUpdateOp>,
+    old: &[LineSlot],
+    old_start: usize,
+) -> Option<(usize, usize, Vec<LineSlot>)> {
+    // Collect positioned rows in view order. Wrapped VLF inserts carry `ln`
+    // only on logical-line heads (continuation rows omit it), so wrapped
+    // windows must be slotted as dense display rows — a naive ln fallback
+    // would collide the continuation with the next logical line's head and
+    // drop rows.
+    // Cheap pre-scan: copy/skip/invalidate-only updates re-assert the current
+    // window (the core's "nothing changed" shortcut emits a whole-document
+    // copy sized by the *approximate* line count, which can be far larger than
+    // the real one), so bail before materializing any rows.
+    if !ops.iter().any(|op| op.op == CoreUpdateKind::Insert) {
+        return None;
+    }
+    let mut rows: Vec<(Option<usize>, LineSlot)> = Vec::new();
+    let mut source_index: usize = 0; // cursor into the previous window for copy ops
+    for op in ops {
+        match op.op {
+            CoreUpdateKind::Insert => {
+                for line in op.lines {
+                    rows.push((line.logical_line, LineSlot::from(line)));
+                }
+            }
+            CoreUpdateKind::Skip => {
+                source_index = source_index.saturating_add(op.n);
+            }
+            // Copy/update re-emit rows the client already has. The rope
+            // frontend positions them from `source_index` over a full-document
+            // cache; the bounded VLF window instead treats them as the
+            // contiguous continuation of the already-positioned rows (the
+            // core's plan segments are contiguous in view order), falling back
+            // to the previous window's absolute positions when nothing has
+            // been positioned yet. Rows that fall outside the previous
+            // window's extent carry no usable content (the core's copy sizes
+            // are sized by the *approximate* line count, which can dwarf the
+            // real one) — stop there so a stale copy cannot balloon the
+            // bounded window.
+            CoreUpdateKind::Copy | CoreUpdateKind::Update => {
+                for k in 0..op.n {
+                    let idx = source_index.saturating_add(k);
+                    let pos = rows
+                        .last()
+                        .and_then(|(ln, _)| *ln)
+                        .map(|prev| prev.saturating_add(1))
+                        .unwrap_or_else(|| old_start.saturating_add(idx));
+                    let Some(rel) = pos.checked_sub(old_start) else { break };
+                    let Some(slot) = old.get(rel) else { break };
+                    rows.push((Some(pos), slot.clone()));
+                }
+                source_index = source_index.saturating_add(op.n);
+            }
+            // Invalidate spans lie outside the visible window (discard
+            // regions of the plan); dropping them keeps the window bounded.
+            CoreUpdateKind::Invalidate => {}
+        }
+    }
+    // Copy/skip/invalidate-only updates re-assert the current window and are
+    // handled by the pre-scan above.
+    if rows.is_empty() {
+        return None;
+    }
+    if rows.iter().all(|(ln, _)| ln.is_some()) {
+        // Unwrapped: every row is a logical line; position by absolute `ln`
+        // (gaps between multiple inserts stay Invalid).
+        let mut window: Vec<(usize, LineSlot)> = Vec::with_capacity(rows.len());
+        for (ln, slot) in rows {
+            window.push((ln.expect("checked above"), slot));
+        }
+        window.sort_by_key(|(ln, _)| *ln);
+        window.dedup_by_key(|(ln, _)| *ln);
+        let start = window.first().expect("non-empty window").0;
+        let end = window.last().expect("non-empty window").0 + 1;
+        let mut cache = vec![LineSlot::Invalid; end - start];
+        for (ln, slot) in window {
+            cache[ln - start] = slot;
+        }
+        Some((start, end, cache))
+    } else {
+        // Wrapped: dense display rows anchored at the window's first head.
+        let start = rows.iter().find_map(|(ln, _)| *ln).unwrap_or(0);
+        let end = start + rows.len();
+        Some((start, end, rows.into_iter().map(|(_, slot)| slot).collect()))
     }
 }
 #[derive(Debug)]
@@ -260,6 +315,10 @@ pub(crate) struct BufferManager {
     /// Last viewport size pushed to the backend, re-sent when the active view
     /// changes so word wrap uses the real width in every view.
     pub(crate) last_resize: Option<(f64, f64)>,
+    /// Applied `update` notifications (core-pushed renders). Monotone counter
+    /// used by the §4 render benchmarks to measure per-render latency without
+    /// polling for content (empty `Pending` windows never fill slots).
+    pub(crate) render_updates: u64,
     next_buf_id: BufferId,
     next_rpc_id: u64,
     /// Pending synchronous RPC responses keyed by request id.
@@ -275,7 +334,6 @@ pub(crate) struct BufferManager {
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
     startup_profile: StartupProfile,
     startup_profile_active: bool,
-    vlf_viewports: VlfViewportScheduler,
 }
 
 impl std::ops::Deref for BufferManager {

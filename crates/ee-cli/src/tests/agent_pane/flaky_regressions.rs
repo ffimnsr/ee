@@ -312,9 +312,16 @@ pub(super) fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
     fs::write(&target, "before\n").expect("write baseline file");
     commit_git_baseline(workspace.path());
 
-    let turn_timeout = Duration::from_secs(1);
+    // The virtual timeout drives the deterministic pause (the script advances
+    // the tokio clock past `turn_timeout` while the model call is pending).
+    // `turn_timeout` doubles as the real-clock fallback of the orchestrator
+    // deadline when the scripted advance is ever delayed, so the pause wait
+    // below must budget ABOVE it (45 s > 30 s + propagation slack) — with a
+    // smaller budget a load-induced stall of the advance path turns a pause
+    // that lands 30 s in wall time into a false failure at the 20 s default.
+    let turn_timeout = Duration::from_secs(30);
     let write_arguments = json!({ "path": target.display().to_string(), "content": "after\n" });
-    let scripted = ScriptedOpenRouterCompletion::pause_then_with_virtual_timeout(
+    let scripted = ScriptedOpenRouterCompletion::pause_then_with_virtual_timeout_stop(
         vec![live_tool_response("write-before-pause", "write_file", write_arguments.clone())],
         vec![
             live_tool_response("write-after-resume", "write_file", write_arguments),
@@ -340,9 +347,16 @@ pub(super) fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "write approval before pause", |app| app.agents.approvals.len() == 1);
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    wait_until(&mut app, "provider checkpointed pause", |app| {
-        app.agents.threads[0].state == ThreadUiState::PausedRecoverable
-    });
+    // Budget above `turn_timeout` (see above): the orchestrator deadline's
+    // real-clock fallback is 30 s, and a stalled virtual advance would land
+    // the pause past the shared 20 s default.
+    wait_until_timeout(
+        &mut app,
+        "provider checkpointed pause",
+        Duration::from_secs(45),
+        &mut |app| app.agents.threads[0].state == ThreadUiState::PausedRecoverable,
+        &mut |_| format!("bodies={}", scripted.request_bodies().len()),
+    );
     let thread = &app.agents.threads[0];
     let pending = thread.pending_recovery.as_ref().expect("recoverable checkpoint retained");
     assert!(pending.info.safe_resume, "completed write checkpoint must be safe to resume");

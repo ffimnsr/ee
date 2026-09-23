@@ -81,10 +81,7 @@ pub(super) fn text_revision_id(content: &str) -> String {
 
 pub(super) fn buffer_revision_id(buf: &crate::buffer::BufState) -> String {
     if buf.is_vlf {
-        return format!(
-            "vlf:{}:{}:{}",
-            buf.vlf_generation, buf.vlf_cache_start_line, buf.vlf_approx_line_count
-        );
+        return format!("vlf:{}:{}", buf.vlf_cache_start_line, buf.vlf_approx_line_count);
     }
     text_revision_id(&buf.whole_text().unwrap_or_default())
 }

@@ -21,7 +21,6 @@ mod init;
 mod movement;
 mod plugins;
 mod vlf;
-mod vlf_tail;
 
 #[cfg(test)]
 mod tests;
@@ -41,7 +40,6 @@ use crate::file::FileInfo;
 use crate::plugins::Plugin;
 use crate::syntax::LanguageId;
 use crate::tabs::{BufferId, ViewId};
-use crate::tree_sitter_support::VisibleSyntaxSpan;
 use crate::view::View;
 use crate::width_cache::WidthCache;
 
@@ -64,17 +62,6 @@ pub const MAX_SIZE_LIMIT: usize = 1024 * 1024;
 /// The render delay after an edit occurs; plugin updates received in this
 /// window will be sent to the view along with the edit.
 const RENDER_DELAY: Duration = Duration::from_millis(2);
-const VLF_TAIL_EXACT_LINE_COUNT_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const VLF_PREFIX_PENDING_INDEX_FALLBACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
-
-struct VlfViewportResponse {
-    line_start: u64,
-    lines: Vec<String>,
-    syntax_spans: Vec<Vec<VisibleSyntaxSpan>>,
-    approximate_line_count: u64,
-    line_count_exact: bool,
-    index_progress: f64,
-}
 
 /// A collection of all the state relevant for handling a particular event.
 ///

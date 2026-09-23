@@ -215,12 +215,6 @@ pub(crate) enum SpecialEvent {
     GotoParagraph {
         forward: bool,
     },
-    /// VLF viewport request; see [`EditNotification::VlfViewport`].
-    VlfViewport {
-        line_start: u64,
-        line_end: u64,
-        generation: u64,
-    },
     VlfReplaceRange {
         start_line: u64,
         start_col: u64,
@@ -680,8 +674,6 @@ impl From<EditNotification> for EventDomain {
             RotateSelectionContentsForward => BufferEvent::RotateSelectionContentsForward.into(),
             ReverseSelectionContents => BufferEvent::ReverseSelectionContents.into(),
             CollapseSelections => ViewEvent::CollapseSelections.into(),
-            VlfViewport { line_start, line_end, generation } =>
-                SpecialEvent::VlfViewport { line_start, line_end, generation }.into(),
             VlfReplaceRange { start_line, start_col, end_line, end_col, text } =>
                 SpecialEvent::VlfReplaceRange {
                     start_line,

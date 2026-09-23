@@ -28,6 +28,7 @@ mod cache_tests;
 mod edit_tests;
 mod overlay_tests;
 mod read_tests;
+mod render_source_tests;
 mod save_tests;
 mod scan_tests;
 mod viewport_tests;

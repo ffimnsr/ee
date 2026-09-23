@@ -298,6 +298,50 @@ pub fn init_test_git_repo(cwd: &Path) {
 
 // ── Fixture / temp-path helpers ────────────────────────────────────────────────
 
+/// Serializes huge-fixture VLF tests: they run under parallel test threads,
+/// and their combined resident peaks (several times the fixture size each)
+/// can OOM a machine that could run any single one of them comfortably.
+/// Hold the guard for the whole test so they never overlap.
+pub fn large_fixture_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` (and prints a skip notice) when the machine's available
+/// memory is too small to open the huge fixture at `path`; large-file VLF
+/// tests should return early instead of getting OOM-killed. Call under
+/// [`large_fixture_test_lock`] so the measurement is not competing with
+/// another huge fixture already resident.
+pub fn skip_large_fixture_if_low_memory(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else { return false };
+    let Some(available) = available_memory_bytes() else { return false };
+    // Opening a fixture costs ~1.3× its size at peak (measured on the 2 GiB
+    // gate fixture); require 2× plus a fixed GiB of slack for the harness,
+    // the core, and whatever else is already resident.
+    let required = meta.len().saturating_mul(2).saturating_add(1 << 30);
+    if available < required {
+        eprintln!(
+            "skipping {}: needs ~{} GiB headroom, {} GiB available",
+            path.display(),
+            required / (1 << 30),
+            available / (1 << 30),
+        );
+        return true;
+    }
+    false
+}
+
+/// Linux `MemAvailable` in bytes; `None` when unavailable (non-Linux or
+/// restricted `/proc`), in which case callers should not skip.
+fn available_memory_bytes() -> Option<u64> {
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = text.lines().find(|line| line.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
 pub fn unique_temp_path(prefix: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -588,11 +632,11 @@ pub fn test_buf_state() -> BufState {
         annotations: Vec::new(),
         is_vlf: false,
         vlf_cache_start_line: 0,
-        vlf_previous_viewport: None,
-        vlf_generation: 0,
         vlf_approx_line_count: 0,
         vlf_line_count_exact: false,
+        vlf_index_progress: 0.0,
         pending_vlf_tail_jump: false,
+        vlf_tail_jump_viewport: None,
         vlf_search_ranges: Vec::new(),
     }
 }

@@ -24,7 +24,8 @@ use xi_rope::{LinesMetric, Rope};
 
 use crate::text_store::{
     ByteOffset, ByteRange, DocumentMode, FullTextPolicy, KnownLineCount, LineLookup, LogicalLine,
-    TextChunk, TextChunkResult, TextStore, Utf16Lookup, Utf16Offset,
+    ReadResult, RenderLineCount, RenderSource, TextChunk, TextChunkResult, TextStore, Utf16Lookup,
+    Utf16Offset,
 };
 
 // ---------------------------------------------------------------------------
@@ -240,6 +241,73 @@ impl TextStore for RopeTextStore {
     fn full_text_policy(&self) -> FullTextPolicy {
         // Normal-mode rope store always permits full-text extraction.
         FullTextPolicy::Allowed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RenderSource
+// ---------------------------------------------------------------------------
+
+/// Rope-backed `RenderSource`: every op delegates directly to the `Rope` so
+/// render behaviour is byte-for-byte identical with direct `&Rope` access.
+impl RenderSource for RopeTextStore {
+    fn len_bytes(&self) -> usize {
+        self.rope.len()
+    }
+
+    fn total_lines(&self) -> RenderLineCount {
+        // LinesMetric counts newlines; total logical lines = newlines + 1.
+        RenderLineCount::Exact((self.rope.measure::<LinesMetric>() + 1) as u64)
+    }
+
+    fn line_to_byte(&self, line: u64) -> LineLookup {
+        // Clamp to the last line before delegating: `offset_of_line` panics on
+        // out-of-range lines (debug builds); the renderer's pre-facade path
+        // clamped inside `Lines::offset_of_visual_line`.
+        let max_line = (self.rope.measure::<LinesMetric>() + 1) as u64;
+        let line = line.min(max_line) as usize;
+        LineLookup::Exact(ByteOffset(self.rope.offset_of_line(line) as u64))
+    }
+
+    fn byte_to_line(&self, byte: usize) -> Option<u64> {
+        let byte = byte.min(self.rope.len());
+        // `line_of_offset` panics on mid-codepoint offsets; snap down to the
+        // previous boundary (same line, robust to arbitrary offsets).
+        let byte = if self.rope.is_codepoint_boundary(byte) {
+            byte
+        } else {
+            self.rope.prev_codepoint_offset(byte).unwrap_or(byte)
+        };
+        Some(self.rope.line_of_offset(byte) as u64)
+    }
+
+    fn read_range(&self, start: usize, end: usize) -> ReadResult<'_> {
+        let len = self.rope.len();
+        let start = start.min(len);
+        let end = end.min(len).max(start);
+        // Snap to codepoint boundaries like the VLF seam decoder (start back
+        // to the previous boundary, end forward past a trailing continuation):
+        // `slice_to_cow` panics on mid-codepoint ranges, and the renderer
+        // always passes line-interval boundaries anyway.
+        let start = if self.rope.is_codepoint_boundary(start) {
+            start
+        } else {
+            self.rope.prev_codepoint_offset(start).unwrap_or(start)
+        };
+        let end = if self.rope.is_codepoint_boundary(end) {
+            end
+        } else {
+            self.rope.at_or_next_codepoint_boundary(end).unwrap_or(end)
+        };
+        ReadResult::Ready(self.rope.slice_to_cow(start..end))
+    }
+
+    fn index_progress(&self) -> f64 {
+        1.0
+    }
+
+    fn as_rope(&self) -> Option<&Rope> {
+        Some(&self.rope)
     }
 }
 
@@ -686,5 +754,128 @@ mod tests {
         // Confirm the chunk path is available (returns Pending, not Unsupported).
         let chunk_result = store.read_byte_range(ByteRange::new(0, 512));
         assert_eq!(chunk_result, TextChunkResult::Pending);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RenderSource equivalence tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod render_source_tests {
+    use super::*;
+
+    fn store(s: &str) -> RopeTextStore {
+        RopeTextStore::new(Rope::from(s), 0)
+    }
+
+    #[test]
+    fn render_source_metrics_match_rope() {
+        let s = "aé😀x\nsecond line\n";
+        let rope = Rope::from(s);
+        let src = store(s);
+
+        assert_eq!(RenderSource::len_bytes(&src), rope.len());
+        let expected_lines = rope.measure::<LinesMetric>() + 1;
+        assert_eq!(RenderSource::total_lines(&src), RenderLineCount::Exact(expected_lines as u64));
+
+        // In-range lookups delegate to `offset_of_line` exactly.
+        for line in 0..=expected_lines {
+            assert_eq!(
+                RenderSource::line_to_byte(&src, line as u64),
+                LineLookup::Exact(ByteOffset(rope.offset_of_line(line) as u64))
+            );
+        }
+        // Out-of-range lines clamp to EOF, matching `offset_of_line` semantics
+        // that the renderer relied on pre-facade.
+        assert_eq!(
+            RenderSource::line_to_byte(&src, 99),
+            LineLookup::Exact(ByteOffset(rope.len() as u64))
+        );
+
+        for byte in [0, 1, 3, 7, 9, rope.len() / 2, rope.len()] {
+            assert_eq!(
+                RenderSource::byte_to_line(&src, byte),
+                Some(rope.line_of_offset(byte) as u64),
+                "byte {byte}"
+            );
+        }
+        // Mid-codepoint offsets (e.g. byte 5 inside '😀' spanning 3..7) snap
+        // down to the previous boundary: same line, no panic.
+        assert_eq!(RenderSource::byte_to_line(&src, 5), Some(rope.line_of_offset(3) as u64));
+
+        assert_eq!(RenderSource::index_progress(&src), 1.0);
+        assert_eq!(src.as_rope().map(|r| r.len()), Some(rope.len()));
+    }
+
+    #[test]
+    fn render_source_read_range_matches_slice_to_cow() {
+        let s = "héllo wörld\n😀\n";
+        let rope = Rope::from(s);
+        let src = store(s);
+
+        // Boundary-aligned or clamped ranges slice exactly like `slice_to_cow`.
+        for (start, end) in
+            [(0, 5), (1, 13), (0, s.len()), (s.len() - 1, s.len() + 10), (s.len() + 5, s.len() + 9)]
+        {
+            let clamped_start = start.min(s.len());
+            let clamped_end = end.min(s.len()).max(clamped_start);
+            match RenderSource::read_range(&src, start, end) {
+                ReadResult::Ready(chunk) => {
+                    assert_eq!(chunk, rope.slice_to_cow(clamped_start..clamped_end));
+                }
+                other => panic!("rope source must return Ready, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn render_source_read_range_snaps_mid_codepoint_ranges() {
+        // Mid-codepoint offsets snap like the VLF seam decoder: start back to
+        // the previous boundary, end forward to the next boundary — never a
+        // panic and never a partial char.
+        let s = "aé😀x\n";
+        let rope = Rope::from(s);
+        let src = store(s);
+
+        // 'é' spans bytes 1..3; start=2 snaps back to 1.
+        match RenderSource::read_range(&src, 2, 3) {
+            ReadResult::Ready(chunk) => {
+                assert_eq!(chunk, rope.slice_to_cow(1..3), "start snaps to previous boundary");
+            }
+            other => panic!("rope source must return Ready, got {other:?}"),
+        }
+        // '😀' spans bytes 3..7; end=5 snaps forward to 7.
+        match RenderSource::read_range(&src, 3, 5) {
+            ReadResult::Ready(chunk) => {
+                assert_eq!(chunk, rope.slice_to_cow(3..7), "end snaps to next boundary");
+            }
+            other => panic!("rope source must return Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_source_empty_and_edge_shapes() {
+        for s in ["", "no-trailing-newline", "a\n", "\n\n"] {
+            let rope = Rope::from(s);
+            let src = store(s);
+            let expected_lines = rope.measure::<LinesMetric>() + 1;
+
+            assert_eq!(RenderSource::line_to_byte(&src, 0), LineLookup::Exact(ByteOffset(0)));
+            assert_eq!(
+                RenderSource::total_lines(&src),
+                RenderLineCount::Exact(expected_lines as u64)
+            );
+            // Last line start == EOF when the file ends without a newline;
+            // trailing newline yields an empty final line at EOF.
+            assert_eq!(
+                RenderSource::line_to_byte(&src, expected_lines as u64),
+                LineLookup::Exact(ByteOffset(rope.len() as u64))
+            );
+            assert_eq!(
+                RenderSource::byte_to_line(&src, rope.len()),
+                Some(expected_lines.saturating_sub(1) as u64)
+            );
+        }
     }
 }

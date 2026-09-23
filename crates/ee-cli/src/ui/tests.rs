@@ -134,11 +134,11 @@ fn annotation_marker_for_line_prefers_payload_backed_plugin_annotations() {
         }],
         is_vlf: false,
         vlf_cache_start_line: 0,
-        vlf_previous_viewport: None,
-        vlf_generation: 0,
         vlf_approx_line_count: 0,
         vlf_line_count_exact: false,
+        vlf_index_progress: 0.0,
         pending_vlf_tail_jump: false,
+        vlf_tail_jump_viewport: None,
         vlf_search_ranges: Vec::new(),
     };
 

@@ -107,7 +107,13 @@ fn encode_line_includes_backend_syntax_spans_with_byte_ranges() {
     ];
 
     let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
-    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len(), 0);
+    let encoded = view.encode_line(
+        line,
+        Some(&RopeTextStore::new(text.clone(), 0)),
+        &syntax_spans,
+        text.len(),
+        0,
+    );
     let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
     assert_eq!(encoded["ln"], 0, "logical line number is always emitted");
@@ -131,7 +137,13 @@ fn encode_line_keeps_line_relative_syntax_spans() {
     }];
 
     let line = VisualLine { interval: Interval::new(6, 16), line_num: Some(2) };
-    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len(), 1);
+    let encoded = view.encode_line(
+        line,
+        Some(&RopeTextStore::new(text.clone(), 0)),
+        &syntax_spans,
+        text.len(),
+        1,
+    );
     let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
     assert_eq!(syntax.len(), 1);
@@ -146,7 +158,8 @@ fn encode_line_omits_syntax_spans_when_backend_has_no_data() {
     let text = Rope::from("plain text\n");
     let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
 
-    let encoded = view.encode_line(line, Some(&text), &[], text.len(), 0);
+    let encoded =
+        view.encode_line(line, Some(&RopeTextStore::new(text.clone(), 0)), &[], text.len(), 0);
 
     assert!(encoded.get("syntax_spans").is_none());
 }
@@ -159,8 +172,9 @@ fn render_if_dirty_emits_backend_syntax_spans_without_plugin_update() {
     let editor = crate::editor::Editor::with_text("let x = 1;\n");
     let (client, peer) = recording_client();
     view.debug_force_rewrap_cols(editor.get_buffer(), 80);
+    let store = editor.text_store_snapshot();
 
-    view.render_if_dirty(editor.get_buffer(), &client, true, "rust", true);
+    view.render_if_dirty(&store, &client, true, "rust", true);
     let notifications = peer.take_notifications();
 
     let syntax_refresh = notifications.iter().any(|(method, params)| {
@@ -211,7 +225,7 @@ tasks:
     view.debug_force_rewrap_cols(editor.get_buffer(), 120);
 
     let spans = view.backend_syntax_spans_for_segment(
-        editor.get_buffer(),
+        &editor.text_store_snapshot(),
         start_line,
         line_count,
         "yaml",
@@ -242,8 +256,9 @@ fn render_if_dirty_omits_syntax_spans_for_unsupported_language() {
     let editor = crate::editor::Editor::with_text("plain text\n");
     let (client, peer) = recording_client();
     view.debug_force_rewrap_cols(editor.get_buffer(), 80);
+    let store = editor.text_store_snapshot();
 
-    view.render_if_dirty(editor.get_buffer(), &client, true, "Plain Text", true);
+    view.render_if_dirty(&store, &client, true, "Plain Text", true);
 
     let notifications = peer.take_notifications();
     let syntax_refresh = notifications.iter().any(|(method, params)| {
@@ -270,10 +285,26 @@ fn syntax_span_render_perf_probe() {
     let baseline_client = Client::new(Box::new(RecordingPeer::default()));
     let (syntax_client, syntax_peer) = recording_client();
 
-    view.request_lines(&text, &baseline_client, 0, 199, true, "rust", false);
+    view.request_lines(
+        &RopeTextStore::new(text.clone(), 0),
+        &baseline_client,
+        0,
+        199,
+        true,
+        "rust",
+        false,
+    );
 
     let started = Instant::now();
-    view.request_lines(&text, &syntax_client, 0, 199, true, "rust", true);
+    view.request_lines(
+        &RopeTextStore::new(text.clone(), 0),
+        &syntax_client,
+        0,
+        199,
+        true,
+        "rust",
+        true,
+    );
     let elapsed = started.elapsed();
 
     let syntax_bytes: usize = syntax_peer
@@ -301,7 +332,8 @@ fn update_lines_carry_repeated_logical_ln_for_wrapped_rows() {
     view.debug_force_rewrap_cols(&text, 4);
 
     let (client, peer) = recording_client();
-    view.render_if_dirty(&text, &client, true, "", false);
+    let store = RopeTextStore::new(text.clone(), 0);
+    view.render_if_dirty(&store, &client, true, "", false);
 
     let updates = peer.take_notifications();
     let update_json = updates

@@ -568,6 +568,7 @@ pub mod test_support {
         Response(Value),
         Pending,
         AdvanceClockThenPending(Duration),
+        AdvanceClockThenStop(Duration),
     }
 
     /// Replays canned OpenRouter response envelopes and records normalized requests.
@@ -638,6 +639,37 @@ pub mod test_support {
             }
         }
 
+        /// Like [`pause_then_with_virtual_timeout`], but the model call whose
+        /// deadline expires resolves with a plain assistant message instead of
+        /// parking forever.
+        ///
+        /// The turn then continues on its own execution path: the next loop
+        /// iteration's budget reservation compares the (advanced) virtual
+        /// clock against the turn deadline and stops with
+        /// `DeadlineExceeded`, which persists the recovery checkpoint. This
+        /// avoids depending on the runtime's timer wheel waking a parked
+        /// future — under shared-runtime contention that wake can be lost,
+        /// leaving the turn blocked forever (`Running`) while the clock has
+        /// in fact advanced (observed as a flaky pane test).
+        #[must_use]
+        pub fn pause_then_with_virtual_timeout_stop(
+            responses: Vec<Value>,
+            resume_responses: Vec<Value>,
+            turn_timeout: Duration,
+        ) -> Self {
+            let mut steps = VecDeque::new();
+            steps.push_back(ScriptStep::PauseClock);
+            steps.extend(responses.into_iter().map(ScriptStep::Response));
+            steps.push_back(ScriptStep::AdvanceClockThenStop(
+                turn_timeout.saturating_add(Duration::from_nanos(1)),
+            ));
+            steps.extend(resume_responses.into_iter().map(ScriptStep::Response));
+            Self {
+                script: Arc::new(Mutex::new(Script::Steps(steps))),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
         /// Builds a concrete OpenRouter adapter backed by this scripted client.
         #[must_use]
         pub fn adapter(&self, config: Config) -> OpenRouterModelAdapter {
@@ -672,6 +704,22 @@ pub mod test_support {
                     ScriptStep::AdvanceClockThenPending(advance) => {
                         tokio::time::advance(advance).await;
                         return future::pending().await;
+                    }
+                    ScriptStep::AdvanceClockThenStop(advance) => {
+                        tokio::time::advance(advance).await;
+                        // Resolve instead of parking: the owning turn must
+                        // continue so its next budget reservation observes the
+                        // advanced deadline (timer-wheel wake of a parked
+                        // future is unreliable on the shared app runtime).
+                        // `finish_reason: "length"` (not "stop") keeps
+                        // `completed` false so the loop does not end the turn
+                        // before the deadline check runs.
+                        return json!({
+                            "choices": [{
+                                "message": { "content": "deadline reached" },
+                                "finish_reason": "length"
+                            }]
+                        });
                     }
                 }
             }

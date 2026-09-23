@@ -45,6 +45,5 @@ pub(crate) mod trust_rule_manager;
 pub(crate) mod vim_keys;
 pub(crate) mod vlf_cache;
 pub(crate) mod vlf_edit;
-pub(crate) mod vlf_viewport;
 pub(crate) mod workspace_read_trust;
 pub(crate) mod write_trust;

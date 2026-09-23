@@ -11,15 +11,35 @@ use xi_core_lib::vlf::search::{
 use xi_core_lib::vlf::store::VlfStore;
 
 pub const ONE_MIB: u64 = 1024 * 1024;
+pub const TWO_GIB: u64 = 2 * 1024 * 1024 * 1024;
 pub const PAGE_SIZE: u64 = ONE_MIB;
 pub const DECODED_BUDGET: u64 = 16 * ONE_MIB;
 pub const PAGE_DOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// §4 gate viewport: 200-line window at head / middle / tail of the 2 GB file.
+pub const RENDER_GATE_VIEWPORT_LINES: usize = 200;
+/// §4 gate budget: decode + index + syntax per render.
+pub const RENDER_GATE_BUDGET: Duration = Duration::from_millis(16);
+/// Per-render allocation cap (window-bounded): line payloads, JSON wire
+/// values, and their temporaries for a 200-line window are KB-scale; the cap
+/// is generous slack so a file-size-proportional leak trips it loudly.
+pub const RENDER_GATE_ALLOC_BYTES: u64 = 4 * ONE_MIB;
 const SEARCH_QUERY: &str = "needle-absent-for-throughput";
 
 #[derive(Clone, Copy, Debug)]
 pub struct FixtureSpec {
     pub label: &'static str,
     pub size_bytes: u64,
+    /// Write real line text across the whole file (dense). False keeps the
+    /// legacy sparse layout (dense chunk islands in a zero hole) for specs
+    /// above 128 MiB — fine for index/search benches, wrong for line-window
+    /// render benches (zero holes read as page-sized lines).
+    pub dense: bool,
+}
+
+impl FixtureSpec {
+    pub const fn new(label: &'static str, size_bytes: u64, dense: bool) -> Self {
+        FixtureSpec { label, size_bytes, dense }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +67,7 @@ pub fn build_fixture(spec: FixtureSpec, root: &Path) -> io::Result<FixtureMeta> 
     file.set_len(spec.size_bytes)?;
 
     let dense_target =
-        if spec.size_bytes <= 128 * ONE_MIB { spec.size_bytes } else { 64 * ONE_MIB };
+        if spec.dense || spec.size_bytes <= 128 * ONE_MIB { spec.size_bytes } else { 64 * ONE_MIB };
     let chunk_target = 256 * 1024usize;
     let chunk_count = dense_target.div_ceil(chunk_target as u64) as usize;
 

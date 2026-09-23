@@ -153,6 +153,11 @@ impl Lines {
         self.wrap == WrapWidth::None || self.work.is_empty()
     }
 
+    /// The configured wrap width. `WrapWidth::None` when wrapping is off.
+    pub(crate) fn wrap_width(&self) -> WrapWidth {
+        self.wrap
+    }
+
     /// Returns `true` if this interval is part of an incomplete task.
     pub(crate) fn interval_needs_wrap(&self, iv: Interval) -> bool {
         self.work.iter().any(|t| !t.intersect(iv).is_empty())

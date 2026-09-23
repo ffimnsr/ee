@@ -68,7 +68,12 @@ fn backend_event_marks_only_render_critical_startup_work() {
     assert!(
         BackendEvent::Update {
             view_id: String::from("view"),
-            update: CoreUpdate { ops: Vec::new(), pristine: true, annotations: Vec::new() },
+            update: CoreUpdate {
+                ops: Vec::new(),
+                pristine: true,
+                annotations: Vec::new(),
+                vlf_total_lines: None,
+            },
         }
         .is_startup_critical()
     );

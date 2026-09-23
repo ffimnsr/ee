@@ -58,6 +58,111 @@ impl BufferManager {
                 .is_some_and(|metadata| metadata.len() > 0)
     }
 
+    /// Re-request a VLF viewport when an update exposes index maturity the
+    /// previous scroll missed:
+    ///
+    /// - The open scroll can be answered before the background index reports
+    ///   a line count (the core's "nothing changed" shortcut emits a no-op
+    ///   copy). Because the count only advances when the store renders, the
+    ///   frontend must force a real render: `request_lines` upgrades the plan
+    ///   to Render unconditionally. Each response advances the index and the
+    ///   cycle stops once rows land (or the store reports an exact zero).
+    /// - A goto-end sentinel can land on the *approximate* count while the
+    ///   index still scans; keeping the window at the old tail leaves the
+    ///   cursor short of the true end. While the count is inexact and the
+    ///   window touches the current tail, re-issue the tail request until the
+    ///   index completes, and re-jump when the matured count moves the tail
+    ///   past a cursor parked on a stale (approximate) end.
+    fn vlf_after_update_refresh(
+        &mut self,
+        idx: usize,
+        tail_pending_before: bool,
+        count_before: u64,
+        exact_before: bool,
+    ) -> io::Result<()> {
+        if idx != self.current {
+            return Ok(());
+        }
+        let (
+            count,
+            exact,
+            start,
+            len,
+            last_scroll,
+            view_id,
+            unpopulated,
+            tail_jump_cleared,
+            cursor,
+        ) = {
+            let buf = &self.bufs[idx];
+            if !buf.is_vlf || buf.view_id.is_empty() {
+                return Ok(());
+            }
+            (
+                buf.vlf_approx_line_count,
+                buf.vlf_line_count_exact,
+                buf.vlf_cache_start_line,
+                buf.line_cache.len(),
+                buf.last_scroll,
+                buf.view_id.clone(),
+                buf.line_cache.iter().all(|slot| matches!(slot, LineSlot::Invalid)),
+                tail_pending_before && !buf.pending_vlf_tail_jump,
+                buf.cursor_line,
+            )
+        };
+        // A tail jump just landed: the sentinel only renders the slop rows at
+        // the true end, so preload the page above the tail (the viewport the
+        // jump cursor sits at) on the next update.
+        if tail_jump_cleared && let Some(height) = self.bufs[idx].vlf_tail_jump_viewport.take() {
+            let cursor = self.bufs[idx].cursor_line;
+            let last = cursor.saturating_add(1);
+            let first = last.saturating_sub(height);
+            return self.notify_scroll(first, last);
+        }
+        let count_usize = usize::try_from(count).unwrap_or(usize::MAX);
+        // The tail jump is still pending: the last sentinel render landed no
+        // window (e.g. it clamped onto an approximate total that overshot the
+        // real line count and produced zero rows). Re-drive with the freshest
+        // count until a window lands.
+        if !tail_jump_cleared && self.bufs[idx].pending_vlf_tail_jump {
+            if count > 0 {
+                return self.request_vlf_tail_viewport(count_usize);
+            }
+            return Ok(());
+        }
+        if unpopulated {
+            if exact && count == 0 {
+                return Ok(()); // the store really has no lines; nothing renders
+            }
+            let (first, last) = last_scroll.unwrap_or((0, Self::STARTUP_VLF_VIEWPORT_LINES));
+            return send_rpc_notification(
+                &self.tx,
+                "edit",
+                json!({
+                    "view_id": view_id,
+                    "method": "request_lines",
+                    "params": [first, last],
+                }),
+            );
+        }
+        if !exact && count > 0 && start.saturating_add(len) >= count_usize {
+            return self.request_vlf_tail_viewport(count_usize);
+        }
+        // The index matured while a previous jump left the cursor parked on
+        // the stale (approximate) end: re-jump so the tail chases the real
+        // end of the file. `count_before > 0` skips the open-time 0 -> N
+        // transition, which is not a tail move.
+        let count_matured = count != count_before || exact != exact_before;
+        if count_matured
+            && count_before > 0
+            && count > 0
+            && cursor.saturating_add(1) >= usize::try_from(count_before).unwrap_or(usize::MAX)
+        {
+            return self.request_vlf_tail_viewport(count_usize);
+        }
+        Ok(())
+    }
+
     pub(super) fn apply_event_to_buffer(&mut self, event: BackendEvent) -> io::Result<()> {
         let current = self.current;
         match event {
@@ -72,11 +177,10 @@ impl BufferManager {
                         let update_pristine = update.pristine;
                         let buf = &mut self.bufs[idx];
                         let was_pristine = buf.pristine;
-                        if buf.is_vlf {
-                            buf.pending_line_request = false;
-                            return Ok(());
-                        }
                         buf.pending_line_request = false;
+                        let tail_pending_before = buf.pending_vlf_tail_jump;
+                        let count_before = buf.vlf_approx_line_count;
+                        let exact_before = buf.vlf_line_count_exact;
                         let stats = buf.apply_update(update)?;
                         if was_pristine && update_pristine {
                             self.finish_external_reload(idx);
@@ -85,6 +189,15 @@ impl BufferManager {
                             self.startup_profile.update_apply += update_started.elapsed();
                             self.startup_profile.rebuild_lines += stats.rebuild_lines;
                         }
+                        // §4 render benchmarks count applied core renders to
+                        // measure per-render latency without slot polling.
+                        self.render_updates += 1;
+                        self.vlf_after_update_refresh(
+                            idx,
+                            tail_pending_before,
+                            count_before,
+                            exact_before,
+                        )?;
                     }
                     BackendEvent::ScrollTo { line, col, .. } => {
                         let buf = &mut self.bufs[idx];
@@ -189,37 +302,11 @@ impl BufferManager {
                     self.bufs[idx].last_scroll = None;
                     self.bufs[idx].vlf_approx_line_count = 0;
                     self.bufs[idx].vlf_line_count_exact = false;
+                    self.bufs[idx].vlf_index_progress = 0.0;
                     self.bufs[idx].pending_vlf_tail_jump = false;
                 } else {
                     // Rebuild lines now that mode is set.
                     self.bufs[idx].rebuild_lines();
-                }
-            }
-            BackendEvent::VlfChunks {
-                view_id,
-                generation,
-                line_start,
-                lines,
-                syntax_spans,
-                approximate_line_count,
-                line_count_exact,
-                index_progress,
-            } => {
-                let _ = index_progress;
-                self.vlf_viewports.response_received(&self.tx, &view_id, generation)?;
-                let Some(idx) = self.buffer_index_for_view(&view_id) else {
-                    return Ok(());
-                };
-                if generation == self.bufs[idx].vlf_generation {
-                    self.bufs[idx].pending_line_request = false;
-                    self.bufs[idx].apply_vlf_chunks(VlfChunkUpdate {
-                        generation,
-                        line_start,
-                        lines: &lines,
-                        syntax_spans: &syntax_spans,
-                        approximate_line_count,
-                        line_count_exact,
-                    });
                 }
             }
             BackendEvent::VlfSearchStatus {

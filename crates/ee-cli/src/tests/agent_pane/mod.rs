@@ -369,7 +369,27 @@ fn two_fake_agents_app() -> (App, tempfile::TempDir, ScriptedFake, ScriptedFake)
 
 /// Pumps agents + backend until `condition` holds or the timeout fires.
 fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> bool) {
-    let deadline = Instant::now() + WAIT;
+    wait_until_timeout(app, label, WAIT, &mut condition, &mut |_| String::new());
+}
+
+/// [`wait_until`] with an explicit wall-clock budget and a state probe.
+///
+/// Tests whose ordering depends on a virtual-clock deadline must pass a
+/// budget that dominates the deadline's real-clock fallback: if the virtual
+/// advance path stalls under load, the orchestrator deadline still fires at
+/// wall time equal to the configured `turn_timeout`, and a smaller budget
+/// turns a recoverable stall into a false failure (the pause lands right
+/// after the timeout). `debug` runs at timeout and its output is included in
+/// the panic so fixture state (e.g. recorded request bodies) survives the
+/// failure for diagnosis.
+fn wait_until_timeout(
+    app: &mut App,
+    label: &str,
+    budget: Duration,
+    condition: &mut dyn FnMut(&App) -> bool,
+    debug: &mut dyn Fn(&App) -> String,
+) {
+    let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
         app.pump_agents();
         let _ = app.backend.drain_events();
@@ -378,7 +398,13 @@ fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> boo
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {label}; status={:?}", app.backend.status_message.as_deref());
+    let thread_state =
+        app.agents.threads.first().map(|thread| format!("{:?}", thread.state)).unwrap_or_default();
+    panic!(
+        "timed out waiting for {label}; status={:?} thread_state={thread_state} {}",
+        app.backend.status_message.as_deref(),
+        debug(app)
+    );
 }
 
 fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {

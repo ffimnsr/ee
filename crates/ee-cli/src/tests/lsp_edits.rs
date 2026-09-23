@@ -791,44 +791,6 @@ fn symbols_notification_populates_picker() {
 }
 
 #[test]
-fn vlf_chunks_backend_event_parsed() {
-    let params = json!({
-        "view_id": "view-1",
-        "generation": 42,
-        "line_start": 10,
-        "lines": ["hello", "world"],
-        "syntax_spans": [[{ "start_byte": 0, "end_byte": 5, "scope": "keyword.control" }], []],
-        "approximate_line_count": 500,
-        "line_count_exact": false,
-        "index_progress": 0.42,
-    });
-    let event = parse_notification("vlf_chunks", params).expect("should parse vlf_chunks");
-    match event {
-        BackendEvent::VlfChunks {
-            view_id,
-            generation,
-            line_start,
-            lines,
-            syntax_spans,
-            approximate_line_count,
-            line_count_exact,
-            index_progress,
-        } => {
-            assert_eq!(view_id, "view-1");
-            assert_eq!(generation, 42);
-            assert_eq!(line_start, 10);
-            assert_eq!(lines, vec!["hello", "world"]);
-            assert_eq!(syntax_spans.len(), 2);
-            assert_eq!(syntax_spans[0][0].scope, "keyword.control");
-            assert_eq!(approximate_line_count, 500);
-            assert!(!line_count_exact);
-            assert!((index_progress - 0.42).abs() < 1e-9);
-        }
-        other => panic!("expected VlfChunks, got {:?}", other),
-    }
-}
-
-#[test]
 fn coalesce_backend_events_keeps_latest_noisy_view_events() {
     let events = vec![
         BackendEvent::VlfSearchStatus {
@@ -840,16 +802,7 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
             stored_match_count: 1,
             ranges: Vec::new(),
         },
-        BackendEvent::VlfChunks {
-            view_id: String::from("view-1"),
-            generation: 1,
-            line_start: 0,
-            lines: vec![String::from("old")],
-            syntax_spans: Vec::new(),
-            approximate_line_count: 100,
-            line_count_exact: false,
-            index_progress: 0.0,
-        },
+        BackendEvent::DocumentMode { view_id: String::from("view-1"), is_vlf: true },
         BackendEvent::VlfSearchStatus {
             view_id: String::from("view-1"),
             query: String::from("needle"),
@@ -859,42 +812,26 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
             stored_match_count: 1,
             ranges: Vec::new(),
         },
-        BackendEvent::VlfChunks {
-            view_id: String::from("view-1"),
-            generation: 2,
-            line_start: 5,
-            lines: vec![String::from("new")],
-            syntax_spans: Vec::new(),
-            approximate_line_count: 100,
-            line_count_exact: false,
-            index_progress: 0.5,
-        },
         BackendEvent::Update {
             view_id: String::from("view-1"),
             update: crate::backend::CoreUpdate {
                 pristine: true,
                 annotations: Vec::new(),
                 ops: vec![],
+                vlf_total_lines: None,
             },
         },
     ];
     let coalesced = coalesce_backend_events(events);
-    assert_eq!(coalesced.len(), 4);
-    assert!(matches!(&coalesced[0], BackendEvent::VlfChunks { generation: 1, line_start: 0, .. }));
+    assert_eq!(coalesced.len(), 3);
+    assert!(matches!(&coalesced[0], BackendEvent::DocumentMode { is_vlf: true, .. }));
     match &coalesced[1] {
         BackendEvent::VlfSearchStatus { scanned_bytes, .. } => {
             assert_eq!(*scanned_bytes, 50);
         }
         other => panic!("expected latest vlf search status, got {other:?}"),
     }
-    match &coalesced[2] {
-        BackendEvent::VlfChunks { generation, line_start, lines, .. } => {
-            assert_eq!(*generation, 2);
-            assert_eq!(*line_start, 5);
-            assert_eq!(lines, &vec![String::from("new")]);
-        }
-        other => panic!("expected latest vlf chunks, got {other:?}"),
-    }
+    assert!(matches!(&coalesced[2], BackendEvent::Update { .. }));
 }
 
 #[test]

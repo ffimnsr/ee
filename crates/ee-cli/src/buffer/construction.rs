@@ -4,8 +4,6 @@ use super::*;
 impl BufferManager {
     pub(super) const SYNC_IDLE_LIMIT: usize = 6;
     pub(super) const STARTUP_VLF_VIEWPORT_LINES: usize = 200;
-    pub(super) const VLF_VIEWPORT_OVERSCAN_LINES: usize = 200;
-    pub(super) const TAIL_VLF_PREFETCH_LINES: usize = 4096;
 
     pub(super) fn buffer_index_for_view(&self, view_id: &str) -> Option<usize> {
         self.view_to_idx.get(view_id).copied()
@@ -120,11 +118,11 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
-            vlf_previous_viewport: None,
-            vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
+            vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
+            vlf_tail_jump_viewport: None,
             vlf_search_ranges: Vec::new(),
         };
 
@@ -144,6 +142,7 @@ impl BufferManager {
             access_history: Vec::new(),
             modified_history: Vec::new(),
             last_resize: None,
+            render_updates: 0,
             next_buf_id: 2,
             next_rpc_id: 2,
             pending,
@@ -158,7 +157,6 @@ impl BufferManager {
                 ..StartupProfile::default()
             },
             startup_profile_active: true,
-            vlf_viewports: VlfViewportScheduler::default(),
         };
 
         let init_apply_started = Instant::now();

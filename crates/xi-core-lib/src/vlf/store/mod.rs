@@ -61,7 +61,6 @@ pub(crate) use crate::text_store::{
 
 pub(crate) use super::page_index::{PageDescriptor, PageIndex, ScanState};
 pub(crate) use super::pager::{CancelGeneration, DEFAULT_CACHE_BYTE_CAP, FilePager, pread_exact};
-pub(crate) use crate::tree_sitter_support::VisibleSyntaxSpan;
 pub(crate) use crate::vlf::overlay::{
     OverlayEditContext, OverlayLimits, PieceOverlay, TextMetrics, VlfSavePolicy,
 };
@@ -397,30 +396,6 @@ impl VlfViewportState {
 ///
 /// Conversion to a full `Rope` is explicitly prohibited; calling
 /// `read_full_text()` returns `TextChunkResult::Unsupported`.
-/// Memoized visible-window syntax spans for read-only VLF repaints.
-///
-/// Same-window viewport requests (cursor moves, repaints) re-run a
-/// synchronous tree-sitter parse of the window on every request. Read-only
-/// VLF content is immutable between file refreshes, so the last
-/// (window text, language) result can be safely reused. Editable overlay
-/// windows bypass the cache because overlay content can change between
-/// requests.
-pub(crate) struct ViewportSyntaxCache {
-    window_text: String,
-    language: String,
-    spans: Vec<Vec<VisibleSyntaxSpan>>,
-}
-
-impl ViewportSyntaxCache {
-    fn new() -> Self {
-        ViewportSyntaxCache {
-            window_text: String::new(),
-            language: String::new(),
-            spans: Vec::new(),
-        }
-    }
-}
-
 pub struct VlfStore {
     pager: FilePager,
     /// Interior-mutable so TextStore's `&self` methods can update the index
@@ -433,8 +408,20 @@ pub struct VlfStore {
     /// Priority-aware LRU cache for decoded text, separate from the raw-byte
     /// cache in `FilePager`.
     decoded_cache: RefCell<DecodedTextCache>,
-    /// Memoized visible-window syntax spans for read-only repaints.
-    syntax_cache: RefCell<ViewportSyntaxCache>,
+    /// Monotone overlay line→byte cursor (resumes CRLF-aware walks from the
+    /// last resolved line start; see `overlay_line_to_byte`).
+    line_cursor: RefCell<Option<overlay::OverlayLineCursor>>,
+    /// Line-ending evidence observed by overlay walks / page scans; gates the
+    /// unedited base-index fast path (see `overlay::CrlfState`).
+    crlf_state: Cell<overlay::CrlfState>,
+    /// Consecutive-lookup fast path cursor: the last `(line, byte)` resolved
+    /// from the base page index, letting renders resume newline counting in
+    /// the current page instead of restarting at byte 0 (see
+    /// `line_to_byte_internal`).
+    base_line_cursor: RefCell<Option<(u64, u64)>>,
+    /// True once the file prefix has been sniffed for lone-`\r` endings;
+    /// the unedited fast path must not trust base-index answers before that.
+    crlf_prefix_sniffed: Cell<bool>,
     /// Default batch size for viewport reads.
     batch_size: u64,
     /// Peak memory usage counters; updated on every cache write.
@@ -687,6 +674,7 @@ fn advise_line_count_sequential(_file: &File, _file_size: u64) {}
 mod editing;
 mod overlay;
 mod read;
+mod render_source;
 mod scan;
 mod text_store;
 mod viewport;

@@ -5,6 +5,8 @@ mod app;
 #[allow(dead_code)]
 mod backend;
 #[allow(dead_code)]
+mod bench_alloc;
+#[allow(dead_code)]
 mod buffer;
 #[allow(dead_code)]
 mod config;
@@ -42,7 +44,5 @@ mod theme;
 #[allow(dead_code)]
 mod ui;
 pub mod vlf_bench_support;
-#[allow(dead_code)]
-mod vlf_viewport;
 #[allow(dead_code)]
 mod window;

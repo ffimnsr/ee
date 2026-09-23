@@ -28,7 +28,6 @@ use crate::plugins::rpc::{
 };
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
-use crate::tree_sitter_support::VisibleSyntaxSpan;
 use crate::vlf::search::VlfMatchRange;
 use crate::width_cache::{WidthReq, WidthResponse};
 
@@ -340,39 +339,6 @@ impl Client {
         );
     }
 
-    /// Respond to a `vlf_viewport` request with decoded line content.
-    ///
-    /// `generation` echoes the request's generation id so the frontend can
-    /// discard responses that have been superseded by a newer viewport scroll.
-    ///
-    /// An empty `lines` slice signals that the index is not yet ready for the
-    /// requested position; the frontend should retry on the next repaint.
-    pub fn vlf_chunks(
-        &self,
-        view_id: ViewId,
-        generation: u64,
-        line_start: u64,
-        lines: &[String],
-        syntax_spans: &[Vec<VisibleSyntaxSpan>],
-        approximate_line_count: u64,
-        line_count_exact: bool,
-        index_progress: f64,
-    ) {
-        self.0.send_rpc_notification(
-            "vlf_chunks",
-            &json!({
-                "view_id": view_id,
-                "generation": generation,
-                "line_start": line_start,
-                "lines": lines,
-                "syntax_spans": syntax_spans,
-                "approximate_line_count": approximate_line_count,
-                "line_count_exact": line_count_exact,
-                "index_progress": index_progress,
-            }),
-        );
-    }
-
     pub(crate) fn vlf_search_status(
         &self,
         view_id: ViewId,
@@ -411,6 +377,20 @@ pub struct Update {
     pub(crate) ops: Vec<UpdateOp>,
     pub(crate) pristine: bool,
     pub(crate) annotations: Vec<Value>,
+    /// VLF-only: total (possibly approximate) line count + index progress.
+    /// Rope-backed renders omit this entirely — the rope path never changes
+    /// the wire shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vlf_total_lines: Option<VlfTotalLines>,
+}
+
+/// Carries the VLF line count on the `update` channel (Stage A Phase 3),
+/// replacing the `vlf_chunks` payload fields.
+#[derive(Debug, Serialize, Clone, Copy)]
+pub(crate) struct VlfTotalLines {
+    pub(crate) count: u64,
+    pub(crate) exact: bool,
+    pub(crate) index_progress: f64,
 }
 
 #[derive(Debug, Serialize)]
