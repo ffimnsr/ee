@@ -223,15 +223,42 @@ mod tests {
     }
 
     #[test]
-    fn legacy_folding_remains_available_without_fold_query() {
+    fn rust_blocks_fold_via_query() {
         let _guard = runtime_loader_test_guard();
+        let source = "fn main() {\n    let x = 1;\n    if ok {\n        work();\n    }\n}\n";
+
         let folds = fold_ranges_for_text(
             Some("rust"),
             Some(Path::new("main.rs")),
-            "fn main() {\n    println!(\"hello\");\n}\n",
+            source,
+            Duration::from_secs(1),
+        );
+        // The function body `block` starts on the same header line as
+        // `fn main` (the `{` is on the opening brace line), so its range
+        // dedups against the function fold.
+        assert_eq!(
+            folds,
+            vec![
+                // `fn main` folds its whole body.
+                FoldRange { header_line: 0, body_start: 1, body_end: 5 },
+                // The multi-line `if` expression folds its body.
+                FoldRange { header_line: 2, body_start: 3, body_end: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_folding_remains_available_without_fold_query() {
+        let _guard = runtime_loader_test_guard();
+        // Python has no bundled folds.scm, so this exercises the AST-kind
+        // legacy fallback (function bodies).
+        let folds = fold_ranges_for_text(
+            Some("python"),
+            Some(Path::new("main.py")),
+            "def main():\n    x = 1\n\n\n",
             Duration::from_secs(1),
         );
 
-        assert!(folds.iter().any(|fold| fold.header_line == 0 && fold.body_end >= 2));
+        assert!(folds.iter().any(|fold| fold.header_line == 0 && fold.body_end >= 1));
     }
 }

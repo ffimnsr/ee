@@ -1,0 +1,30 @@
+; Fold rust items, expressions, and blocks (nvim-treesitter-sourced).
+; Single-line nodes never yield a range: the fold engine only emits folds
+; whose body spans past the header line, so one-line calls, blocks, and
+; `use` declarations stay unfoldable.
+
+[
+  (mod_item)
+  (foreign_mod_item)
+  (function_item)
+  (struct_item)
+  (trait_item)
+  (enum_item)
+  (impl_item)
+  (type_item)
+  (union_item)
+  (const_item)
+  (let_declaration)
+  (loop_expression)
+  (for_expression)
+  (while_expression)
+  (if_expression)
+  (match_expression)
+  (call_expression)
+  (array_expression)
+  (macro_definition)
+  (macro_invocation)
+  (attribute_item)
+  (block)
+  (use_declaration)+
+] @fold

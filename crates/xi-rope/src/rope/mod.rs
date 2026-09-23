@@ -41,6 +41,9 @@ pub enum RopeError {
     LineOutOfBounds { line: usize, max_line: usize },
     ReversedInterval { start: usize, end: usize },
     IntervalOutOfBounds { start: usize, end: usize, len: usize },
+    CharOffsetOutOfBounds { offset: usize, len: usize },
+    CharReversedInterval { start: usize, end: usize },
+    CharIntervalOutOfBounds { start: usize, end: usize, len: usize },
 }
 
 impl RopeError {
@@ -75,6 +78,15 @@ impl fmt::Display for RopeError {
             }
             Self::IntervalOutOfBounds { start, end, len } => {
                 write!(f, "interval [{start}, {end}) beyond rope length {len}")
+            }
+            Self::CharOffsetOutOfBounds { offset, len } => {
+                write!(f, "char offset {offset} beyond rope char length {len}")
+            }
+            Self::CharReversedInterval { start, end } => {
+                write!(f, "invalid char interval [{start}, {end}): start exceeds end")
+            }
+            Self::CharIntervalOutOfBounds { start, end, len } => {
+                write!(f, "char interval [{start}, {end}) beyond rope char length {len}")
             }
         }
     }
@@ -139,17 +151,20 @@ pub type RopeDelta = Delta<RopeInfo>;
 pub type RopeDeltaElement = DeltaElement<RopeInfo>;
 
 pub use builder::RopeBuilder;
-pub use metrics::{LinesMetric, RopeInfo, count_newlines};
+pub use iter::{Bytes, Chars};
+pub use metrics::{LinesMetric, RopeInfo, count_chars, count_newlines};
 pub use slice::{Lines, LinesRaw, RopeSlice, RopeSliceCursor};
 
 pub(crate) use impls::ChunkIter;
-pub use metrics::{BaseMetric, Utf16CodeUnitsMetric};
+pub use metrics::{BaseMetric, CharsMetric, Utf16CodeUnitsMetric};
 #[cfg(test)]
 pub(crate) use metrics::{clamp_to_char_boundary, find_leaf_split_for_merge, is_crlf_split_point};
 
 mod builder;
+mod chars;
 mod core;
 mod impls;
+mod iter;
 mod metrics;
 mod slice;
 

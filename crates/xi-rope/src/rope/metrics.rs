@@ -30,6 +30,7 @@ impl Leaf for String {
 pub struct RopeInfo {
     pub(crate) lines: usize,
     pub(crate) utf16_size: usize,
+    pub(crate) chars: usize,
 }
 
 impl NodeInfo for RopeInfo {
@@ -38,14 +39,19 @@ impl NodeInfo for RopeInfo {
     fn accumulate(&mut self, other: &Self) {
         self.lines += other.lines;
         self.utf16_size += other.utf16_size;
+        self.chars += other.chars;
     }
 
     fn compute_info(s: &String) -> Self {
-        RopeInfo { lines: count_newlines(s), utf16_size: count_utf16_code_units(s) }
+        RopeInfo {
+            lines: count_newlines(s),
+            utf16_size: count_utf16_code_units(s),
+            chars: count_chars(s),
+        }
     }
 
     fn identity() -> Self {
-        RopeInfo { lines: 0, utf16_size: 0 }
+        RopeInfo { lines: 0, utf16_size: 0, chars: 0 }
     }
 }
 
@@ -188,6 +194,64 @@ impl Metric<RopeInfo> for LinesMetric {
     }
 }
 
+/// Char (Unicode scalar value) metric.
+///
+/// Measured units are chars; base units are UTF-8 bytes. Valid boundaries are
+/// Unicode scalar-value boundaries, so offsets that split a multi-byte code
+/// point are invalid. This metric is atomic.
+#[derive(Clone, Copy)]
+pub struct CharsMetric;
+
+impl Metric<RopeInfo> for CharsMetric {
+    fn measure(info: &RopeInfo, _: usize) -> usize {
+        info.chars
+    }
+
+    fn is_boundary(s: &String, offset: usize) -> bool {
+        s.is_char_boundary(offset)
+    }
+
+    fn to_base_units(s: &String, in_measured_units: usize) -> usize {
+        match s.char_indices().nth(in_measured_units) {
+            Some((byte_idx, _)) => byte_idx,
+            None => s.len(),
+        }
+    }
+
+    fn from_base_units(s: &String, in_base_units: usize) -> usize {
+        let mut end = in_base_units.min(s.len());
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].chars().count()
+    }
+
+    fn prev(s: &String, offset: usize) -> Option<usize> {
+        if offset == 0 {
+            None
+        } else {
+            let mut len = 1;
+            while !s.is_char_boundary(offset - len) {
+                len += 1;
+            }
+            Some(offset - len)
+        }
+    }
+
+    fn next(s: &String, offset: usize) -> Option<usize> {
+        if offset == s.len() {
+            None
+        } else {
+            let b = s.as_bytes()[offset];
+            Some(offset + len_utf8_from_first_byte(b))
+        }
+    }
+
+    fn can_fragment() -> bool {
+        false
+    }
+}
+
 /// UTF-16 code-unit metric used by protocols such as LSP.
 ///
 /// Measured units are UTF-16 code units; base units are UTF-8 bytes. Boundaries
@@ -256,6 +320,13 @@ impl Metric<RopeInfo> for Utf16CodeUnitsMetric {
 
 pub fn count_newlines(s: &str) -> usize {
     bytecount::count(s.as_bytes(), b'\n')
+}
+
+/// Number of Unicode scalar values (chars) in `s`.
+///
+/// Counts UTF-8 leading bytes (all bytes except continuations).
+pub fn count_chars(s: &str) -> usize {
+    s.bytes().filter(|&b| b & 0b1100_0000 != 0b1000_0000).count()
 }
 
 pub(crate) fn count_utf16_code_units(s: &str) -> usize {
