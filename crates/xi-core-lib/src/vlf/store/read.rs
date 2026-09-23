@@ -70,6 +70,33 @@ impl VlfStore {
         Ok(SeamResult { text, original_range: range, decoded_range })
     }
 
+    /// Returns syntax spans for the visible window text, reusing the previous
+    /// result when the same (window text, language) pair is requested again.
+    ///
+    /// Spans are window-relative, so identical window text means identical
+    /// spans even at different byte offsets. `compute` runs only on a cache
+    /// miss, or when an editable overlay is active (overlay content can
+    /// change between requests).
+    pub(crate) fn cached_visible_syntax_spans(
+        &self,
+        window_text: &str,
+        language: &str,
+        compute: impl FnOnce() -> Vec<Vec<VisibleSyntaxSpan>>,
+    ) -> Vec<Vec<VisibleSyntaxSpan>> {
+        if self.overlay_read_enabled() {
+            return compute();
+        }
+        let mut cache = self.syntax_cache.borrow_mut();
+        if cache.window_text == window_text && cache.language == language {
+            return cache.spans.clone();
+        }
+        let spans = compute();
+        cache.window_text = window_text.to_owned();
+        cache.language = language.to_owned();
+        cache.spans = spans.clone();
+        spans
+    }
+
     pub(super) fn read_raw_range_token(
         &self,
         range: ByteRange,

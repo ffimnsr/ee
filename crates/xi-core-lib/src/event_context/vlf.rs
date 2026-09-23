@@ -737,7 +737,22 @@ impl<'a> EventContext<'a> {
             return Vec::new();
         }
         let visible_text = lines.join("\n");
-        visible_syntax_spans(self.language.as_ref(), &visible_text, VisibleSyntaxLimits::default())
+        let language = self.language.as_ref();
+        // Memoize the windowed parse for read-only VLF repaints: same-window
+        // requests (cursor moves, repaints) reuse the previous result instead
+        // of re-running the synchronous tree-sitter parse.
+        self.editor
+            .borrow()
+            .vlf_store
+            .as_ref()
+            .map(|store| {
+                store.cached_visible_syntax_spans(&visible_text, language, || {
+                    visible_syntax_spans(language, &visible_text, VisibleSyntaxLimits::default())
+                })
+            })
+            .unwrap_or_else(|| {
+                visible_syntax_spans(language, &visible_text, VisibleSyntaxLimits::default())
+            })
     }
 
     pub(crate) fn do_vlf_syntax_selection(

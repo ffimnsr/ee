@@ -77,6 +77,7 @@ fn decoded_cache_evicts_background_before_viewport() {
         page_size: 3,
         viewport: RefCell::new(VlfViewportState::new(0)),
         decoded_cache: RefCell::new(DecodedTextCache::new(5)),
+        syntax_cache: RefCell::new(ViewportSyntaxCache::new()),
         batch_size: 0, // overscan == viewport, so [3,6) is Background when viewport=[0,3)
         stats: RefCell::new(VlfMemoryStats::default()),
         first_viewport_set: Cell::new(false),
@@ -104,4 +105,64 @@ fn decoded_cache_evicts_background_before_viewport() {
         "cache exceeded cap: {} bytes",
         store.decoded_cache_used_bytes()
     );
+}
+
+// ---- Visible-syntax-span memo --------------------------------------
+
+#[test]
+fn syntax_cache_computes_once_for_same_window() {
+    let (store, _f) = store_from(b"fn main() {}\nlet x = 1;\n");
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let c = std::rc::Rc::clone(&calls);
+    let compute_a = move || {
+        c.set(c.get() + 1);
+        vec![Vec::new()]
+    };
+    let c = std::rc::Rc::clone(&calls);
+    let compute_b = move || {
+        c.set(c.get() + 1);
+        vec![Vec::new()]
+    };
+    let r1 = store.cached_visible_syntax_spans("fn main() {}\n", "rust", compute_a);
+    let r2 = store.cached_visible_syntax_spans("fn main() {}\n", "rust", compute_b);
+    assert_eq!(r1, r2);
+    assert_eq!(calls.get(), 1, "identical window should compute spans once");
+}
+
+#[test]
+fn syntax_cache_recomputes_on_window_or_language_change() {
+    let (store, _f) = store_from(b"fn main() {}\n");
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let mk = |calls: std::rc::Rc<std::cell::Cell<usize>>| {
+        move || {
+            calls.set(calls.get() + 1);
+            vec![Vec::new()]
+        }
+    };
+    let _ = store.cached_visible_syntax_spans("window a", "rust", mk(std::rc::Rc::clone(&calls)));
+    let _ = store.cached_visible_syntax_spans("window a", "rust", mk(std::rc::Rc::clone(&calls)));
+    let _ = store.cached_visible_syntax_spans("window b", "rust", mk(std::rc::Rc::clone(&calls)));
+    let _ = store.cached_visible_syntax_spans("window b", "c", mk(std::rc::Rc::clone(&calls)));
+    assert_eq!(calls.get(), 3, "hit once, then window change and language change each recompute");
+}
+
+#[test]
+fn syntax_cache_bypasses_when_overlay_editing_active() {
+    let (store, _f) = store_from(b"fn main() {}\n");
+    store.enable_editing();
+    if let Some(overlay) = store.overlay.borrow_mut().as_mut() {
+        overlay.set_read_byte_range_ready();
+    }
+    assert!(store.overlay_read_enabled(), "test precondition: overlay reads on");
+
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let mk = |calls: std::rc::Rc<std::cell::Cell<usize>>| {
+        move || {
+            calls.set(calls.get() + 1);
+            vec![Vec::new()]
+        }
+    };
+    let _ = store.cached_visible_syntax_spans("same", "rust", mk(std::rc::Rc::clone(&calls)));
+    let _ = store.cached_visible_syntax_spans("same", "rust", mk(std::rc::Rc::clone(&calls)));
+    assert_eq!(calls.get(), 2, "overlay windows must bypass the memo");
 }

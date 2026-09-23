@@ -203,6 +203,7 @@ impl VlfStore {
 
         *self.index.get_mut() = PageIndex::new(file_size);
         *self.decoded_cache.get_mut() = DecodedTextCache::new(decoded_cache_byte_cap);
+        *self.syntax_cache.get_mut() = ViewportSyntaxCache::new();
 
         let window_start = viewport.window_start.0.min(file_size);
         let window_end = viewport.window_end.0.min(file_size).max(window_start);
