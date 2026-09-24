@@ -1,15 +1,16 @@
 [package]
-name = "ee-openrouter-agent"
+name = "ee-opencode-agent"
 version = "0.11.10"
 edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
-description = "OpenRouter ACP agent provider built on the ee-acp-agent-server framework."
+description = "OpenCode Zen and OpenCode Go ACP agent provider with exact (surface, model) protocol routing."
 
 [features]
-# Exposes hermetic scripted completions for cross-crate integration tests.
-test-utils = ["tokio/test-util"]
+# Exposes the scripted dialect codec and test argument builder for cross-crate
+# integration tests, mirroring `ee-acp-agent-server`'s `test-utils` convention.
+test-utils = []
 
 [dependencies]
 clap.workspace = true
@@ -23,8 +24,11 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]
+# Self-dependency so the binary, the in-crate tests, and the integration tests
+# all see the `test-utils` fixtures without a second ACP loop or transport.
+ee-opencode-agent = { path = ".", features = ["test-utils"] }
 ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
-ee-agent-protocol.workspace = true
+ee-agent-orchestrator = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util"] }

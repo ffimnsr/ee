@@ -6,8 +6,10 @@ members = [
   "crates/ee-agent-memory",
   "crates/ee-agent-orchestrator",
   "crates/ee-agent-protocol",
+  "crates/ee-chat-completions",
   "crates/ee-cli",
   "crates/ee-mcp",
+  "crates/ee-opencode-agent",
   "crates/ee-openrouter-agent",
   "crates/ee-ts-test-grammars",
   "crates/xi-core-lib",
@@ -127,7 +129,9 @@ ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", vers
 ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.10" }
 ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.10" }
 ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.10" }
+ee-chat-completions = { package = "ee-chat-completions", path = "crates/ee-chat-completions", version = "0.11.10" }
 ee-mcp = { package = "ee-mcp", path = "crates/ee-mcp", version = "0.11.10" }
+ee-opencode-agent = { package = "ee-opencode-agent", path = "crates/ee-opencode-agent", version = "0.11.10" }
 xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.11.10" }
 xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.11.10" }
 xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.11.10" }

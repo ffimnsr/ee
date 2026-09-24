@@ -266,9 +266,93 @@ impl Default for PolicyEngine {
     }
 }
 
+/// Builds the default policy for a production orchestrated agent session.
+///
+/// Read, execute, and delegate tools are available because orchestrated mode is
+/// the production agent path. Writes and external-network reads are admitted
+/// only so trusted ee proxy tools can reach existing host approval and scope
+/// checks. Policy never performs either side effect itself, and external MCP
+/// tools cannot borrow the ee allowance.
+#[must_use]
+pub fn default_agent_policy() -> PolicyEngine {
+    PolicyEngine::new(
+        ToolPolicy {
+            allow_read: true,
+            allow_write: true,
+            allow_execute: true,
+            allow_delegate: true,
+            ..ToolPolicy::default()
+        }
+        .allow_side_effect_subclass(SideEffectSubclass::Overwrite)
+        .allow_side_effect_subclass(SideEffectSubclass::ExternalNetwork),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_admits_only_host_approved_external_network_reads() {
+        let policy = default_agent_policy();
+        let context = PolicyContext::default();
+        let network_tool = |class| {
+            ToolDefinition::new("ee_fetch_url", "fetches HTTPS content")
+                .side_effect_class(class)
+                .side_effect_subclass(SideEffectSubclass::ExternalNetwork)
+        };
+
+        assert!(
+            policy.check(&network_tool(SideEffectClass::Read).host_approval(), context).allow,
+            "trusted ee web reads must reach host network approval"
+        );
+        assert!(
+            !policy.check(&network_tool(SideEffectClass::Read), context).allow,
+            "external MCP tools cannot borrow ee network allowance"
+        );
+        assert!(
+            !policy.check(&network_tool(SideEffectClass::Execute).host_approval(), context).allow,
+            "network allowance must not permit command execution"
+        );
+    }
+
+    #[test]
+    fn policy_admits_editor_writes_without_bypassing_the_host_gate() {
+        let policy = default_agent_policy();
+        let context = PolicyContext::default();
+
+        assert!(
+            policy
+                .check(
+                    &ToolDefinition::new("create_terminal", "runs")
+                        .side_effect_class(SideEffectClass::Execute),
+                    context,
+                )
+                .allow
+        );
+        assert!(
+            policy
+                .check(
+                    &ToolDefinition::new("write_file", "writes")
+                        .side_effect_class(SideEffectClass::Write)
+                        .side_effect_subclass(SideEffectSubclass::Overwrite),
+                    context,
+                )
+                .allow,
+            "admission only reaches the host approval gate; the policy never writes"
+        );
+        assert!(
+            !policy
+                .check(
+                    &ToolDefinition::new("delete_file", "deletes")
+                        .side_effect_class(SideEffectClass::Write)
+                        .side_effect_subclass(SideEffectSubclass::Delete),
+                    context,
+                )
+                .allow,
+            "unrelated destructive writes remain denied before any host request"
+        );
+    }
 
     fn tool(class: SideEffectClass) -> ToolDefinition {
         ToolDefinition::new("tool", "test").side_effect_class(class)

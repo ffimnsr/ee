@@ -7,39 +7,33 @@
 //! budgets, and policy gates, while OpenRouter only answers chat-completions
 //! round trips.
 //!
-//! The transcript is converted to OpenRouter messages and the registry's
-//! tool definitions to an OpenRouter function schema; text, reasoning, tool
-//! calls, and the `finish_reason` completion signal map back onto the
-//! normalized [`ModelResponse`].  The API key appears only in the
-//! Authorization header and never in the transcript, memory, or logs.
+//! The adapter is the shared `ee-chat-completions` adapter with an OpenRouter
+//! profile, so the transcript, tool-schema, response, streaming, and retry
+//! behavior is identical to every other OpenAI-compatible provider; only the
+//! endpoint, attribution headers, reasoning shaping, and error wording are
+//! OpenRouter's own.  The API key appears only in the Authorization header and
+//! never in the transcript, memory, or logs.
 //!
-//! The HTTP round trip is behind a completion client so tests stay
+//! The HTTP round trip is behind an injected completion client so tests stay
 //! network-free with scripted responses.
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
-    DEFAULT_MODEL_ID, ModelAdapter, ModelCapability, ModelContent, ModelError, ModelFamily,
-    ModelFuture, ModelIdentity, ModelMessage, ModelRegistration, ModelRequest, ModelResponse,
-    ModelRole, ModelTier, ModelUsage, OrchestratorConfig, OrchestratorProvider,
-    OrchestratorProviderConfig, RUBBER_DUCK_ROLE, StreamSink, ToolDefinition, ToolIntent,
+    DEFAULT_MODEL_ID, ModelAdapter, ModelCapability, ModelError, ModelFamily, ModelFuture,
+    ModelIdentity, ModelRegistration, ModelRequest, ModelResponse, ModelTier, OrchestratorConfig,
+    OrchestratorProvider, OrchestratorProviderConfig, RUBBER_DUCK_ROLE, StreamSink,
 };
 use ee_agent_protocol::Implementation;
-use serde_json::{Value, json};
+use ee_chat_completions::ChatCompletionsAdapter;
+#[cfg(any(test, feature = "test-utils"))]
+use ee_chat_completions::CompletionClient;
 use tokio::sync::watch;
 
 use crate::config::Config;
-#[cfg(test)]
-use crate::openrouter::openrouter_request_body_with_tools;
-use crate::openrouter::{
-    OpenRouterMessage, OpenRouterStreamDelta, call_openrouter_streaming_with_retry,
-    call_openrouter_with_retry,
-};
+use crate::openrouter::{openrouter_profile, openrouter_token_source};
 
 mod policy;
 
@@ -127,7 +121,8 @@ pub fn openrouter_multi_model_provider(
         .timeout(config.timeout)
         .build()
         .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-    let root = OpenRouterModelAdapter::with_http(config.clone(), http.clone());
+    let root = OpenRouterModelAdapter::with_http(config.clone(), http.clone())
+        .map_err(|error| error.to_string())?;
     let root_family = config
         .model_family
         .as_deref()
@@ -227,7 +222,8 @@ fn register_openrouter_critic(
     let critic = OpenRouterModelAdapter::with_http(
         Config { model: model_id.to_string(), ..config.clone() },
         http,
-    );
+    )
+    .map_err(|error| format!("invalid critic model configuration: {error}"))?;
     registry
         .register_model(
             RUBBER_DUCK_ROLE,
@@ -237,103 +233,54 @@ fn register_openrouter_critic(
         .map_err(|error| format!("invalid critic model route: {error}"))
 }
 
-/// Boxed future returned by a completion client.
-pub(crate) type OpenRouterCompletionFuture =
-    Pin<Box<dyn Future<Output = Result<OpenRouterMessage, ProviderError>> + Send + 'static>>;
-
-/// One chat-completions round trip, abstracted so tests stay network-free.
-///
-/// Arguments: `(config, api_key, messages, tools)`; the real client sends the
-/// request body built from those parts.
-pub(crate) type OpenRouterCompletionClient =
-    dyn Fn(&Config, &str, &[Value], &[Value]) -> OpenRouterCompletionFuture + Send + Sync;
-
-/// One streaming OpenRouter chat-completions round trip.
-pub(crate) type OpenRouterStreamingClient = dyn Fn(&Config, &str, &[Value], &[Value], StreamSink) -> OpenRouterCompletionFuture
-    + Send
-    + Sync;
-
 /// OpenRouter as a normalized [`ModelAdapter`].
-pub struct OpenRouterModelAdapter {
-    config: Config,
-    completion: Arc<OpenRouterCompletionClient>,
-    streaming: Option<Arc<OpenRouterStreamingClient>>,
-}
+///
+/// A thin wrapper over the shared Chat Completions adapter: the profile supplies
+/// OpenRouter's endpoint, attribution headers, reasoning shaping, retry policy,
+/// and error wording, while the shared adapter owns the protocol behavior.
+pub struct OpenRouterModelAdapter(ChatCompletionsAdapter);
 
 impl OpenRouterModelAdapter {
     /// Builds an adapter with a real HTTP client honoring `config.timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic when the configured endpoint or a header value is
+    /// unusable, or when the HTTP client cannot be built.
     pub fn new(config: Config) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-        Ok(Self::with_http(config, http))
+        let profile = openrouter_profile(&config, &config.model)?;
+        let adapter = ChatCompletionsAdapter::new(profile, openrouter_token_source(&config))?;
+        Ok(Self(adapter))
     }
 
-    fn with_http(config: Config, http: reqwest::Client) -> Self {
-        Self {
-            config,
-            completion: real_completion(http.clone()),
-            streaming: Some(real_streaming(http)),
-        }
+    /// Builds an adapter over an existing HTTP client (shared pools).
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic when the configured endpoint or a header value is
+    /// unusable.
+    fn with_http(config: Config, http: reqwest::Client) -> Result<Self, String> {
+        let profile = openrouter_profile(&config, &config.model)?;
+        Ok(Self(ChatCompletionsAdapter::with_http(profile, openrouter_token_source(&config), http)))
     }
 
     /// Builds an adapter with an injected completion client (tests).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `config` carries an unusable endpoint or header value; test
+    /// fixtures are expected to be valid configurations.
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
-    pub(crate) fn with_completion(
-        config: Config,
-        completion: Arc<OpenRouterCompletionClient>,
-    ) -> Self {
-        Self { config, completion, streaming: None }
+    pub(crate) fn with_completion(config: Config, completion: Arc<CompletionClient>) -> Self {
+        let profile =
+            openrouter_profile(&config, &config.model).expect("test OpenRouter profile builds");
+        Self(ChatCompletionsAdapter::with_completion(
+            profile,
+            openrouter_token_source(&config),
+            completion,
+        ))
     }
-}
-
-/// The real completion client: one OpenRouter chat-completions round trip.
-fn real_completion(http: reqwest::Client) -> Arc<OpenRouterCompletionClient> {
-    Arc::new(move |config, api_key, messages, tools| {
-        let http = http.clone();
-        let config = config.clone();
-        let api_key = api_key.to_string();
-        let messages = messages.to_vec();
-        let tools = tools.to_vec();
-        Box::pin(async move {
-            call_openrouter_with_retry(&http, &config, &api_key, &messages, &tools).await
-        })
-    })
-}
-
-fn real_streaming(http: reqwest::Client) -> Arc<OpenRouterStreamingClient> {
-    Arc::new(move |config, api_key, messages, tools, events| {
-        let http = http.clone();
-        let config = config.clone();
-        let api_key = api_key.to_string();
-        let messages = messages.to_vec();
-        let tools = tools.to_vec();
-        Box::pin(async move {
-            let mut on_delta = |delta: OpenRouterStreamDelta| match delta {
-                OpenRouterStreamDelta::Text(text) => events.text(text).map_err(|error| {
-                    ProviderError::BackendFailure(format!(
-                        "failed to forward OpenRouter text stream: {error}"
-                    ))
-                }),
-                OpenRouterStreamDelta::Reasoning(text) => events.reasoning(text).map_err(|error| {
-                    ProviderError::BackendFailure(format!(
-                        "failed to forward OpenRouter reasoning stream: {error}"
-                    ))
-                }),
-            };
-            call_openrouter_streaming_with_retry(
-                &http,
-                &config,
-                &api_key,
-                &messages,
-                &tools,
-                &mut on_delta,
-            )
-            .await
-        })
-    })
 }
 
 impl ModelAdapter for OpenRouterModelAdapter {
@@ -342,26 +289,7 @@ impl ModelAdapter for OpenRouterModelAdapter {
         request: ModelRequest,
         cancel: watch::Receiver<bool>,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
-        let config = self.config.clone();
-        let completion = self.completion.clone();
-        Box::pin(async move {
-            if *cancel.borrow() {
-                return Err(ModelError::Cancelled);
-            }
-            let Some(api_key) = config.api_key.clone() else {
-                return Err(ModelError::Adapter(
-                    "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
-                ));
-            };
-            let messages = openrouter_messages_from_transcript(&config, &request.transcript);
-            let tools = openrouter_tools_from_definitions(&request.tools);
-            let completion = completion(&config, &api_key, &messages, &tools);
-            let answer = tokio::select! {
-                answer = completion => answer.map_err(|error| ModelError::Adapter(error.to_string()))?,
-                () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
-            };
-            Ok(model_response_from_openrouter(answer))
-        })
+        self.0.complete(request, cancel)
     }
 
     fn complete_streaming(
@@ -370,178 +298,8 @@ impl ModelAdapter for OpenRouterModelAdapter {
         cancel: watch::Receiver<bool>,
         events: StreamSink,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
-        let Some(streaming) = self.streaming.clone() else {
-            let completion = self.complete(request, cancel);
-            return Box::pin(async move {
-                let response = completion.await?;
-                if let Some(reasoning) =
-                    response.reasoning.as_deref().filter(|text| !text.is_empty())
-                {
-                    events.reasoning(reasoning.to_string())?;
-                }
-                if !response.text.is_empty() {
-                    events.text(response.text.clone())?;
-                }
-                Ok(response)
-            });
-        };
-        let config = self.config.clone();
-        Box::pin(async move {
-            if *cancel.borrow() {
-                return Err(ModelError::Cancelled);
-            }
-            let Some(api_key) = config.api_key.clone() else {
-                return Err(ModelError::Adapter(
-                    "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
-                ));
-            };
-            let messages = openrouter_messages_from_transcript(&config, &request.transcript);
-            let tools = openrouter_tools_from_definitions(&request.tools);
-            let completion = streaming(&config, &api_key, &messages, &tools, events);
-            let answer = tokio::select! {
-                answer = completion => answer.map_err(|error| ModelError::Adapter(error.to_string()))?,
-                () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
-            };
-            Ok(model_response_from_openrouter(answer))
-        })
+        self.0.complete_streaming(request, cancel, events)
     }
-}
-
-async fn wait_cancelled(mut cancel: watch::Receiver<bool>) {
-    if *cancel.borrow() {
-        return;
-    }
-    while cancel.changed().await.is_ok() {
-        if *cancel.borrow() {
-            return;
-        }
-    }
-}
-
-/// Converts a normalized transcript into OpenRouter chat messages, prepending
-/// the configured system prompt.  Tool observations carry their stable
-/// tool-call id; subagent summaries map to user content.
-pub(crate) fn openrouter_messages_from_transcript(
-    config: &Config,
-    transcript: &[ModelMessage],
-) -> Vec<Value> {
-    let mut messages = vec![json!({ "role": "system", "content": config.system_prompt })];
-    for message in transcript {
-        let role = match message.role {
-            ModelRole::System => "system",
-            ModelRole::User | ModelRole::Subagent => "user",
-            ModelRole::Assistant => "assistant",
-            ModelRole::Tool => "tool",
-        };
-        let content = message_content_text(&message.content);
-        let entry = if role == "tool" {
-            json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id_of(&message.content),
-                "content": content,
-            })
-        } else {
-            json!({ "role": role, "content": content })
-        };
-        messages.push(entry);
-    }
-    messages
-}
-
-/// Renders one message's content blocks as text.
-fn message_content_text(content: &[ModelContent]) -> String {
-    let mut parts = Vec::new();
-    for block in content {
-        match block {
-            ModelContent::Text(text) => parts.push(text.clone()),
-            ModelContent::ToolResult { result, .. } => parts.push(result.summary_text()),
-            ModelContent::FileReference { path } => parts.push(format!("[file:{path}]")),
-            ModelContent::TerminalReference { terminal_id } => {
-                parts.push(format!("[terminal:{terminal_id}]"))
-            }
-            _ => {} // future content kinds stay out of the OpenRouter text view
-        }
-    }
-    parts.join("\n")
-}
-
-/// Stable tool-call id of a tool observation message.
-fn tool_call_id_of(content: &[ModelContent]) -> String {
-    content
-        .iter()
-        .find_map(|block| match block {
-            ModelContent::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// Converts normalized tool definitions into an OpenRouter function schema.
-pub(crate) fn openrouter_tools_from_definitions(definitions: &[ToolDefinition]) -> Vec<Value> {
-    definitions
-        .iter()
-        .map(|definition| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": definition.name,
-                    "description": definition.description,
-                    "parameters": definition.input_schema,
-                }
-            })
-        })
-        .collect()
-}
-
-/// Maps a model tool-call name onto the registry's tool name.  The historical
-/// `tool_read_file` alias maps to the built-in `read_file` tool.
-fn map_tool_name(name: &str) -> String {
-    match name {
-        "tool_read_file" => "read_file".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Converts a decoded OpenRouter assistant message into a normalized
-/// [`ModelResponse`]: text, reasoning, tool intents, and the completion
-/// signal derived from `finish_reason`.
-pub(crate) fn model_response_from_openrouter(answer: OpenRouterMessage) -> ModelResponse {
-    let completed =
-        answer.tool_calls.is_empty() && answer.finish_reason.as_deref().unwrap_or("stop") == "stop";
-    let intents = answer
-        .tool_calls
-        .into_iter()
-        .map(|call| ToolIntent::new(call.id, map_tool_name(&call.name), call.arguments))
-        .collect();
-    let openrouter_usage = answer.usage.unwrap_or_default();
-    let mut usage = ModelUsage::new();
-    usage.input_tokens =
-        openrouter_usage.input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.output_tokens =
-        openrouter_usage.output_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    let mut response =
-        ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
-    if !answer.reasoning.is_empty() {
-        response = response.reasoning(answer.reasoning);
-    }
-    if completed {
-        response = response.completed();
-    }
-    response
-}
-
-/// Builds the OpenRouter request body for a completion round (tests).
-#[cfg(test)]
-pub(crate) fn openrouter_body_for_request(
-    config: &Config,
-    transcript: &[ModelMessage],
-    definitions: &[ToolDefinition],
-) -> Value {
-    openrouter_request_body_with_tools(
-        config,
-        &openrouter_messages_from_transcript(config, transcript),
-        &openrouter_tools_from_definitions(definitions),
-    )
 }
 
 /// Hermetic OpenRouter completion fixture for cross-crate integration tests.
@@ -552,9 +310,11 @@ pub mod test_support {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use ee_acp_agent_server::ProviderError;
+    use ee_chat_completions::{CompletionClient, decode_message};
     use serde_json::{Value, json};
 
-    use super::{Config, OpenRouterCompletionClient, OpenRouterModelAdapter};
+    use super::{Config, OpenRouterModelAdapter};
 
     #[derive(Clone)]
     enum Script {
@@ -725,9 +485,9 @@ pub mod test_support {
             }
         }
 
-        pub(crate) fn client(&self) -> Arc<OpenRouterCompletionClient> {
+        pub(crate) fn client(&self) -> Arc<CompletionClient> {
             let scripted = self.clone();
-            Arc::new(move |_config, _api_key, messages, tools| {
+            Arc::new(move |messages, tools| {
                 let scripted = scripted.clone();
                 let messages = messages.to_vec();
                 let tools = tools.to_vec();
@@ -738,8 +498,8 @@ pub mod test_support {
                         .expect("bodies poisoned")
                         .push(json!({ "messages": messages, "tools": tools }));
                     let response = scripted.next_response().await;
-                    crate::openrouter::extract_openrouter_message(&response).ok_or_else(|| {
-                        ee_acp_agent_server::ProviderError::BackendFailure(
+                    decode_message(&response).ok_or_else(|| {
+                        ProviderError::BackendFailure(
                             "scripted OpenRouter response has no assistant message".into(),
                         )
                     })

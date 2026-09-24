@@ -16,6 +16,14 @@
 //! instead of the simple provider mode. `OPENROUTER_ORCHESTRATED=0` is a
 //! temporary fallback for diagnostics.
 //!
+//! Both modes speak OpenAI-compatible Chat Completions through
+//! `ee-chat-completions`, the provider-neutral transport, codec, SSE decoding,
+//! retry boundary, and normalized adapter mapping shared with other
+//! OpenAI-compatible providers.  [`openrouter`] keeps only what is OpenRouter's
+//! own: the `OPENROUTER_*` names, the `HTTP-Referer` / `X-Title` headers,
+//! reasoning-effort request shaping, error wording, and the simple provider's
+//! tool schema.
+//!
 //! # MCP servers
 //!
 //! Orchestrated sessions discover session-advertised MCP servers and bridge
@@ -41,7 +49,13 @@
 
 pub mod compaction;
 pub mod config;
-pub mod dotenv;
+/// Non-mutating `.env` parsing.
+///
+/// The parser lives in `ee-acp-agent-server` so every ee agent binary shares one
+/// implementation; this module keeps the historical path working.
+pub mod dotenv {
+    pub use ee_acp_agent_server::dotenv::{env_or_dotenv, load_dotenv, parse_dotenv};
+}
 pub mod openrouter;
 pub mod orchestrated;
 pub mod provider;

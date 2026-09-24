@@ -31,10 +31,11 @@ use crate::compaction::{
 };
 use crate::config::Config;
 use crate::openrouter::{
-    OpenRouterStreamDelta, OpenRouterUsage, call_openrouter, call_openrouter_streaming_with_retry,
+    MISSING_API_KEY, OpenRouterStreamDelta, OpenRouterUsage, has_api_key, openrouter_client,
     openrouter_tools,
 };
 use crate::tools::handle_tool_call;
+use ee_chat_completions::ChatCompletionsClient;
 
 /// Maximum number of model tool rounds in one prompt turn.
 pub const MAX_TOOL_ROUNDS: usize = 6;
@@ -52,7 +53,7 @@ pub(crate) struct SessionData {
 /// future is `'static`).
 struct PromptTurn {
     config: Config,
-    http: reqwest::Client,
+    client: ChatCompletionsClient,
     sessions: Arc<Mutex<BTreeMap<String, SessionData>>>,
     next_message: Arc<AtomicU64>,
 }
@@ -63,7 +64,7 @@ struct PromptTurn {
 /// `Send + Sync` and prompt turns can own their state independently.
 pub struct OpenRouterProvider {
     config: Config,
-    http: reqwest::Client,
+    client: ChatCompletionsClient,
     sessions: Arc<Mutex<BTreeMap<String, SessionData>>>,
     /// Monotonic session-id generator (framework-owned, `openrouter-N`).
     ids: Arc<Mutex<SessionIdGenerator>>,
@@ -72,15 +73,12 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    /// Builds a provider with an HTTP client honoring `config.timeout`.
+    /// Builds a provider whose Chat Completions client honors `config.timeout`.
     pub fn new(config: Config) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|error| format!("failed to build HTTP client: {error}"))?;
+        let client = openrouter_client(&config, &config.model)?;
         Ok(Self {
             config,
-            http,
+            client,
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             ids: Arc::new(Mutex::new(SessionIdGenerator::new("openrouter"))),
             next_message: Arc::new(AtomicU64::new(1)),
@@ -133,7 +131,7 @@ impl AgentProvider for OpenRouterProvider {
     ) -> ProviderFuture<Result<PromptResult, ProviderError>> {
         let turn = PromptTurn {
             config: self.config.clone(),
-            http: self.http.clone(),
+            client: self.client.clone(),
             sessions: self.sessions.clone(),
             next_message: self.next_message.clone(),
         };
@@ -176,11 +174,9 @@ async fn run_prompt(
         return run_compact(&turn, ctx, sink, cancel, instructions, false).await;
     }
     let session_key = ctx.session_id.to_string();
-    let Some(api_key) = turn.config.api_key.clone() else {
-        return Err(ProviderError::BackendFailure(
-            "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
-        ));
-    };
+    if !has_api_key(&turn.config) {
+        return Err(ProviderError::BackendFailure(MISSING_API_KEY.to_string()));
+    }
 
     let mut turn_history = turn
         .sessions
@@ -221,15 +217,8 @@ async fn run_prompt(
                 })
             }
         };
-        let answer = call_openrouter_streaming_with_retry(
-            &turn.http,
-            &turn.config,
-            &api_key,
-            &messages,
-            &openrouter_tools(),
-            &mut on_delta,
-        )
-        .await?;
+        let answer =
+            turn.client.complete_streaming(&messages, &openrouter_tools(), &mut on_delta).await?;
         merge_openrouter_usage(&mut turn_usage, answer.usage);
         emit_context_usage(&sink, answer.usage, turn.config.context_window);
 
@@ -311,11 +300,9 @@ async fn compact_history(
     cancel: watch::Receiver<bool>,
     instructions: Option<&str>,
 ) -> Result<CompactedHistory, ProviderError> {
-    let Some(api_key) = turn.config.api_key.clone() else {
-        return Err(ProviderError::BackendFailure(
-            "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
-        ));
-    };
+    if !has_api_key(&turn.config) {
+        return Err(ProviderError::BackendFailure(MISSING_API_KEY.to_string()));
+    }
     if *cancel.borrow() {
         return Err(ProviderError::Cancellation);
     }
@@ -333,7 +320,7 @@ async fn compact_history(
         .collect::<Vec<_>>();
 
     // No tools during compaction; one bounded, cancellable round trip.
-    let answer = call_openrouter(&turn.http, &turn.config, &api_key, &messages, &[]).await?;
+    let answer = turn.client.complete_once(&messages, &[]).await?;
     if *cancel.borrow() {
         return Err(ProviderError::Cancellation);
     }
@@ -675,7 +662,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(true);
         let turn = PromptTurn {
             config: test_config(),
-            http: provider.http.clone(),
+            client: provider.client.clone(),
             sessions: provider.sessions.clone(),
             next_message: provider.next_message.clone(),
         };

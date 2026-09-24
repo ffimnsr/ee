@@ -1489,6 +1489,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-chat-completions"
+version = "0.11.10"
+dependencies = [
+ "ee-acp-agent-server",
+ "ee-agent-orchestrator",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "ee-cli"
 version = "0.11.10"
 dependencies = [
@@ -1506,6 +1518,7 @@ dependencies = [
  "ee-agent-orchestrator",
  "ee-agent-protocol",
  "ee-mcp",
+ "ee-opencode-agent",
  "ee-openrouter-agent",
  "ee-xi-core-lib",
  "ee-xi-lsp-lib",
@@ -1562,6 +1575,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-opencode-agent"
+version = "0.11.10"
+dependencies = [
+ "clap",
+ "dirs",
+ "ee-acp-agent-server",
+ "ee-agent-orchestrator",
+ "ee-agent-protocol",
+ "ee-chat-completions",
+ "ee-opencode-agent",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ee-openrouter-agent"
 version = "0.11.10"
 dependencies = [
@@ -1570,6 +1600,7 @@ dependencies = [
  "ee-acp-agent-server",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
+ "ee-chat-completions",
  "reqwest 0.12.28",
  "serde_json",
  "tempfile",

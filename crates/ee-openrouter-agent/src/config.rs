@@ -455,10 +455,7 @@ impl Config {
     /// Looks a variable up in the process environment first, then in the
     /// parsed `.env` map; empty values count as unset.
     pub fn env_or_dotenv(name: &str, dotenv: &BTreeMap<String, String>) -> Option<String> {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .or_else(|| dotenv.get(name).cloned().filter(|value| !value.is_empty()))
+        ee_acp_agent_server::env_or_dotenv(name, dotenv)
     }
 }
 

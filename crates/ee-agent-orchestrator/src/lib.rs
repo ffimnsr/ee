@@ -359,7 +359,7 @@ pub use observability::{
 };
 pub use parallel_tools::ParallelToolRunner;
 pub use plan_compiler::{PlanCompilation, PlanCompiler, PlanInput, TaskCriteria};
-pub use policy::{PolicyContext, PolicyDecision, PolicyEngine, ToolPolicy};
+pub use policy::{PolicyContext, PolicyDecision, PolicyEngine, ToolPolicy, default_agent_policy};
 pub use progress::{ProgressScore, ProgressTracker};
 pub use progress_scoring::{
     TaskProgress, blocked_tasks, is_blocked, is_ready, mark_blocked_by_failed_dependencies,

@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ee_agent_orchestrator::{
-    BudgetTracker, OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig,
-    SideEffectClass, TaskId, TaskNode, ToolDefinition, ToolResult,
+    BudgetTracker, ModelMessage, ModelRole, OrchestratorConfig, OrchestratorProvider,
+    OrchestratorProviderConfig, SideEffectClass, TaskId, TaskNode, ToolDefinition, ToolResult,
 };
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
 use serde_json::{Value, json};
@@ -148,57 +148,22 @@ fn sample_request() -> ModelRequest {
     )
 }
 
-fn openrouter_message(value: Value) -> OpenRouterMessage {
-    extract_openrouter_message_for_test(&value)
-}
-
-fn extract_openrouter_message_for_test(value: &Value) -> OpenRouterMessage {
-    // Reuses the crate's decoder on a full response envelope.
-    crate::openrouter::extract_openrouter_message(value).expect("decodes message")
-}
-
 #[test]
-fn transcript_converts_to_openrouter_messages() {
-    let config = test_config();
-    let messages = openrouter_messages_from_transcript(&config, &sample_transcript());
-
-    assert_eq!(messages.len(), 5, "system prompt plus four transcript messages");
-    assert_eq!(messages[0]["role"], "system");
-    assert_eq!(messages[0]["content"], "system");
-    assert_eq!(messages[1]["role"], "system");
-    assert_eq!(messages[1]["content"], "Memory facts:\ncwd: /work");
-    assert_eq!(messages[2]["role"], "user");
-    assert_eq!(messages[3]["role"], "assistant");
-    assert_eq!(messages[4]["role"], "tool");
-    assert_eq!(messages[4]["tool_call_id"], "call_1");
-    assert_eq!(messages[4]["content"], "file contents");
-}
-
-#[test]
-fn subagent_summaries_map_to_user_content() {
-    let config = test_config();
-    let transcript = vec![ModelMessage::text(ModelRole::Subagent, "summary")];
-    let messages = openrouter_messages_from_transcript(&config, &transcript);
-    assert_eq!(messages[1]["role"], "user");
-    assert_eq!(messages[1]["content"], "summary");
-}
-
-#[test]
-fn definitions_convert_to_openrouter_function_schema() {
-    let tools = openrouter_tools_from_definitions(&sample_definitions());
-
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["type"], "function");
-    assert_eq!(tools[0]["function"]["name"], "read_file");
-    assert_eq!(tools[0]["function"]["description"], "reads a file");
-    assert_eq!(tools[0]["function"]["parameters"]["required"][0], "path");
-}
-
-#[test]
-fn request_body_carries_transcript_tools_and_config() {
+fn request_body_carries_profile_system_prompt_tools_and_reasoning() {
     let mut config = test_config();
     config.reasoning_effort = Some(String::from("medium"));
-    let body = openrouter_body_for_request(&config, &sample_transcript(), &sample_definitions());
+    let profile = crate::openrouter::openrouter_profile(&config, &config.model).expect("profile");
+    let messages =
+        ee_chat_completions::messages_from_transcript(&profile.system_prompt, &sample_transcript());
+    let tools = ee_chat_completions::tools_from_definitions(&sample_definitions());
+
+    let body = ee_chat_completions::request_body(
+        &profile.model,
+        &messages,
+        &tools,
+        false,
+        profile.extensions.as_ref(),
+    );
 
     assert_eq!(body["model"], "test/model");
     assert_eq!(body["stream"], false);
@@ -209,100 +174,80 @@ fn request_body_carries_transcript_tools_and_config() {
     assert_eq!(body["messages"][4]["role"], "tool");
 }
 
-#[test]
-fn tool_call_converts_to_normalized_tool_intent() {
-    let value = json!({
+#[tokio::test]
+async fn adapter_sends_profile_system_prompt_and_normalized_tools() {
+    let scripted = ScriptedCompletion::new(vec![response_with_text("done")]);
+    let adapter =
+        OpenRouterModelAdapter::with_completion(test_config(), scripted_client(scripted.clone()));
+    let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+
+    let response = adapter.complete(sample_request(), cancel).await.expect("completes");
+
+    assert_eq!(response.text, "done");
+    let bodies = scripted.request_bodies();
+    assert_eq!(bodies[0]["messages"][0]["role"], "system");
+    assert_eq!(bodies[0]["messages"][0]["content"], "system");
+    assert_eq!(bodies[0]["messages"][4]["role"], "tool");
+    assert_eq!(bodies[0]["tools"][0]["function"]["name"], "read_file");
+}
+
+#[tokio::test]
+async fn adapter_maps_tool_calls_reasoning_and_usage_onto_the_normalized_response() {
+    let scripted = ScriptedCompletion::new(vec![json!({
         "choices": [{
             "message": {
-                "content": null,
+                "content": "done",
+                "reasoning": "think first",
                 "tool_calls": [{
                     "id": "call_1",
                     "type": "function",
-                    "function": {
-                        "name": "tool_read_file",
-                        "arguments": "{\"path\":\"/tmp/x\"}"
-                    }
+                    "function": { "name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}" }
                 }]
             },
             "finish_reason": "tool_calls"
-        }]
-    });
-    let response = model_response_from_openrouter(openrouter_message(value));
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 4 }
+    })]);
+    let adapter = OpenRouterModelAdapter::with_completion(test_config(), scripted_client(scripted));
+    let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
 
-    assert_eq!(response.tool_intents.len(), 1);
-    let intent = &response.tool_intents[0];
-    assert_eq!(intent.tool_call_id, "call_1");
-    assert_eq!(intent.name, "read_file", "historical alias maps to the builtin");
-    assert_eq!(intent.arguments["path"], "/tmp/x");
-    assert!(!response.completed, "tool calls mean the turn continues");
-    assert!(response.text.is_empty());
-}
+    let response = adapter.complete(sample_request(), cancel).await.expect("completes");
 
-#[test]
-fn reasoning_converts_to_normalized_reasoning() {
-    let value = json!({
-        "choices": [{
-            "message": { "reasoning": "think first", "content": "answer" },
-            "finish_reason": "stop"
-        }]
-    });
-    let response = model_response_from_openrouter(openrouter_message(value));
-
+    assert_eq!(response.text, "done");
     assert_eq!(response.reasoning.as_deref(), Some("think first"));
-    assert_eq!(response.text, "answer");
-    assert!(response.completed);
+    assert_eq!(response.tool_intents.len(), 1);
+    assert_eq!(response.tool_intents[0].tool_call_id, "call_1");
+    assert_eq!(response.tool_intents[0].name, "read_file");
+    assert_eq!(response.tool_intents[0].arguments["path"], "/tmp/x");
+    assert!(!response.completed, "tool calls continue the turn");
+    assert_eq!(response.usage.input_tokens, Some(10));
+    assert_eq!(response.usage.output_tokens, Some(4));
 }
 
-#[test]
-fn usage_converts_to_normalized_usage() {
-    let response = model_response_from_openrouter(openrouter_message(json!({
-        "choices": [{ "message": { "content": "answer" }, "finish_reason": "stop" }],
-        "usage": { "prompt_tokens": 6_120, "completion_tokens": 2_311 }
-    })));
+#[tokio::test]
+async fn adapter_missing_key_fails_before_any_model_call() {
+    let mut config = test_config();
+    config.api_key = None;
+    let scripted = ScriptedCompletion::new(vec![response_with_text("done")]);
+    let adapter =
+        OpenRouterModelAdapter::with_completion(config, scripted_client(scripted.clone()));
+    let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
 
-    assert_eq!(response.usage.input_tokens, Some(6_120));
-    assert_eq!(response.usage.output_tokens, Some(2_311));
-}
+    let error = adapter.complete(sample_request(), cancel).await.expect_err("no key");
 
-#[test]
-fn stop_reason_maps_to_completion_signal() {
-    let stopped = model_response_from_openrouter(openrouter_message(json!({
-        "choices": [{ "message": { "content": "done" }, "finish_reason": "stop" }]
-    })));
-    assert!(stopped.completed);
-    assert!(stopped.tool_intents.is_empty());
-
-    // Missing finish reason is treated as a completed stop (older APIs).
-    let missing = model_response_from_openrouter(openrouter_message(json!({
-        "choices": [{ "message": { "content": "done" } }]
-    })));
-    assert!(missing.completed);
-
-    // Length-limited responses are not a completion signal.
-    let truncated = model_response_from_openrouter(openrouter_message(json!({
-        "choices": [{ "message": { "content": "half" }, "finish_reason": "length" }]
-    })));
-    assert!(!truncated.completed);
-}
-
-#[test]
-fn request_body_builds_from_normalized_request() {
-    let config = test_config();
-    let body =
-        openrouter_body_for_request(&config, &sample_request().transcript, &sample_request().tools);
-    assert_eq!(body["messages"][0]["role"], "system");
-    assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    assert!(error.to_string().contains("OPENROUTER_API_KEY is not set"), "{error}");
+    assert!(scripted.request_bodies().is_empty(), "no request may be attempted");
 }
 
 // ── Orchestrated mode over the framework server ──────────────────────
 
 type ScriptedCompletion = test_support::ScriptedOpenRouterCompletion;
 
-fn scripted_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
+fn scripted_client(script: ScriptedCompletion) -> Arc<CompletionClient> {
     script.client()
 }
 
-fn never_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
+fn never_client(script: ScriptedCompletion) -> Arc<CompletionClient> {
     script.client()
 }
 

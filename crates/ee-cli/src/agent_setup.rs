@@ -537,4 +537,69 @@ mod tests {
         assert_eq!(bytes.len(), MAX_MANIFEST_BYTES);
         assert!(truncated);
     }
+
+    // ── OpenCode provider setup (Phase 5 integration) ────────────────────
+
+    /// The OpenCode agent ships as one more local `ee-*-agent` binary, so the
+    /// generic discovery pattern has to accept it unchanged.
+    #[test]
+    fn opencode_agent_discovers_as_one_local_provider() {
+        assert!(is_agent_file_name("ee-opencode-agent"));
+
+        let manifest = ee_opencode_agent::config::setup_manifest();
+        assert_eq!(manifest.agent.id, "opencode");
+        assert_eq!(manifest.agent.display_name, "OpenCode");
+        assert!(!manifest.agent.id.contains("openrouter"), "not an OpenRouter alias");
+        assert!(!manifest.agent.id.contains("openai"), "not a generic OpenAI provider");
+    }
+
+    /// The manifest the OpenCode binary emits must satisfy every rule this host
+    /// setup path enforces, including unique environment destinations.
+    #[test]
+    fn opencode_manifest_passes_host_setup_validation_with_explicit_surface_selection() {
+        let manifest = validate_manifest(ee_opencode_agent::config::setup_manifest())
+            .expect("host setup accepts the OpenCode manifest");
+
+        let key = manifest
+            .env_vars
+            .iter()
+            .find(|env| env.name == ee_opencode_agent::config::API_KEY_ENV)
+            .expect("api key variable");
+        assert!(key.required && key.secret, "the OpenCode key is required and secret");
+
+        for env in [ee_opencode_agent::config::SURFACE_ENV, ee_opencode_agent::config::MODEL_ENV] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.config.env == env)
+                .expect("surface and model stay explicit inputs");
+            assert!(input.default.is_none(), "{env} is never defaulted for the user");
+        }
+    }
+
+    /// Setup must describe Go and Zen as OpenCode's own service surfaces: the
+    /// host never claims billing, balance, usage, or account capability.
+    #[test]
+    fn opencode_manifest_keeps_provider_claims_with_provider() {
+        let manifest = ee_opencode_agent::config::setup_manifest();
+        let mut text = vec![manifest.agent.display_name.clone()];
+        text.extend(manifest.env_vars.iter().map(|env| env.description.clone()));
+        text.extend(manifest.inputs.iter().map(|input| input.label.clone()));
+
+        let described = text.join("\n").to_ascii_lowercase();
+        for claim in ["billing", "balances", "usage limits", "account management"] {
+            assert!(described.contains(claim), "setup explains `{claim}` ownership");
+        }
+        assert!(
+            described.contains("stay with opencode"),
+            "the descriptor attributes those to OpenCode: {described}"
+        );
+        assert!(
+            described.contains("zen") && described.contains("go"),
+            "both surfaces are named for the user: {described}"
+        );
+        for root in ["https://opencode.ai/zen/v1", "https://opencode.ai/zen/go/v1"] {
+            assert!(described.contains(root), "setup shows the `{root}` root");
+        }
+    }
 }

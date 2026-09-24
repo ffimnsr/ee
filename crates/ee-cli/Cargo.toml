@@ -90,6 +90,7 @@ ee-agent-host = { workspace = true, features = ["test-utils"] }
 ee-agent-orchestrator.workspace = true
 ee-mcp = { workspace = true, features = ["test-utils"] }
 ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
+ee-opencode-agent = { path = "../ee-opencode-agent" }
 futures.workspace = true
 insta.workspace = true
 tempfile.workspace = true
