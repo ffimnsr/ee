@@ -402,6 +402,39 @@ fn vlf_mixed_insert_copy_window_keeps_copied_rows() {
 }
 
 #[test]
+fn vlf_window_trims_to_insert_span_with_overscan() {
+    // Bug regression: copies re-emit rows the client holds, and unbounded
+    // keeping grew the window toward the whole file (every later apply and
+    // teardown became O(document)). The window must stay bounded around the
+    // freshly rendered insert span.
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_cache_start_line = 9_000;
+    buf.line_cache = (9_000..11_000)
+        .map(|line| {
+            LineSlot::Known(CachedLine {
+                text: format!("old {line}"),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+                logical_line: Some(line),
+            })
+        })
+        .collect();
+
+    // Fresh render at 10_000..10_040 plus a copy re-assert over the overlap.
+    let mut ops: Vec<CoreUpdateOp> = (10_000..10_040).map(|ln| inserted("new", ln)).collect();
+    ops.push(CoreUpdateOp { op: CoreUpdateKind::Copy, n: 2_000, lines: Vec::new() });
+    buf.apply_update(vlf_update(ops, 20_000, true)).unwrap();
+
+    assert_eq!(buf.vlf_cache_start_line, 10_000, "window anchors at the render span");
+    assert_eq!(buf.line_cache.len(), 40 + 512, "copies keep only the overscan tail");
+    assert_eq!(buf.get_line(10_000), Some("new"), "fresh rows stay cached");
+    assert_eq!(buf.get_line(10_040), Some("old 10040"), "copied overlap keeps old content");
+    assert_eq!(buf.get_line(10_551), Some("old 10551"), "overscan below stays cached");
+    assert!(buf.get_line(10_552).is_none(), "copies beyond the overscan are dropped");
+}
+
+#[test]
 fn vlf_document_mode_clears_stale_normal_cache_and_scrolls() {
     let (tx, rx) = mpsc::channel();
     let (backend_tx, backend_rx) = mpsc::channel();

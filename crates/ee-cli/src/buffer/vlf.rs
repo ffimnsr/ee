@@ -11,6 +11,7 @@ impl BufferManager {
         if buf.view_id.is_empty() {
             return Ok(());
         }
+        buf.vlf_requested_viewport = Some(range);
         if buf.last_scroll == Some(range) {
             return Ok(());
         }
@@ -36,18 +37,23 @@ impl BufferManager {
         self.bufs[self.current].last_scroll = None;
         self.notify_scroll(first_line, last_line)
     }
-    pub(crate) fn request_vlf_tail_viewport(&mut self, line_count: usize) -> io::Result<()> {
+    pub(crate) fn request_vlf_tail_viewport(&mut self, viewport_lines: usize) -> io::Result<()> {
         // Goto-end: ask the core to scroll to the last screen. The core clamps
         // the viewport to the file tail on the next render; when the window
         // update lands, `apply_vlf_update_window` completes the cursor jump.
+        // The sentinel carries only a viewport-sized span: a sentinel sized by
+        // the line count wedges the view height into the hundreds of
+        // thousands, and later `request_lines` repairs then render whole-file
+        // spans (hundreds of ms each).
         let buf = &mut self.bufs[self.current];
         if !buf.is_vlf || buf.view_id.is_empty() {
             return Ok(());
         }
-        let first = 9_000_000_000_i64.saturating_sub(line_count as i64);
-        let last = first.saturating_add(line_count as i64);
+        let height = i64::try_from(viewport_lines.max(1)).unwrap_or(i64::MAX);
+        let first = 9_000_000_000_i64.saturating_sub(height);
+        let last = first.saturating_add(height);
         buf.pending_vlf_tail_jump = true;
-        buf.vlf_tail_jump_viewport = Some(line_count);
+        buf.vlf_tail_jump_viewport = Some(viewport_lines);
         buf.last_scroll = None;
         send_xi_notification(
             &self.tx,

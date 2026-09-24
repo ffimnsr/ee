@@ -125,6 +125,7 @@ impl BufferManager {
             vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
             vlf_tail_jump_viewport: None,
+            vlf_requested_viewport: None,
             vlf_search_ranges: Vec::new(),
         };
         let mut view_to_idx = HashMap::new();

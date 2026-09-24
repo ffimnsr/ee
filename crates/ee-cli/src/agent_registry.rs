@@ -499,6 +499,35 @@ fn command_extensions() -> Vec<String> {
     vec![String::new()]
 }
 
+/// Spawns the version probe, retrying briefly when `exec` reports the file as
+/// busy (ETXTBSY).
+///
+/// A process forked by another thread while the probe binary was being
+/// written inherits the open write handle for an instant; until it `exec`s,
+/// Linux refuses to execute that file. The window is milliseconds wide, so a
+/// short retry is enough — and the same race can hit a real install whose
+/// probe runs while another agent process is spawning.
+fn spawn_version_probe(probe: &mut Command, command: &Path) -> Result<std::process::Child, String> {
+    const RETRIES: usize = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(5);
+    for attempt in 0..=RETRIES {
+        match probe.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if is_text_file_busy(&error) && attempt < RETRIES => {
+                thread::sleep(RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(format!("cannot check {} version: {error}", command.display()));
+            }
+        }
+    }
+    Err(format!("cannot check {} version: file stayed busy", command.display()))
+}
+
+fn is_text_file_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ExecutableFileBusy || error.raw_os_error() == Some(26)
+}
+
 fn command_reports_version(command: &Path, expected: &str) -> Result<bool, String> {
     let mut stdout = tempfile::tempfile()
         .map_err(|error| format!("cannot capture {} version stdout: {error}", command.display()))?;
@@ -519,9 +548,7 @@ fn command_reports_version(command: &Path, expected: &str) -> Result<bool, Strin
         use std::os::unix::process::CommandExt as _;
         probe.process_group(0);
     }
-    let mut child = probe
-        .spawn()
-        .map_err(|error| format!("cannot check {} version: {error}", command.display()))?;
+    let mut child = spawn_version_probe(&mut probe, command)?;
     let process_id = child.id();
     let deadline = Instant::now() + VERSION_TIMEOUT;
     let status = loop {

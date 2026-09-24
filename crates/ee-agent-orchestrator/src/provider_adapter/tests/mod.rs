@@ -173,6 +173,10 @@ impl Harness {
 
     /// Waits for exactly `count` outbound frames, keeping overflow
     /// queued for the next call.
+    ///
+    /// Uses a real 1 ms tick instead of a `yield_now` spin so a loaded
+    /// runner cannot exhaust the budget before the responder is scheduled
+    /// (under paused time the tick advances instantly).
     async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
             let ready = {
@@ -185,7 +189,7 @@ impl Harness {
             if let Some(frames) = ready {
                 return frames;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         panic!("timed out waiting for {count} outbound frames");
     }
@@ -287,11 +291,13 @@ async fn drain_mcp_diagnostics(handle: &Harness) {
     }
 }
 async fn wait_until(condition: impl Fn() -> bool) {
+    // Real 1 ms tick: a `yield_now` spin burns the budget in microseconds
+    // under load (paused time advances the tick instantly).
     for _ in 0..10_000 {
         if condition() {
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
     panic!("condition never satisfied");
 }

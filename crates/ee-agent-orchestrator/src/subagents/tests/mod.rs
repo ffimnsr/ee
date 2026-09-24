@@ -108,11 +108,13 @@ fn manager_harness(config: OrchestratorConfig, model: Arc<dyn ModelAdapter>) -> 
     ManagerHarness { manager, tasks, _memory: memory, budget, children }
 }
 async fn wait_until(condition: impl Fn() -> bool) {
+    // Real 1 ms tick: a `yield_now` spin burns the budget in microseconds
+    // under load (paused time advances the tick instantly).
     for _ in 0..10_000 {
         if condition() {
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
     panic!("condition never satisfied");
 }

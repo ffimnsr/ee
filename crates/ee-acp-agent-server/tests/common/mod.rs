@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use ee_acp_agent_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
@@ -374,6 +375,11 @@ impl Harness {
 
     /// Waits for exactly `count` outbound frames, in order, keeping any
     /// overflow queued for the next call.
+    ///
+    /// The wait yields to the scheduler with a real 1 ms tick: a pure
+    /// `yield_now` spin burns its budget in microseconds, so a loaded CI
+    /// runner can delay the responder past it and the suite fails with empty
+    /// queues. Under paused time the tick advances instantly.
     pub async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
             let frames = {
@@ -386,7 +392,7 @@ impl Harness {
             if !frames.is_empty() {
                 return frames;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!(
             "not enough outbound frames within budget; wanted {count}, pending={:?}, fresh={:?}",
@@ -434,13 +440,16 @@ pub async fn spawn_server_with_config(
 
 /// Waits until a predicate over the provider call log holds, then returns
 /// the log.
+///
+/// Uses a real 1 ms tick instead of a `yield_now` spin so a loaded runner
+/// cannot exhaust the budget before the provider task is scheduled.
 pub async fn wait_for_log(log: &CallLog, predicate: impl Fn(&[String]) -> bool) -> Vec<String> {
     for _ in 0..5_000 {
         let calls = log.calls();
         if predicate(&calls) {
             return calls;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     panic!("call log predicate not satisfied; calls={:?}", log.calls());
 }

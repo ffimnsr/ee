@@ -534,6 +534,102 @@ fn vlf_tail_jump_lands_cursor_when_tail_window_update_arrives() {
 }
 
 #[test]
+fn vlf_tail_viewport_sentinel_is_viewport_sized() {
+    // Bug regression: the sentinel scroll used the line count as its span,
+    // wedging the core view height into the hundreds of thousands; later
+    // `request_lines` repairs then rendered whole-file spans (hundreds of ms
+    // each) and teardown drained that backlog for tens of seconds.
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    mgr.is_vlf = true;
+    mgr.vlf_approx_line_count = 279_813;
+
+    mgr.request_vlf_tail_viewport(40).unwrap();
+    let message: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail scroll request should be json");
+    let params = message["params"]["params"].as_array().expect("params array");
+    let first = params[0].as_i64().expect("first");
+    let last = params[1].as_i64().expect("last");
+    assert_eq!(last - first, 40, "sentinel span must stay viewport-sized");
+}
+
+#[test]
+fn vlf_shrunk_window_requests_missing_viewport_lines() {
+    // Bug regression: deep scrolling shrinks the bounded window; the core's
+    // document-wide shadow then answers scrolls with copy-only updates and
+    // the uncovered viewport rows stay `Loading` forever. The manager must
+    // request the missing ranges through the forced-render path.
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    // Land a window far below the viewport the UI will ask for.
+    let ops = (500..540)
+        .map(|idx| CoreUpdateOp {
+            op: CoreUpdateKind::Insert,
+            n: 1,
+            lines: vec![CoreLine {
+                text: Some(format!("row {idx}\n")),
+                cursor: Vec::new(),
+                syntax_spans: Some(Vec::new()),
+                logical_line: Some(idx),
+            }],
+        })
+        .collect::<Vec<_>>();
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("view-id-1"),
+            update: CoreUpdate {
+                ops,
+                pristine: true,
+                annotations: Vec::new(),
+                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                    count: 10_000,
+                    exact: true,
+                    index_progress: 1.0,
+                }),
+            },
+        })
+        .unwrap();
+    mgr.drain_events().unwrap();
+    assert_eq!(mgr.get_line(500), Some("row 500"));
+
+    // The UI asks for the viewport above; the core answers copy-only (nothing
+    // changed for its shadow), leaving rows 100..140 uncovered locally.
+    mgr.notify_scroll(100, 140).unwrap();
+    let _scroll: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("scroll notification should be json");
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("view-id-1"),
+            update: CoreUpdate {
+                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 10_000, lines: Vec::new() }],
+                pristine: true,
+                annotations: Vec::new(),
+                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                    count: 10_000,
+                    exact: true,
+                    index_progress: 1.0,
+                }),
+            },
+        })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    let repair: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("coverage repair should be sent"),
+    )
+    .expect("repair notification should be json");
+    assert_eq!(repair["params"]["method"], "request_lines");
+    assert_eq!(repair["params"]["params"], json!([100, 140]));
+    assert!(mgr.pending_line_request, "repair must gate further repeats");
+}
+
+#[test]
 fn vlf_startup_pump_requests_initial_scroll_after_document_mode() {
     let path = unique_temp_path("ee-cli-vlf-startup");
     fs::write(&path, "alpha\nbeta\n").unwrap();

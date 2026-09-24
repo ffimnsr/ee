@@ -203,6 +203,37 @@ fn installed_binary_is_reused_only_at_exact_registry_version() {
 
 #[cfg(unix)]
 #[test]
+fn version_probe_retries_while_the_file_is_text_busy() {
+    // Regression: a fork from another thread can inherit the freshly written
+    // probe file's open write handle, making `exec` fail ETXTBSY until that
+    // child execs. Hold a write handle deterministically and release it from
+    // a helper thread so the retry can succeed.
+    let temp = tempfile::tempdir().unwrap();
+    let command = temp.path().join("busy-agent");
+    write_executable(&command, "#!/bin/sh\nprintf '%s\\n' 'busy-agent 1.2.3'\n");
+    let hold = fs::OpenOptions::new().write(true).open(&command).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(hold);
+    });
+
+    assert!(command_reports_version(&command, "1.2.3").unwrap());
+    releaser.join().unwrap();
+
+    // Without the retry the same exec fails immediately: prove the hold
+    // actually produced ETXTBSY by probing while still holding the handle.
+    let hold = fs::OpenOptions::new().write(true).open(&command).unwrap();
+    let error = Command::new(&command).arg("--version").output().unwrap_err();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(26),
+        "expected ETXTBSY while a write handle is open, got {error}"
+    );
+    drop(hold);
+}
+
+#[cfg(unix)]
+#[test]
 fn version_probe_kills_descendants_holding_output_pipes() {
     let temp = tempfile::tempdir().unwrap();
     let command = temp.path().join("forking-agent");

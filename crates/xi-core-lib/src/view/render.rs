@@ -173,9 +173,6 @@ impl View {
         language_name: &str,
         syntax_enabled: bool,
     ) {
-        // Wrap-aware visual math, find, and plugin annotations are rope-backed
-        // in Stage A; non-rope sources (VLF) render without them (Phase 2
-        // enables cursor/selection annotations behind a feature gate).
         let rope = text.as_rope();
 
         // every time current visible range changes, annotations are sent to frontend
@@ -496,6 +493,18 @@ impl View {
         let mut plan = RenderPlan::create(height, self.first_line, self.height);
         plan.request_lines(first_line, last_line);
         self.send_update_for_plan(text, client, &plan, pristine, language_name, syntax_enabled);
+    }
+
+    /// Clear the frontend-validity claim over `first..last` so the next render
+    /// re-sends those rows even when the shadow considered them cached.
+    ///
+    /// Used by the bounded VLF window: it can drop rows the document-wide
+    /// shadow still claims valid, and a copy-only answer would leave the
+    /// frontend unable to refill them.
+    pub(crate) fn invalidate_shadow_range(&mut self, first: usize, last: usize) {
+        if first < last {
+            self.lc_shadow.partial_invalidate(first, last, line_cache_shadow::ALL_VALID);
+        }
     }
 
     /// Invalidates front-end's entire line cache, forcing a full render at the next

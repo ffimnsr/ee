@@ -173,6 +173,11 @@ impl Harness {
 
     /// Waits for exactly `count` outbound frames, in order, keeping any
     /// overflow queued for the next call.
+    ///
+    /// The wait yields to the scheduler with a real 1 ms tick: a pure
+    /// `yield_now` spin burns its budget in microseconds, so a loaded CI
+    /// runner can delay the responder past it and the suite fails with empty
+    /// queues. Under paused time the tick advances instantly.
     pub async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
             let frames = {
@@ -185,7 +190,7 @@ impl Harness {
             if !frames.is_empty() {
                 return frames;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!(
             "not enough outbound frames within budget; wanted {count}, pending={:?}, fresh={:?}",

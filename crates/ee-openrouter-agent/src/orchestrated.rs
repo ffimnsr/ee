@@ -639,7 +639,7 @@ pub mod test_support {
             }
         }
 
-        /// Like [`pause_then_with_virtual_timeout`], but the model call whose
+        /// Like [`Self::pause_then_with_virtual_timeout`], but the model call whose
         /// deadline expires resolves with a plain assistant message instead of
         /// parking forever.
         ///

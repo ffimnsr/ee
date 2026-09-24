@@ -88,7 +88,7 @@ impl BufferManager {
             exact,
             start,
             len,
-            last_scroll,
+            requested_viewport,
             view_id,
             unpopulated,
             tail_jump_cleared,
@@ -103,7 +103,7 @@ impl BufferManager {
                 buf.vlf_line_count_exact,
                 buf.vlf_cache_start_line,
                 buf.line_cache.len(),
-                buf.last_scroll,
+                buf.vlf_requested_viewport,
                 buf.view_id.clone(),
                 buf.line_cache.iter().all(|slot| matches!(slot, LineSlot::Invalid)),
                 tail_pending_before && !buf.pending_vlf_tail_jump,
@@ -126,7 +126,12 @@ impl BufferManager {
         // count until a window lands.
         if !tail_jump_cleared && self.bufs[idx].pending_vlf_tail_jump {
             if count > 0 {
-                return self.request_vlf_tail_viewport(count_usize);
+                // Pass a viewport-sized height: the sentinel's span must not
+                // travel with the line count (it wedges the core view height).
+                let height = self.bufs[idx]
+                    .vlf_tail_jump_viewport
+                    .unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
+                return self.request_vlf_tail_viewport(height);
             }
             return Ok(());
         }
@@ -134,7 +139,7 @@ impl BufferManager {
             if exact && count == 0 {
                 return Ok(()); // the store really has no lines; nothing renders
             }
-            let (first, last) = last_scroll.unwrap_or((0, Self::STARTUP_VLF_VIEWPORT_LINES));
+            let (first, last) = requested_viewport.unwrap_or((0, Self::STARTUP_VLF_VIEWPORT_LINES));
             return send_rpc_notification(
                 &self.tx,
                 "edit",
@@ -146,7 +151,9 @@ impl BufferManager {
             );
         }
         if !exact && count > 0 && start.saturating_add(len) >= count_usize {
-            return self.request_vlf_tail_viewport(count_usize);
+            let height =
+                self.bufs[idx].vlf_tail_jump_viewport.unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
+            return self.request_vlf_tail_viewport(height);
         }
         // The index matured while a previous jump left the cursor parked on
         // the stale (approximate) end: re-jump so the tail chases the real
@@ -158,7 +165,52 @@ impl BufferManager {
             && count > 0
             && cursor.saturating_add(1) >= usize::try_from(count_before).unwrap_or(usize::MAX)
         {
-            return self.request_vlf_tail_viewport(count_usize);
+            let height =
+                self.bufs[idx].vlf_tail_jump_viewport.unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
+            return self.request_vlf_tail_viewport(height);
+        }
+        // The bounded window can miss viewport rows the core still considers
+        // cached (its shadow is document-wide, and deep scrolling shrinks the
+        // window): without a forced re-render the core answers scrolls with
+        // copy-only updates and the rows stay `Loading`. Request the uncovered
+        // ranges; `pending_line_request` gates the re-sends until a response
+        // lands.
+        if !self.bufs[idx].pending_line_request
+            && let Some((first, last)) = requested_viewport
+        {
+            let mut missing: Vec<(usize, usize)> = Vec::new();
+            {
+                let buf = &self.bufs[idx];
+                let mut gap_start: Option<usize> = None;
+                for li in first..last {
+                    let covered = matches!(buf.line_slot(li), Some(LineSlot::Known(_)));
+                    match (covered, gap_start) {
+                        (false, None) => gap_start = Some(li),
+                        (true, Some(start)) => {
+                            missing.push((start, li));
+                            gap_start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(start) = gap_start {
+                    missing.push((start, last));
+                }
+            }
+            if !missing.is_empty() {
+                self.bufs[idx].pending_line_request = true;
+                for (start, end) in missing.into_iter().take(4) {
+                    send_rpc_notification(
+                        &self.tx,
+                        "edit",
+                        json!({
+                            "view_id": view_id,
+                            "method": "request_lines",
+                            "params": [start, end],
+                        }),
+                    )?;
+                }
+            }
         }
         Ok(())
     }

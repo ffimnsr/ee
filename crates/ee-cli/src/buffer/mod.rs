@@ -116,6 +116,10 @@ pub(crate) struct BufState {
     /// Viewport height the pending tail jump was issued with; consumed when
     /// the tail window lands to preload the page above the tail.
     pub(crate) vlf_tail_jump_viewport: Option<usize>,
+    /// Last viewport range the UI asked the core to render. Unlike
+    /// `last_scroll` (overwritten with the landed window's range for dedupe),
+    /// this is the actual visible range used for coverage repairs.
+    pub(crate) vlf_requested_viewport: Option<(usize, usize)>,
     /// Backend-authoritative visible VLF match ranges for current search.
     pub(crate) vlf_search_ranges: Vec<VlfSearchRange>,
 }
@@ -182,6 +186,7 @@ impl PartialEq for BufState {
             && self.vlf_index_progress == other.vlf_index_progress
             && self.pending_vlf_tail_jump == other.pending_vlf_tail_jump
             && self.vlf_tail_jump_viewport == other.vlf_tail_jump_viewport
+            && self.vlf_requested_viewport == other.vlf_requested_viewport
             && self.vlf_search_ranges == other.vlf_search_ranges
     }
 }
@@ -211,6 +216,11 @@ pub(crate) fn vlf_window_from_ops(
     old: &[LineSlot],
     old_start: usize,
 ) -> Option<(usize, usize, Vec<LineSlot>)> {
+    // Rows kept on each side of the freshly rendered insert span. Bounds the
+    // window so long scroll sessions cannot grow it toward the whole file
+    // (copies re-emit rows the client already holds, and a document-wide
+    // window makes every later apply, repair, and teardown O(document)).
+    const WINDOW_OVERSCAN: usize = 512;
     // Collect positioned rows in view order. Wrapped VLF inserts carry `ln`
     // only on logical-line heads (continuation rows omit it), so wrapped
     // windows must be slotted as dense display rows — a naive ln fallback
@@ -225,10 +235,18 @@ pub(crate) fn vlf_window_from_ops(
     }
     let mut rows: Vec<(Option<usize>, LineSlot)> = Vec::new();
     let mut source_index: usize = 0; // cursor into the previous window for copy ops
+    let mut insert_min: Option<usize> = None;
+    let mut insert_max: Option<usize> = None;
+    let mut insert_count = 0usize;
     for op in ops {
         match op.op {
             CoreUpdateKind::Insert => {
                 for line in op.lines {
+                    if let Some(ln) = line.logical_line {
+                        insert_min = Some(insert_min.map_or(ln, |min| min.min(ln)));
+                        insert_max = Some(insert_max.map_or(ln, |max| max.max(ln)));
+                    }
+                    insert_count += 1;
                     rows.push((line.logical_line, LineSlot::from(line)));
                 }
             }
@@ -272,7 +290,20 @@ pub(crate) fn vlf_window_from_ops(
     }
     if rows.iter().all(|(ln, _)| ln.is_some()) {
         // Unwrapped: every row is a logical line; position by absolute `ln`
-        // (gaps between multiple inserts stay Invalid).
+        // (gaps between multiple inserts stay Invalid). Trim to the insert
+        // span ± overscan so copied rows cannot grow the window without bound.
+        let trimmed = match (insert_min, insert_max) {
+            (Some(min), Some(max)) => {
+                let keep_start = min.saturating_sub(WINDOW_OVERSCAN);
+                let keep_end = max.saturating_add(1).saturating_add(WINDOW_OVERSCAN);
+                rows.retain(|(ln, _)| ln.is_some_and(|ln| ln >= keep_start && ln < keep_end));
+                true
+            }
+            _ => false,
+        };
+        if trimmed && rows.is_empty() {
+            return None;
+        }
         let mut window: Vec<(usize, LineSlot)> = Vec::with_capacity(rows.len());
         for (ln, slot) in rows {
             window.push((ln.expect("checked above"), slot));
@@ -288,6 +319,13 @@ pub(crate) fn vlf_window_from_ops(
         Some((start, end, cache))
     } else {
         // Wrapped: dense display rows anchored at the window's first head.
+        // Bound the dense window by the insert rows plus overscan on each
+        // side, keeping the newest rows so the freshly rendered span survives.
+        let max_rows = insert_count.saturating_add(WINDOW_OVERSCAN.saturating_mul(2));
+        if rows.len() > max_rows {
+            let drop = rows.len() - max_rows;
+            rows.drain(..drop);
+        }
         let start = rows.iter().find_map(|(ln, _)| *ln).unwrap_or(0);
         let end = start + rows.len();
         Some((start, end, rows.into_iter().map(|(_, slot)| slot).collect()))

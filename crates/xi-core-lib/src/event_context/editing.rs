@@ -40,7 +40,12 @@ impl<'a> EventContext<'a> {
         {
             // Stage A Phase 3+: VLF invalid-slot repairs go through the
             // unified render path (the rope snapshot would be the empty
-            // placeholder).
+            // placeholder). The bounded VLF window can drop rows the
+            // document-wide shadow still claims valid (deep scrolling shrinks
+            // the window), so clear the claim over the requested span first:
+            // otherwise `needs_render` answers with a copy-only update and the
+            // frontend can never refill the rows.
+            view.invalidate_shadow_range(first, last);
             view.request_lines(
                 store.as_ref(),
                 self.client,
