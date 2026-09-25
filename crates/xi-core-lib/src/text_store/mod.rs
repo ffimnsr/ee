@@ -26,10 +26,15 @@
 //! storage backend. If performance profiling later shows vtable overhead is
 //! significant, a thin enum wrapper can be added without changing public APIs.
 
+use std::borrow::Cow;
+
 pub mod render_source;
 pub mod rope_store;
 
-pub use render_source::{ReadResult, RenderLineCount, RenderSource};
+#[cfg(test)]
+pub(crate) mod conformance;
+
+pub use render_source::{ReadBytesResult, ReadResult, RenderLineCount, RenderSource};
 
 // ---------------------------------------------------------------------------
 // Document mode
@@ -418,6 +423,31 @@ pub enum TextChunkResult {
     Unsupported,
 }
 
+/// Result of a borrowed text-chunk read.
+///
+/// `Ready` carries the same bytes and the same `byte_range` as the owned carrier
+/// ([`TextChunkResult::Ready`]) for the same request, and `Pending` / `Cancelled`
+/// / `Unsupported` mirror the owned outcomes one for one, so the two carriers are
+/// interchangeable for callers that only need bytes.
+///
+/// Whether the bytes are actually borrowed is implementation-defined: a store can
+/// lend them when the range sits inside one backing chunk it owns for the lifetime
+/// of `&self`, and otherwise reports an owned copy. A store whose chunks live
+/// behind interior-mutability caches always reports the owned copy, which is also
+/// what the default [`TextStore::read_chunk_bytes`] does. Callers must not branch
+/// on the `Cow` variant for correctness, only for cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkBytes<'a> {
+    /// The chunk is available as UTF-8 bytes.
+    Ready { bytes: Cow<'a, [u8]>, byte_range: ByteRange },
+    /// The page backing this range has not yet been read from disk.
+    Pending,
+    /// The read was cancelled (e.g. by a newer viewport request).
+    Cancelled,
+    /// The operation is not supported in the current document mode.
+    Unsupported,
+}
+
 // ---------------------------------------------------------------------------
 // TextStore trait
 // ---------------------------------------------------------------------------
@@ -448,6 +478,34 @@ pub trait TextStore {
     /// Returns `TextChunkResult::Unsupported` if the range is out of bounds.
     /// Returns `TextChunkResult::Pending` when the page is not yet loaded.
     fn read_byte_range(&self, range: ByteRange) -> TextChunkResult;
+
+    /// Read UTF-8 bytes for the given byte range, borrowing store storage when
+    /// the range sits inside one lendable backing chunk.
+    ///
+    /// Same validation, pending, and cancellation semantics as
+    /// [`TextStore::read_byte_range`], with byte-identical content for the same
+    /// request. The returned `byte_range` is the range the store actually served,
+    /// which can be wider than the request where a store snaps ranges (VLF seam
+    /// decoding, lossy overlay views); callers must use the returned range rather
+    /// than assuming the request was served verbatim.
+    ///
+    /// Borrowing is implementation-defined, and the default implementation below
+    /// always reports an owned copy. A store must keep that default when its
+    /// storage cannot be lent for the lifetime of `&self` (because reads copy out
+    /// of an owning cache, or because an evicting cache could invalidate the
+    /// borrow); override it only when the storage is genuinely lendable, as
+    /// `RopeTextStore` does for a range inside one rope leaf.
+    fn read_chunk_bytes(&self, range: ByteRange) -> ChunkBytes<'_> {
+        match self.read_byte_range(range) {
+            TextChunkResult::Ready(chunk) => ChunkBytes::Ready {
+                bytes: Cow::Owned(chunk.text.into_bytes()),
+                byte_range: chunk.byte_range,
+            },
+            TextChunkResult::Pending => ChunkBytes::Pending,
+            TextChunkResult::Cancelled => ChunkBytes::Cancelled,
+            TextChunkResult::Unsupported => ChunkBytes::Unsupported,
+        }
+    }
 
     /// Map a logical line number to the byte offset of its first character.
     fn line_to_byte(&self, line: LogicalLine) -> LineLookup;

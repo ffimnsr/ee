@@ -6,8 +6,9 @@ use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
 use crate::app::App;
+use crate::backend::update::{CoreLine, VlfTotalLines};
 use crate::backend::{
-    BackendEvent, CachedLine, CoreLine, CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot,
+    BackendEvent, CachedLine, CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot,
     coalesce_backend_events, invalid_line_ranges_bounded, parse_notification,
 };
 use crate::buffer::BufferManager;
@@ -106,21 +107,24 @@ fn render_source_fixture_under_one_frame_budget() {
 
 fn vlf_update(ops: Vec<CoreUpdateOp>, count: u64, exact: bool) -> CoreUpdate {
     CoreUpdate {
+        blob: None,
         ops,
         pristine: true,
         annotations: Vec::new(),
-        vlf_total_lines: Some(crate::backend::VlfTotalLines { count, exact, index_progress: 1.0 }),
+        vlf_total_lines: Some(VlfTotalLines { count, exact, index_progress: 1.0 }),
+        scopes: Vec::new(),
     }
 }
 
 fn inserted(text: &str, ln: usize) -> CoreUpdateOp {
     CoreUpdateOp {
+        blob: false,
         op: CoreUpdateKind::Insert,
         n: 1,
         lines: vec![CoreLine {
             text: Some(text.to_owned()),
             cursor: Vec::new(),
-            syntax_spans: Some(Vec::new()),
+            spans: Some(Vec::new()),
             logical_line: Some(ln),
         }],
     }
@@ -128,12 +132,13 @@ fn inserted(text: &str, ln: usize) -> CoreUpdateOp {
 
 fn inserted_row(text: &str, ln: Option<usize>) -> CoreUpdateOp {
     CoreUpdateOp {
+        blob: false,
         op: CoreUpdateKind::Insert,
         n: 1,
         lines: vec![CoreLine {
             text: Some(text.to_owned()),
             cursor: Vec::new(),
-            syntax_spans: Some(Vec::new()),
+            spans: Some(Vec::new()),
             logical_line: ln,
         }],
     }
@@ -194,6 +199,47 @@ fn vlf_wrapped_window_anchors_at_mid_file_head() {
 }
 
 #[test]
+fn rejected_vlf_update_keeps_the_window() {
+    // A malformed insert must not empty the bounded window. The shared VLF
+    // helper restores the previous cache on rejection, so the next payload —
+    // which the core builds assuming the client still holds those rows — applies
+    // cleanly instead of failing against an empty window forever.
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.apply_update(vlf_update(vec![inserted("alpha", 0), inserted("beta", 1)], 2, true)).unwrap();
+    let before = buf.line_cache.clone();
+    assert_eq!(buf.line_cache.len(), 2);
+
+    let rejected = buf.apply_update(vlf_update(
+        vec![CoreUpdateOp {
+            blob: false,
+            op: CoreUpdateKind::Insert,
+            n: 1,
+            lines: vec![CoreLine {
+                text: Some(String::from("gamma")),
+                cursor: Vec::new(),
+                // Scope id 9 against an empty table: rejected on decode.
+                spans: Some(vec![0, 3, 9]),
+                logical_line: Some(2),
+            }],
+        }],
+        3,
+        true,
+    ));
+    assert!(rejected.is_err(), "unknown scope id must reject the payload");
+    assert_eq!(buf.line_cache, before, "a rejected payload leaves the window intact");
+    assert_eq!(buf.get_line(0), Some("alpha"), "window rows stay readable");
+
+    buf.apply_update(vlf_update(
+        vec![inserted("alpha", 0), inserted("beta", 1), inserted("gamma", 2)],
+        3,
+        true,
+    ))
+    .unwrap();
+    assert_eq!(buf.line_cache.len(), 3);
+}
+
+#[test]
 fn vlf_update_window_populates_line_cache() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
@@ -204,12 +250,17 @@ fn vlf_update_window_populates_line_cache() {
     assert_eq!(buf.vlf_cache_start_line, 0);
     assert_eq!(
         buf.line_slot(0).cloned().unwrap(),
-        LineSlot::from(CoreLine {
-            text: Some(String::from("alpha")),
-            cursor: vec![],
-            syntax_spans: Some(Vec::new()),
-            logical_line: Some(0),
-        })
+        LineSlot::from_core_line(
+            CoreLine {
+                text: Some(String::from("alpha")),
+                cursor: vec![],
+                spans: Some(Vec::new()),
+                logical_line: Some(0),
+            },
+            &[],
+            None,
+        )
+        .unwrap()
     );
     assert_eq!(buf.get_line(0), Some("alpha"));
     assert_eq!(buf.get_line(1), Some("beta"));
@@ -337,7 +388,7 @@ fn vlf_copy_only_update_keeps_window_and_cursor() {
     })];
 
     buf.apply_update(vlf_update(
-        vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() }],
+        vec![CoreUpdateOp { blob: false, op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() }],
         1_000,
         false,
     ))
@@ -385,7 +436,7 @@ fn vlf_mixed_insert_copy_window_keeps_copied_rows() {
         vec![
             inserted("line 8", 8),
             inserted("line 9", 9),
-            CoreUpdateOp { op: CoreUpdateKind::Copy, n: 3, lines: Vec::new() },
+            CoreUpdateOp { blob: false, op: CoreUpdateKind::Copy, n: 3, lines: Vec::new() },
         ],
         100,
         true,
@@ -423,7 +474,7 @@ fn vlf_window_trims_to_insert_span_with_overscan() {
 
     // Fresh render at 10_000..10_040 plus a copy re-assert over the overlap.
     let mut ops: Vec<CoreUpdateOp> = (10_000..10_040).map(|ln| inserted("new", ln)).collect();
-    ops.push(CoreUpdateOp { op: CoreUpdateKind::Copy, n: 2_000, lines: Vec::new() });
+    ops.push(CoreUpdateOp { blob: false, op: CoreUpdateKind::Copy, n: 2_000, lines: Vec::new() });
     buf.apply_update(vlf_update(ops, 20_000, true)).unwrap();
 
     assert_eq!(buf.vlf_cache_start_line, 10_000, "window anchors at the render span");
@@ -750,20 +801,28 @@ fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
 
     state
         .apply_update(CoreUpdate {
+            blob: None,
             pristine: true,
             vlf_total_lines: None,
             annotations: Vec::new(),
+            scopes: Vec::new(),
             ops: vec![
                 // Copy entire existing cache — must not scan non-copy lines.
-                CoreUpdateOp { op: CoreUpdateKind::Copy, n: large_line_count, lines: Vec::new() },
+                CoreUpdateOp {
+                    blob: false,
+                    op: CoreUpdateKind::Copy,
+                    n: large_line_count,
+                    lines: Vec::new(),
+                },
                 // Append one new line.
                 CoreUpdateOp {
+                    blob: false,
                     op: CoreUpdateKind::Insert,
                     n: 1,
                     lines: vec![CoreLine {
                         text: Some(String::from("new-tail")),
                         cursor: Vec::new(),
-                        syntax_spans: None,
+                        spans: None,
                         logical_line: None,
                     }],
                 },
@@ -795,10 +854,13 @@ fn invalidate_op_large_count_does_not_allocate_text() {
 
     state
         .apply_update(CoreUpdate {
+            blob: None,
             pristine: true,
             vlf_total_lines: None,
             annotations: Vec::new(),
+            scopes: Vec::new(),
             ops: vec![CoreUpdateOp {
+                blob: false,
                 op: CoreUpdateKind::Invalidate,
                 n: 100_000,
                 lines: Vec::new(),

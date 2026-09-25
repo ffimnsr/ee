@@ -1,7 +1,40 @@
 //! VLF store tests: `RenderSource` surface (Stage A Phase 2).
 use super::*;
 
-use crate::text_store::{LogicalLine, ReadResult, RenderLineCount, RenderSource};
+use crate::text_store::{LogicalLine, ReadBytesResult, ReadResult, RenderLineCount, RenderSource};
+
+#[test]
+fn read_bytes_matches_read_range_and_reports_pending() {
+    // VLF has no lendable carrier yet, so the byte path is the owned text path:
+    // same bytes for a served range, and the same retry signal when the pager
+    // refuses the read.
+    let content = b"alpha\nbeta gamma\ndelta\n";
+    let (store, _f) = store_from(content);
+    store.scan_all().unwrap();
+
+    for (start, end) in [(0, 6), (6, 11), (11, content.len()), (0, 0)] {
+        let expected = match RenderSource::read_range(&store, start, end) {
+            ReadResult::Ready(text) => text.into_owned(),
+            other => panic!("text carrier should be ready for {start}..{end}: {other:?}"),
+        };
+        match RenderSource::read_bytes(&store, start, end) {
+            ReadBytesResult::Ready(bytes) => {
+                assert_eq!(bytes.as_ref(), expected.as_bytes(), "bytes differ for {start}..{end}");
+            }
+            other => panic!("byte carrier should be ready for {start}..{end}: {other:?}"),
+        }
+    }
+
+    // `max_read_size` is `page_size * 4`, so page size 2 refuses the widened read
+    // and both carriers must report the retry signal rather than partial bytes.
+    let content = b"0123456789abcdefghijklmnopqrstuv";
+    let mut f = NamedTempFile::new().unwrap();
+    f.write_all(content).unwrap();
+    f.flush().unwrap();
+    let store = VlfStore::open_with_config(f.path(), 2, 64).unwrap();
+    assert!(matches!(RenderSource::read_range(&store, 0, 16), ReadResult::Pending));
+    assert!(matches!(RenderSource::read_bytes(&store, 0, 16), ReadBytesResult::Pending));
+}
 
 /// Fully scanned store: every lookup is exact.
 #[test]

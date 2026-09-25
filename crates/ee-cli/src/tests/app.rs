@@ -69,10 +69,12 @@ fn backend_event_marks_only_render_critical_startup_work() {
         BackendEvent::Update {
             view_id: String::from("view"),
             update: CoreUpdate {
+                blob: None,
                 ops: Vec::new(),
                 pristine: true,
                 annotations: Vec::new(),
                 vlf_total_lines: None,
+                scopes: Vec::new(),
             },
         }
         .is_startup_critical()

@@ -8,6 +8,7 @@ pub(crate) mod agent_mcp;
 #[cfg(feature = "agents")]
 pub(crate) mod agent_pane;
 pub(crate) mod app;
+pub(crate) mod blob_frames;
 pub(crate) mod bounded_rule_extraction;
 #[cfg(feature = "agents")]
 pub(crate) mod builtin_tool_safeguards;

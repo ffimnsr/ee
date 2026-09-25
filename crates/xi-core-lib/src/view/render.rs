@@ -1,5 +1,40 @@
 //! `impl View` methods: render.
 use super::*;
+use crate::line_cache_shadow::PlanSegment;
+use crate::span_payload::{ScopeTable, clamp_offset};
+use crate::text_blob::TextBlob;
+use crate::text_store::ReadBytesResult;
+
+/// Per-op view of the update's text blob.
+///
+/// The blob itself is shared by every op in the update (one frame per payload);
+/// `used` records whether *this* op put any row into it, which is what the op's
+/// `blob` flag on the wire reports.
+pub(super) struct OpBlob<'a> {
+    blob: &'a mut TextBlob,
+    used: bool,
+}
+
+/// Encodes one line's spans as a flat `[start, end, scope_id, ..]` array.
+///
+/// Scope names are interned per update, so a line carries ids only; the scope
+/// table travels once on the update payload. Lines without spans omit the key
+/// entirely, which is what "no backend syntax for this line" means today.
+pub(super) fn encode_line_spans(
+    syntax_spans: &[VisibleSyntaxSpan],
+    scopes: &mut ScopeTable,
+) -> Option<Value> {
+    let mut flat = Vec::with_capacity(syntax_spans.len() * 3);
+    for span in syntax_spans.iter().filter(|span| span.end_byte > span.start_byte) {
+        flat.push(clamp_offset(span.start_byte));
+        flat.push(clamp_offset(span.end_byte));
+        flat.push(scopes.intern(&span.scope));
+    }
+    if flat.is_empty() {
+        return None;
+    }
+    Some(Value::Array(flat.into_iter().map(Value::from).collect()))
+}
 
 impl View {
     pub(super) fn encode_line(
@@ -7,13 +42,14 @@ impl View {
         line: VisualLine,
         text: Option<&dyn RenderSource>,
         syntax_spans: &[VisibleSyntaxSpan],
+        scopes: &mut ScopeTable,
         last_pos: usize,
         logical_line: usize,
+        blob: Option<&mut OpBlob<'_>>,
     ) -> Value {
         let start_pos = line.interval.start;
         let pos = line.interval.end;
         let mut cursors = Vec::new();
-        let mut selections = Vec::new();
         for region in self.selection.regions_in_range(start_pos, pos) {
             // cursor
             let c = region.end;
@@ -24,13 +60,6 @@ impl View {
                 || (c == pos && c == last_pos)
             {
                 cursors.push(c - start_pos);
-            }
-
-            // selection with interior
-            let sel_start_ix = clamp(region.min(), start_pos, pos) - start_pos;
-            let sel_end_ix = clamp(region.max(), start_pos, pos) - start_pos;
-            if sel_end_ix > sel_start_ix {
-                selections.push((sel_start_ix, sel_end_ix));
             }
         }
 
@@ -53,15 +82,35 @@ impl View {
         let mut result = json!({});
 
         if let Some(text) = text {
-            if let ReadResult::Ready(chunk) = text.read_range(start_pos, pos) {
-                result["text"] = json!(chunk);
+            // Row text travels either in the update's text frame (the op sets its
+            // `blob` flag, and rows are handed out positionally) or, when the peer
+            // has no byte carrier, the row would overflow the frame cap, or the
+            // source cannot serve the row now, as a per-line string. The frontend
+            // decodes both through one path, so an op may mix the two.
+            let pushed = match blob {
+                Some(op_blob) => match text.read_bytes(start_pos, pos) {
+                    ReadBytesResult::Ready(bytes) => {
+                        let pushed = op_blob.blob.push_bytes(&bytes);
+                        op_blob.used |= pushed;
+                        pushed
+                    }
+                    ReadBytesResult::Pending
+                    | ReadBytesResult::Cancelled
+                    | ReadBytesResult::Unsupported => false,
+                },
+                None => false,
+            };
+            if !pushed {
+                if let ReadResult::Ready(chunk) = text.read_range(start_pos, pos) {
+                    result["text"] = json!(chunk);
+                }
+                // `Pending`/`Cancelled` reads leave `text` out of the payload;
+                // the frontend keeps its previous line content until the next
+                // repaint.
             }
-            // `Pending`/`Cancelled` reads leave `text` out of the payload; the
-            // frontend keeps its previous line content until the next repaint.
         }
-        let encoded_syntax_spans = self.encode_syntax_spans(syntax_spans);
-        if !encoded_syntax_spans.is_empty() {
-            result["syntax_spans"] = Value::Array(encoded_syntax_spans);
+        if let Some(spans) = encode_line_spans(syntax_spans, scopes) {
+            result["spans"] = spans;
         }
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
@@ -75,20 +124,6 @@ impl View {
         result
     }
 
-    pub(super) fn encode_syntax_spans(&self, syntax_spans: &[VisibleSyntaxSpan]) -> Vec<Value> {
-        syntax_spans
-            .iter()
-            .filter(|span| span.end_byte > span.start_byte)
-            .map(|span| {
-                json!({
-                    "start_byte": span.start_byte,
-                    "end_byte": span.end_byte,
-                    "scope": span.scope,
-                })
-            })
-            .collect()
-    }
-
     pub(super) fn backend_syntax_spans_for_segment(
         &self,
         text: &dyn RenderSource,
@@ -97,11 +132,11 @@ impl View {
         language_name: &str,
         syntax_enabled: bool,
     ) -> Vec<Vec<VisibleSyntaxSpan>> {
-        // Non-rope sources (VLF) stay gated here: the windowed
-        // `vlf_visible_syntax_spans` memo served the deleted `vlf_chunks`
-        // channel, and the current frontend consumes no line syntax spans
-        // from the `update` stream (no TUI highlighter). Revisit when a
-        // consumer exists — the windowed parse + memo are unchanged.
+        // Non-rope sources (VLF) stay gated here: VLF renders with
+        // `syntax_enabled = false`, and its windowed `vlf_visible_syntax_spans`
+        // memo served the deleted `vlf_chunks` channel. Rope-backed views do
+        // feed the TUI highlighter through `update` line spans. Revisit when
+        // VLF gains a span consumer — the windowed parse + memo are unchanged.
         let Some(rope) = text.as_rope() else {
             return vec![Vec::new(); line_count];
         };
@@ -225,6 +260,8 @@ impl View {
                 pristine,
                 annotations,
                 vlf_total_lines: vlf_total_lines_for(text),
+                scopes: None,
+                blob: None,
             };
             client.update_view(self.view_id, &update);
             return;
@@ -250,8 +287,21 @@ impl View {
         let mut b = line_cache_shadow::Builder::new();
         let mut ops = Vec::new();
         let mut line_num = 0; // tracks old line cache
+        // Scope names interned while encoding this payload's lines; travels once
+        // on the `update` as the `scopes` table.
+        let mut scopes = ScopeTable::new();
+        // Binary text carrier: when the peer's transport carries raw frames, row
+        // text is appended here and referenced by slice; a peer without that
+        // capability keeps the per-line string carrier, and a row the source
+        // cannot serve (or one that would exceed the blob cap) falls back per row,
+        // so one update may mix carriers.
+        let mut blob = if client.supports_binary_frames() { Some(TextBlob::new()) } else { None };
 
-        for seg in self.lc_shadow.iter_with_plan(plan) {
+        // Collected up front: the span cache below needs `&mut self` per segment,
+        // which iterating the shadow in place (an immutable borrow of `self`) would
+        // forbid. A plan has a handful of segments, so the copy is free in practice.
+        let segments: Vec<PlanSegment> = self.lc_shadow.iter_with_plan(plan).collect();
+        for seg in segments {
             match seg.tactic {
                 RenderTactic::Discard => {
                     ops.push(UpdateOp::invalidate(seg.n));
@@ -297,8 +347,12 @@ impl View {
                             // ALL_VALID; copy lines as-is
                             ops.push(UpdateOp::copy(seg.n, logical_line + 1));
                         } else {
-                            // !CURSOR_VALID; update cursors.  `iter_lines`
-                            // reports logical line numbers 1-based.
+                            // !CURSOR_VALID; update cursors. Text and syntax are
+                            // still valid (the branch above checked both), so the
+                            // frontend keeps the spans it already decoded for
+                            // these rows: omitting `spans` avoids re-parsing and
+                            // re-walking the window on every caret move.
+                            // `iter_lines` reports logical line numbers 1-based.
                             let start_line = seg.our_line_num;
                             let mut running_logical = match rope {
                                 Some(rope) => {
@@ -317,37 +371,34 @@ impl View {
                                             l,
                                             /* text = */ None,
                                             &[],
+                                            &mut scopes,
                                             text.len_bytes(),
                                             logical,
+                                            None,
                                         )
                                     })
                                     .collect::<Vec<_>>()
                             } else {
-                                let syntax_spans = self.backend_syntax_spans_for_segment(
-                                    text,
-                                    start_line,
-                                    seg.n,
-                                    language_name,
-                                    syntax_enabled,
-                                );
                                 self.iter_render_lines(text, start_line)
                                     .take(seg.n)
-                                    .zip(syntax_spans)
-                                    .map(|(line, syntax)| {
+                                    .map(|line| {
                                         if let Some(n) = line.line_num {
                                             running_logical = n;
                                         }
                                         self.encode_line(
                                             line,
                                             Some(text),
-                                            &syntax,
+                                            &[],
+                                            &mut scopes,
                                             text.len_bytes(),
                                             running_logical,
+                                            None,
                                         )
                                     })
                                     .collect::<Vec<_>>()
                             };
 
+                            let op_blob = blob.as_mut().map(|blob| OpBlob { blob, used: false });
                             let logical_line_opt =
                                 if logical_line == 0 { None } else { Some(logical_line + 1) };
                             // Wrapped VLF emits more rows than the segment's
@@ -357,7 +408,8 @@ impl View {
                             if rope.is_none() && self.facade_wrap_cols().is_some() {
                                 span_rows = encoded_lines.len();
                             }
-                            ops.push(UpdateOp::update(encoded_lines, logical_line_opt));
+                            let blob_used = op_blob.as_ref().is_some_and(|op_blob| op_blob.used);
+                            ops.push(UpdateOp::update(encoded_lines, logical_line_opt, blob_used));
                         }
                         b.add_span(span_rows, seg.our_line_num, seg.validity);
                         line_num = seg.their_line_num + span_rows;
@@ -372,6 +424,7 @@ impl View {
                             }
                             None => seg.our_line_num + 1,
                         };
+                        let mut op_blob = blob.as_mut().map(|blob| OpBlob { blob, used: false });
                         let encoded_lines = if rope.is_none()
                             && let Some(cols) = self.facade_wrap_cols()
                         {
@@ -385,11 +438,22 @@ impl View {
                             wrapped_facade_rows(text, start_line, seg.n, cols)
                                 .into_iter()
                                 .map(|(l, logical)| {
-                                    self.encode_line(l, Some(text), &[], text.len_bytes(), logical)
+                                    self.encode_line(
+                                        l,
+                                        Some(text),
+                                        &[],
+                                        &mut scopes,
+                                        text.len_bytes(),
+                                        logical,
+                                        op_blob.as_mut(),
+                                    )
                                 })
                                 .collect::<Vec<_>>()
                         } else {
-                            let syntax_spans = self.backend_syntax_spans_for_segment(
+                            // Served from the per-view span cache when this window was
+                            // already walked for this text; a scroll back to a window
+                            // the plan discarded is a lookup instead of a re-parse.
+                            let syntax_spans = self.cached_syntax_spans_for_segment(
                                 text,
                                 start_line,
                                 seg.n,
@@ -407,8 +471,10 @@ impl View {
                                         line,
                                         Some(text),
                                         &syntax,
+                                        &mut scopes,
                                         text.len_bytes(),
                                         running_logical,
+                                        op_blob.as_mut(),
                                     )
                                 })
                                 .collect::<Vec<_>>()
@@ -426,7 +492,8 @@ impl View {
                             debug_assert_eq!(encoded_lines.len(), seg.n);
                             seg.n
                         };
-                        ops.push(UpdateOp::insert(encoded_lines));
+                        let blob_used = op_blob.as_ref().is_some_and(|op_blob| op_blob.used);
+                        ops.push(UpdateOp::insert(encoded_lines, blob_used));
                         b.add_span(span_rows, seg.our_line_num, line_cache_shadow::ALL_VALID);
                     }
                 }
@@ -438,8 +505,16 @@ impl View {
             find.set_hls_dirty(false)
         }
 
-        let update =
-            Update { ops, pristine, annotations, vlf_total_lines: vlf_total_lines_for(text) };
+        let scopes = if scopes.is_empty() { None } else { Some(scopes.into_names()) };
+        let update = Update {
+            ops,
+            pristine,
+            annotations,
+            vlf_total_lines: vlf_total_lines_for(text),
+            scopes,
+            blob: None,
+        }
+        .with_blob(blob.map(TextBlob::into_frame));
         client.update_view(self.view_id, &update);
     }
 
@@ -535,6 +610,9 @@ impl View {
     /// and currently in a debugging state.
     pub(crate) fn rewrap(&mut self, text: &Rope, width_cache: &mut WidthCache, client: &Client) {
         let _t = tracing::trace_span!("View::rewrap", categories = "core").entered();
+        // Wrapping decides what a visual line is, so cached windows no longer refer
+        // to the rows they were walked for.
+        self.syntax_cache.invalidate();
         let visible = self.first_line..self.first_line + self.height;
         let inval = self.lines.rewrap_chunk(text, width_cache, client, visible);
         if let Some(InvalLines { start_line, inval_count, new_count }) = inval {
@@ -554,6 +632,8 @@ impl View {
         width_cache: &mut WidthCache,
         drift: InsertDrift,
     ) {
+        // The text changed, so every cached span window describes something else.
+        self.syntax_cache.invalidate();
         let visible = self.first_line..self.first_line + self.height;
         match self.lines.after_edit(text, last_text, delta, width_cache, client, visible) {
             Some(InvalLines { start_line, inval_count, new_count }) => {

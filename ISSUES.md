@@ -5400,3 +5400,65 @@ Expose concurrency state clearly and validate full change set.
 - [x] Users can distinguish queued work from truly concurrent work in agents pane.
 - [x] Same-agent and cross-agent parallel behavior is documented with limits and write-safety rules.
 - [x] Formatting, targeted tests, Clippy, and workspace summary pass.
+
+## Editor Syntax Span Performance
+
+Goal: keep syntax span production cheap enough that typing and scrolling stay inside
+frame budget on every language, and keep the measurement honest with the probe that
+already exists.
+
+### Current-state analysis
+
+- Spans are render-critical: `ee-cli/src/ui/panels.rs` styles lines through
+  `highlight.rs` using the spans carried on `update` line payloads.
+- Interactive repaints (caret moves, drag selections) no longer produce spans after
+  the Phase 1b work; the cost now lands only on true `Render` segments, meaning
+  edited lines and newly visible rows.
+- Reference measurements from
+  `crates/xi-core-lib/src/view/tests/render_find_tests.rs::syntax_span_render_perf_probe`
+  (manual, ignored; run with
+  `cargo test --quiet -p ee-xi-core-lib syntax_span_render_perf_probe -- --ignored --nocapture`),
+  200-line window, warm, this machine:
+  - Rust production ~2.0 ms, parse-only ~0.4 ms, so the query walk carries ~80%.
+  - Scroll back to a previously rendered window: ~2.2 ms, 159 span rows, 15,460 B
+    before the span cache; ~0.27 ms with the cache (same rows and bytes — the walk
+    is skipped, the payload re-send is not).
+  - YAML 200-line window through `View::backend_syntax_spans_for_segment`: ~26.7 ms,
+    flat at document offsets 0, 2,400, and 4,800 of a 5,000-line document.
+  - The same 200-line YAML window through `chunk_syntax_spans` directly: 1.6 ms.
+- Consequences: the YAML cost is neither the parse window nor
+  `parse_from_document_start` (`view/render.rs` context start), because the sweep
+  is flat; it lives in the render path's own work. At ~13x a Rust window of equal
+  line count it is the largest per-render cost measured so far and would be
+  user-visible on YAML edits and scrolls.
+- Span caching landed (`crates/xi-core-lib/src/view/syntax_cache.rs`, per-view,
+  row-coverage keyed); the remaining deferred item there is incremental reparse
+  (`old_tree`). Recorded decisions and triggers live in
+  `docs/upgrades/line-payload-binary-framing.md` under "Span production: recorded
+  decisions". Do not duplicate them here.
+
+### Phase 1: Localize the YAML render-path cost
+
+#### Work items
+
+- [ ] Extend the probe to report sub-timings inside
+      `View::backend_syntax_spans_for_segment` for YAML: context-line collection,
+      chunk slicing, `chunk_syntax_spans`, span assembly, and padding.
+- [ ] Confirm the 1.6 ms direct versus 26.7 ms render-path gap is not a probe
+      artifact by running both paths in one process after a warm-up.
+- [ ] Attribute the 26 ms to a named stage with numbers before changing any code.
+- [ ] Do not change `parse_from_document_start` while the flat-offset measurement
+      stands; it is not the driver.
+- [ ] Check whether injection handling (`apply_injection_spans`, depth capped at 4)
+      runs per window for YAML and what it costs.
+- [ ] Keep every change behind the existing `VisibleSyntaxLimits` budgets and fail
+      closed to empty spans on timeout.
+
+#### Exit criteria
+
+- [ ] The 26 ms is attributed to a named stage with reproducible numbers.
+- [ ] Either a fix ships with measured before/after, or the cost is explained by an
+      unavoidable grammar property and recorded as accepted.
+- [ ] The probe keeps both paths (real render path and direct `chunk_syntax_spans`)
+      so a future change cannot hide the difference.
+- [ ] YAML typing and scrolling stay within frame budget on the reference fixture.

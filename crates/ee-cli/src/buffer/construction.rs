@@ -19,7 +19,7 @@ impl BufferManager {
         lsp_config: Table,
     ) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
-        let (from_core_tx, from_core_rx) = std_mpsc::channel::<String>();
+        let (from_core_tx, from_core_rx) = std_mpsc::channel::<Frame>();
         let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();
 
         let core_thread = thread::spawn(move || {

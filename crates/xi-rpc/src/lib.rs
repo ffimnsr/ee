@@ -108,6 +108,24 @@ pub trait Peer: Send + 'static {
     fn cancel_timer(&self, token: usize) -> bool;
     /// Requests orderly shutdown of the current RPC loop.
     fn request_shutdown(&self);
+
+    /// Whether this peer's transport carries raw binary frames.
+    ///
+    /// Backend payload builders use it to pick a carrier; the default keeps
+    /// every transport that has not opted in on the text path.
+    fn supports_binary_frames(&self) -> bool {
+        false
+    }
+
+    /// Sends one raw binary frame to the peer.
+    ///
+    /// Defaults to unsupported, matching [`Peer::supports_binary_frames`].
+    fn send_binary_frame(&self, _data: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "peer transport does not support binary frames",
+        ))
+    }
 }
 
 /// The `Peer` trait object.
@@ -659,6 +677,16 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
 
     fn request_shutdown(&self) {
         self.disconnect();
+    }
+
+    fn supports_binary_frames(&self) -> bool {
+        self.0.writer.lock().unwrap_or_else(|e| e.into_inner()).supports_binary_frames()
+    }
+
+    fn send_binary_frame(&self, data: &[u8]) -> io::Result<()> {
+        let span = trace_span!(target: "xi_rpc", "send_binary_frame", len = data.len());
+        let _entered = span.enter();
+        self.0.writer.lock().unwrap_or_else(|e| e.into_inner()).write_binary_message(data)
     }
 }
 

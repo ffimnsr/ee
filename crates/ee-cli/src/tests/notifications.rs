@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
@@ -11,8 +12,9 @@ use serde_json::{Value, json};
 use xi_core_lib::plugins::rpc::ClientPluginInfo;
 
 use crate::app::App;
+use crate::backend::update::{CoreLine, decode_spans, scope_table};
 use crate::backend::{
-    BackendEvent, CachedLine, CoreAnnotation, CoreLine, CoreSyntaxSpan, CoreUpdate, CoreUpdateKind,
+    BackendEvent, CachedLine, CoreAnnotation, CoreSyntaxSpan, CoreUpdate, CoreUpdateKind,
     CoreUpdateOp, LineSlot, invalid_line_ranges, parse_notification, startup_render_ready,
 };
 use crate::buffer::BufferManager;
@@ -107,7 +109,7 @@ fn parse_available_plugins_notification() {
 }
 
 #[test]
-fn parse_notification_decodes_syntax_spans_in_update_lines() {
+fn parse_notification_decodes_flat_span_triples_with_scope_table() {
     let event = parse_notification(
         "update",
         json!({
@@ -115,16 +117,14 @@ fn parse_notification_decodes_syntax_spans_in_update_lines() {
             "update": {
                 "pristine": true,
                 "annotations": [],
+                "scopes": ["keyword.control.rust", "constant.numeric.decimal.rust"],
                 "ops": [{
                     "op": "ins",
                     "n": 1,
                     "lines": [{
                         "text": "let x = 1",
                         "cursor": [3],
-                        "syntax_spans": [
-                            { "start_byte": 0, "end_byte": 3, "scope": "keyword.control.rust" },
-                            { "start_byte": 8, "end_byte": 9, "scope": "constant.numeric.decimal.rust" }
-                        ]
+                        "spans": [0, 3, 0, 8, 9, 1]
                     }]
                 }]
             }
@@ -133,9 +133,113 @@ fn parse_notification_decodes_syntax_spans_in_update_lines() {
     .expect("update notification should parse");
 
     let BackendEvent::Update { update, .. } = event else { panic!("expected update event") };
-    let spans = update.ops[0].lines[0].syntax_spans.as_ref().expect("missing syntax spans");
+    let flat = update.ops[0].lines[0].spans.as_ref().expect("missing flat spans");
+    let table = scope_table(&update.scopes);
+    let spans = decode_spans(flat, &table, "let x = 1".len()).expect("flat spans should decode");
+
     assert_eq!(spans.len(), 2);
-    assert_eq!(spans[0].scope, "keyword.control.rust");
+    assert_eq!(spans[0].scope.as_ref(), "keyword.control.rust");
+    assert_eq!((spans[1].start_byte, spans[1].end_byte), (8, 9));
+    assert_eq!(spans[1].scope.as_ref(), "constant.numeric.decimal.rust");
+}
+
+fn insert_update(lines: &[&str]) -> CoreUpdate {
+    CoreUpdate {
+        blob: None,
+        ops: vec![CoreUpdateOp {
+            blob: false,
+            op: CoreUpdateKind::Insert,
+            n: lines.len(),
+            lines: lines
+                .iter()
+                .map(|text| CoreLine { text: Some((*text).to_owned()), ..CoreLine::default() })
+                .collect(),
+        }],
+        pristine: true,
+        annotations: Vec::new(),
+        vlf_total_lines: None,
+        scopes: Vec::new(),
+    }
+}
+
+#[test]
+fn flat_span_decode_fails_closed_on_malformed_payloads() {
+    let table = scope_table(&[String::from("keyword.control.rust")]);
+    let line_len = 10usize;
+
+    assert!(decode_spans(&[0, 3], &table, line_len).is_err(), "truncated triple rejects");
+    assert!(decode_spans(&[9, 3, 0], &table, line_len).is_err(), "inverted range rejects");
+    assert!(decode_spans(&[0, 3, 7], &table, line_len).is_err(), "unknown scope id rejects");
+    assert!(
+        decode_spans(&[4, 4, 999], &table, line_len).is_err(),
+        "scope id is validated before a zero-width span is dropped"
+    );
+    assert!(
+        decode_spans(&[0, 5, 0, 2, 6, 0], &table, line_len).is_err(),
+        "overlapping triples reject: the highlighter walks forward-only"
+    );
+    assert!(
+        decode_spans(&[0, 5, 0, 5, 6, 0], &table, line_len).is_ok(),
+        "touching spans are ordered, not overlapping"
+    );
+    assert!(
+        decode_spans(&[(line_len + 3) as u32, (line_len + 4) as u32, 0], &table, line_len).is_err(),
+        "span start past the served line rejects"
+    );
+
+    let spans = decode_spans(&[4, 4, 0], &table, line_len).expect("zero-width span is dropped");
+    assert!(spans.is_empty());
+
+    // A span may legitimately end on the stripped trailing line ending, so the
+    // end is clipped to the served line instead of rejecting the update.
+    let spans = decode_spans(&[0, (line_len + 1) as u32, 0], &table, line_len)
+        .expect("trailing span clips");
+    assert_eq!((spans[0].start_byte, spans[0].end_byte), (0, line_len));
+}
+
+#[test]
+fn rejected_update_keeps_the_cached_lines() {
+    // A rejected payload must not empty the buffer's cache: the following `copy`
+    // ops would then fail against an empty cache and no range would read as
+    // invalid, so the app would never re-request the rows.
+    let mut buf = test_buf_state();
+    buf.apply_update(insert_update(&["alpha", "beta"])).unwrap();
+    let before = buf.line_cache.clone();
+    assert_eq!(before.len(), 2);
+
+    let rejected = buf.apply_update(CoreUpdate {
+        blob: None,
+        ops: vec![CoreUpdateOp {
+            blob: false,
+            op: CoreUpdateKind::Insert,
+            n: 1,
+            lines: vec![CoreLine {
+                text: Some(String::from("gamma")),
+                spans: Some(vec![0, 3, 9]),
+                ..CoreLine::default()
+            }],
+        }],
+        pristine: false,
+        annotations: Vec::new(),
+        vlf_total_lines: None,
+        scopes: vec![String::from("keyword.control.rust")],
+    });
+    assert!(rejected.is_err(), "unknown scope id must reject the payload");
+    assert_eq!(buf.line_cache, before, "a rejected payload leaves the cache intact");
+    assert!(!buf.lines.is_empty(), "line texts stay in step with the cache");
+
+    // The buffer still accepts the next payload, as it would after a sender bug.
+    buf.apply_update(insert_update(&["gamma"])).unwrap();
+    assert_eq!(buf.line_cache.len(), 1);
+}
+
+#[test]
+fn empty_scope_table_rejects_any_span_id() {
+    // `spans` present with an empty table is malformed, not "no styling": there
+    // is no id the table could resolve.
+    let table = scope_table(&[]);
+    let error = decode_spans(&[0, 3, 0], &table, 10).expect_err("id 0 has no entry");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
 #[test]
@@ -169,40 +273,49 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
 
     client
         .apply_update(CoreUpdate {
+            blob: None,
             pristine: false,
             vlf_total_lines: None,
+            scopes: vec![
+                String::from("unused.placeholder"),
+                String::from("also.unused"),
+                String::from("entity.name.function.rust"),
+            ],
             annotations: vec![CoreAnnotation {
                 annotation_type: String::from("selection"),
                 ranges: vec![[1, 1, 1, 3]],
                 payloads: None,
             }],
             ops: vec![
-                CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
+                CoreUpdateOp { blob: false, op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
                 CoreUpdateOp {
+                    blob: false,
                     op: CoreUpdateKind::Update,
                     n: 1,
                     lines: vec![CoreLine {
                         text: None,
                         cursor: vec![1],
-                        syntax_spans: None,
+                        spans: None,
                         logical_line: None,
                     }],
                 },
                 CoreUpdateOp {
+                    blob: false,
                     op: CoreUpdateKind::Insert,
                     n: 1,
                     lines: vec![CoreLine {
                         text: Some("delta".into()),
                         cursor: Vec::new(),
-                        syntax_spans: Some(vec![CoreSyntaxSpan {
-                            start_byte: 0,
-                            end_byte: 5,
-                            scope: "entity.name.function.rust".into(),
-                        }]),
+                        spans: Some(vec![0, 5, 2]),
                         logical_line: None,
                     }],
                 },
-                CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
+                CoreUpdateOp {
+                    blob: false,
+                    op: CoreUpdateKind::Invalidate,
+                    n: 2,
+                    lines: Vec::new(),
+                },
             ],
         })
         .unwrap();
@@ -228,16 +341,63 @@ fn update_merge_normalizes_line_text() {
     });
 
     let merged = slot
-        .merge(CoreLine {
-            text: Some(String::from("beta\n")),
-            cursor: Vec::new(),
-            syntax_spans: None,
-            logical_line: None,
-        })
+        .merge(
+            CoreLine {
+                text: Some(String::from("beta\n")),
+                cursor: Vec::new(),
+                spans: None,
+                logical_line: None,
+            },
+            &[],
+            None,
+        )
         .expect("update merge should succeed");
 
     let LineSlot::Known(line) = merged else { panic!("expected known line") };
     assert_eq!(line.text, "beta");
+}
+
+#[test]
+fn update_op_without_spans_keeps_cached_spans() {
+    // Cursor-only repaints omit `spans` on purpose: the frontend keeps what it
+    // already decoded for those rows, because text and syntax were unchanged.
+    let mut client = test_buf_state();
+    client.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("let x = 1"),
+        cursors: vec![0],
+        syntax_spans: vec![CoreSyntaxSpan {
+            start_byte: 0,
+            end_byte: 3,
+            scope: "keyword.control.rust".into(),
+        }],
+        logical_line: Some(0),
+    })];
+
+    client
+        .apply_update(CoreUpdate {
+            blob: None,
+            pristine: true,
+            vlf_total_lines: None,
+            annotations: Vec::new(),
+            scopes: Vec::new(),
+            ops: vec![CoreUpdateOp {
+                blob: false,
+                op: CoreUpdateKind::Update,
+                n: 1,
+                lines: vec![CoreLine {
+                    text: None,
+                    cursor: vec![7],
+                    spans: None,
+                    logical_line: None,
+                }],
+            }],
+        })
+        .expect("cursor-only update should apply");
+
+    let LineSlot::Known(line) = &client.line_cache[0] else { panic!("expected cached line") };
+    assert_eq!(line.cursors, vec![7], "cursors update");
+    assert_eq!(line.syntax_spans.len(), 1, "spans survive a cursor-only update");
+    assert_eq!(line.syntax_spans[0].scope.as_ref(), "keyword.control.rust");
 }
 
 #[test]
@@ -282,10 +442,17 @@ fn pristine_external_reload_update_clears_changed_flag_for_trailing_blank_line_r
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                blob: None,
                 vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
-                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 2, lines: Vec::new() }],
+                scopes: Vec::new(),
+                ops: vec![CoreUpdateOp {
+                    blob: false,
+                    op: CoreUpdateKind::Copy,
+                    n: 2,
+                    lines: Vec::new(),
+                }],
             },
         })
         .unwrap();
@@ -317,10 +484,17 @@ fn stale_view_updates_are_ignored() {
         .send(BackendEvent::Update {
             view_id: String::from("stale-view"),
             update: CoreUpdate {
+                blob: None,
                 vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
-                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Skip, n: 2, lines: Vec::new() }],
+                scopes: Vec::new(),
+                ops: vec![CoreUpdateOp {
+                    blob: false,
+                    op: CoreUpdateKind::Skip,
+                    n: 2,
+                    lines: Vec::new(),
+                }],
             },
         })
         .unwrap();
@@ -341,21 +515,29 @@ fn core_update_keeps_invalid_lines_lazy() {
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                blob: None,
                 vlf_total_lines: None,
                 pristine: true,
                 annotations: Vec::new(),
+                scopes: Vec::new(),
                 ops: vec![
                     CoreUpdateOp {
+                        blob: false,
                         op: CoreUpdateKind::Insert,
                         n: 1,
                         lines: vec![CoreLine {
                             text: Some(String::from("visible")),
                             cursor: Vec::new(),
-                            syntax_spans: None,
+                            spans: None,
                             logical_line: None,
                         }],
                     },
-                    CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 100_000, lines: Vec::new() },
+                    CoreUpdateOp {
+                        blob: false,
+                        op: CoreUpdateKind::Invalidate,
+                        n: 100_000,
+                        lines: Vec::new(),
+                    },
                 ],
             },
         })

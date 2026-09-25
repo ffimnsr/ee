@@ -64,11 +64,12 @@ fn language_changed_invalidates_view_for_syntax_refresh() {
 
     let syntax_refresh = notifications.iter().any(|(method, params)| {
         method == "update"
+            && params["update"]["scopes"].as_array().is_some_and(|scopes| !scopes.is_empty())
             && params["update"]["ops"].as_array().is_some_and(|ops| {
                 ops.iter().any(|op| {
-                    op["lines"].as_array().is_some_and(|lines| {
-                        lines.iter().any(|line| line.get("syntax_spans").is_some())
-                    })
+                    op["lines"]
+                        .as_array()
+                        .is_some_and(|lines| lines.iter().any(|line| line.get("spans").is_some()))
                 })
             })
     });

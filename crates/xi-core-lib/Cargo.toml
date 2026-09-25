@@ -51,6 +51,9 @@ windows-sys = { workspace = true }
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+# Only the `#[cfg(test)]` span-record experiments in `span_payload.rs` use this;
+# the production path ships the JSON carrier.
+zerocopy.workspace = true
 ee-ts-test-grammars = { path = "../ee-ts-test-grammars" }
 
 [features]

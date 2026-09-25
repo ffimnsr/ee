@@ -122,6 +122,10 @@ chacha20poly1305 = "0.10.1"
 keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
 sha2 = "0.10.9"
 zeroize = "1.8.2"
+# Fixed-width span/op records for the `update` payload work (see
+# docs/upgrades/line-payload-binary-framing.md). Already in the lockfile via
+# `ahash`, so this adds no new build units.
+zerocopy = { version = "0.8", features = ["derive"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 ee-acp-agent-server = { package = "ee-acp-agent-server", path = "crates/ee-acp-agent-server", version = "0.11.10" }

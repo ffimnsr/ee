@@ -9,9 +9,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use crate::app::{App, Mode};
+use crate::backend::update::{CoreLine, VlfTotalLines};
 use crate::backend::{
-    BackendEvent, CachedLine, CoreLine, CoreSyntaxSpan, CoreUpdate, CoreUpdateKind, CoreUpdateOp,
-    LineSlot,
+    BackendEvent, CachedLine, CoreSyntaxSpan, CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot,
 };
 use crate::buffer::BufferManager;
 use crate::tests::helpers::*;
@@ -116,8 +116,8 @@ fn vlf_insert_preserves_untouched_syntax_spans_before_viewport_reply() {
         text: String::from("beta"),
         cursors: Vec::new(),
         syntax_spans: vec![
-            CoreSyntaxSpan { start_byte: 0, end_byte: 2, scope: String::from("prefix") },
-            CoreSyntaxSpan { start_byte: 2, end_byte: 4, scope: String::from("suffix") },
+            CoreSyntaxSpan { start_byte: 0, end_byte: 2, scope: "prefix".into() },
+            CoreSyntaxSpan { start_byte: 2, end_byte: 4, scope: "suffix".into() },
         ],
         logical_line: None,
     })];
@@ -131,9 +131,9 @@ fn vlf_insert_preserves_untouched_syntax_spans_before_viewport_reply() {
         other => panic!("expected cached VLF line, got {other:?}"),
     };
     assert_eq!(spans.len(), 2);
-    assert_eq!(spans[0].scope, "prefix");
+    assert_eq!(spans[0].scope.as_ref(), "prefix");
     assert_eq!((spans[0].start_byte, spans[0].end_byte), (0, 2));
-    assert_eq!(spans[1].scope, "suffix");
+    assert_eq!(spans[1].scope.as_ref(), "suffix");
     assert_eq!((spans[1].start_byte, spans[1].end_byte), (3, 5));
 }
 
@@ -498,12 +498,13 @@ fn vlf_tail_jump_lands_cursor_when_tail_window_update_arrives() {
     // The tail window lands through the unified update channel.
     let ops = (0..40)
         .map(|idx| CoreUpdateOp {
+            blob: false,
             op: CoreUpdateKind::Insert,
             n: 1,
             lines: vec![CoreLine {
                 text: Some(format!("tail {idx}\n")),
                 cursor: Vec::new(),
-                syntax_spans: Some(Vec::new()),
+                spans: Some(Vec::new()),
                 logical_line: Some(9_960 + idx),
             }],
         })
@@ -512,14 +513,16 @@ fn vlf_tail_jump_lands_cursor_when_tail_window_update_arrives() {
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                blob: None,
                 ops,
                 pristine: true,
                 annotations: Vec::new(),
-                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                vlf_total_lines: Some(VlfTotalLines {
                     count: 10_000,
                     exact: false,
                     index_progress: 0.1,
                 }),
+                scopes: Vec::new(),
             },
         })
         .unwrap();
@@ -570,12 +573,13 @@ fn vlf_shrunk_window_requests_missing_viewport_lines() {
     // Land a window far below the viewport the UI will ask for.
     let ops = (500..540)
         .map(|idx| CoreUpdateOp {
+            blob: false,
             op: CoreUpdateKind::Insert,
             n: 1,
             lines: vec![CoreLine {
                 text: Some(format!("row {idx}\n")),
                 cursor: Vec::new(),
-                syntax_spans: Some(Vec::new()),
+                spans: Some(Vec::new()),
                 logical_line: Some(idx),
             }],
         })
@@ -584,14 +588,16 @@ fn vlf_shrunk_window_requests_missing_viewport_lines() {
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
+                blob: None,
                 ops,
                 pristine: true,
                 annotations: Vec::new(),
-                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                vlf_total_lines: Some(VlfTotalLines {
                     count: 10_000,
                     exact: true,
                     index_progress: 1.0,
                 }),
+                scopes: Vec::new(),
             },
         })
         .unwrap();
@@ -607,10 +613,17 @@ fn vlf_shrunk_window_requests_missing_viewport_lines() {
         .send(BackendEvent::Update {
             view_id: String::from("view-id-1"),
             update: CoreUpdate {
-                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 10_000, lines: Vec::new() }],
+                blob: None,
+                ops: vec![CoreUpdateOp {
+                    blob: false,
+                    op: CoreUpdateKind::Copy,
+                    n: 10_000,
+                    lines: Vec::new(),
+                }],
                 pristine: true,
                 annotations: Vec::new(),
-                vlf_total_lines: Some(crate::backend::VlfTotalLines {
+                scopes: Vec::new(),
+                vlf_total_lines: Some(VlfTotalLines {
                     count: 10_000,
                     exact: true,
                     index_progress: 1.0,

@@ -29,6 +29,39 @@ fn upstream_caret_invalidates_previous_visual_line() {
 }
 
 #[test]
+fn selection_change_keeps_syntax_valid_for_cursor_only_repaints() {
+    // A non-caret selection change moves cursors, not text: syntax spans stay
+    // valid so the repaint takes the cursor-only `update` path instead of
+    // re-parsing and re-walking the selected rows.
+    let mut view = View::new(1.into(), BufferId::new(2));
+    let text = Rope::from("a\nb\nc");
+    let mut shadow = line_cache_shadow::Builder::new();
+    shadow.add_span(3, 0, line_cache_shadow::ALL_VALID);
+    view.lc_shadow = shadow.build();
+    let mut selection = Selection::new();
+    selection.add_region(SelRegion::new(0, 3));
+    view.selection = selection;
+
+    view.invalidate_selection(&text);
+
+    let plan =
+        line_cache_shadow::RenderPlan { spans: vec![(3, line_cache_shadow::RenderTactic::Render)] };
+    let segments = view
+        .lc_shadow
+        .iter_with_plan(&plan)
+        .map(|segment| (segment.our_line_num, segment.n, segment.validity))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        segments,
+        vec![
+            (0, 2, line_cache_shadow::TEXT_VALID | line_cache_shadow::SYNTAX_VALID),
+            (2, 1, line_cache_shadow::ALL_VALID),
+        ],
+        "selection changes must leave syntax valid"
+    );
+}
+
+#[test]
 fn extending_backward_preserves_direction_when_regions_merge() {
     let mut view = View::new(1.into(), BufferId::new(2));
     let text = Rope::from("abcdefghi");

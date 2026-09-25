@@ -19,8 +19,8 @@ pub(crate) use xi_rpc::RpcLoop;
 
 pub(crate) use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreSyntaxSpan,
-    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, PendingRequests,
-    PendingUiAction, VlfSearchRange, block_for_response, checked_advance, coalesce_backend_events,
+    CoreUpdate, CoreUpdateKind, CoreUpdateOp, Frame, LineSlot, NavigationTarget, PendingRequests,
+    PendingUiAction, VlfSearchRange, block_for_response, coalesce_backend_events,
     drain_sync_notifications, invalid_line_ranges, invalid_line_ranges_bounded,
     normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
     send_rpc_request, startup_render_ready, xi_reader_thread,
@@ -209,13 +209,16 @@ pub(crate) fn line_text_for_slot(slot: &LineSlot) -> String {
 /// their absolute positions. Gaps (unreferenced lines) stay `Invalid`.
 ///
 /// Returns `None` when the update carries no inserted lines (copy/skip-only:
-/// the window is preserved, only cursors/annotations refresh). Shared by
-/// `BufState` and the `XiClient` active-view mirror.
+/// the window is preserved, only cursors/annotations refresh). Called through
+/// [`crate::buffer::apply::replace_vlf_window`], which both frontend line caches
+/// share.
 pub(crate) fn vlf_window_from_ops(
     ops: Vec<CoreUpdateOp>,
     old: &[LineSlot],
     old_start: usize,
-) -> Option<(usize, usize, Vec<LineSlot>)> {
+    scopes: &[String],
+    blob: Option<&[u8]>,
+) -> io::Result<Option<(usize, usize, Vec<LineSlot>)>> {
     // Rows kept on each side of the freshly rendered insert span. Bounds the
     // window so long scroll sessions cannot grow it toward the whole file
     // (copies re-emit rows the client already holds, and a document-wide
@@ -231,7 +234,17 @@ pub(crate) fn vlf_window_from_ops(
     // copy sized by the *approximate* line count, which can be far larger than
     // the real one), so bail before materializing any rows.
     if !ops.iter().any(|op| op.op == CoreUpdateKind::Insert) {
-        return None;
+        return Ok(None);
+    }
+    // One shared `Arc<str>` per scope name for the whole payload, so decoding a
+    // row does not allocate a string per span.
+    let scopes = crate::backend::update::scope_table(scopes);
+    // Frame rows are consumed in op order, exactly as `validate_blob_ops` checked;
+    // copy/update ops re-emit rows the client already holds, so only inserts take
+    // rows here (the validator walks every op, so a payload cannot smuggle rows).
+    let mut frame_rows = crate::backend::update::BlobRows::default();
+    if let Some(frame) = blob {
+        frame_rows = crate::backend::update::BlobRows::decode(frame)?;
     }
     let mut rows: Vec<(Option<usize>, LineSlot)> = Vec::new();
     let mut source_index: usize = 0; // cursor into the previous window for copy ops
@@ -239,6 +252,7 @@ pub(crate) fn vlf_window_from_ops(
     let mut insert_max: Option<usize> = None;
     let mut insert_count = 0usize;
     for op in ops {
+        let mut op_rows = crate::backend::update::take_op_rows(&mut frame_rows, &op).into_iter();
         match op.op {
             CoreUpdateKind::Insert => {
                 for line in op.lines {
@@ -247,7 +261,8 @@ pub(crate) fn vlf_window_from_ops(
                         insert_max = Some(insert_max.map_or(ln, |max| max.max(ln)));
                     }
                     insert_count += 1;
-                    rows.push((line.logical_line, LineSlot::from(line)));
+                    let bytes = op_rows.next().flatten();
+                    rows.push((line.logical_line, LineSlot::from_core_line(line, &scopes, bytes)?));
                 }
             }
             CoreUpdateKind::Skip => {
@@ -286,7 +301,7 @@ pub(crate) fn vlf_window_from_ops(
     // Copy/skip/invalidate-only updates re-assert the current window and are
     // handled by the pre-scan above.
     if rows.is_empty() {
-        return None;
+        return Ok(None);
     }
     if rows.iter().all(|(ln, _)| ln.is_some()) {
         // Unwrapped: every row is a logical line; position by absolute `ln`
@@ -302,7 +317,7 @@ pub(crate) fn vlf_window_from_ops(
             _ => false,
         };
         if trimmed && rows.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut window: Vec<(usize, LineSlot)> = Vec::with_capacity(rows.len());
         for (ln, slot) in rows {
@@ -316,7 +331,7 @@ pub(crate) fn vlf_window_from_ops(
         for (ln, slot) in window {
             cache[ln - start] = slot;
         }
-        Some((start, end, cache))
+        Ok(Some((start, end, cache)))
     } else {
         // Wrapped: dense display rows anchored at the window's first head.
         // Bound the dense window by the insert rows plus overscan on each
@@ -328,7 +343,7 @@ pub(crate) fn vlf_window_from_ops(
         }
         let start = rows.iter().find_map(|(ln, _)| *ln).unwrap_or(0);
         let end = start + rows.len();
-        Some((start, end, rows.into_iter().map(|(_, slot)| slot).collect()))
+        Ok(Some((start, end, rows.into_iter().map(|(_, slot)| slot).collect())))
     }
 }
 #[derive(Debug)]
@@ -492,6 +507,7 @@ fn _use_normalize(text: Option<String>) -> String {
 #[allow(dead_code)]
 fn _use_nav(_: &NavigationTarget) {}
 
+pub(crate) mod apply;
 mod buffers;
 mod bufstate;
 mod construction;

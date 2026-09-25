@@ -241,12 +241,12 @@ impl View {
             first_line
         };
         let last_line = self.line_of_offset(text, last.max()) + 1;
-        let all_caret = self.selection.iter().all(|region| region.is_caret());
-        let invalid = if all_caret {
-            line_cache_shadow::CURSOR_VALID
-        } else {
-            line_cache_shadow::CURSOR_VALID | line_cache_shadow::SYNTAX_VALID
-        };
+        // Syntax spans are a pure function of the text, and edits invalidate
+        // them through `after_edit`. A selection change therefore only moves
+        // cursors: keeping `SYNTAX_VALID` lets the repaint take the cursor-only
+        // `update` path (no re-parse, no query walk, spans preserved on the
+        // frontend) instead of a full row re-render.
+        let invalid = line_cache_shadow::CURSOR_VALID;
         self.lc_shadow.partial_invalidate(first_line, last_line, invalid);
     }
 

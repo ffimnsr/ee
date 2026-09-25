@@ -32,96 +32,29 @@ impl BufState {
             // window) leave it untouched.
             return self.apply_vlf_update_window(update);
         }
-        let CoreUpdate { ops, pristine, annotations, vlf_total_lines: _ } = update;
+        let CoreUpdate { ops, pristine, annotations, vlf_total_lines: _, scopes, blob, .. } =
+            update;
+        // A rejected op must leave the buffer exactly as it was. The cache is
+        // taken here, so returning early with it emptied would strand the buffer:
+        // following `copy`/`skip` ops would fail against an empty cache, no range
+        // would read as invalid, and the app would never re-request the rows. The
+        // shared op walk is pure, so only a successful pass is committed.
         let previous = std::mem::take(&mut self.line_cache);
-        let previous_lines = std::mem::take(&mut self.lines);
-        let mut next_cache = Vec::new();
-        let mut next_lines = Vec::new();
-        let mut source_index = 0;
 
-        self.pristine = pristine;
-        self.annotations = annotations;
-
-        for op in ops {
-            match op.op {
-                CoreUpdateKind::Insert => {
-                    if op.lines.len() != op.n {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "insert op length mismatch: expected {}, got {}",
-                                op.n,
-                                op.lines.len()
-                            ),
-                        ));
-                    }
-                    for line in op.lines {
-                        let slot = LineSlot::from(line);
-                        next_lines.push(line_text_for_slot(&slot));
-                        next_cache.push(slot);
-                    }
-                }
-                CoreUpdateKind::Skip => {
-                    source_index = checked_advance(source_index, op.n, previous.len(), "skip")?;
-                }
-                CoreUpdateKind::Invalidate => {
-                    next_cache.extend(std::iter::repeat_n(LineSlot::Invalid, op.n));
-                    next_lines.extend(std::iter::repeat_n(String::new(), op.n));
-                }
-                CoreUpdateKind::Copy => {
-                    let end = checked_advance(source_index, op.n, previous.len(), "copy")?;
-                    // Clear cursor data from copied slots: Copy op means content is
-                    // unchanged from xi-core's perspective, but cursor positions may
-                    // have moved. Only Insert/Update ops carry authoritative cursor data.
-                    for (offset, slot) in previous[source_index..end].iter().enumerate() {
-                        match slot.clone() {
-                            LineSlot::Known(mut line) => {
-                                line.cursors.clear();
-                                next_cache.push(LineSlot::Known(line));
-                            }
-                            invalid => next_cache.push(invalid),
-                        }
-                        next_lines.push(
-                            previous_lines
-                                .get(source_index + offset)
-                                .cloned()
-                                .unwrap_or_else(|| line_text_for_slot(slot)),
-                        );
-                    }
-                    source_index = end;
-                }
-                CoreUpdateKind::Update => {
-                    if op.lines.len() != op.n {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "update op length mismatch: expected {}, got {}",
-                                op.n,
-                                op.lines.len()
-                            ),
-                        ));
-                    }
-                    let end = checked_advance(source_index, op.n, previous.len(), "update")?;
-                    for (slot, line) in previous[source_index..end].iter().cloned().zip(op.lines) {
-                        let slot = slot.merge(line)?;
-                        next_lines.push(line_text_for_slot(&slot));
-                        next_cache.push(slot);
-                    }
-                    source_index = end;
-                }
+        match apply::rope_update(ops, &previous, &scopes, blob.as_deref()) {
+            Ok(next_cache) => {
+                self.line_cache = next_cache;
+                self.lines = apply::line_texts_for_cache(&self.line_cache);
+                self.pristine = pristine;
+                self.annotations = annotations;
+                self.sync_cursor_from_cache();
+                Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })
+            }
+            Err(err) => {
+                self.line_cache = previous;
+                Err(err)
             }
         }
-
-        self.line_cache = next_cache;
-        self.lines = next_lines;
-        if matches!(
-            self.line_cache.as_slice(),
-            [LineSlot::Known(CachedLine { text, .. })] if text.is_empty()
-        ) {
-            self.lines.clear();
-        }
-        self.sync_cursor_from_cache();
-        Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })
     }
 
     /// VLF window application: take the inserted line segments from the core
@@ -133,7 +66,7 @@ impl BufState {
     /// updates (scrolling within the current window) keep the window as-is;
     /// only cursors/annotations refresh.
     fn apply_vlf_update_window(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
-        let CoreUpdate { ops, pristine, annotations, vlf_total_lines } = update;
+        let CoreUpdate { ops, pristine, annotations, vlf_total_lines, scopes, blob, .. } = update;
         self.pristine = pristine;
         self.annotations = annotations;
         if let Some(total) = vlf_total_lines {
@@ -143,16 +76,19 @@ impl BufState {
         }
 
         // The previous window feeds copy/update ops (rows the core expects
-        // the client to already hold); take it before the cache is replaced.
-        let old_cache = std::mem::take(&mut self.line_cache);
-        let Some((start, end, cache)) =
-            vlf_window_from_ops(ops, &old_cache, self.vlf_cache_start_line)
+        // the client to already hold); the helper restores it if the payload is
+        // rejected, so a malformed update cannot empty the window.
+        let Some((start, end)) = apply::replace_vlf_window(
+            &mut self.line_cache,
+            &mut self.lines,
+            ops,
+            self.vlf_cache_start_line,
+            &scopes,
+            blob.as_deref(),
+        )?
         else {
-            self.line_cache = old_cache;
             return Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO });
         };
-        self.line_cache = cache;
-        self.lines = self.line_cache.iter().map(line_text_for_slot).collect();
         self.vlf_cache_start_line = start;
         self.last_scroll = Some((start, end));
         if self.pending_vlf_tail_jump {
@@ -177,21 +113,7 @@ impl BufState {
             return;
         }
 
-        self.lines = self
-            .line_cache
-            .iter()
-            .map(|slot| match slot {
-                LineSlot::Known(line) => line.text.clone(),
-                LineSlot::Invalid => String::new(),
-            })
-            .collect();
-
-        if matches!(
-            self.line_cache.as_slice(),
-            [LineSlot::Known(CachedLine { text, .. })] if text.is_empty()
-        ) {
-            self.lines.clear();
-        }
+        self.lines = apply::line_texts_for_cache(&self.line_cache);
     }
 
     pub(super) fn sync_cursor_from_cache(&mut self) {

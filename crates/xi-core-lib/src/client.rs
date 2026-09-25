@@ -47,6 +47,20 @@ impl Client {
                 "update": update,
             }),
         );
+        // The blob (when the renderer used the binary text carrier) follows the
+        // notification as one raw frame; the presence of `blob` slices in the
+        // payload is what tells the frontend to read it.
+        if let Some(blob) = update.blob() {
+            if let Err(err) = self.0.send_binary_frame(blob) {
+                tracing::error!("failed to send update text blob ({} bytes): {}", blob.len(), err);
+            }
+        }
+    }
+
+    /// Whether this peer's transport carries raw binary frames, i.e. whether the
+    /// renderer may use the text blob carrier for `update` payloads.
+    pub fn supports_binary_frames(&self) -> bool {
+        self.0.supports_binary_frames()
     }
 
     pub fn scroll_to(&self, view_id: ViewId, line: usize, col: usize) {
@@ -382,6 +396,34 @@ pub struct Update {
     /// the wire shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vlf_total_lines: Option<VlfTotalLines>,
+    /// Interned syntax scope names for this update. Lines carry scope ids in
+    /// their flat `spans` arrays; the table travels once per payload and is
+    /// omitted entirely when nothing was interned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scopes: Option<Vec<String>>,
+    /// Row text for this update's per-line `blob` slices. Never serialized: it
+    /// travels as one binary frame immediately after the notification, and the
+    /// presence of `blob` slices in the payload is what tells the frontend to
+    /// read that frame.
+    #[serde(skip)]
+    pub(crate) blob: Option<Vec<u8>>,
+}
+
+impl Update {
+    /// Attaches a text blob.
+    ///
+    /// An empty blob is kept when the payload references it: rows of empty text
+    /// still carry zero-length slices, and the frontend reads the frame whenever
+    /// the payload declares one. Dropping it would desync the two.
+    pub(crate) fn with_blob(mut self, blob: Option<Vec<u8>>) -> Self {
+        self.blob = blob;
+        self
+    }
+
+    /// The blob bytes to send after this update, if any.
+    pub(crate) fn blob(&self) -> Option<&[u8]> {
+        self.blob.as_deref()
+    }
 }
 
 /// Carries the VLF line count on the `update` channel (Stage A Phase 3),
@@ -402,31 +444,48 @@ pub(crate) struct UpdateOp {
     #[serde(rename = "ln")]
     #[serde(skip_serializing_if = "Option::is_none")]
     first_line_number: Option<usize>,
+    /// Set when this op's rows take their text from the update's binary text frame,
+    /// handed out positionally: a row without `text` consumes the next frame row.
+    #[serde(skip_serializing_if = "is_false")]
+    blob: bool,
+}
+
+/// `serde` predicate: omit a `false` flag instead of writing `"blob":false` on
+/// every op.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl UpdateOp {
     pub(crate) fn invalidate(n: usize) -> Self {
-        UpdateOp { op: OpType::Invalidate, n, lines: None, first_line_number: None }
+        UpdateOp { op: OpType::Invalidate, n, lines: None, first_line_number: None, blob: false }
     }
 
     pub(crate) fn skip(n: usize) -> Self {
-        UpdateOp { op: OpType::Skip, n, lines: None, first_line_number: None }
+        UpdateOp { op: OpType::Skip, n, lines: None, first_line_number: None, blob: false }
     }
 
     pub(crate) fn copy(n: usize, line: usize) -> Self {
-        UpdateOp { op: OpType::Copy, n, lines: None, first_line_number: Some(line) }
+        UpdateOp { op: OpType::Copy, n, lines: None, first_line_number: Some(line), blob: false }
     }
 
-    pub(crate) fn insert(lines: Vec<Value>) -> Self {
-        UpdateOp { op: OpType::Insert, n: lines.len(), lines: Some(lines), first_line_number: None }
+    pub(crate) fn insert(lines: Vec<Value>, blob: bool) -> Self {
+        UpdateOp {
+            op: OpType::Insert,
+            n: lines.len(),
+            lines: Some(lines),
+            first_line_number: None,
+            blob,
+        }
     }
 
-    pub(crate) fn update(lines: Vec<Value>, line_opt: Option<usize>) -> Self {
+    pub(crate) fn update(lines: Vec<Value>, line_opt: Option<usize>, blob: bool) -> Self {
         UpdateOp {
             op: OpType::Update,
             n: lines.len(),
             lines: Some(lines),
             first_line_number: line_opt,
+            blob,
         }
     }
 }

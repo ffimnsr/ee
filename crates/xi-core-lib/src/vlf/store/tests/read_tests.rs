@@ -1,5 +1,6 @@
 //! VLF store tests: read.
 use super::*;
+use crate::text_store::ChunkBytes;
 
 #[test]
 fn mode_is_vlf() {
@@ -11,6 +12,94 @@ fn mode_is_vlf() {
 fn full_text_policy_is_forbidden() {
     let (store, _f) = store_from(b"hello");
     assert_eq!(store.full_text_policy(), FullTextPolicy::Forbidden);
+}
+
+#[test]
+fn chunk_bytes_conformance_holds_for_vlf_store() {
+    // Shared conformance set: the borrowed carrier must match the owned carrier
+    // for whole, empty, interior, and out-of-bounds ranges, and both must agree
+    // across every range `iter_chunks` reports.
+    let content = "alpha café 😀\nbeta gamma\ndelta\n";
+    let (store, _f) = store_from(content.as_bytes());
+    crate::text_store::conformance::assert_chunk_bytes_conformance(&store, content);
+}
+
+#[test]
+fn chunk_bytes_report_the_seam_expanded_range_as_served() {
+    // Page size 3 puts the '€' (3 bytes) in its own page. A request starting
+    // inside it is widened by seam decoding, so the served range is wider than
+    // the request and both carriers must report that served range, not the
+    // request.
+    let (store, _f) = store_with_multibyte_at_boundary();
+    let request = ByteRange::new(2, 4);
+    let served = match store.read_byte_range(request) {
+        TextChunkResult::Ready(chunk) => chunk.byte_range,
+        other => panic!("owned carrier should be ready, got {other:?}"),
+    };
+    assert_ne!(served, request, "fixture must exercise seam expansion");
+
+    crate::text_store::conformance::assert_matches_owned(&store, request);
+    match store.read_chunk_bytes(request) {
+        ChunkBytes::Ready { bytes, byte_range } => {
+            assert_eq!(byte_range, served, "borrowed carrier must report the served range");
+            assert_eq!(bytes.as_ref(), "c€".as_bytes());
+        }
+        other => panic!("expected ready chunk, got {other:?}"),
+    }
+}
+
+#[test]
+fn chunk_bytes_propagate_pending_when_the_pager_refuses_a_read() {
+    // `max_read_size` is `page_size * 4`, so page size 2 refuses the widened
+    // 4 KiB-slack read; the store maps that to `Pending` and both carriers must
+    // say so rather than reporting an empty or partial chunk.
+    let content = b"0123456789abcdefghijklmnopqrstuv";
+    let mut f = NamedTempFile::new().unwrap();
+    f.write_all(content).unwrap();
+    f.flush().unwrap();
+    let store = VlfStore::open_with_config(f.path(), 2, 64).unwrap();
+    let range = ByteRange::new(0, 16);
+
+    assert_eq!(store.read_byte_range(range), TextChunkResult::Pending);
+    assert_eq!(store.read_chunk_bytes(range), ChunkBytes::Pending);
+    crate::text_store::conformance::assert_matches_owned(&store, range);
+}
+
+#[test]
+fn owned_carrier_answers_inverted_ranges_while_rope_rejects_them() {
+    // Store-specific verdict, pinned on purpose: VLF treats `end <= start` as
+    // empty and answers `Ready`, while `RopeTextStore` rejects the same request as
+    // `Unsupported`. The shared conformance set therefore asserts carrier
+    // agreement only, never a verdict.
+    let (store, _f) = store_from(b"hello");
+    let inverted = ByteRange::new(3, 1);
+    match store.read_byte_range(inverted) {
+        TextChunkResult::Ready(chunk) => {
+            assert_eq!(chunk.text, "");
+            assert_eq!(chunk.byte_range, inverted);
+        }
+        other => panic!("VLF answers inverted ranges as empty, got {other:?}"),
+    }
+    assert_eq!(
+        store.read_chunk_bytes(inverted),
+        ChunkBytes::Ready { bytes: std::borrow::Cow::Owned(Vec::new()), byte_range: inverted }
+    );
+}
+
+#[test]
+fn chunk_bytes_reports_owned_pages_today() {
+    // Pages are copied out of the pager per read, so the VLF carrier wraps owned
+    // bytes while keeping content and range identical to the owned carrier.
+    let content = "hello vlf world";
+    let (store, _f) = store_from(content.as_bytes());
+    match store.read_chunk_bytes(ByteRange::new(6, 9)) {
+        ChunkBytes::Ready { bytes, byte_range } => {
+            assert_eq!(bytes.as_ref(), b"vlf");
+            assert_eq!(byte_range, ByteRange::new(6, 9));
+            assert!(matches!(bytes, std::borrow::Cow::Owned(_)), "pager lends nothing today");
+        }
+        other => panic!("expected ready chunk, got {other:?}"),
+    }
 }
 
 #[test]

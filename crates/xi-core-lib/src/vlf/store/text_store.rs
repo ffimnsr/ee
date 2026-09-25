@@ -1,4 +1,11 @@
 //! `impl TextStore for VlfStore`: text-store contract surface.
+//!
+//! This store does not override `TextStore::read_chunk_bytes`, so it inherits the
+//! owned default. Pages are copied out of the pager per read (cache entries are
+//! owned `PageBytes`), the decoded cache sits behind a `RefCell` and is an
+//! evicting LRU, so nothing here can be lent for the lifetime of `&self`. A
+//! borrowing VLF carrier needs the decode path restructured to hand out stable
+//! storage first; until then `Cow::Owned` is the sound choice, not a shortcut.
 use super::*;
 
 impl TextStore for VlfStore {

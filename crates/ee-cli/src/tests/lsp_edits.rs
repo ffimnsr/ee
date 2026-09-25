@@ -7,8 +7,7 @@ use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::App;
 use crate::backend::{
-    BackendEvent, CompletionSuggestion, NavigationTarget, coalesce_backend_events,
-    format_location_message, parse_notification,
+    BackendEvent, CompletionSuggestion, coalesce_backend_events, parse_notification,
 };
 use crate::buffer::BufferManager;
 use crate::picker::PickerKind;
@@ -637,24 +636,6 @@ fn ee_cli_sources_do_not_use_raw_lsp_or_plugin_routes() {
 }
 
 #[test]
-fn format_location_message_formats_empty_and_single_results() {
-    assert_eq!(format_location_message("definition", &[]), "definition: no locations");
-    assert_eq!(
-        format_location_message(
-            "definition",
-            &[NavigationTarget {
-                path: String::from("/tmp/main.rs"),
-                line: 2,
-                column: 4,
-                end_line: 2,
-                end_column: 7,
-            }],
-        ),
-        "definition: /tmp/main.rs:3:5"
-    );
-}
-
-#[test]
 fn completion_suggestion_deserializes_optional_fields() {
     let item: CompletionSuggestion = serde_json::from_value(json!({
         "label": "println!"
@@ -815,10 +796,12 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
         BackendEvent::Update {
             view_id: String::from("view-1"),
             update: crate::backend::CoreUpdate {
+                blob: None,
                 pristine: true,
                 annotations: Vec::new(),
                 ops: vec![],
                 vlf_total_lines: None,
+                scopes: Vec::new(),
             },
         },
     ];

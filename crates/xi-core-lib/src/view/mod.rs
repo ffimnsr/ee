@@ -83,6 +83,11 @@ pub struct View {
     /// Cached visible VLF semantic parse for repeated syntax-object commands.
     semantic_parse_cache: object::SyntaxParseCache,
 
+    /// Span windows already walked for this view's text, so a repaint that discards
+    /// and re-renders rows (scroll back, viewport jump) does not re-parse them.
+    /// Invalidated by `after_edit` and `rewrap`; see `syntax_cache`.
+    syntax_cache: syntax_cache::SyntaxSpanCache,
+
     drag_state: Option<DragState>,
 
     /// vertical scroll position
@@ -248,6 +253,7 @@ mod find;
 mod render;
 mod select;
 mod selection;
+mod syntax_cache;
 
 #[cfg(test)]
 mod tests;

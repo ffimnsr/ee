@@ -11,6 +11,7 @@ impl View {
             primary_selection_idx: 0,
             object_selection_history: Vec::new(),
             semantic_parse_cache: object::SyntaxParseCache::default(),
+            syntax_cache: Default::default(),
             scroll_to: Some(0),
             size: Size::default(),
             drag_state: None,

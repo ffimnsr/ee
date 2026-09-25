@@ -33,6 +33,17 @@ pub trait ReadTransport {
     /// Appends the next message body to `buf` and returns the number of
     /// bytes appended.  Returns `Ok(0)` to signal EOF / clean disconnect.
     fn read_message(&mut self, buf: &mut String) -> io::Result<usize>;
+
+    /// Reads the next binary frame into `buf`, replacing its contents, and
+    /// returns the number of bytes read.
+    ///
+    /// Defaults to unsupported so text-only transports (and every plugin stdio
+    /// transport) keep working unchanged. Callers must check the transport's
+    /// capability before relying on this carrier; see
+    /// [`WriteTransport::supports_binary_frames`] for the peer-side predicate.
+    fn read_binary_message(&mut self, _buf: &mut Vec<u8>) -> io::Result<usize> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "transport does not support binary frames"))
+    }
 }
 
 /// Writes complete framed messages to an underlying byte stream.
@@ -43,6 +54,24 @@ pub trait WriteTransport: Send + 'static {
     /// Encodes `data` with appropriate framing, writes it to the
     /// underlying stream, and flushes.
     fn write_message(&mut self, data: &[u8]) -> io::Result<()>;
+
+    /// Encodes `data` as one raw binary frame, writes it, and flushes.
+    ///
+    /// Defaults to unsupported: a transport that does not opt in can never be
+    /// selected for a binary carrier, because [`Self::supports_binary_frames`]
+    /// defaults to `false` alongside it.
+    fn write_binary_message(&mut self, _data: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "transport does not support binary frames"))
+    }
+
+    /// Whether [`Self::write_binary_message`] is implemented.
+    ///
+    /// This is the capability predicate backend payload builders use to pick a
+    /// carrier: `NewlineWriter`, `ContentLengthWriter`, and plugin stdio
+    /// transports report `false` and keep receiving per-line JSON text.
+    fn supports_binary_frames(&self) -> bool {
+        false
+    }
 }
 
 // ── Newline-delimited framing ──────────────────────────────────────

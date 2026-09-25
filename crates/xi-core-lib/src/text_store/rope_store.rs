@@ -19,13 +19,15 @@
 //! normal-mode behaviour is byte-for-byte compatible with previous direct
 //! `Rope` access.
 
+use std::borrow::Cow;
+
 use xi_rope::rope::{byte_to_utf16_cu_idx, utf16_cu_to_byte_idx};
 use xi_rope::{LinesMetric, Rope};
 
 use crate::text_store::{
-    ByteOffset, ByteRange, DocumentMode, FullTextPolicy, KnownLineCount, LineLookup, LogicalLine,
-    ReadResult, RenderLineCount, RenderSource, TextChunk, TextChunkResult, TextStore, Utf16Lookup,
-    Utf16Offset,
+    ByteOffset, ByteRange, ChunkBytes, DocumentMode, FullTextPolicy, KnownLineCount, LineLookup,
+    LogicalLine, ReadBytesResult, ReadResult, RenderLineCount, RenderSource, TextChunk,
+    TextChunkResult, TextStore, Utf16Lookup, Utf16Offset,
 };
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,28 @@ impl RopeTextStore {
         let end = range.end.0 as usize;
         let len = self.rope.len();
         if start > len || end > len || start > end { None } else { Some((start, end)) }
+    }
+
+    /// Clamps `start..end` into the rope and snaps both ends to codepoint
+    /// boundaries the way the VLF seam decoder does (start back to the previous
+    /// boundary, end forward past a trailing continuation): `slice_to_cow` panics
+    /// on mid-codepoint ranges, and the renderer always passes line-interval
+    /// boundaries anyway.
+    fn clamped_range(&self, start: usize, end: usize) -> (usize, usize) {
+        let len = self.rope.len();
+        let start = start.min(len);
+        let end = end.min(len).max(start);
+        let start = if self.rope.is_codepoint_boundary(start) {
+            start
+        } else {
+            self.rope.prev_codepoint_offset(start).unwrap_or(start)
+        };
+        let end = if self.rope.is_codepoint_boundary(end) {
+            end
+        } else {
+            self.rope.at_or_next_codepoint_boundary(end).unwrap_or(end)
+        };
+        (start, end)
     }
 
     fn collect_text(&self, start: usize, end: usize) -> String {
@@ -182,6 +206,37 @@ impl TextStore for RopeTextStore {
         TextChunkResult::Ready(TextChunk { text, byte_range: range })
     }
 
+    fn read_chunk_bytes(&self, range: ByteRange) -> ChunkBytes<'_> {
+        let Some((start, end)) = self.validate_range(range) else {
+            return ChunkBytes::Unsupported;
+        };
+        if start == end {
+            // Nothing to copy: report it as borrowed so the cost signal stays
+            // "no allocation" for empty rows.
+            return ChunkBytes::Ready { bytes: Cow::Borrowed(&[]), byte_range: range };
+        }
+        // A range inside one rope leaf is handed out as a borrow of that leaf.
+        // Anything else falls back to the same bytes the owned carrier produces:
+        // a range crossing leaves, or one whose ends are not char boundaries,
+        // which the owned path rejects by panicking (`slice_to_cow` semantics) and
+        // which must therefore not quietly succeed here.
+        if let Some((chunk, byte_start, _, _)) = self.rope.chunk_at_offset(start) {
+            let rel_start = start - byte_start;
+            let rel_end = rel_start + (end - start);
+            if rel_end <= chunk.len()
+                && chunk.is_char_boundary(rel_start)
+                && chunk.is_char_boundary(rel_end)
+            {
+                let borrowed = &chunk.as_bytes()[rel_start..rel_end];
+                return ChunkBytes::Ready { bytes: Cow::Borrowed(borrowed), byte_range: range };
+            }
+        }
+        ChunkBytes::Ready {
+            bytes: Cow::Owned(self.collect_text(start, end).into_bytes()),
+            byte_range: range,
+        }
+    }
+
     fn line_to_byte(&self, line: LogicalLine) -> LineLookup {
         let line = line.0 as usize;
         let max_line = self.rope.measure::<LinesMetric>() + 1;
@@ -282,24 +337,21 @@ impl RenderSource for RopeTextStore {
     }
 
     fn read_range(&self, start: usize, end: usize) -> ReadResult<'_> {
-        let len = self.rope.len();
-        let start = start.min(len);
-        let end = end.min(len).max(start);
-        // Snap to codepoint boundaries like the VLF seam decoder (start back
-        // to the previous boundary, end forward past a trailing continuation):
-        // `slice_to_cow` panics on mid-codepoint ranges, and the renderer
-        // always passes line-interval boundaries anyway.
-        let start = if self.rope.is_codepoint_boundary(start) {
-            start
-        } else {
-            self.rope.prev_codepoint_offset(start).unwrap_or(start)
-        };
-        let end = if self.rope.is_codepoint_boundary(end) {
-            end
-        } else {
-            self.rope.at_or_next_codepoint_boundary(end).unwrap_or(end)
-        };
+        let (start, end) = self.clamped_range(start, end);
         ReadResult::Ready(self.rope.slice_to_cow(start..end))
+    }
+
+    fn read_bytes(&self, start: usize, end: usize) -> ReadBytesResult<'_> {
+        let (start, end) = self.clamped_range(start, end);
+        // Same range as `read_range`; only the carrier differs. A range inside one
+        // leaf is lent straight out of the rope, otherwise the owned copy the text
+        // carrier would have made is handed over as bytes.
+        match TextStore::read_chunk_bytes(self, ByteRange::new(start as u64, end as u64)) {
+            ChunkBytes::Ready { bytes, .. } => ReadBytesResult::Ready(bytes),
+            ChunkBytes::Pending => ReadBytesResult::Pending,
+            ChunkBytes::Cancelled => ReadBytesResult::Cancelled,
+            ChunkBytes::Unsupported => ReadBytesResult::Unsupported,
+        }
     }
 
     fn index_progress(&self) -> f64 {
@@ -320,8 +372,8 @@ mod tests {
     use xi_rope::Rope;
 
     use crate::text_store::{
-        ByteOffset, ByteRange, DocumentMode, FullTextPolicy, KnownLineCount, LineLookup,
-        LogicalLine, TextChunkResult, TextStore, Utf16Lookup, Utf16Offset,
+        ByteOffset, ByteRange, ChunkBytes, DocumentMode, FullTextPolicy, KnownLineCount,
+        LineLookup, LogicalLine, TextChunkResult, TextStore, Utf16Lookup, Utf16Offset,
     };
 
     use super::{RopeTextStore, byte_offset_for_utf16_in_chunk, utf16_prefix_in_chunk};
@@ -710,6 +762,9 @@ mod tests {
         fn read_byte_range(&self, _range: ByteRange) -> TextChunkResult {
             TextChunkResult::Pending
         }
+        fn read_chunk_bytes(&self, _range: ByteRange) -> ChunkBytes<'_> {
+            ChunkBytes::Pending
+        }
         fn line_to_byte(&self, _line: LogicalLine) -> LineLookup {
             LineLookup::Pending
         }
@@ -762,11 +817,189 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod chunk_bytes_tests {
+    use std::borrow::Cow;
+
+    use super::*;
+    use crate::text_store::conformance;
+
+    fn store(s: &str) -> RopeTextStore {
+        RopeTextStore::new(Rope::from(s), 7)
+    }
+
+    #[test]
+    fn single_leaf_range_borrows_rope_storage() {
+        let text = "let value = 42;\nsecond line\n";
+        let store = store(text);
+
+        match store.read_chunk_bytes(ByteRange::new(4, 9)) {
+            ChunkBytes::Ready { bytes, byte_range } => {
+                assert_eq!(bytes.as_ref(), b"value");
+                assert_eq!(byte_range, ByteRange::new(4, 9));
+                let (leaf, leaf_start, _, _) =
+                    store.rope().chunk_at_offset(4).expect("leaf at offset");
+                let leaf_base = leaf.as_ptr() as usize;
+                assert_eq!(
+                    bytes.as_ptr() as usize - leaf_base,
+                    4 - leaf_start,
+                    "borrowed bytes must point into the rope leaf, not a copy"
+                );
+                assert!(bytes.as_ptr() as usize + bytes.len() <= leaf_base + leaf.len());
+                assert!(matches!(bytes, Cow::Borrowed(_)));
+            }
+            other => panic!("expected ready chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_range_borrows_and_out_of_bounds_is_unsupported() {
+        let store = store("abc");
+        match store.read_chunk_bytes(ByteRange::new(1, 1)) {
+            ChunkBytes::Ready { bytes, byte_range } => {
+                assert!(bytes.is_empty());
+                assert_eq!(byte_range, ByteRange::new(1, 1));
+            }
+            other => panic!("expected ready empty chunk, got {other:?}"),
+        }
+        assert_eq!(store.read_chunk_bytes(ByteRange::new(0, 4)), ChunkBytes::Unsupported);
+        assert_eq!(store.read_chunk_bytes(ByteRange::new(3, 1)), ChunkBytes::Unsupported);
+    }
+
+    #[test]
+    fn range_crossing_leaves_falls_back_to_owned_bytes() {
+        // Long content to force multiple leaves, then a range that straddles the
+        // first leaf boundary.
+        let text = "0123456789abcdef".repeat(512);
+        let store = store(&text);
+        let first_leaf_len = store.rope().chunk_at_offset(0).expect("first leaf").0.len();
+        assert!(
+            first_leaf_len < text.len(),
+            "fixture must span more than one leaf (leaf={first_leaf_len}, text={})",
+            text.len()
+        );
+
+        let start = (first_leaf_len - 4) as u64;
+        let end = (first_leaf_len + 4) as u64;
+        let range = ByteRange::new(start, end);
+        match (store.read_byte_range(range), store.read_chunk_bytes(range)) {
+            (TextChunkResult::Ready(chunk), ChunkBytes::Ready { bytes, byte_range }) => {
+                assert_eq!(bytes.as_ref(), chunk.text.as_bytes());
+                assert_eq!(byte_range, ByteRange::new(start, end));
+                assert!(matches!(bytes, Cow::Owned(_)), "crossing leaves copies today");
+            }
+            (owned, borrowed) => panic!("expected both ready: {owned:?} / {borrowed:?}"),
+        }
+    }
+
+    #[test]
+    fn row_sized_range_in_realistic_document_borrows() {
+        // Text leaves are 511-1024 bytes (`xi_rope::rope`), so a whole window
+        // always crosses leaves and takes the owned fallback, while a single
+        // row usually fits inside one leaf and borrows. Phase 3 blob assembly
+        // therefore reads row-by-row rather than window-by-window.
+        let text: String = (0..200).map(|i| format!("line {i} with some content\n")).collect();
+        let store = store(&text);
+        let row_start = text.find("line 100 ").expect("row present") as u64;
+        let row_end = row_start + "line 100 with some content\n".len() as u64;
+
+        match store.read_chunk_bytes(ByteRange::new(row_start, row_end)) {
+            ChunkBytes::Ready { bytes, .. } => {
+                assert_eq!(bytes.as_ref(), &text.as_bytes()[row_start as usize..row_end as usize]);
+                assert!(matches!(bytes, Cow::Borrowed(_)), "a row should fit inside one leaf");
+            }
+            other => panic!("expected ready chunk, got {other:?}"),
+        }
+
+        let window = ByteRange::new(0, text.len() as u64);
+        match store.read_chunk_bytes(window) {
+            ChunkBytes::Ready { bytes, .. } => {
+                assert_eq!(bytes.as_ref(), text.as_bytes());
+                assert!(
+                    matches!(bytes, Cow::Owned(_)),
+                    "a multi-leaf window cannot borrow from a single leaf"
+                );
+            }
+            other => panic!("expected ready chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "char boundary")]
+    fn borrowed_carrier_rejects_mid_codepoint_range_like_the_owned_one() {
+        // 'é' spans bytes 1..3, so 2..3 splits it. The range fits inside one leaf
+        // and would otherwise be borrowable, but the owned carrier panics here
+        // (`slice_to_cow` semantics), so the borrowed carrier must fail the same
+        // way rather than hand out invalid UTF-8.
+        let store = store("aé😀x\n");
+        store.read_chunk_bytes(ByteRange::new(2, 3));
+    }
+
+    #[test]
+    #[should_panic(expected = "char boundary")]
+    fn owned_carrier_rejects_the_same_mid_codepoint_range() {
+        // Parity pin for the test above: whatever the borrowed carrier does with
+        // this request, the owned carrier panics.
+        let store = store("aé😀x\n");
+        store.read_byte_range(ByteRange::new(2, 3));
+    }
+
+    #[test]
+    fn rope_store_chunk_bytes_conformance() {
+        let store = store("alpha café 😀\nbeta gamma\ndelta\n");
+        conformance::assert_chunk_bytes_conformance(&store, "alpha café 😀\nbeta gamma\ndelta\n");
+    }
+
+    #[test]
+    fn rope_store_chunk_bytes_conformance_across_leaves() {
+        let text = "lorem ipsum dolor sit amet ".repeat(256);
+        let store = RopeTextStore::new(Rope::from(text.clone()), 1);
+        conformance::assert_chunk_bytes_conformance(&store, &text);
+    }
+}
+
+#[cfg(test)]
 mod render_source_tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     fn store(s: &str) -> RopeTextStore {
         RopeTextStore::new(Rope::from(s), 0)
+    }
+
+    #[test]
+    fn read_bytes_matches_read_range_and_borrows_single_leaf_rows() {
+        // The byte carrier must serve exactly what the text carrier serves, and a
+        // row that fits inside one leaf must be lent rather than copied.
+        let s = "alpha\ncafé\n😀 row\n";
+        let rope = Rope::from(s);
+        let src = store(s);
+
+        for (start, end) in [(0, 6), (6, 11), (11, s.len()), (0, 0), (2, 4)] {
+            let expected = match RenderSource::read_range(&src, start, end) {
+                ReadResult::Ready(text) => text.into_owned(),
+                other => panic!("text carrier should be ready for {start}..{end}: {other:?}"),
+            };
+            match RenderSource::read_bytes(&src, start, end) {
+                ReadBytesResult::Ready(bytes) => {
+                    assert_eq!(
+                        bytes.as_ref(),
+                        expected.as_bytes(),
+                        "bytes differ for {start}..{end}"
+                    );
+                }
+                other => panic!("byte carrier should be ready for {start}..{end}: {other:?}"),
+            }
+        }
+
+        match RenderSource::read_bytes(&src, 0, 6) {
+            ReadBytesResult::Ready(bytes) => {
+                assert!(matches!(bytes, Cow::Borrowed(_)), "one-leaf row should be lent");
+                assert_eq!(bytes.as_ref(), b"alpha\n");
+            }
+            other => panic!("expected ready bytes, got {other:?}"),
+        }
+        assert_eq!(rope.len(), s.len());
     }
 
     #[test]

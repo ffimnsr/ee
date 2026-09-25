@@ -277,7 +277,7 @@ fn ui_render_uses_backend_syntax_spans_only() {
                 vec![CoreSyntaxSpan {
                     start_byte: 13,
                     end_byte: 15,
-                    scope: String::from("constant.numeric.decimal.rust"),
+                    scope: "constant.numeric.decimal.rust".into(),
                 }]
             } else {
                 Vec::new()

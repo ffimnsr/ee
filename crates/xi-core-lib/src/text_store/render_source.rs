@@ -40,6 +40,25 @@ pub enum ReadResult<'a> {
     Cancelled,
 }
 
+/// Result of a bounded byte read for a render window.
+///
+/// Mirrors [`ReadResult`] for callers that want the row's bytes without an
+/// intermediate `String` (the binary line-text carrier).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadBytesResult<'a> {
+    /// The bytes for the requested range (borrowed when the source can serve a
+    /// slice of its own storage, owned otherwise).
+    Ready(Cow<'a, [u8]>),
+    /// The source cannot serve the range yet (VLF index/decode in flight);
+    /// callers render the window without text and retry on the next repaint.
+    Pending,
+    /// The read was cancelled by a newer generation; treat like `Pending`.
+    Cancelled,
+    /// The source has no byte carrier for the range; callers omit the row's text
+    /// and let the frontend keep what it already shows.
+    Unsupported,
+}
+
 /// Text-access surface for the render pipeline.
 ///
 /// Implemented by `RopeTextStore` (exact rope ops, byte-identical with direct
@@ -62,6 +81,24 @@ pub trait RenderSource {
 
     /// Read the half-open byte range `start..end`, clamped to the document.
     fn read_range(&self, start: usize, end: usize) -> ReadResult<'_>;
+
+    /// Read the half-open byte range `start..end` as bytes, clamped and snapped
+    /// exactly like [`RenderSource::read_range`].
+    ///
+    /// The default derives the bytes from `read_range`, which is correct for any
+    /// source but copies through a `String`; stores with a lendable chunk carrier
+    /// override it so a row can be appended to the update's text blob without an
+    /// intermediate allocation.
+    fn read_bytes(&self, start: usize, end: usize) -> ReadBytesResult<'_> {
+        match self.read_range(start, end) {
+            ReadResult::Ready(text) => ReadBytesResult::Ready(match text {
+                Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+                Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+            }),
+            ReadResult::Pending => ReadBytesResult::Pending,
+            ReadResult::Cancelled => ReadBytesResult::Cancelled,
+        }
+    }
 
     /// Index completeness in `[0.0, 1.0]`; `1.0` means lookups are exact.
     fn index_progress(&self) -> f64;
