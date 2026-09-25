@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 use ee_acp_agent_server::{
     AcpAgentServer, AcpAgentServerConfig, MemoryTransport, MemoryTransportHandle,
 };
+use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, OrchestratorProvider};
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
-use ee_chat_completions::TokenSource;
-use ee_opencode_agent::adapter::test_support::{
-    ScriptedAnswer, ScriptedCodec, missing_token_source, test_config, test_token_source,
-};
-use ee_opencode_agent::adapter::{OpenCodeModelAdapter, opencode_orchestrated_provider};
+use ee_opencode_agent::adapter::test_support::{ScriptedAnswer, ScriptedCodec, test_config};
 use ee_opencode_agent::config::Config;
-use ee_opencode_agent::routes::{OpenCodeDialect, OpenCodeRoute, OpenCodeSurface, catalog};
+use ee_opencode_agent::critic::opencode_multi_model_provider_with_codecs;
+use ee_opencode_agent::routes::{
+    OpenCodeDialect, OpenCodeRoute, OpenCodeSurface, catalog, resolve_route,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -184,11 +184,10 @@ fn spawn_agent(
     surface: OpenCodeSurface,
     dialect: OpenCodeDialect,
     answers: Vec<ScriptedAnswer>,
-    token: TokenSource,
     dirs: &TestDirs,
 ) -> SpawnedAgent {
     let route = route_for(surface, dialect);
-    spawn_agent_with_config(test_config(surface, route.model_id), answers, token, dirs)
+    spawn_agent_with_config(test_config(surface, route.model_id), answers, dirs)
 }
 
 /// Spawns the production provider over a scripted codec for an exact config, so
@@ -196,13 +195,27 @@ fn spawn_agent(
 fn spawn_agent_with_config(
     config: Config,
     answers: Vec<ScriptedAnswer>,
-    token: TokenSource,
     dirs: &TestDirs,
 ) -> SpawnedAgent {
     let route = config.route;
     let codec = Arc::new(ScriptedCodec::new(route.dialect, answers));
-    let adapter = OpenCodeModelAdapter::with_codec(route, token, codec.clone());
-    let provider = opencode_orchestrated_provider(&config, dirs.state(), adapter);
+    let (provider, warning) = opencode_multi_model_provider_with_codecs(
+        &config,
+        dirs.state(),
+        (route, codec.clone() as Arc<dyn ee_opencode_agent::adapter::DialectCodec>),
+        None,
+    )
+    .expect("root provider builds");
+    assert!(warning.is_none(), "no critic is configured in this fixture: {warning:?}");
+    let (harness, task) = spawn_provider(provider, dirs);
+    (codec, harness, task)
+}
+
+/// Serves one already-built provider over the framework's memory transport.
+fn spawn_provider(
+    provider: OrchestratorProvider,
+    dirs: &TestDirs,
+) -> (Harness, tokio::task::JoinHandle<Result<(), ee_acp_agent_server::AcpServerError>>) {
     let server = AcpAgentServer::new(provider, AcpAgentServerConfig::default());
     let (transport, handle) = MemoryTransport::new();
     let task = tokio::spawn(async move { server.run_with_transport(transport).await });
@@ -211,7 +224,7 @@ fn spawn_agent_with_config(
         pending: Arc::new(Mutex::new(VecDeque::new())),
         workspace: dirs.workspace(),
     };
-    (codec, harness, task)
+    (harness, task)
 }
 
 type SpawnedAgent = (
@@ -339,7 +352,6 @@ async fn initialize_reports_the_opencode_agent_identity() {
         OpenCodeSurface::Zen,
         OpenCodeDialect::OpenAiResponses,
         vec![ScriptedAnswer::text("unused")],
-        test_token_source(),
         &dirs,
     );
 
@@ -355,7 +367,6 @@ async fn prompt_streams_thought_then_answer_for_the_configured_route() {
         OpenCodeSurface::Go,
         OpenCodeDialect::AnthropicMessages,
         vec![ScriptedAnswer::reasoning("weighing options", "the answer")],
-        test_token_source(),
         &dirs,
     );
     initialize(&harness).await;
@@ -387,7 +398,6 @@ async fn tool_call_runs_through_the_client_bridge_and_continues_the_turn() {
             ScriptedAnswer::tool_call("call_1", "read_file", json!({ "path": "/tmp/notes.txt" })),
             ScriptedAnswer::text("read it"),
         ],
-        test_token_source(),
         &dirs,
     );
     initialize(&harness).await;
@@ -438,7 +448,6 @@ async fn session_cancel_stops_a_pending_model_turn() {
         OpenCodeSurface::Zen,
         OpenCodeDialect::OpenAiResponses,
         vec![ScriptedAnswer::Pending],
-        test_token_source(),
         &dirs,
     );
     initialize(&harness).await;
@@ -463,13 +472,11 @@ async fn session_cancel_stops_a_pending_model_turn() {
 #[tokio::test]
 async fn missing_credential_fails_the_prompt_without_a_model_request() {
     let dirs = TestDirs::new();
-    let (codec, harness, task) = spawn_agent(
-        OpenCodeSurface::Go,
-        OpenCodeDialect::OpenAiChatCompletions,
-        vec![ScriptedAnswer::text("never sent")],
-        missing_token_source(),
-        &dirs,
-    );
+    // The credential now comes from the configuration, exactly as in production.
+    let mut config = test_config(OpenCodeSurface::Go, "kimi-k3");
+    config.api_key = None;
+    let (codec, harness, task) =
+        spawn_agent_with_config(config, vec![ScriptedAnswer::text("never sent")], &dirs);
     initialize(&harness).await;
     let session_id = new_session(&harness, 2).await;
 
@@ -494,7 +501,6 @@ async fn session_close_ends_the_session_and_the_server_exits_on_eof() {
         OpenCodeSurface::Zen,
         OpenCodeDialect::OpenAiResponses,
         vec![ScriptedAnswer::text("unused")],
-        test_token_source(),
         &dirs,
     );
     initialize(&harness).await;
@@ -527,7 +533,6 @@ async fn every_dialect_streams_thought_then_answer_and_ends_the_turn() {
             surface,
             dialect,
             vec![ScriptedAnswer::reasoning("thinking", "answer")],
-            test_token_source(),
             &dirs,
         );
         initialize(&harness).await;
@@ -557,13 +562,8 @@ async fn every_dialect_streams_thought_then_answer_and_ends_the_turn() {
 async fn every_dialect_cancels_a_pending_model_call_without_retrying() {
     for (surface, dialect) in DIALECT_MATRIX {
         let dirs = TestDirs::new();
-        let (codec, harness, task) = spawn_agent(
-            surface,
-            dialect,
-            vec![ScriptedAnswer::Pending],
-            test_token_source(),
-            &dirs,
-        );
+        let (codec, harness, task) =
+            spawn_agent(surface, dialect, vec![ScriptedAnswer::Pending], &dirs);
         initialize(&harness).await;
         let session_id = new_session(&harness, 2).await;
 
@@ -603,7 +603,6 @@ async fn every_dialect_denies_a_policy_blocked_tool_before_any_host_request() {
                 ),
                 ScriptedAnswer::text("stopped"),
             ],
-            test_token_source(),
             &dirs,
         );
         initialize(&harness).await;
@@ -634,13 +633,8 @@ async fn every_dialect_recovers_a_durable_session_after_a_restart() {
     for (surface, dialect) in DIALECT_MATRIX {
         let label = format!("{surface:?}/{dialect:?}");
         let dirs = TestDirs::new();
-        let (first_codec, harness, task) = spawn_agent(
-            surface,
-            dialect,
-            vec![ScriptedAnswer::text("first answer")],
-            test_token_source(),
-            &dirs,
-        );
+        let (first_codec, harness, task) =
+            spawn_agent(surface, dialect, vec![ScriptedAnswer::text("first answer")], &dirs);
         initialize(&harness).await;
         let session_id = new_session(&harness, 2).await;
         harness.send(request(3, "session/prompt", prompt_params(&session_id, "hello")));
@@ -658,13 +652,8 @@ async fn every_dialect_recovers_a_durable_session_after_a_restart() {
             !directory_entries(&dirs.state()).is_empty(),
             "durable session state is written on {label}"
         );
-        let (codec, harness, task) = spawn_agent(
-            surface,
-            dialect,
-            vec![ScriptedAnswer::text("resumed answer")],
-            test_token_source(),
-            &dirs,
-        );
+        let (codec, harness, task) =
+            spawn_agent(surface, dialect, vec![ScriptedAnswer::text("resumed answer")], &dirs);
         initialize(&harness).await;
         harness.send(request(
             2,
@@ -727,13 +716,8 @@ async fn every_dialect_keeps_durable_recovery_state_wired_to_the_checkpoint_dire
 async fn every_dialect_closes_the_session_and_exits_on_eof() {
     for (surface, dialect) in DIALECT_MATRIX {
         let dirs = TestDirs::new();
-        let (_codec, harness, task) = spawn_agent(
-            surface,
-            dialect,
-            vec![ScriptedAnswer::text("unused")],
-            test_token_source(),
-            &dirs,
-        );
+        let (_codec, harness, task) =
+            spawn_agent(surface, dialect, vec![ScriptedAnswer::text("unused")], &dirs);
         initialize(&harness).await;
         let session_id = new_session(&harness, 2).await;
 
@@ -779,7 +763,6 @@ async fn a_live_turn_never_leaks_the_configured_key_into_frames_or_state() {
                 ScriptedAnswer::reasoning("plan", "answer"),
                 ScriptedAnswer::Failure(String::from("OpenCode request failed: HTTP 500")),
             ],
-            test_token_source(),
             &dirs,
         );
         initialize(&harness).await;
@@ -818,4 +801,121 @@ async fn a_live_turn_never_leaks_the_configured_key_into_frames_or_state() {
 
         harness.shutdown(task).await;
     }
+}
+
+// ── Critic (rubber-duck) second opinion ──────────────────────────────────
+
+/// Serialized clean critique report the critic model must return.
+fn clean_critique_report() -> String {
+    let report = CritiqueReport::clean(CritiqueTarget::Implementation);
+    serde_json::to_string(&report).expect("clean report serializes")
+}
+
+#[tokio::test]
+async fn rubber_duck_second_opinion_runs_the_configured_critic() {
+    for (root_model, critic_model) in [("gpt-5.5", "kimi-k3"), ("qwen3.7-max", "kimi-k3")] {
+        let surface = OpenCodeSurface::Zen;
+        let label = format!("{root_model} + {critic_model}");
+        let dirs = TestDirs::new();
+        let root_route = resolve_route(surface, root_model).expect("documented root route");
+        let critic_route = resolve_route(surface, critic_model).expect("documented critic route");
+        assert_ne!(root_route.dialect, critic_route.dialect, "{label} spans two dialects");
+
+        let root_codec = Arc::new(ScriptedCodec::new(
+            root_route.dialect,
+            vec![ScriptedAnswer::text("synthesis after critique")],
+        ));
+        let critic_codec = Arc::new(ScriptedCodec::new(
+            critic_route.dialect,
+            vec![ScriptedAnswer::text(&clean_critique_report())],
+        ));
+        let mut config = test_config(surface, root_model);
+        config.critic_model = Some(critic_model.to_string());
+
+        let (provider, warning) = opencode_multi_model_provider_with_codecs(
+            &config,
+            dirs.state(),
+            (root_route, root_codec.clone() as Arc<dyn ee_opencode_agent::adapter::DialectCodec>),
+            Some((
+                critic_route,
+                critic_codec.clone() as Arc<dyn ee_opencode_agent::adapter::DialectCodec>,
+            )),
+        )
+        .expect("provider builds with a critic");
+        assert!(warning.is_none(), "{label}: {warning:?}");
+
+        let (harness, task) = spawn_provider(provider, &dirs);
+        initialize(&harness).await;
+        let session_id = new_session(&harness, 2).await;
+
+        harness.send(request(3, "session/prompt", prompt_params(&session_id, "/rubber-duck")));
+        let (updates, result) = harness.collect_until_response(3).await;
+
+        assert_eq!(result["stopReason"], "end_turn", "{label}");
+        let selection = updates
+            .iter()
+            .find(|params| params["update"]["messageId"] == "rubber-duck-selected")
+            .unwrap_or_else(|| panic!("{label} reports the selected critic: {updates:?}"));
+        // The runtime reports registry identities: the critic is the
+        // `rubber_duck` route, and the root is the `default` route.
+        assert!(
+            selection["update"]["content"]["text"].as_str().is_some_and(|text| {
+                text.contains("rubber_duck") && text.contains("root default")
+            }),
+            "{label} reports the selected critic route: {selection}"
+        );
+        assert!(
+            has_text_chunk(&updates, "agent_message_chunk", "synthesis after critique"),
+            "{label} streams the root synthesis"
+        );
+
+        // The critic ran exactly once, on its own route and dialect, and the
+        // root then synthesized once.
+        assert_eq!(critic_codec.requests().len(), 1, "{label} critic call");
+        assert_eq!(root_codec.requests().len(), 1, "{label} root synthesis call");
+        let critic_request = critic_codec.requests()[0].json().to_string();
+        assert!(
+            critic_request.contains("rubber-duck critic"),
+            "{label} critic received the critique contract: {critic_request}"
+        );
+        let root_request = root_codec.requests()[0].json().to_string();
+        assert!(
+            root_request.contains("read it") || root_request.contains("final decision owner"),
+            "{label} root received the synthesis contract: {root_request}"
+        );
+
+        harness.shutdown(task).await;
+    }
+}
+
+#[tokio::test]
+async fn rubber_duck_without_a_critic_reports_contrast_unavailable() {
+    let dirs = TestDirs::new();
+    let (_codec, harness, task) = spawn_agent(
+        OpenCodeSurface::Zen,
+        OpenCodeDialect::OpenAiResponses,
+        vec![ScriptedAnswer::text("unused")],
+        &dirs,
+    );
+    initialize(&harness).await;
+    let session_id = new_session(&harness, 2).await;
+
+    harness.send(request(3, "session/prompt", prompt_params(&session_id, "/rubber-duck")));
+    let (updates, result) = harness.collect_until_response(3).await;
+
+    assert_eq!(result["stopReason"], "end_turn");
+    let reported = updates
+        .iter()
+        .find(|params| params["update"]["messageId"] == "rubber-duck-result")
+        .unwrap_or_else(|| {
+            panic!("root-only agent explains why contrast is unavailable: {updates:?}")
+        });
+    assert!(
+        reported["update"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("rubber duck skipped")),
+        "the root-only agent explains why the critic is unavailable: {reported}"
+    );
+
+    harness.shutdown(task).await;
 }

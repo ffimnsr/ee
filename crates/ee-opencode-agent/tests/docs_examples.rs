@@ -117,6 +117,11 @@ fn documented_exclusions_and_secret_rules_stay_documented() {
         "static-catalog-only",
         "never by model-name prefix",
         "OPENCODE_API_URL",
+        "OPENCODE_CRITIC_MODEL",
+        "OPENCODE_RUBBER_DUCK_MODE",
+        "OPENCODE_REASONING_EFFORT",
+        "different declared vendor",
+        "sends nothing and prints one stderr warning",
     ] {
         assert!(text.contains(required), "documentation must state `{required}`");
     }

@@ -7,11 +7,11 @@
 //! cancellation, streamed update ordering, and error mapping that never carries a
 //! credential, a raw request body, or an unbounded provider error body.
 //!
-//! [`opencode_orchestrated_provider`] wires the adapter into
-//! `ee-agent-orchestrator` with the same tool policy every production ee agent
-//! uses ([`ee_agent_orchestrator::default_agent_policy`]), so the OpenCode agent
-//! inherits the established approval, scope, cancellation, and recovery
-//! boundaries instead of inventing its own.
+//! [`crate::critic::opencode_multi_model_provider`] wires one or two of these
+//! adapters into `ee-agent-orchestrator` with the same tool policy every
+//! production ee agent uses ([`ee_agent_orchestrator::default_agent_policy`]),
+//! so the OpenCode agent inherits the established approval, scope, cancellation,
+//! and recovery boundaries instead of inventing its own.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::ModelMessage;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, OrchestratorConfig,
-    OrchestratorProvider, OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolDefinition,
+    OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolDefinition,
 };
 use ee_agent_protocol::Implementation;
 use ee_chat_completions::{DeltaSink, EndpointTransport, StreamDelta, TokenSource, wait_cancelled};
@@ -266,7 +266,10 @@ fn forward_error(error: ModelError) -> ProviderError {
 /// Builds the orchestrator configuration for one OpenCode session.
 ///
 /// Recovery is durable only when a checkpoint directory is configured; without
-/// one, recovery stays same-process so crash recovery is never implied.
+/// one, recovery stays same-process so crash recovery is never implied. The
+/// rubber-duck mode reaches the runtime unchanged, so an unusable or absent
+/// critic is reported by the orchestrator as contrast unavailable rather than
+/// silently ignored.
 #[must_use]
 pub fn opencode_orchestrator_config(
     config: &Config,
@@ -279,6 +282,15 @@ pub fn opencode_orchestrator_config(
             context_window_tokens: config.context_window,
             max_loop_iterations: config.max_iterations,
             max_model_calls: config.max_iterations,
+            rubber_duck: config.rubber_duck.clone(),
+            rubber_duck_triggers: ee_agent_orchestrator::RubberDuckTriggerConfig {
+                mode: if config.rubber_duck.mode == ee_agent_orchestrator::RubberDuckMode::Automatic
+                {
+                    ee_agent_orchestrator::RubberDuckTriggerMode::Automatic
+                } else {
+                    ee_agent_orchestrator::RubberDuckTriggerMode::ManualOnly
+                },
+            },
             recovery: match config.checkpoint_dir.clone() {
                 Some(directory) => RecoveryConfig::durable(directory),
                 None => RecoveryConfig::memory_only(),
@@ -295,13 +307,14 @@ pub fn opencode_orchestrator_config(
 ///
 /// The concrete [`OpenCodeModelAdapter`] parameter keeps generic test adapters
 /// from being mistaken for the production OpenCode configuration.
+#[cfg(any(test, feature = "test-utils"))]
 #[must_use]
 pub fn opencode_orchestrated_provider(
     config: &Config,
     session_state_dir: PathBuf,
     adapter: OpenCodeModelAdapter,
-) -> OrchestratorProvider {
-    OrchestratorProvider::with_policy(
+) -> ee_agent_orchestrator::OrchestratorProvider {
+    ee_agent_orchestrator::OrchestratorProvider::with_policy(
         opencode_orchestrator_config(config, session_state_dir),
         Arc::new(adapter),
         ee_agent_orchestrator::default_agent_policy(),

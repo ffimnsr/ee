@@ -4542,6 +4542,21 @@ Goal: prove route selection, codecs, agent integration, and extracted shared cod
 - [x] OpenRouter remains behavior-compatible after shared Chat Completions extraction.
 - [x] No validation requires or performs live OpenCode account, balance, billing, or paid model call.
 
+### OpenCode parity follow-ups
+
+Two OpenRouter capabilities the plan's phases did not require were closed after the plan:
+
+- [x] Second opinion (rubber-duck critic) for the OpenCode agent.
+  - [x] `OPENCODE_CRITIC_MODEL` names one more exact catalog id on the root surface; resolution reuses `resolve_route` and rejects unknown, cross-surface, retired, TUI-alias, same-id, and same-vendor ids with bounded guidance.
+  - [x] `OPENCODE_RUBBER_DUCK_MODE` (`off`/`manual`/`automatic`) reaches the orchestrator unchanged.
+  - [x] Declared vendor families (`src/family.rs`) give contrast real identity; completeness tests fail when a catalog row has no family and no vendor is ever guessed from a model name.
+  - [x] The critic is registered under `RUBBER_DUCK_ROLE` in one `ModelRegistry`, so `/rubber-duck` runs one read-only critique plus one root synthesis (proven end-to-end over ACP memory transport for two dialect pairs).
+  - [x] An unusable critic degrades to root-only with one bounded, credential-free stderr warning; root routing and credentials are unaffected.
+- [x] Reasoning-effort knob.
+  - [x] `OPENCODE_REASONING_EFFORT` (`low`/`medium`/`high`) is sent only through fields the routed dialect documents: `reasoning.effort` (Responses) and `reasoning_effort` (Chat Completions).
+  - [x] The Anthropic Messages dialect keeps its request shape and prints one bounded stderr note instead of receiving an unverified field or an invented token budget.
+  - [x] Unsupported values fail closed at startup; unset or empty means the dialect default.
+
 ## Agent Filesystem Tool Parity
 
 - [x] Add approval-gated `ee_create_directory`, `ee_delete_path`, `ee_copy_path`, and `ee_move_path` tools for stdio and ACP transports.

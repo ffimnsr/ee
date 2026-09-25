@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use ee_acp_agent_server::{AcpAgentServer, AcpAgentServerConfig, env_or_dotenv, load_dotenv};
-use ee_opencode_agent::adapter::{OpenCodeModelAdapter, opencode_orchestrated_provider};
 use ee_opencode_agent::config::{self, Args, Config};
+use ee_opencode_agent::critic::opencode_multi_model_provider;
 use ee_opencode_agent::discovery::{self, HttpMetadataFetcher};
 use ee_opencode_agent::routes::{self, OpenCodeRoute};
 use serde_json::{Value, json};
@@ -86,16 +86,22 @@ async fn print_discovered_models(args: Args) -> Result<(), String> {
     print_json(&report.to_json())
 }
 
-/// Runs the production path: resolve config, build the routed adapter, serve ACP
-/// over stdio.
+/// Runs the production path: resolve config, build the routed adapter (plus the
+/// configured critic), serve ACP over stdio.
 async fn run(args: Args) -> Result<(), String> {
     let config =
         Config::from_args_and_dotenv(args, &read_dotenv()).map_err(|error| error.to_string())?;
     if !config.has_api_key() {
         return Err(String::from(config::MISSING_API_KEY));
     }
-    let adapter = OpenCodeModelAdapter::new(&config)?;
-    let provider = opencode_orchestrated_provider(&config, default_session_state_dir()?, adapter);
+    if let Some(note) = config.reasoning_effort_note() {
+        eprintln!("ee-opencode-agent: warning: {note}");
+    }
+    let (provider, critic_warning) =
+        opencode_multi_model_provider(&config, default_session_state_dir()?)?;
+    if let Some(warning) = critic_warning {
+        eprintln!("ee-opencode-agent: warning: {warning}");
+    }
     AcpAgentServer::new(provider, AcpAgentServerConfig::default())
         .run_stdio()
         .await

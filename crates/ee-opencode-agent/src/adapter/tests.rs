@@ -287,3 +287,31 @@ fn orchestrator_config_carries_opencode_identity_budgets_and_recovery() {
         Some(std::path::Path::new("/tmp/ee-opencode-agent-checkpoints-test"))
     );
 }
+
+#[test]
+fn reasoning_effort_shapes_only_the_dialect_that_documents_it() {
+    let mut chat = test_config(OpenCodeSurface::Zen, "kimi-k3");
+    chat.reasoning_effort = Some(crate::reasoning::ReasoningEffort::High);
+    let profile = chat.profile().expect("profile builds");
+    assert_eq!(profile.extensions, Some(json!({ "reasoning_effort": "high" })));
+    assert_eq!(chat.reasoning_effort_note(), None);
+
+    let mut responses = test_config(OpenCodeSurface::Zen, "gpt-5.5");
+    responses.reasoning_effort = Some(crate::reasoning::ReasoningEffort::Low);
+    let profile = responses.profile().expect("profile builds");
+    assert_eq!(profile.extensions, Some(json!({ "reasoning": { "effort": "low" } })));
+    assert_eq!(responses.reasoning_effort_note(), None);
+
+    let mut messages = test_config(OpenCodeSurface::Zen, "claude-opus-4-5");
+    messages.reasoning_effort = Some(crate::reasoning::ReasoningEffort::Medium);
+    assert_eq!(messages.profile().expect("profile builds").extensions, None);
+    let note = messages.reasoning_effort_note().expect("unsupported dialect explains itself");
+    assert!(note.contains("anthropic_messages"), "{note}");
+
+    // Without the knob, every dialect keeps its request shape.
+    for model_id in ["gpt-5.5", "claude-opus-4-5", "kimi-k3"] {
+        let config = test_config(OpenCodeSurface::Zen, model_id);
+        assert_eq!(config.profile().expect("profile builds").extensions, None, "{model_id}");
+        assert_eq!(config.reasoning_effort_note(), None, "{model_id}");
+    }
+}
