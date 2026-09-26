@@ -33,6 +33,51 @@ fn agents_transcript_bottom_aligns_short_chat() {
 }
 
 #[test]
+fn composer_shows_snippet_for_long_and_multiline_drafts() {
+    let script = base_script().wait_for("session/prompt");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    begin_fixture_turn(&mut app, &fake);
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    let mut composer_row = |app: &App| -> String {
+        terminal.draw(|frame| ui(frame, app)).unwrap();
+        (0..20)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("prompt>"))
+            .expect("composer row")
+    };
+
+    // Multiline draft collapses to a first-line snippet with a line count.
+    type_text(&mut app, "line one");
+    press(&mut app, KeyCode::Enter, KeyModifiers::ALT);
+    type_text(&mut app, "line two");
+    let row = composer_row(&app);
+    assert!(
+        row.contains("line one") && row.contains("(2 lines)") && row.contains("\u{2026}"),
+        "{row}"
+    );
+
+    // A long single line also collapses with a trailing ellipsis.
+    app.agents.threads[0].draft = "x".repeat(80);
+    app.agents.threads[0].draft_cursor = 80;
+    let row = composer_row(&app);
+    assert!(row.contains("\u{2026}") && !row.contains(&"x".repeat(80)), "{row}");
+
+    // Short single-line drafts render verbatim (no snippet).
+    app.agents.threads[0].draft = String::from("short");
+    app.agents.threads[0].draft_cursor = 5;
+    let row = composer_row(&app);
+    assert!(row.contains("short") && !row.contains("\u{2026}"), "{row}");
+
+    app.shutdown_agents();
+}
+
+#[test]
 fn agents_transcript_preserves_agent_markdown_newlines() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -175,10 +220,10 @@ fn scrollback_pins_to_bottom_until_user_scrolls_up() {
         "scroll offset must stay within the transcript"
     );
 
-    press(&mut app, KeyCode::End, KeyModifiers::NONE);
-    assert!(app.agents.threads[0].stick_to_bottom, "End re-pins the view");
+    press(&mut app, KeyCode::End, KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].stick_to_bottom, "Ctrl-End re-pins the view");
 
-    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
     assert_eq!(app.agents.threads[0].scroll, 0);
 
     press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);

@@ -190,6 +190,9 @@ pub(crate) struct AgentThreadUi {
     pub(crate) current_plan: Vec<(String, char)>,
     /// Whether the user has opened the current plan modal.
     pub(crate) plan_modal_open: bool,
+    /// Floating prompt-editor snapshot: the draft at open time, kept so Esc
+    /// can cancel cleanly. `None` means the prompt editor is closed.
+    pub(crate) prompt_editor_snapshot: Option<String>,
     /// Last turn error, when any.
     pub(crate) last_error: Option<String>,
     /// Paused turn awaiting resume/discard, when the agent reported a
@@ -601,6 +604,20 @@ impl AgentThreadUi {
     /// history navigation, stash/restore, and mention completion).
     pub(crate) fn draft_cursor_to_end(&mut self) {
         self.draft_cursor = draft_char_count(&self.draft);
+    }
+
+    /// Moves the caret to the start of the current line.
+    pub(crate) fn draft_cursor_line_start(&mut self) {
+        let byte = draft_char_to_byte(&self.draft, self.draft_cursor);
+        let line_start = self.draft[..byte].rfind('\n').map_or(0, |index| index + 1);
+        self.draft_cursor = self.draft[..line_start].chars().count();
+    }
+
+    /// Moves the caret to the end of the current line.
+    pub(crate) fn draft_cursor_line_end(&mut self) {
+        let byte = draft_char_to_byte(&self.draft, self.draft_cursor);
+        let line_end = self.draft[byte..].find('\n').map_or(self.draft.len(), |index| byte + index);
+        self.draft_cursor = self.draft[..line_end].chars().count();
     }
 }
 

@@ -86,20 +86,16 @@ pub(super) fn transcript_lines(
             }
         }
 
-        TranscriptItem::Permission { title, options, at } => {
+        TranscriptItem::Permission { title, at, .. } => {
+            // Only the question renders in the chat thread; the user picks a
+            // choice in the composer (the bottom prompt section). The full
+            // option list is preserved in the transcript export for audit.
             let time = fmt_hhmm(*at);
             lines.push(Line::from(vec![
                 Span::styled(format!("[{time}]"), dim),
                 Span::styled(" permission: ", Style::default().fg(theme::FG_WARNING)),
                 Span::styled(title.clone(), Style::default().fg(theme::FG_TEXT)),
             ]));
-            for option in options {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled("· ", Style::default().fg(theme::FG_WARNING)),
-                    Span::styled(option.clone(), Style::default().fg(theme::FG_TEXT)),
-                ]));
-            }
         }
         TranscriptItem::Elicitation { agent, message, url, url_host, at } => {
             let time = fmt_hhmm(*at);

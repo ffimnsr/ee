@@ -445,6 +445,17 @@ impl App {
             }
         }
 
+        // Floating prompt editor: all keys edit the draft until it closes.
+        if self
+            .agents
+            .active_thread_index()
+            .and_then(|index| self.agents.threads.get(index))
+            .is_some_and(|thread| thread.prompt_editor_snapshot.is_some())
+        {
+            self.handle_prompt_editor_key(key);
+            return;
+        }
+
         match key.code {
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -518,8 +529,15 @@ impl App {
             KeyCode::Esc => {}
             KeyCode::PageUp => self.agents_scroll(-(AGENTS_SCROLL_PAGE as isize)),
             KeyCode::PageDown => self.agents_scroll(AGENTS_SCROLL_PAGE as isize),
-            KeyCode::Home => self.agents_scroll_to(0),
-            KeyCode::End => self.agents_scroll_to_bottom(),
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_scroll_to(0);
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_scroll_to_bottom();
+            }
+            KeyCode::Home => self.agents_draft_cursor_line_start(),
+            KeyCode::End => self.agents_draft_cursor_line_end(),
+            KeyCode::Insert => self.agents_open_prompt_editor(),
             _ => {}
         }
     }
@@ -831,6 +849,105 @@ impl App {
             thread.prompt_history_cursor = None;
             thread.prompt_history_restore_draft = None;
             thread.draft_delete_word_backward();
+        }
+    }
+
+    fn agents_draft_cursor_line_start(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_cursor_line_start();
+        }
+    }
+
+    fn agents_draft_cursor_line_end(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_cursor_line_end();
+        }
+    }
+
+    /// Opens the floating prompt editor, snapshotting the draft so Esc can
+    /// cancel. Triggered by the Insert key.
+    pub(super) fn agents_open_prompt_editor(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_editor_snapshot = Some(thread.draft.clone());
+            self.backend.status_message =
+                Some(String::from("prompt editor: Enter newline · Ctrl-Enter accept · Esc cancel"));
+        }
+    }
+
+    /// Closes the floating prompt editor. `accept` keeps the edited draft;
+    /// otherwise the pre-open snapshot is restored.
+    pub(super) fn agents_close_prompt_editor(&mut self, accept: bool) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let snapshot = thread.prompt_editor_snapshot.take();
+        if let Some(restore) = snapshot.filter(|_| !accept) {
+            thread.draft = restore;
+        }
+        thread.draft_cursor_to_end();
+        self.backend.status_message = Some(if accept {
+            String::from("prompt editor: accepted")
+        } else {
+            String::from("prompt editor: cancelled")
+        });
+    }
+
+    /// Key handling while the floating prompt editor is open. Every key edits
+    /// the live draft; pastes arrive through [`App::handle_paste`] and insert
+    /// at the caret.
+    fn handle_prompt_editor_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.agents_close_prompt_editor(false);
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_close_prompt_editor(true);
+            }
+            KeyCode::Enter => {
+                self.agents_append_draft("\n");
+            }
+            KeyCode::Backspace
+                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.agents_draft_delete_word();
+            }
+            KeyCode::Backspace => self.agents_draft_backspace(),
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agents_draft_cursor_move_word(-1);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agents_draft_cursor_move_word(1);
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_draft_cursor_move_word(-1);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_draft_cursor_move_word(1);
+            }
+            KeyCode::Left => self.agents_draft_cursor_move(-1),
+            KeyCode::Right => self.agents_draft_cursor_move(1),
+            KeyCode::Home => self.agents_draft_cursor_line_start(),
+            KeyCode::End => self.agents_draft_cursor_line_end(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_clear_draft();
+            }
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_draft_delete_word();
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.agents_append_draft(&c.to_string());
+            }
+            _ => {}
         }
     }
 

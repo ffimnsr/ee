@@ -96,3 +96,78 @@ fn ctrl_u_clears_draft_and_resets_caret() {
     assert_eq!(cursor(&app), 0);
     app.shutdown_agents();
 }
+
+#[test]
+fn home_end_jump_to_current_line_edges() {
+    let (mut app, _temp) = composer_app();
+    type_text(&mut app, "ab cd");
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    }
+    assert_eq!(cursor(&app), 1);
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    assert_eq!(cursor(&app), 0, "Home goes to start of line");
+    press(&mut app, KeyCode::End, KeyModifiers::NONE);
+    assert_eq!(cursor(&app), 5, "End goes to end of line");
+    // Multiline: Home/End stay on the current line. "ab cd\n ef" has the
+    // second line starting at char 6 and ending at char 9.
+    app.agents.threads[0].draft = String::from("ab cd\n ef");
+    app.agents.threads[0].draft_cursor = 9;
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    assert_eq!(cursor(&app), 6, "Home lands at start of second line");
+    press(&mut app, KeyCode::End, KeyModifiers::NONE);
+    assert_eq!(cursor(&app), 9, "End lands at end of second line");
+    app.shutdown_agents();
+}
+
+#[test]
+fn insert_opens_editor_and_enter_adds_newline_without_submitting() {
+    let (mut app, _temp) = composer_app();
+    type_text(&mut app, "hello");
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    assert!(app.agents.threads[0].prompt_editor_snapshot.is_some(), "Insert opens the editor");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.agents.threads[0].prompt_editor_snapshot.is_some(),
+        "Enter must not submit while the editor is open"
+    );
+    assert_eq!(draft(&app), "hello\n");
+    type_text(&mut app, "world");
+    assert_eq!(draft(&app), "hello\nworld");
+    // Caret editing still works inside the editor: Home + word-right lands at
+    // the end of the second line, then typing inserts there.
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+    type_text(&mut app, "!");
+    assert_eq!(draft(&app), "hello\nworld!");
+    app.shutdown_agents();
+}
+
+#[test]
+fn editor_esc_cancels_and_ctrl_enter_accepts() {
+    let (mut app, _temp) = composer_app();
+    type_text(&mut app, "original");
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    type_text(&mut app, "X");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.agents.threads[0].prompt_editor_snapshot.is_none(), "Esc closes the editor");
+    assert_eq!(draft(&app), "original", "Esc restores the pre-open draft");
+
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    type_text(&mut app, "+");
+    press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].prompt_editor_snapshot.is_none());
+    assert_eq!(draft(&app), "original+", "Ctrl-Enter keeps the edited draft");
+    app.shutdown_agents();
+}
+
+#[test]
+fn editor_accepts_bracketed_paste_and_cancel_discards_it() {
+    let (mut app, _temp) = composer_app();
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    app.handle_event(Event::Paste(String::from("line1\r\nline2")));
+    assert_eq!(draft(&app), "line1\nline2");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "", "cancelling discards the pasted content");
+    app.shutdown_agents();
+}

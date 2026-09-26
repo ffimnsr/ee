@@ -813,6 +813,7 @@ impl App {
             expanded_tool_details: BTreeSet::new(),
             current_plan: Vec::new(),
             plan_modal_open: false,
+            prompt_editor_snapshot: None,
             last_error: None,
             pending_recovery: None,
             last_prompt: None,

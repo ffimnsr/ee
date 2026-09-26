@@ -43,6 +43,54 @@ pub(super) fn render_plan_modal(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Renders the floating prompt editor over the agents pane. The draft is
+/// edited live; Esc cancels (restoring the snapshot) and Ctrl-Enter accepts.
+#[cfg(feature = "agents")]
+pub(super) fn render_prompt_editor(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    thread: &crate::app::AgentThreadUi,
+) {
+    let modal = prompt_editor_rect(area);
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" prompt editor — Enter: newline · Ctrl-Enter: accept · Esc: cancel ")
+        .border_style(Style::default().fg(theme::FG_KEY))
+        .style(Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let draft = &thread.draft;
+    let byte = thread.draft_byte_at_cursor().min(draft.len());
+    let prefix = &draft[..byte];
+    let caret_line = prefix.chars().filter(|c| *c == '\n').count().min(inner.height as usize - 1);
+    let caret_col = prefix.rsplit_once('\n').map_or_else(
+        || ratatui::text::Span::raw(prefix).width(),
+        |(_, rest)| ratatui::text::Span::raw(rest).width(),
+    );
+    let scroll = caret_line.saturating_sub(inner.height as usize - 2);
+
+    let lines: Vec<Line<'static>> = draft
+        .split('\n')
+        .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(theme::FG_TEXT))))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+    frame.set_cursor_position(ratatui::layout::Position {
+        x: inner.x.saturating_add(caret_col as u16),
+        y: inner.y.saturating_add((caret_line - scroll) as u16),
+    });
+}
+
+#[cfg(feature = "agents")]
+pub(super) fn prompt_editor_rect(area: Rect) -> Rect {
+    let width = (area.width.saturating_mul(4) / 5).clamp(40, 120);
+    let height = (area.height.saturating_mul(3) / 5).clamp(8, 40);
+    let x = area.x + area.width.saturating_sub(width).saturating_sub(2) / 2;
+    let y = area.y + area.height.saturating_sub(height).saturating_sub(4) / 2;
+    Rect { x, y, width, height }
+}
+
 #[cfg(feature = "agents")]
 pub(super) fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
     let width = area.width.saturating_sub(4).clamp(24, 72);
@@ -447,12 +495,42 @@ pub(super) fn agents_composer_line(
         .is_some_and(|prefix| !prefix.chars().any(char::is_whitespace));
     let mut spans = vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
-        Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
+        Span::styled(
+            agents_draft_snippet(thread, DRAFT_SNIPPET_MAX_CHARS).unwrap_or_else(|| draft.clone()),
+            Style::default().fg(theme::FG_TEXT),
+        ),
     ];
     if command_hint {
         spans.push(Span::styled("  Tab complete · /help", theme_style(theme::FG_DIM)));
     }
     spans
+}
+
+/// Maximum characters shown in the single-line composer before the prompt
+/// collapses to a snippet ending in `…`.
+pub(super) const DRAFT_SNIPPET_MAX_CHARS: usize = 60;
+
+/// Snippet form of a long or multiline draft: the first line truncated to
+/// `max_chars` plus `…` (and a line count for multiline drafts). `None` means
+/// the draft fits the single-line prompt as-is.
+pub(super) fn agents_draft_snippet(
+    thread: &crate::app::AgentThreadUi,
+    max_chars: usize,
+) -> Option<String> {
+    let draft = &thread.draft;
+    let multiline = draft.contains('\n');
+    let overlong = draft.chars().count() > max_chars;
+    if !multiline && !overlong {
+        return None;
+    }
+    let first_line = draft.split('\n').next().unwrap_or_default();
+    let mut snippet: String = first_line.chars().take(max_chars).collect();
+    if multiline {
+        snippet.push_str(&format!(" \u{2026} ({} lines)", draft.split('\n').count()));
+    } else {
+        snippet.push_str(" \u{2026}");
+    }
+    Some(snippet)
 }
 
 /// Builds the composer line shown while no session exists yet.
