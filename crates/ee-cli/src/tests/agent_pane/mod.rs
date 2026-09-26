@@ -241,6 +241,12 @@ default_agent = "fake"
 
 [agents.servers.fake]
 command = "unused"
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#;
 
 const TWO_AGENTS_TOML: &str = r#"
@@ -256,6 +262,12 @@ command = "unused-alpha"
 [agents.servers.beta]
 label = "Beta Agent"
 command = "unused-beta"
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#;
 
 fn openrouter_fixture_config() -> OpenRouterConfig {
@@ -598,6 +610,7 @@ fn begin_fixture_turn(app: &mut App, fake: &ScriptedFake) -> u64 {
         .turn_id()
 }
 
+mod composer_tests;
 mod footer_tests;
 mod mode_config_tests;
 mod pane_tests;

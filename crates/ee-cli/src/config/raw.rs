@@ -113,7 +113,8 @@ pub(crate) struct AgentsToml {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspaceMemoryToml {
-    /// Enables local durable workspace memory. Defaults to `false`.
+    /// Enables durable workspace memory. Defaults to `true` when agents
+    /// mode is enabled; set `false` to opt out.
     pub enabled: Option<bool>,
     /// Maximum UTF-8 bytes in one fact value.
     pub max_value_bytes: Option<usize>,

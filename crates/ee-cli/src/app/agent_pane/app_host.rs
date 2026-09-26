@@ -221,6 +221,21 @@ impl App {
         // Always host policy-governed editor MCP for ACP-native agents. Explicit
         // proxy configuration remains required only for stdio fallback.
         config.ee_proxy_enabled = true;
+        // Heal known first-run config requirements at launch so upgrades and
+        // manually configured installs never hit a missing-config launcher
+        // error (setup already bootstraps new installs).
+        if let Some(home) = dirs::home_dir() {
+            for id in config.agents.keys() {
+                if let Ok(crate::agent_bootstrap::FirstRunBootstrap::Created(path)) =
+                    crate::agent_bootstrap::bootstrap_first_run_config_for_id(id, &home)
+                {
+                    let _ = crate::logs::append_editor_log_line(&format!(
+                        "bootstrapped first-run config for `{id}`: {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
         let memory = &self.config.agents.workspace_memory;
         config.workspace_memory = ee_agent_host::WorkspaceMemoryHostConfig {
             enabled: memory.enabled,

@@ -73,6 +73,12 @@ default_agent = "fake"
 
 [agents.servers.fake]
 command = "unused"
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#;
 
 pub(crate) fn agents_app_in(

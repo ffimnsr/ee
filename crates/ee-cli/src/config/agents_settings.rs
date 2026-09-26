@@ -46,7 +46,8 @@ pub(crate) struct AgentsSettings {
     pub servers: BTreeMap<String, AgentServerSettings>,
     /// Frontend-resolved critic policy; translated to backend policy on use.
     pub rubber_duck: RubberDuckSettings,
-    /// Durable workspace memory. Explicitly disabled unless configured.
+    /// Durable workspace memory with persistence. Enabled by default when
+    /// agents mode is on; set `enabled = false` to opt out.
     pub workspace_memory: WorkspaceMemorySettings,
     /// Trusted web retrieval policy. This exists only in agents-enabled builds;
     /// raw config remains parseable in every build so schema validation is stable.

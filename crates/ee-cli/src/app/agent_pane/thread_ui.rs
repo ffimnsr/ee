@@ -139,6 +139,9 @@ pub(crate) struct AgentThreadUi {
     pub(crate) optimistic_message: Option<usize>,
     /// Per-thread composer draft (preserved across switches).
     pub(crate) draft: String,
+    /// Composer caret position in chars (0 = start, `draft.len()` in chars =
+    /// end). Word/char movement and insert/backspace operate relative to it.
+    pub(crate) draft_cursor: usize,
     /// Submitted plain prompt text. Context snapshots are intentionally absent.
     pub(crate) prompt_history: Vec<String>,
     /// Selected history item while navigating/searching.
@@ -478,7 +481,130 @@ impl AgentThreadUi {
         self.transcript.push(TranscriptItem::System { text: text.into(), at: SystemTime::now() });
         self.trim_transcript();
     }
+}
 
+// ── Composer draft editing ───────────────────────────────────────────────────
+
+/// Byte offset in `text` for the `char_index`-th char (clamped to the end).
+fn draft_char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices().nth(char_index).map(|(index, _)| index).unwrap_or(text.len())
+}
+
+fn draft_char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// Char index of the start of the word before `cursor` (skips whitespace).
+fn draft_word_start_left(text: &str, cursor: usize) -> usize {
+    let mut index = cursor;
+    while index > 0
+        && text[..draft_char_to_byte(text, index)]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        index -= 1;
+    }
+    while index > 0 {
+        let Some(previous) = text[..draft_char_to_byte(text, index)].chars().next_back() else {
+            break;
+        };
+        if previous.is_whitespace() {
+            break;
+        }
+        index -= 1;
+    }
+    index
+}
+
+/// Char index just past the next word after `cursor`. From the middle of a
+/// word it lands at the word end; from whitespace it lands at the start of
+/// the next word.
+fn draft_word_end_right(text: &str, cursor: usize) -> usize {
+    let mut index = cursor;
+    let count = draft_char_count(text);
+    let at_word = index < count
+        && !text[draft_char_to_byte(text, index)..].chars().next().is_some_and(char::is_whitespace);
+    if at_word {
+        while index < count
+            && !text[draft_char_to_byte(text, index)..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            index += 1;
+        }
+    } else {
+        while index < count
+            && text[draft_char_to_byte(text, index)..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            index += 1;
+        }
+    }
+    index
+}
+
+impl AgentThreadUi {
+    /// Byte offset of the composer caret in the draft string.
+    pub(crate) fn draft_byte_at_cursor(&self) -> usize {
+        draft_char_to_byte(&self.draft, self.draft_cursor)
+    }
+
+    /// Inserts text at the caret and advances it.
+    pub(crate) fn draft_insert_at_cursor(&mut self, text: &str) {
+        let byte = draft_char_to_byte(&self.draft, self.draft_cursor);
+        self.draft.insert_str(byte, text);
+        self.draft_cursor += text.chars().count();
+    }
+
+    /// Removes the char before the caret.
+    pub(crate) fn draft_backspace_at_cursor(&mut self) {
+        if self.draft_cursor == 0 {
+            return;
+        }
+        let start = draft_char_to_byte(&self.draft, self.draft_cursor - 1);
+        let end = draft_char_to_byte(&self.draft, self.draft_cursor);
+        self.draft.drain(start..end);
+        self.draft_cursor -= 1;
+    }
+
+    /// Moves the caret one char; clamps at the draft edges.
+    pub(crate) fn draft_cursor_move(&mut self, delta: isize) {
+        let count = draft_char_count(&self.draft);
+        self.draft_cursor = (self.draft_cursor as isize + delta).clamp(0, count as isize) as usize;
+    }
+
+    /// Moves the caret to the previous/next word boundary.
+    pub(crate) fn draft_cursor_move_word(&mut self, delta: isize) {
+        if delta < 0 {
+            self.draft_cursor = draft_word_start_left(&self.draft, self.draft_cursor);
+        } else {
+            self.draft_cursor = draft_word_end_right(&self.draft, self.draft_cursor);
+        }
+    }
+
+    /// Deletes the word before the caret.
+    pub(crate) fn draft_delete_word_backward(&mut self) {
+        let start = draft_word_start_left(&self.draft, self.draft_cursor);
+        if start == self.draft_cursor {
+            return;
+        }
+        let end = draft_char_to_byte(&self.draft, self.draft_cursor);
+        self.draft.drain(start..end);
+        self.draft_cursor = start;
+    }
+
+    /// Pins the caret to the end (used after whole-draft replacements such as
+    /// history navigation, stash/restore, and mention completion).
+    pub(crate) fn draft_cursor_to_end(&mut self) {
+        self.draft_cursor = draft_char_count(&self.draft);
+    }
+}
+
+impl AgentThreadUi {
     /// Appends a stderr/debug line (bounded).
     pub(super) fn push_stderr(&mut self, line: impl Into<String>) {
         self.transcript.push(TranscriptItem::Stderr { text: line.into(), at: SystemTime::now() });

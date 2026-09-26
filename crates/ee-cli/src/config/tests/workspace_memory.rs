@@ -12,10 +12,10 @@ use super::super::*;
 // Serialize back through the full document shape: the resolved
 // document carries the proxy flag.
 #[test]
-fn workspace_memory_defaults_disabled_and_merges_field_by_field() {
+fn workspace_memory_defaults_enabled_and_merges_field_by_field() {
     let mut settings = EditorSettings::default();
     let defaults = settings.agents.workspace_memory.clone();
-    assert!(!defaults.enabled);
+    assert!(defaults.enabled, "workspace memory is on by default with agents mode");
 
     let first: EeToml = toml::from_str(
             "[agents.workspace_memory]\nenabled = true\nmax_value_bytes = 8192\nmax_recall_results = 12\ndefault_expiry_days = 180\ncandidate_retention_days = 5\n",

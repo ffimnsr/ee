@@ -788,6 +788,7 @@ impl App {
             transcript,
             optimistic_message: None,
             draft: std::mem::take(&mut self.agents.pending_draft),
+            draft_cursor: 0,
             prompt_history,
             prompt_history_cursor: None,
             prompt_history_restore_draft: None,

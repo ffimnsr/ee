@@ -212,6 +212,36 @@ enabled = true
     assert!(restored.mcp.proxy.enabled);
 }
 #[test]
+fn mcp_proxy_defaults_on_when_agents_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    write_config_layer(&env, ConfigLayerKind::Ancestor, "[agents]\nenabled = true\n");
+    let settings = load_config_with_env(None, &env);
+    assert!(settings.mcp.proxy.enabled, "proxy defaults on with agents mode");
+}
+#[test]
+fn mcp_proxy_explicit_opt_out_wins_over_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        "[agents]\nenabled = true\n\n[mcp.proxy]\nenabled = false\n",
+    );
+    let settings = load_config_with_env(None, &env);
+    assert!(!settings.mcp.proxy.enabled);
+}
+#[test]
+fn mcp_proxy_stays_off_without_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    let settings = load_config_with_env(None, &env);
+    assert!(!settings.mcp.proxy.enabled);
+}
+#[test]
 fn mcp_settings_to_toml_includes_proxy_when_enabled() {
     let settings = EditorSettings::default();
     assert!(mcp_settings_to_toml(&settings.mcp).is_none());

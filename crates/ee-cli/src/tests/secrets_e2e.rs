@@ -30,6 +30,12 @@ enabled = true
 [agents.servers.fake]
 command = "unused"
 env = { OPENROUTER_API_KEY = "secret://openrouter-api-key" }
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#;
 
 // ── Fixture: fake keychain + host binding + vault ───────────────────────────
@@ -150,6 +156,12 @@ enabled = true
 command = "agent-bin"
 args = ["--serve"]
 env = { LOG_LEVEL = "info" }
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#,
     );
     write_config_layer(

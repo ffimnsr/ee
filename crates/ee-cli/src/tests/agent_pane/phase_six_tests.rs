@@ -802,5 +802,41 @@ fn phase_six_chat_only_turn_observes_baseline_revision_and_keeps_chat_clean() {
         "evidence audit log must record the turn-start and terminal summaries: {log_lines:?}"
     );
 
+    let rendered: Vec<String> =
+        crate::ui::agents_pane::agent_transcript_lines(&app, &app.agents.threads[0], 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    assert!(
+        rendered.iter().all(|line| !line.to_lowercase().contains("thinking")),
+        "spinner must vanish once the final response arrives: {rendered:?}"
+    );
+
+    app.shutdown_agents();
+}
+
+#[test]
+fn thinking_indicator_shows_while_turn_runs() {
+    // A turn that never answers keeps the thread Running; the spinner row
+    // must be pinned after the last transcript message.
+    let script = base_script().wait_for("session/prompt");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    begin_fixture_turn(&mut app, &fake);
+
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::Running);
+    let rendered: Vec<String> =
+        crate::ui::agents_pane::agent_transcript_lines(&app, &app.agents.threads[0], 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    let last = rendered.last().expect("transcript has a trailing spinner row");
+    assert!(last.ends_with("Thinking"), "{last}");
+    let first = last.chars().next().expect("spinner frame");
+    assert!(
+        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"].contains(&first.to_string().as_str()),
+        "expected braille spinner frame, got {last}"
+    );
+
     app.shutdown_agents();
 }

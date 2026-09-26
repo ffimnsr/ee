@@ -25,22 +25,47 @@ pub(super) fn transcript_lines(
             let time = fmt_hhmm(*at);
             let nick_display = pad_or_trim(nick, nick_col);
             let wrapped = crate::app::wrap_text(text, text_width);
-            for (index, segment) in
-                wrapped.iter().filter(|segment| !segment.trim().is_empty()).enumerate()
-            {
-                if index == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("[{time}]"), dim),
-                        Span::raw(" "),
-                        Span::styled(nick_display.clone(), style),
-                        Span::styled(" ", dim),
-                        Span::styled(segment.clone(), style),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(indent)),
-                        Span::styled(segment.clone(), style),
-                    ]));
+            match kind {
+                MessageRenderKind::Assistant => {
+                    // Assistant replies are markdown: render styled, wrapped
+                    // lines with the same first-line prefix layout.
+                    for (index, line) in
+                        crate::ui::markdown::markdown_message_lines(text, text_width, style)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let mut spans = Vec::with_capacity(line.spans.len() + 2);
+                        if index == 0 {
+                            spans.push(Span::styled(format!("[{time}]"), dim));
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(nick_display.clone(), style));
+                            spans.push(Span::styled(" ", dim));
+                        } else {
+                            spans.push(Span::raw(" ".repeat(indent)));
+                        }
+                        spans.extend(line.spans);
+                        lines.push(Line::from(spans));
+                    }
+                }
+                MessageRenderKind::User | MessageRenderKind::Thought => {
+                    for (index, segment) in
+                        wrapped.iter().filter(|segment| !segment.trim().is_empty()).enumerate()
+                    {
+                        if index == 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled(format!("[{time}]"), dim),
+                                Span::raw(" "),
+                                Span::styled(nick_display.clone(), style),
+                                Span::styled(" ", dim),
+                                Span::styled(segment.clone(), style),
+                            ]));
+                        } else {
+                            lines.push(Line::from(vec![
+                                Span::raw(" ".repeat(indent)),
+                                Span::styled(segment.clone(), style),
+                            ]));
+                        }
+                    }
                 }
             }
         }
@@ -150,7 +175,7 @@ pub(super) fn agents_pane_rows(app: &App, area: Rect) -> std::rc::Rc<[Rect]> {
 }
 
 #[cfg(feature = "agents")]
-pub(super) fn agent_transcript_lines(
+pub(crate) fn agent_transcript_lines(
     app: &App,
     thread: &crate::app::AgentThreadUi,
     width: usize,
@@ -208,7 +233,31 @@ pub(super) fn agent_transcript_lines(
         }
         lines.extend(transcript_lines(item, width, show_tool_detail));
     }
+    if let Some(line) = thinking_line(thread) {
+        lines.push(line);
+    }
     lines
+}
+
+/// Spinner frames cycled while a turn runs (classic cli-spinners style).
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// One animated row pinned after the last transcript message while the turn
+/// is still working and the final response has not arrived. It vanishes as
+/// soon as the thread leaves the running state; the streamed final message
+/// then occupies the last row.
+fn thinking_line(thread: &crate::app::AgentThreadUi) -> Option<Line<'static>> {
+    if thread.state != crate::app::ThreadUiState::Running {
+        return None;
+    }
+    let frame = thread
+        .turn_started_at
+        .map_or(0, |started| (started.elapsed().as_millis() / 80) % SPINNER_FRAMES.len() as u128)
+        as usize;
+    Some(Line::from(Span::styled(
+        format!("{} Thinking", SPINNER_FRAMES[frame]),
+        Style::default().fg(theme::FG_DIM),
+    )))
 }
 
 /// Maximum visual-row offset for active agent transcript within `area`.

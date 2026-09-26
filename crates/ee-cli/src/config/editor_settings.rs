@@ -447,13 +447,19 @@ impl EditorSettings {
                 Err(error) => eprintln!("ee: warning: invalid agents.rubber_duck: {error}"),
             }
         }
+        // Default-on policy: agents mode implies the ee MCP proxy unless the
+        // user configured `[mcp.proxy]` explicitly.
+        if self.agents.enabled && !self.mcp.proxy_explicit {
+            self.mcp.proxy.enabled = true;
+        }
     }
 
     fn merge_mcp_toml(&mut self, patch: &McpToml) {
-        if let Some(proxy) = &patch.proxy
-            && let Some(enabled) = proxy.enabled
-        {
-            self.mcp.proxy.enabled = enabled;
+        if let Some(proxy) = &patch.proxy {
+            self.mcp.proxy_explicit = true;
+            if let Some(enabled) = proxy.enabled {
+                self.mcp.proxy.enabled = enabled;
+            }
         }
         for (id, server) in &patch.servers {
             match resolve_mcp_server(id, server) {

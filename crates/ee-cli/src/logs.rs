@@ -116,3 +116,80 @@ pub(crate) fn discover_log_paths() -> Vec<LogPathCandidate> {
 
     items
 }
+
+/// Process-global guard that redirects stderr (fd 2) into the editor log for
+/// the lifetime of the TUI session. Warnings, panics, and stray diagnostics
+/// then land in the log file instead of corrupting the alternate screen. The
+/// original descriptor is restored on drop so post-TUI diagnostics still
+/// reach the caller's terminal. Stdout is deliberately left untouched: the
+/// alternate screen renders through it.
+#[cfg(unix)]
+pub(crate) struct TuiStderrRedirect {
+    saved_stderr: std::os::unix::io::RawFd,
+}
+
+/// Starts the TUI stderr redirect against the preferred editor log path.
+#[cfg(unix)]
+pub(crate) fn redirect_tui_stderr() -> io::Result<TuiStderrRedirect> {
+    redirect_stderr_to_path(&preferred_editor_log_path())
+}
+
+#[cfg(unix)]
+fn redirect_stderr_to_path(path: &Path) -> io::Result<TuiStderrRedirect> {
+    use std::os::unix::io::AsRawFd;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if saved < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(saved) };
+        return Err(error);
+    }
+    Ok(TuiStderrRedirect { saved_stderr: saved })
+}
+
+#[cfg(unix)]
+impl Drop for TuiStderrRedirect {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dup2(self.saved_stderr, libc::STDERR_FILENO);
+            libc::close(self.saved_stderr);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_redirect_lands_in_log_and_restores_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("run.log");
+        let guard = redirect_stderr_to_path(&path).expect("redirect stderr");
+        // libtest intercepts Rust-level eprintln (capture buffer), so probe the
+        // fd directly: this is exactly what production eprintln/tracing/panics
+        // write through once the descriptor is redirected.
+        let probe = b"TUI-STDERR-PROBE-12345\n";
+        unsafe { libc::write(libc::STDERR_FILENO, probe.as_ptr().cast(), probe.len()) };
+        drop(guard);
+
+        let content = fs::read_to_string(&path).expect("read log");
+        assert!(content.contains("TUI-STDERR-PROBE-12345"), "{content}");
+
+        // After restore, further fd writes must not touch the file again.
+        let marker = b"TUI-STDERR-RESTORED-MARKER\n";
+        unsafe { libc::write(libc::STDERR_FILENO, marker.as_ptr().cast(), marker.len()) };
+        let after = fs::read_to_string(&path).expect("read log again");
+        assert!(
+            !after.contains("TUI-STDERR-RESTORED-MARKER"),
+            "stderr must be restored after the guard drops: {after}"
+        );
+    }
+}

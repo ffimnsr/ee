@@ -21,6 +21,7 @@ use reqwest::blocking::{Client, Response};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::logs;
 use url::Url;
 
 const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -218,12 +219,12 @@ impl RegistryAgent {
         if let LaunchDistribution::Binary(binary) = &distribution
             && let Some(prepared) = self.installed_binary(binary)?
         {
-            println!(
+            let _ = logs::append_editor_log_line(&format!(
                 "Using installed {} {} from {}.",
                 self.name,
                 self.version,
                 prepared.command.display()
-            );
+            ));
             return Ok(prepared);
         }
         match distribution {
@@ -323,7 +324,10 @@ impl RegistryAgent {
             .tempfile_in(&version_dir)
             .map_err(|error| format!("cannot create agent download file: {error}"))?;
 
-        println!("Downloading {} {} from ACP Registry.", self.name, self.version);
+        let _ = logs::append_editor_log_line(&format!(
+            "Downloading {} {} from ACP Registry.",
+            self.name, self.version
+        ));
         download_archive(&binary.archive, download.as_file())?;
         verify_download(download.path(), binary.sha256.as_deref())?;
         extract_download(download.path(), &binary.archive, staging.path(), &relative_command)?;
@@ -355,6 +359,17 @@ impl RegistryAgent {
     ) -> PreparedAgent {
         PreparedAgent { id: self.id.clone(), display_name: self.name.clone(), command, args, env }
     }
+}
+
+pub(crate) use crate::agent_bootstrap::FirstRunBootstrap;
+
+/// First-run bootstrap for registry agents, delegated to the shared module so
+/// setup (binary crate) and launch healing (library crate) share one path.
+pub(crate) fn bootstrap_first_run_config(
+    agent: &RegistryAgent,
+    home: &Path,
+) -> Result<FirstRunBootstrap, String> {
+    crate::agent_bootstrap::bootstrap_first_run_config_for_id(&agent.id, home)
 }
 
 fn validate_binary(binary: &BinaryDistribution) -> Result<(), String> {

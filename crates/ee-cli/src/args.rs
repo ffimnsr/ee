@@ -100,11 +100,15 @@ pub(crate) enum DoCommands {
         #[command(subcommand)]
         command: SchemaCommands,
     },
-    /// Generate shell completion script
+    /// Generate or install shell completion script
     Completions {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: Shell,
+        /// Install the script in the shell's userspace config location
+        /// instead of printing it (no sudo required)
+        #[arg(long)]
+        install: bool,
     },
     /// Manage the host-bound encrypted secrets store
     Secrets {

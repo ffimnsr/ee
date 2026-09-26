@@ -31,6 +31,8 @@ use xi_core_lib::vlf::store::VlfStore;
 use xi_core_lib::{plugin_manifest, plugins::PluginCatalog};
 
 #[cfg(feature = "agents")]
+mod agent_bootstrap;
+#[cfg(feature = "agents")]
 mod agent_registry;
 #[cfg(feature = "agents")]
 mod agent_setup;
@@ -345,7 +347,7 @@ fn main() -> io::Result<()> {
                     SchemaCommands::Generate { output } => cmd_schema_generate(&output),
                     SchemaCommands::Check { schema } => cmd_schema_check(&schema),
                 },
-                DoCommands::Completions { shell } => cmd_completions(shell),
+                DoCommands::Completions { shell, install } => cmd_completions(shell, install),
                 DoCommands::Secrets { command } => cmd_secrets(command),
             }
             if !launch_agent_shell {
@@ -400,6 +402,10 @@ fn main() -> io::Result<()> {
 
 fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     enable_raw_mode()?;
+    // Keep process stderr out of the alternate screen: warnings, panics, and
+    // stray diagnostics land in the editor log and are restored on exit.
+    #[cfg(unix)]
+    let _stderr_log = logs::redirect_tui_stderr();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;

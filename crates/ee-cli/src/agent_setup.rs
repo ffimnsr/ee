@@ -91,6 +91,21 @@ fn setup_registry_agent(agent: &RegistryAgent) -> Result<(), String> {
     }
 
     let prepared = agent.prepare()?;
+    match agent_registry::bootstrap_first_run_config(
+        agent,
+        &dirs::home_dir()
+            .ok_or_else(|| String::from("cannot resolve home directory for agent setup"))?,
+    )? {
+        agent_registry::FirstRunBootstrap::Created(path) => {
+            println!("Created first-run configuration for {} ({}).", agent.name, path.display())
+        }
+        agent_registry::FirstRunBootstrap::Existing(path) => println!(
+            "First-run configuration for {} already present: {}",
+            agent.name,
+            path.display()
+        ),
+        agent_registry::FirstRunBootstrap::NotApplicable => {}
+    }
     let path = config::configure_global_agent_server(
         &prepared.id,
         &prepared.command,

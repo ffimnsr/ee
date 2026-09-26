@@ -346,6 +346,7 @@ impl App {
         let (command, args) = split_slash_command(&draft);
         if let Some("mode") = command.as_deref() {
             self.agents.threads[active].draft.clear();
+            self.agents.threads[active].draft_cursor = 0;
             self.agents_set_mode(active, &args);
             return;
         }
@@ -370,6 +371,7 @@ impl App {
         let next_context = {
             let thread = &mut self.agents.threads[active];
             thread.draft.clear();
+            thread.draft_cursor = 0;
             thread.record_prompt_history(&prompt_text);
             std::mem::take(&mut thread.next_prompt_context_files)
         };
@@ -400,6 +402,7 @@ impl App {
         }
         let next_prompt_context_files = std::mem::take(&mut thread.next_prompt_context_files);
         thread.draft.clear();
+        thread.draft_cursor = 0;
         thread.record_prompt_history(&prompt_text);
         let prompt = QueuedPrompt { text: prompt_text, next_prompt_context_files };
         if priority {

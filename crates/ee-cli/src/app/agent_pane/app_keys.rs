@@ -117,13 +117,14 @@ impl App {
         }
     }
 
-    /// Appends text to the active thread's draft, or to the startup draft before a session exists.
+    /// Inserts text at the active thread's draft caret, or appends to the
+    /// startup draft before a session exists.
     pub(crate) fn agents_append_draft(&mut self, text: &str) {
         if let Some(active) = self.agents.active_thread_index() {
             let thread = &mut self.agents.threads[active];
             thread.prompt_history_cursor = None;
             thread.prompt_history_restore_draft = None;
-            thread.draft.push_str(text);
+            thread.draft_insert_at_cursor(text);
         } else {
             self.agents.pending_draft.push_str(text);
         }
@@ -452,6 +453,8 @@ impl App {
                         'p' => self.agents_switch_thread(-1),
                         't' => self.open_agents_thread_picker(),
                         'g' => self.agents_toggle_plan(),
+                        // Terminals that send Ctrl+Backspace as Ctrl+H.
+                        'h' => self.agents_draft_delete_word(),
                         'r' if key.modifiers.contains(KeyModifiers::SHIFT)
                             || self
                                 .agents
@@ -481,6 +484,14 @@ impl App {
             KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.agents_select_response_group(1);
             }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agents_draft_cursor_move_word(-1);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.agents_draft_cursor_move_word(1);
+            }
+            KeyCode::Left => self.agents_draft_cursor_move(-1),
+            KeyCode::Right => self.agents_draft_cursor_move(1),
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     self.agents_append_draft("\n");
@@ -495,6 +506,11 @@ impl App {
             }
             KeyCode::BackTab => {
                 let _ = self.cycle_slash_command(-1);
+            }
+            KeyCode::Backspace
+                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.agents_draft_delete_word();
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
             KeyCode::Up => self.agents_navigate_prompt_history(-1),
@@ -641,6 +657,7 @@ impl App {
         if let Some(active) = self.agents.active_thread_index() {
             let thread = &mut self.agents.threads[active];
             thread.draft.clear();
+            thread.draft_cursor = 0;
             thread.prompt_history_cursor = None;
             thread.prompt_history_restore_draft = None;
         } else {
@@ -679,6 +696,7 @@ impl App {
         if let Some(index) = next {
             thread.draft = thread.prompt_history[index].clone();
         }
+        thread.draft_cursor_to_end();
     }
 
     fn agents_reverse_prompt_history_search(&mut self) {
@@ -698,6 +716,7 @@ impl App {
                 }
                 thread.prompt_history_cursor = Some(index);
                 thread.draft = thread.prompt_history[index].clone();
+                thread.draft_cursor_to_end();
                 self.backend.status_message =
                     Some(format!("history search: {}/{}", index + 1, thread.prompt_history.len()));
             }
@@ -767,7 +786,9 @@ impl App {
         };
         let replacement = format!("@{completed}");
         if let Some(active) = self.agents.active_thread_index() {
-            self.agents.threads[active].draft.replace_range(token_start.., &replacement);
+            let thread = &mut self.agents.threads[active];
+            thread.draft.replace_range(token_start.., &replacement);
+            thread.draft_cursor_to_end();
         } else {
             self.agents.pending_draft.replace_range(token_start.., &replacement);
         }
@@ -780,9 +801,36 @@ impl App {
             let thread = &mut self.agents.threads[active];
             thread.prompt_history_cursor = None;
             thread.prompt_history_restore_draft = None;
-            thread.draft.pop();
+            thread.draft_backspace_at_cursor();
         } else {
             self.agents.pending_draft.pop();
+        }
+    }
+
+    fn agents_draft_cursor_move(&mut self, delta: isize) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_cursor_move(delta);
+        }
+    }
+
+    fn agents_draft_cursor_move_word(&mut self, delta: isize) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_cursor_move_word(delta);
+        }
+    }
+
+    fn agents_draft_delete_word(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_delete_word_backward();
         }
     }
 

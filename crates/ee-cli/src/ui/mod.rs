@@ -349,9 +349,10 @@ fn fmt_hhmm(at: std::time::SystemTime) -> String {
     format!("{:02}:{:02}", day_secs / 3600, (day_secs / 60) % 60)
 }
 
-mod agents_pane;
+pub(crate) mod agents_pane;
 mod annotations;
 mod composer;
+mod markdown;
 mod panels;
 mod picker;
 mod prompt;

@@ -1,6 +1,8 @@
 // Benchmark APIs exercise selected editor paths without linking the CLI entrypoint.
 // Runtime-only paths therefore remain intentionally unreachable in this library target.
 #[allow(dead_code)]
+mod agent_bootstrap;
+#[allow(dead_code)]
 mod app;
 #[allow(dead_code)]
 mod backend;

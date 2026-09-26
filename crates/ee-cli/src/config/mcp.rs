@@ -25,8 +25,11 @@ pub(super) const DEFAULT_MCP_HTTP_TIMEOUT_MS: u64 = 30_000;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct McpSettings {
     pub servers: BTreeMap<String, McpServerSettings>,
-    /// Optional ee MCP proxy mode (off by default).
+    /// ee MCP proxy mode. Enabled by default when agents mode is on; the
+    /// user can opt out with `[mcp.proxy] enabled = false`.
     pub proxy: McpProxySettings,
+    /// Whether the user explicitly configured `[mcp.proxy]` in any layer.
+    pub proxy_explicit: bool,
 }
 
 /// Resolved ee MCP proxy runtime settings.

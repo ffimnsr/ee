@@ -327,6 +327,7 @@ impl App {
             return false;
         };
         thread.draft = slash_command_draft(command_names[next_index], &rest);
+        thread.draft_cursor_to_end();
         true
     }
 

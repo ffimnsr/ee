@@ -214,11 +214,18 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
             });
         }
     } else {
-        let cursor_col = composer
-            .iter()
-            .map(|span| span.width())
-            .sum::<usize>()
-            .min(composer_area.width.saturating_sub(1) as usize);
+        // The composer caret sits inside the draft (chars left/right/word
+        // movement); overlays keep the end-of-line placement.
+        let cursor_col = if let Some(active_index) = app.agents.active_thread {
+            let thread = &app.agents.threads[active_index];
+            let byte = thread.draft_byte_at_cursor().min(thread.draft.len());
+            let prefix = &thread.draft[..byte];
+            let line_prefix = prefix.rsplit_once('\n').map_or(prefix, |(_, rest)| rest);
+            8 + ratatui::text::Span::raw(line_prefix).width()
+        } else {
+            composer.iter().map(|span| span.width()).sum::<usize>()
+        };
+        let cursor_col = cursor_col.min(composer_area.width.saturating_sub(1) as usize);
         frame.render_widget(Paragraph::new(Line::from(composer)), composer_area);
         if app.agents_focused() {
             frame.set_cursor_position(Position {

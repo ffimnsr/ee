@@ -112,7 +112,7 @@ pub(crate) fn mcp_app_in(
     // particular, a developer's `agents.servers.fake.env` secret reference
     // must not make these fake-agent tests depend on a platform keychain.
     let mut toml = String::from(
-        "root = true\n\n[agents]\nenabled = true\ndefault_agent = \"fake\"\n\n[agents.servers.fake]\ncommand = \"unused\"\n",
+        "root = true\n\n[agents]\nenabled = true\ndefault_agent = \"fake\"\n\n[agents.servers.fake]\ncommand = \"unused\"\n\n[agents.workspace_memory]\nenabled = false\n",
     );
     if mcp_servers {
         toml.push_str(
@@ -121,6 +121,10 @@ pub(crate) fn mcp_app_in(
     }
     if proxy {
         toml.push_str("[mcp.proxy]\nenabled = true\n");
+    } else {
+        // Proxy defaults on with agents mode; the non-proxy fixtures opt out
+        // explicitly to keep their expectations deterministic.
+        toml.push_str("[mcp.proxy]\nenabled = false\n");
     }
     fs::write(temp.path().join(".ee.toml"), toml).unwrap();
     let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();

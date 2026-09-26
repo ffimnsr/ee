@@ -58,7 +58,7 @@ impl Default for WorkspaceMemorySettings {
         {
             let defaults = WorkspaceMemoryHostConfig::default();
             Self {
-                enabled: false,
+                enabled: true,
                 max_value_bytes: defaults.quotas.max_value_bytes,
                 max_active_facts: defaults.quotas.max_active_facts,
                 max_active_bytes: defaults.quotas.max_active_bytes,
@@ -76,7 +76,7 @@ impl Default for WorkspaceMemorySettings {
         #[cfg(not(any(feature = "agents", test)))]
         {
             Self {
-                enabled: false,
+                enabled: true,
                 max_value_bytes: 4 * 1024,
                 max_active_facts: 256,
                 max_active_bytes: 512 * 1024,

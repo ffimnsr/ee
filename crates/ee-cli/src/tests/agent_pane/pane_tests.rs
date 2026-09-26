@@ -101,6 +101,12 @@ command = "unused-alpha"
 
 [agents.servers.beta]
 command = "unused-beta"
+
+[agents.workspace_memory]
+enabled = false
+
+[mcp.proxy]
+enabled = false
 "#,
     )
     .unwrap();

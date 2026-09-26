@@ -502,6 +502,7 @@ impl App {
             return;
         }
         thread.stashed_draft = Some(std::mem::take(&mut thread.draft));
+        thread.draft_cursor = 0;
         thread.prompt_history_cursor = None;
         thread.prompt_history_restore_draft = None;
         self.backend.status_message = Some(String::from("draft stashed locally"));
@@ -516,6 +517,7 @@ impl App {
         match thread.stashed_draft.take() {
             Some(draft) => {
                 thread.draft = draft;
+                thread.draft_cursor_to_end();
                 thread.prompt_history_cursor = None;
                 thread.prompt_history_restore_draft = None;
                 self.backend.status_message = Some(String::from("draft restored locally"));
@@ -569,6 +571,7 @@ impl App {
                         .and_then(|index| self.agents.threads.get_mut(index))
                         .map(|thread| {
                             thread.draft = draft;
+                            thread.draft_cursor_to_end();
                             thread.prompt_history_cursor = None;
                             thread.prompt_history_restore_draft = None;
                         })

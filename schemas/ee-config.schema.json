@@ -814,7 +814,7 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enables local durable workspace memory. Defaults to `false`.",
+          "description": "Enables durable workspace memory. Defaults to `true` when agents\nmode is enabled; set `false` to opt out.",
           "type": [
             "boolean",
             "null"
