@@ -175,6 +175,63 @@ env = { OPENROUTER_API_KEY = "global-literal" }
     assert_eq!(key.raw, "global-literal");
 }
 #[test]
+fn env_only_global_server_drops_silently_without_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        r#"
+[agents]
+enabled = true
+
+[agents.servers.assistant.env]
+OPENROUTER_API_KEY = "secret://openrouter-api-key"
+"#,
+    );
+
+    let settings = load_for(&env);
+
+    assert!(settings.agents.servers.is_empty(), "env-only entry is inert and dropped");
+}
+#[test]
+fn env_only_global_server_completes_from_workspace_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        r#"
+[agents.servers.gh]
+env = { OPENROUTER_API_KEY = "global-literal" }
+"#,
+    );
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        r#"
+[agents]
+enabled = true
+
+[agents.servers.gh]
+command = "agent-bin"
+"#,
+    );
+
+    let settings = load_for(&env);
+    let key = settings
+        .agents
+        .servers
+        .get("gh")
+        .expect("server completed by workspace command")
+        .env
+        .get("OPENROUTER_API_KEY")
+        .expect("global env merged into completed server");
+    assert_eq!(key.raw, "global-literal");
+}
+#[test]
 fn validate_agent_server_rejects_malformed_secret_reference_with_field_path() {
     let server = AgentServerToml {
         label: None,

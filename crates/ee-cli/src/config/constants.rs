@@ -161,6 +161,10 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # env = { API_KEY = "secret://agent-api-key" }
 # cwd = "/path/to/workspace"
 #
+# User-global env-only entries (env without command) are inert decoration:
+# they merge into the server only when a workspace `.ee.toml` supplies the
+# command, and drop silently otherwise.
+#
 # [mcp.proxy]
 # enabled = false
 #

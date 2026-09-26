@@ -414,7 +414,20 @@ impl EditorSettings {
     }
 
     pub(super) fn finalize_agents(&mut self) {
-        for id in agents::remove_incomplete_servers(self.agents.enabled, &mut self.agents.servers) {
+        // Server ids that must resolve to a runnable entry; dropping one of
+        // these is a real misconfiguration worth warning about.
+        let referenced = self
+            .agents
+            .default_agent
+            .iter()
+            .chain(self.agents.rubber_duck.external_agent_id.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for id in agents::remove_incomplete_servers(
+            self.agents.enabled,
+            &referenced,
+            &mut self.agents.servers,
+        ) {
             eprintln!(
                 "ee: warning: invalid agents server `{id}`: agent server command must not be empty"
             );
