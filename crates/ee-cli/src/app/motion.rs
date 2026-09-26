@@ -272,6 +272,9 @@ impl App {
         self.viewport = Viewport::default();
     }
     pub(super) fn page_cursor_half(&mut self, down: bool) {
+        // Half-page scrolling moves the cursor, so a pending goto-end jump has
+        // been overridden by the user; drop it before the viewport is requested.
+        self.backend.cancel_vlf_tail_jump();
         let editor_rows = crossterm::terminal::size()
             .map(|(_, height)| height.saturating_sub(2) as usize)
             .unwrap_or(22);

@@ -124,6 +124,7 @@ impl BufferManager {
             vlf_line_count_exact: false,
             vlf_index_progress: 0.0,
             pending_vlf_tail_jump: false,
+            vlf_tail_jump_cursor: None,
             vlf_tail_jump_viewport: None,
             vlf_requested_viewport: None,
             vlf_search_ranges: Vec::new(),
@@ -265,6 +266,8 @@ impl BufferManager {
         buf.vlf_approx_line_count = 0;
         buf.vlf_line_count_exact = false;
         buf.pending_vlf_tail_jump = false;
+        buf.vlf_tail_jump_cursor = None;
+        buf.vlf_tail_jump_viewport = None;
         buf.vlf_search_ranges.clear();
         buf.status_message = Some("reloaded".to_owned());
         buf.mtime = mtime;

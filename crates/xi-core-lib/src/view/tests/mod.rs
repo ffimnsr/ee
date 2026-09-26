@@ -154,3 +154,4 @@ mod render_source_tests;
 mod selection_tests;
 mod syntax_cache_tests;
 mod text_blob_tests;
+mod viewport_clamp_tests;

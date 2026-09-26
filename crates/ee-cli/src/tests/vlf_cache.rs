@@ -333,8 +333,9 @@ fn vlf_update_keeps_tail_jump_pending_until_window_lands() {
     buf.apply_update(vlf_update(Vec::new(), 10_000, false)).unwrap();
     assert!(buf.pending_vlf_tail_jump);
 
-    // Inexact window lands: the cursor follows the returned tail while the
-    // jump stays pending (the index can still move the true end).
+    // Inexact count: only a window that reaches the reported end of file is the
+    // tail landing, so a mid-file window (a stale or user-driven scroll) must
+    // leave the cursor alone while the jump is pending.
     buf.apply_update(vlf_update(
         vec![inserted("line 998\n", 998), inserted("line 999\n", 999)],
         10_000,
@@ -343,7 +344,23 @@ fn vlf_update_keeps_tail_jump_pending_until_window_lands() {
     .unwrap();
 
     assert!(buf.pending_vlf_tail_jump, "inexact tail must not settle the jump");
-    assert_eq!((buf.cursor_line, buf.cursor_col), (999, 0));
+    assert_eq!(
+        (buf.cursor_line, buf.cursor_col),
+        (0, 0),
+        "mid-file window must not take the cursor"
+    );
+
+    // A tail landing follows the returned tail while the jump stays pending
+    // (the index can still move the true end).
+    buf.apply_update(vlf_update(
+        vec![inserted("line 9998\n", 9998), inserted("line 9999\n", 9999)],
+        10_000,
+        false,
+    ))
+    .unwrap();
+
+    assert!(buf.pending_vlf_tail_jump, "inexact tail must not settle the jump");
+    assert_eq!((buf.cursor_line, buf.cursor_col), (9999, 0));
 
     // Exact count settles the jump.
     buf.apply_update(vlf_update(

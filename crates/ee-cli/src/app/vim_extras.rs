@@ -378,6 +378,9 @@ impl App {
 
     /// `Ctrl-e`/`Ctrl-y`: scroll the view one line without moving the cursor.
     pub(super) fn scroll_lines(&mut self, down: bool) {
+        // A viewport-only scroll is the user looking elsewhere: it must not be
+        // overridden by a pending goto-end sentinel.
+        self.backend.cancel_vlf_tail_jump();
         let height = self.last_editor_height.max(3).saturating_sub(2) as i64;
         let top = self.viewport.top_line as i64;
         let first = if down { top + 1 } else { (top - 1).max(0) };
@@ -409,6 +412,11 @@ impl App {
     }
 
     fn set_viewport_top_line(&mut self, target: usize) {
+        // Repositioning the window (zz/zt/zb) abandons a pending goto-end jump:
+        // the user chose a different part of the document. Cursor-moving
+        // commands (H/M/L, marks) are covered by the manager's own abandonment
+        // check once their gesture reaches the core.
+        self.backend.cancel_vlf_tail_jump();
         let max_line = self.backend.line_count().saturating_sub(1);
         self.viewport.top_line = target.min(max_line);
     }

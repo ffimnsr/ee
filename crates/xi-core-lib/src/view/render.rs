@@ -204,6 +204,7 @@ impl View {
         text: &dyn RenderSource,
         client: &Client,
         plan: &RenderPlan,
+        total_lines: usize,
         pristine: bool,
         language_name: &str,
         syntax_enabled: bool,
@@ -220,8 +221,18 @@ impl View {
             None => render_line_byte(text, self.first_line + self.height + 2),
         };
         // Drive the source's read-ahead window from the rendered range (the
-        // VLF pager + syntax semantic window; rope ignores it).
-        text.set_viewport(start_off, end_off);
+        // VLF pager + syntax semantic window; rope ignores it). A view parked
+        // on the last line can still resolve both offsets past EOF: offset
+        // lookups lag the index, and an approximate VLF total can overshoot the
+        // real line count, collapsing the window to `len..len`. That demotes
+        // the very pages being rendered out of viewport priority, so anchor the
+        // window on the document tail instead.
+        if end_off > start_off {
+            text.set_viewport(start_off, end_off);
+        } else if self.first_line.saturating_add(1) >= total_lines && text.len_bytes() > 0 {
+            let len = text.len_bytes();
+            text.set_viewport(len - 1, len);
+        }
         let visible_range = Interval::new(start_off, end_off);
         let annotations = if let Some(rope) = rope {
             let selection_annotations =
@@ -254,7 +265,6 @@ impl View {
         }
 
         if !self.lc_shadow.needs_render(plan) {
-            let total_lines = self.render_height(text);
             let update = Update {
                 ops: vec![UpdateOp::copy(total_lines, 1)],
                 pristine,
@@ -541,9 +551,17 @@ impl View {
         language_name: &str,
         syntax_enabled: bool,
     ) {
-        let height = self.render_height(text);
-        let plan = RenderPlan::create(height, self.first_line, self.height);
-        self.send_update_for_plan(text, client, &plan, pristine, language_name, syntax_enabled);
+        let total_lines = self.clamped_total_lines(text);
+        let plan = RenderPlan::create(total_lines, self.first_line, self.height);
+        self.send_update_for_plan(
+            text,
+            client,
+            &plan,
+            total_lines,
+            pristine,
+            language_name,
+            syntax_enabled,
+        );
         if let Some(new_scroll_pos) = self.scroll_to.take() {
             let (line, col) = match text.as_rope() {
                 Some(rope) => self.offset_to_line_col(rope, new_scroll_pos),
@@ -564,10 +582,18 @@ impl View {
         language_name: &str,
         syntax_enabled: bool,
     ) {
-        let height = self.render_height(text);
-        let mut plan = RenderPlan::create(height, self.first_line, self.height);
+        let total_lines = self.clamped_total_lines(text);
+        let mut plan = RenderPlan::create(total_lines, self.first_line, self.height);
         plan.request_lines(first_line, last_line);
-        self.send_update_for_plan(text, client, &plan, pristine, language_name, syntax_enabled);
+        self.send_update_for_plan(
+            text,
+            client,
+            &plan,
+            total_lines,
+            pristine,
+            language_name,
+            syntax_enabled,
+        );
     }
 
     /// Clear the frontend-validity claim over `first..last` so the next render
@@ -676,6 +702,23 @@ impl View {
                 }
             },
         }
+    }
+
+    /// Total renderable lines for `text`, with the view position clamped into
+    /// the document.
+    ///
+    /// A scroll request can park the view past the end of the document: the
+    /// frontend's VLF goto-end sentinel deliberately asks for line 9e9 so the
+    /// core clamps the window onto the tail. `RenderPlan::create` clamps only
+    /// its own spans, while `first_line` also anchors every byte offset and the
+    /// source's read-ahead viewport; left out of range those resolve past EOF
+    /// and collapse the viewport to `len..len`, demoting the rows being
+    /// rendered and killing the pager read-ahead. Clamping the stored position
+    /// keeps the same rendered rows as the plan's own clamp.
+    fn clamped_total_lines(&mut self, text: &dyn RenderSource) -> usize {
+        let total_lines = self.render_height(text);
+        self.first_line = self.first_line.min(total_lines.saturating_sub(1));
+        total_lines
     }
 
     /// Iterates visual lines from `start_line`: the wrap-aware `Lines`

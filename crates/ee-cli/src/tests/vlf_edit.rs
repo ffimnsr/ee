@@ -643,6 +643,181 @@ fn vlf_shrunk_window_requests_missing_viewport_lines() {
 }
 
 #[test]
+fn vlf_user_scroll_while_tail_jump_pending_repairs_viewport() {
+    // Bug regression: goto-end arms a tail sentinel while the index is still
+    // scanning; every update then re-drove the sentinel, overriding the
+    // user's viewport, yanking the cursor to the tail window and blocking the
+    // coverage repair, so the rows the user scrolled to stayed `Loading`.
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    mgr.request_vlf_tail_viewport(40).unwrap();
+    let sentinel: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail sentinel should be json");
+    assert_eq!(sentinel["params"]["method"], "scroll");
+    assert!(mgr.pending_vlf_tail_jump);
+
+    // The sentinel lands at the tail while the count is still approximate.
+    backend_tx.send(vlf_test_update(vlf_test_insert_ops(9_960..10_000), 10_000, false)).unwrap();
+    mgr.drain_events().unwrap();
+    assert!(mgr.pending_vlf_tail_jump, "inexact landing keeps chasing the tail");
+    assert_eq!(mgr.cursor_line, 9_999);
+    // The landing re-drives the sentinel to chase the moving end of file.
+    let chase: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("tail chase should be re-driven"),
+    )
+    .expect("chase notification should be json");
+    assert_eq!(chase["params"]["method"], "scroll");
+
+    // The user pages up: the frontend-authoritative cursor moves and the UI
+    // asks for that viewport.
+    mgr.cursor_line = 9_400;
+    mgr.notify_scroll(9_400, 9_440).unwrap();
+    let scroll: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("viewport scroll should be json");
+    assert_eq!(scroll["params"]["params"], json!([9_400, 9_440]));
+
+    // The core answers copy-only (its shadow already covers the tail window),
+    // so nothing lands: the user's viewport rows stay uncovered locally.
+    backend_tx.send(vlf_test_update(vec![vlf_test_copy_op(10_000)], 10_000, false)).unwrap();
+    mgr.drain_events().unwrap();
+
+    assert!(!mgr.pending_vlf_tail_jump, "user navigation must abandon the tail jump");
+    assert_eq!(mgr.cursor_line, 9_400, "the jump must not re-pin the cursor");
+    let repair: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("coverage repair should be sent"),
+    )
+    .expect("repair notification should be json");
+    assert_eq!(repair["params"]["method"], "request_lines");
+    assert_eq!(repair["params"]["params"], json!([9_400, 9_440]));
+    assert!(
+        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+        "no tail sentinel may be re-driven after the user scrolled away"
+    );
+}
+
+#[test]
+fn vlf_stale_tail_window_does_not_override_user_viewport_when_inexact() {
+    // The same wedge without a pending jump: with an inexact count, any window
+    // that happens to sit on the (approximate) tail used to be re-driven as a
+    // tail chase, pulling the core back to the tail while the user scrolled
+    // somewhere else. Only a viewport that is itself at the tail may chase.
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    backend_tx.send(vlf_test_update(vlf_test_insert_ops(9_960..10_000), 10_000, false)).unwrap();
+    mgr.drain_events().unwrap();
+    assert!(!mgr.pending_vlf_tail_jump);
+
+    mgr.cursor_line = 9_400;
+    mgr.notify_scroll(9_400, 9_440).unwrap();
+    let _scroll: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("viewport scroll should be json");
+
+    backend_tx.send(vlf_test_update(vec![vlf_test_copy_op(10_000)], 10_000, false)).unwrap();
+    mgr.drain_events().unwrap();
+
+    let repair: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("coverage repair should be sent"),
+    )
+    .expect("repair notification should be json");
+    assert_eq!(repair["params"]["method"], "request_lines");
+    assert_eq!(repair["params"]["params"], json!([9_400, 9_440]));
+}
+
+/// Guards the legitimate goto-end chase while the index is still scanning: the
+/// cursor follows the moving approximate tail and the jump settles on the exact
+/// end, preloading the cursor's viewport. Not a bug regression (the chase is
+/// unchanged by the intent gating) — it pins the behaviour the fix must keep.
+#[test]
+fn vlf_pending_tail_jump_chases_the_moving_tail_until_exact() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    mgr.request_vlf_tail_viewport(40).unwrap();
+    let _: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail sentinel should be json");
+
+    // First (inexact) landing: the cursor follows the approximate tail and the
+    // jump stays armed so the index can still move the true end. A sentinel
+    // landing carries only the plan's slop rows.
+    backend_tx.send(vlf_test_update(vlf_test_insert_ops(9_998..10_000), 10_000, false)).unwrap();
+    mgr.drain_events().unwrap();
+    assert_eq!(mgr.cursor_line, 9_999);
+    assert!(mgr.pending_vlf_tail_jump);
+
+    // The sentinel is re-driven to chase the moving end of the file.
+    let chase: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("tail chase should be re-driven"),
+    )
+    .expect("chase notification should be json");
+    assert_eq!(chase["params"]["method"], "scroll");
+
+    // The index matures: the tail moved down and is now exact, so the jump
+    // settles on the true end and preloads the cursor's viewport. The preload
+    // range is wider than the landed slop window, so it is not deduped away.
+    backend_tx.send(vlf_test_update(vlf_test_insert_ops(10_098..10_100), 10_100, true)).unwrap();
+    mgr.drain_events().unwrap();
+    assert!(!mgr.pending_vlf_tail_jump);
+    assert_eq!(mgr.cursor_line, 10_099);
+    assert_eq!(mgr.get_line(10_099), Some("row 10099"));
+    let preload: Value = serde_json::from_str(
+        &rx.recv_timeout(Duration::from_secs(1)).expect("tail preload should be sent"),
+    )
+    .expect("preload notification should be json");
+    assert_eq!(preload["params"]["method"], "scroll");
+    assert_eq!(preload["params"]["params"], json!([10_060, 10_100]));
+}
+
+/// One `insert` op per logical line so the VLF window builder can position rows.
+fn vlf_test_insert_ops(lines: std::ops::Range<usize>) -> Vec<CoreUpdateOp> {
+    lines
+        .map(|idx| CoreUpdateOp {
+            blob: false,
+            op: CoreUpdateKind::Insert,
+            n: 1,
+            lines: vec![CoreLine {
+                text: Some(format!("row {idx}\n")),
+                cursor: Vec::new(),
+                spans: Some(Vec::new()),
+                logical_line: Some(idx),
+            }],
+        })
+        .collect()
+}
+
+fn vlf_test_copy_op(n: usize) -> CoreUpdateOp {
+    CoreUpdateOp { blob: false, op: CoreUpdateKind::Copy, n, lines: Vec::new() }
+}
+
+fn vlf_test_update(ops: Vec<CoreUpdateOp>, count: u64, exact: bool) -> BackendEvent {
+    BackendEvent::Update {
+        view_id: String::from("view-id-1"),
+        update: CoreUpdate {
+            blob: None,
+            ops,
+            pristine: true,
+            annotations: Vec::new(),
+            scopes: Vec::new(),
+            vlf_total_lines: Some(VlfTotalLines { count, exact, index_progress: 0.5 }),
+        },
+    }
+}
+
+#[test]
 fn vlf_startup_pump_requests_initial_scroll_after_document_mode() {
     let path = unique_temp_path("ee-cli-vlf-startup");
     fs::write(&path, "alpha\nbeta\n").unwrap();

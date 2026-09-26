@@ -113,6 +113,12 @@ pub(crate) struct BufState {
     /// True when the next matching VLF window update should move the cursor to
     /// the returned tail (goto-end with an inexact line count).
     pub(crate) pending_vlf_tail_jump: bool,
+    /// Cursor line a pending tail jump owns: the cursor position when the jump
+    /// was armed, then the tail line each tail-reaching landing pins. The VLF
+    /// cursor is frontend-authoritative (navigation never reaches the core), so
+    /// any other cursor value means the user navigated away and the jump must
+    /// yield.
+    pub(crate) vlf_tail_jump_cursor: Option<usize>,
     /// Viewport height the pending tail jump was issued with; consumed when
     /// the tail window lands to preload the page above the tail.
     pub(crate) vlf_tail_jump_viewport: Option<usize>,
@@ -185,6 +191,7 @@ impl PartialEq for BufState {
             && self.vlf_line_count_exact == other.vlf_line_count_exact
             && self.vlf_index_progress == other.vlf_index_progress
             && self.pending_vlf_tail_jump == other.pending_vlf_tail_jump
+            && self.vlf_tail_jump_cursor == other.vlf_tail_jump_cursor
             && self.vlf_tail_jump_viewport == other.vlf_tail_jump_viewport
             && self.vlf_requested_viewport == other.vlf_requested_viewport
             && self.vlf_search_ranges == other.vlf_search_ranges

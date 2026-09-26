@@ -53,6 +53,9 @@ impl BufferManager {
         let first = 9_000_000_000_i64.saturating_sub(height);
         let last = first.saturating_add(height);
         buf.pending_vlf_tail_jump = true;
+        // The jump owns the cursor from here on: the arm-time position is what
+        // the user must not drift from (see `abandon_tail_jump_if_user_navigated`).
+        buf.vlf_tail_jump_cursor = Some(buf.cursor_line);
         buf.vlf_tail_jump_viewport = Some(viewport_lines);
         buf.last_scroll = None;
         send_xi_notification(
@@ -68,8 +71,17 @@ impl BufferManager {
 
     pub(crate) fn cancel_vlf_tail_jump(&mut self) {
         let buf = &mut self.bufs[self.current];
+        let had_jump = buf.pending_vlf_tail_jump || buf.vlf_tail_jump_cursor.is_some();
         buf.pending_vlf_tail_jump = false;
-        buf.last_scroll = None;
+        buf.vlf_tail_jump_cursor = None;
+        buf.vlf_tail_jump_viewport = None;
+        if had_jump {
+            // Drop the landed-window dedupe key: the user's viewport must be
+            // re-requested instead of the stale tail window. Skipped when there
+            // was no jump so ordinary navigation (and non-VLF buffers) keep the
+            // per-frame scroll dedupe.
+            buf.last_scroll = None;
+        }
     }
 
     pub(crate) fn apply_local_vlf_replace_range(

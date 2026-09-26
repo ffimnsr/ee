@@ -121,9 +121,11 @@ impl App {
         }
         match m.kind {
             MouseEventKind::ScrollUp => {
+                self.backend.cancel_vlf_tail_jump();
                 let _ = self.backend.send_edit("scroll_up", json!([]));
             }
             MouseEventKind::ScrollDown => {
+                self.backend.cancel_vlf_tail_jump();
                 let _ = self.backend.send_edit("scroll_down", json!([]));
             }
             MouseEventKind::Down(MouseButton::Left) => {

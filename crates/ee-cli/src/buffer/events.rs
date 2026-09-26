@@ -73,6 +73,11 @@ impl BufferManager {
     ///   window touches the current tail, re-issue the tail request until the
     ///   index completes, and re-jump when the matured count moves the tail
     ///   past a cursor parked on a stale (approximate) end.
+    ///
+    /// Tail chasing is intent-bound: a tail landing answers a sentinel, and a
+    /// stale tail window is only re-driven while the user's viewport is still
+    /// at the tail. Either way the jump yields to user navigation, so a pending
+    /// or stale tail must never starve the visible viewport of its rows.
     fn vlf_after_update_refresh(
         &mut self,
         idx: usize,
@@ -150,21 +155,27 @@ impl BufferManager {
                 }),
             );
         }
-        if !exact && count > 0 && start.saturating_add(len) >= count_usize {
-            let height =
-                self.bufs[idx].vlf_tail_jump_viewport.unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
-            return self.request_vlf_tail_viewport(height);
-        }
         // The index matured while a previous jump left the cursor parked on
         // the stale (approximate) end: re-jump so the tail chases the real
         // end of the file. `count_before > 0` skips the open-time 0 -> N
-        // transition, which is not a tail move.
+        // transition, which is not a tail move. Checked before the stale-window
+        // re-drive below: a matured count is the stronger signal, and the two
+        // can apply to the same update.
         let count_matured = count != count_before || exact != exact_before;
         if count_matured
             && count_before > 0
             && count > 0
             && cursor.saturating_add(1) >= usize::try_from(count_before).unwrap_or(usize::MAX)
         {
+            let height =
+                self.bufs[idx].vlf_tail_jump_viewport.unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
+            return self.request_vlf_tail_viewport(height);
+        }
+        // An inexact window sitting on the tail is only worth re-driving while
+        // the user's viewport is at the tail: otherwise the window is a stale
+        // tail landing and re-driving it would override the user's scroll.
+        let requested_at_tail = requested_viewport.is_some_and(|(_, last)| last >= count_usize);
+        if !exact && count > 0 && requested_at_tail && start.saturating_add(len) >= count_usize {
             let height =
                 self.bufs[idx].vlf_tail_jump_viewport.unwrap_or(Self::STARTUP_VLF_VIEWPORT_LINES);
             return self.request_vlf_tail_viewport(height);
@@ -215,6 +226,30 @@ impl BufferManager {
         Ok(())
     }
 
+    /// Abandon a pending tail jump when the user navigated away from it.
+    ///
+    /// The VLF cursor is frontend-authoritative: navigation moves it locally and
+    /// never reaches the core, so a cursor that no longer matches the line the
+    /// jump owns means the user is looking elsewhere. The jump must then yield —
+    /// otherwise its sentinel re-drives on every update, pulling the window back
+    /// to the tail (rows render `Loading`) and blocking the coverage repair.
+    fn abandon_tail_jump_if_user_navigated(&mut self, idx: usize) {
+        let abandoned = {
+            let buf = &self.bufs[idx];
+            buf.pending_vlf_tail_jump
+                && buf.vlf_tail_jump_cursor.is_some_and(|owned| owned != buf.cursor_line)
+        };
+        if abandoned {
+            let buf = &mut self.bufs[idx];
+            buf.pending_vlf_tail_jump = false;
+            buf.vlf_tail_jump_cursor = None;
+            buf.vlf_tail_jump_viewport = None;
+            // Drop the landed-window dedupe key: the user's viewport must be
+            // re-requested so the core renders it again.
+            buf.last_scroll = None;
+        }
+    }
+
     pub(super) fn apply_event_to_buffer(&mut self, event: BackendEvent) -> io::Result<()> {
         let current = self.current;
         match event {
@@ -227,6 +262,7 @@ impl BufferManager {
                     BackendEvent::Update { update, .. } => {
                         let update_started = Instant::now();
                         let update_pristine = update.pristine;
+                        self.abandon_tail_jump_if_user_navigated(idx);
                         let buf = &mut self.bufs[idx];
                         let was_pristine = buf.pristine;
                         buf.pending_line_request = false;
@@ -356,6 +392,8 @@ impl BufferManager {
                     self.bufs[idx].vlf_line_count_exact = false;
                     self.bufs[idx].vlf_index_progress = 0.0;
                     self.bufs[idx].pending_vlf_tail_jump = false;
+                    self.bufs[idx].vlf_tail_jump_cursor = None;
+                    self.bufs[idx].vlf_tail_jump_viewport = None;
                 } else {
                     // Rebuild lines now that mode is set.
                     self.bufs[idx].rebuild_lines();

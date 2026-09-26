@@ -67,6 +67,10 @@ impl BufState {
     /// only cursors/annotations refresh.
     fn apply_vlf_update_window(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
         let CoreUpdate { ops, pristine, annotations, vlf_total_lines, scopes, blob, .. } = update;
+        // Count as of the previous payload: a render and the payload that
+        // carries it can straddle a background index advance, so a landing's
+        // end may sit one step behind the total this payload reports.
+        let previous_count = self.vlf_approx_line_count;
         self.pristine = pristine;
         self.annotations = annotations;
         if let Some(total) = vlf_total_lines {
@@ -92,15 +96,30 @@ impl BufState {
         self.vlf_cache_start_line = start;
         self.last_scroll = Some((start, end));
         if self.pending_vlf_tail_jump {
-            self.cursor_line = end.saturating_sub(1);
-            self.cursor_col = 0;
+            // Only a window that reaches the document tail is the sentinel's own
+            // answer: the plan clamps a goto-end scroll onto the last line, so
+            // its landing carries that line, while windows the core rendered for
+            // an older (or user-driven) scroll sit before it and must not take
+            // over the frontend-authoritative cursor.
+            let count = usize::try_from(self.vlf_approx_line_count).unwrap_or(usize::MAX);
+            let previous = usize::try_from(previous_count).unwrap_or(usize::MAX);
+            let reaches_known_tail =
+                (count > 0 && end >= count) || (previous > 0 && end >= previous);
+            if reaches_known_tail {
+                let landing_line = end.saturating_sub(1);
+                self.vlf_tail_jump_cursor = Some(landing_line);
+                self.cursor_line = landing_line;
+                self.cursor_col = 0;
+            }
             // Settle only when the landing actually reached the exact tail: an
             // inexact tail moves as the index scans, and a delayed response to
             // an older scroll can land mid-file while carrying a fresh exact
             // count.
-            let at_tail = self.vlf_line_count_exact
-                && usize::try_from(self.vlf_approx_line_count).is_ok_and(|count| end >= count);
+            let at_tail = self.vlf_line_count_exact && count > 0 && end >= count;
             self.pending_vlf_tail_jump = !at_tail;
+            if !self.pending_vlf_tail_jump {
+                self.vlf_tail_jump_cursor = None;
+            }
         }
         self.sync_cursor_from_cache();
         Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })

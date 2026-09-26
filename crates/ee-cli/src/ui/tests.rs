@@ -138,6 +138,7 @@ fn annotation_marker_for_line_prefers_payload_backed_plugin_annotations() {
         vlf_line_count_exact: false,
         vlf_index_progress: 0.0,
         pending_vlf_tail_jump: false,
+        vlf_tail_jump_cursor: None,
         vlf_tail_jump_viewport: None,
         vlf_requested_viewport: None,
         vlf_search_ranges: Vec::new(),

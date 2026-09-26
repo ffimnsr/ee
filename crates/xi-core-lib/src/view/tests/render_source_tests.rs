@@ -71,7 +71,7 @@ impl RenderSource for FakeRenderSource {
     }
 }
 
-fn update_ops(peer: &RecordingPeer) -> Value {
+pub(super) fn update_ops(peer: &RecordingPeer) -> Value {
     let notifications = peer.take_notifications();
     let (_, params) = notifications
         .iter()
