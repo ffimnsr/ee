@@ -28,8 +28,8 @@ use crate::events::{
 use crate::mcp_over_acp::EeProxyMode;
 use crate::reducer::{MessageKind, ReducedMessage, SessionState, apply_update};
 use crate::turn_evidence::{
-    PromptTerminalOutcome, TurnEvidence, TurnEvidenceError, TurnEvidenceStore, TurnEvidenceSummary,
-    TurnKey, TurnObservation,
+    EvidenceRevision, PromptTerminalOutcome, TurnEvidence, TurnEvidenceError, TurnEvidenceStore,
+    TurnEvidenceSummary, TurnKey, TurnObservation,
 };
 
 /// Shared per-session state; the connection routes `session/update`
@@ -376,7 +376,19 @@ impl AgentThread {
         &self,
         prompt: Vec<ContentBlock>,
     ) -> Result<PromptResponse, AgentError> {
-        self.send_prompt_inner(prompt, false).await
+        self.send_prompt_inner(prompt, false, None).await
+    }
+
+    /// Like [`send_prompt`], but stores an editor-supplied workspace baseline
+    /// revision as the turn's first observation before any response is
+    /// awaited. Observing inside the host keeps the baseline deterministically
+    /// ahead of the terminal fact even when an agent answers instantly.
+    pub async fn send_prompt_with_baseline(
+        &self,
+        prompt: Vec<ContentBlock>,
+        baseline: Option<EvidenceRevision>,
+    ) -> Result<PromptResponse, AgentError> {
+        self.send_prompt_inner(prompt, false, baseline).await
     }
 
     /// Re-sends the original prompt for an agent-reported recoverable pause.
@@ -386,13 +398,27 @@ impl AgentThread {
         &self,
         prompt: Vec<ContentBlock>,
     ) -> Result<PromptResponse, AgentError> {
-        self.send_prompt_inner(prompt, true).await
+        self.resume_prompt_with_baseline(prompt, None).await
+    }
+
+    /// Like [`resume_prompt`], but records an editor-supplied workspace
+    /// baseline revision as a fresh observation on the reused evidence turn.
+    /// The observation lands synchronously before the resumed response is
+    /// awaited, so resumed turns carry a revision even when the agent answers
+    /// instantly.
+    pub async fn resume_prompt_with_baseline(
+        &self,
+        prompt: Vec<ContentBlock>,
+        baseline: Option<EvidenceRevision>,
+    ) -> Result<PromptResponse, AgentError> {
+        self.send_prompt_inner(prompt, true, baseline).await
     }
 
     async fn send_prompt_inner(
         &self,
         prompt: Vec<ContentBlock>,
         resume: bool,
+        baseline: Option<EvidenceRevision>,
     ) -> Result<PromptResponse, AgentError> {
         validate_prompt_blocks(&self.connection, &prompt)?;
         let wire_prompt =
@@ -403,6 +429,15 @@ impl AgentThread {
             session_id: self.session_id.clone(),
             turn: started_turn.turn.clone(),
         });
+        if let Some(revision) = baseline {
+            // Recorded synchronously before the response await but after the
+            // started marker, so the audit log reads: turn started, baseline
+            // evidence, then observations.
+            let _ = self.shared.observe_evidence(
+                started_turn.turn.turn_id(),
+                TurnObservation::Revision { revision },
+            );
+        }
 
         let result = self
             .connection

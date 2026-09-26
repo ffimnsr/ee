@@ -1,6 +1,27 @@
 //! `impl App` agents-pane tests: phase_six_tests domain.
 use super::*;
 
+fn evidence_log_lines(app: &App) -> Vec<String> {
+    let base =
+        app.agents.test_export_base.as_ref().expect("evidence log requires test export base");
+    let directory = base.join("agent-evidence");
+    let mut lines = Vec::new();
+    if let Ok(entries) = fs::read_dir(&directory) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().ends_with(".log") {
+                lines.extend(
+                    fs::read_to_string(entry.path())
+                        .expect("read evidence log")
+                        .lines()
+                        .map(str::to_owned),
+                );
+            }
+        }
+    }
+    lines
+}
+
 #[test]
 fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
     let _live_lock = phase_six_live_lock();
@@ -144,6 +165,8 @@ fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
         scripted.clone(),
     );
     let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     open_pane_and_wait_ready(&mut app);
@@ -161,15 +184,15 @@ fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "write denial resolved", |app| app.agents.approvals.is_empty());
     wait_until(&mut app, "pane denied-write evidence", |app| {
-        app.agents.threads[0].system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteDenied")
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::WriteDenied)
         })
     });
     wait_until(&mut app, "denied provider turn completion", |app| {
         app.agents.threads[0].state == ThreadUiState::Ready
     });
 
-    let thread = &app.agents.threads[0];
     assert_eq!(fs::read_to_string(&target).expect("read denied write"), "before\n");
     assert_eq!(app.backend.active().whole_text().as_deref(), Some("before\n"));
     assert_eq!(
@@ -192,11 +215,10 @@ fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
         "denied pane write result must reach concrete OpenRouter adapter"
     );
     assert!(
-        thread.system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteDenied")
-        }),
-        "pane must render denied-write blocker: {:?}",
-        thread.system_notices()
+        evidence_log_lines(&app)
+            .iter()
+            .any(|line| { line.contains("verification: Blocked") && line.contains("WriteDenied") }),
+        "evidence audit log must record denied-write blocker"
     );
 
     app.shutdown_agents();
@@ -220,6 +242,8 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
         scripted.clone(),
     );
     let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     wait_until(&mut app, "target buffer loaded", |app| {
@@ -238,15 +262,15 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
     type_text(&mut app, "conflict with dirty editor write");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "pane conflicted-write evidence", |app| {
-        app.agents.threads[0].system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteConflicted")
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::WriteConflicted)
         })
     });
     wait_until(&mut app, "dirty provider turn completion", |app| {
         app.agents.threads[0].state == ThreadUiState::Ready
     });
 
-    let thread = &app.agents.threads[0];
     assert!(app.agents.approvals.is_empty(), "dirty scope must fail before approval");
     assert_eq!(fs::read_to_string(&target).expect("read conflicted write"), "before\n");
     assert_eq!(app.backend.active().whole_text().as_deref(), Some("unsaved user edit\n"));
@@ -264,11 +288,10 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
         "conflicted pane write result must reach concrete OpenRouter adapter"
     );
     assert!(
-        thread.system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteConflicted")
+        evidence_log_lines(&app).iter().any(|line| {
+            line.contains("verification: Blocked") && line.contains("WriteConflicted")
         }),
-        "pane must render dirty-buffer blocker: {:?}",
-        thread.system_notices()
+        "evidence audit log must record dirty-buffer blocker"
     );
 
     app.shutdown_agents();
@@ -300,6 +323,8 @@ fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evide
         scripted.clone(),
     );
     let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(first.clone())).expect("open first buffer");
     app.backend.switch_to_id(buffer_id).expect("focus first buffer");
     open_pane_and_wait_ready(&mut app);
@@ -312,8 +337,9 @@ fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evide
     wait_until(&mut app, "second write approval", |app| !app.agents.approvals.is_empty());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "pane partial-apply evidence", |app| {
-        app.agents.threads[0].system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteFailed")
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::WriteFailed)
         })
     });
     wait_until(&mut app, "partial provider turn completion", |app| {
@@ -328,11 +354,10 @@ fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evide
     assert_eq!(fs::read_to_string(&first).expect("read first write"), "after first\n");
     assert!(second_directory.is_dir(), "failed second write must preserve directory target");
     assert!(
-        thread.system_notices().iter().any(|notice| {
-            notice.contains("verification: Blocked") && notice.contains("WriteFailed")
-        }),
-        "pane must render partial-apply blocker and follow-up: {:?}",
-        thread.system_notices()
+        evidence_log_lines(&app)
+            .iter()
+            .any(|line| { line.contains("verification: Blocked") && line.contains("WriteFailed") }),
+        "evidence audit log must record partial-apply blocker"
     );
     assert_eq!(scripted.request_bodies().len(), 3);
 
@@ -543,7 +568,8 @@ fn phase_six_fixture_matrix_reduces_live_host_evidence_before_completion() {
 
     for fixture in fixtures {
         let script = base_script().wait_for("session/prompt");
-        let (mut app, _temp, fake) = fake_agents_app(script);
+        let (mut app, temp, fake) = fake_agents_app(script);
+        app.agents.test_export_base = Some(temp.path().to_path_buf());
         open_pane_and_wait_ready(&mut app);
         let turn_id = begin_fixture_turn(&mut app, &fake);
 
@@ -584,13 +610,11 @@ fn phase_six_fixture_matrix_reduces_live_host_evidence_before_completion() {
             "fixture={} evidence must precede completion",
             fixture.name
         );
+        let log_lines = evidence_log_lines(&app);
         assert!(
-            app.agents.threads[0]
-                .system_notices()
-                .iter()
-                .any(|notice| notice.contains("verification: Blocked")
-                    && notice.contains(&format!("{:?}", fixture.blocker))),
-            "fixture={} pane must reduce host blocker",
+            log_lines.iter().any(|line| line.contains("verification: Blocked")
+                && line.contains(&format!("{:?}", fixture.blocker))),
+            "fixture={} pane must log reduced host blocker: {log_lines:?}",
             fixture.name
         );
         app.shutdown_agents();
@@ -622,7 +646,15 @@ fn phase_six_resume_interruption_preserves_prompt_without_duplicate_acp_request(
         .wait_for("session/prompt")
         .respond(json!({ "stopReason": "end_turn" }));
     let (mut app, temp, fake) = fake_agents_app(script);
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     open_pane_and_wait_ready(&mut app);
+    // A path-backed open buffer supplies the turn-start workspace baseline
+    // revision; resume must carry a fresh baseline onto the reused turn.
+    let chat_target = temp.path().join("chat.txt");
+    fs::write(&chat_target, "hello file\n").expect("resume chat fixture file");
+    let buffer_id = app.backend.open_buffer(Some(chat_target.clone())).expect("open chat buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus chat buffer");
     fs::write(temp.path().join("resume-context.txt"), "original snapshot\n").unwrap();
     type_text(&mut app, "/context add resume-context.txt");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -669,20 +701,106 @@ fn phase_six_resume_interruption_preserves_prompt_without_duplicate_acp_request(
     assert!(resumed.as_str().is_some_and(|text| text.contains("original snapshot")), "{resumed}");
     wait_until(&mut app, "turn completed after resume", |app| {
         app.agents.threads[0].state == ThreadUiState::Ready
-            && app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))
     });
     assert!(app.agents.threads[0].pending_recovery.is_none(), "resume clears the pause");
     let summary = app.agents.threads[0].terminal_evidence.as_ref().expect("resumed evidence");
     assert_eq!(summary.status, TurnTerminalStatus::Unverified);
-    assert_eq!(summary.blocker, Some(TurnBlocker::MissingRevision));
-    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectCurrentRevision);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingChangedFiles));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectChangedFiles);
     assert_eq!(
         PhaseSixFixtureMetrics {
             prompt_requests: fake.agent().requests_by_method("session/prompt").len(),
             evidence_ids: summary.evidence_ids.len(),
             approvals: app.agents.approvals.len(),
         },
-        PhaseSixFixtureMetrics { prompt_requests: 2, evidence_ids: 2, approvals: 0 },
-        "resume retains pause and completion evidence while sending only original and resumed ACP prompts"
+        PhaseSixFixtureMetrics { prompt_requests: 2, evidence_ids: 4, approvals: 0 },
+        "resume retains pause/completion evidence plus baseline and resumed baseline while sending only original and resumed ACP prompts"
     );
+    let evidence = app.agents.threads[0].host.turn_evidence(1).expect("resumed turn evidence");
+    let observations: Vec<&TurnObservation> =
+        evidence.records().iter().map(ee_agent_host::EvidenceRecord::observation).collect();
+    assert!(
+        matches!(observations.first(), Some(TurnObservation::Revision { .. }))
+            && matches!(observations.get(2), Some(TurnObservation::Revision { .. })),
+        "turn-start and resumed baselines must be the first and third observations: {observations:?}"
+    );
+    let log_lines = evidence_log_lines(&app);
+    assert!(
+        log_lines.iter().any(|line| line.contains("verification: Unverified")
+            && line.contains("blocker: Some(MissingChangedFiles)")
+            && line.contains("evidence: turn:1:evidence:1, turn:1:evidence:2, turn:1:evidence:3, turn:1:evidence:4")),
+        "evidence audit log must record the resumed terminal summary: {log_lines:?}"
+    );
+}
+
+#[test]
+fn phase_six_chat_only_turn_observes_baseline_revision_and_keeps_chat_clean() {
+    // Regression: a write-less chat turn must carry the turn-start workspace
+    // baseline revision so it reduces to a precise missing-evidence blocker
+    // (`MissingChangedFiles`) instead of `MissingRevision`. Terminal evidence
+    // summaries belong to the private audit log, never the chat transcript.
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, temp, _fake) = fake_agents_app(script);
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
+    let target = temp.path().join("chat.txt");
+    fs::write(&target, "hello file\n").expect("chat fixture file");
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open chat buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus chat buffer");
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "chat turn completes", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    let summary = thread.terminal_evidence.as_ref().expect("chat turn evidence");
+    assert_eq!(summary.status, TurnTerminalStatus::Unverified);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingChangedFiles));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectChangedFiles);
+    assert_eq!(summary.evidence_ids.len(), 2, "baseline revision plus prompt terminal");
+    assert!(
+        summary.evidence_ids[0].ends_with(":evidence:1")
+            && summary.evidence_ids[1].ends_with(":evidence:2"),
+        "baseline revision must be the first observation: {:?}",
+        summary.evidence_ids
+    );
+    assert!(
+        thread.host.turn_evidence(summary.key.turn_id()).is_some_and(|evidence| {
+            evidence.base_revision().is_some() && evidence.current_revision().is_some()
+        }),
+        "turn-start baseline must populate host evidence revisions"
+    );
+    assert!(
+        thread.system_notices().iter().all(|notice| !notice.contains("verification:")
+            && !notice.contains("turn started")
+            && !notice.contains("turn completed")),
+        "verification and lifecycle summaries must not pollute the chat transcript: {:?}",
+        thread.system_notices()
+    );
+    let log_lines = evidence_log_lines(&app);
+    assert!(
+        log_lines.iter().any(|line| line.contains("new evidence: turn:1:evidence:1")),
+        "intermediate observations must log only the new evidence id: {log_lines:?}"
+    );
+    assert!(
+        log_lines.iter().any(|line| line.contains("turn:1 started")),
+        "evidence audit log must record the turn-start lifecycle marker: {log_lines:?}"
+    );
+    assert!(
+        log_lines.iter().any(|line| line.contains("turn completed (stop: EndTurn)")),
+        "evidence audit log must record the turn-completion lifecycle marker: {log_lines:?}"
+    );
+    assert!(
+        log_lines.iter().any(|line| line.contains("turn:1 verification: Unverified")
+            && line.contains("blocker: Some(MissingChangedFiles)")
+            && line.contains("follow_up: CollectChangedFiles")
+            && line.contains("evidence: turn:1:evidence:1, turn:1:evidence:2")),
+        "evidence audit log must record the turn-start and terminal summaries: {log_lines:?}"
+    );
+
+    app.shutdown_agents();
 }

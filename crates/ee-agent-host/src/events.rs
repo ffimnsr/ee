@@ -178,8 +178,13 @@ pub enum AgentEvent {
         elicitation_id: ElicitationId,
     },
     /// An agent-to-client file/terminal/elicitation request was dispatched
-    /// to the registered handler.
-    ClientRequestDispatched { session_id: Option<SessionId>, method: String },
+    /// to the registered handler. `target` is a bounded human label for the
+    /// request's file path/search glob (never queries, URLs, or free text).
+    ClientRequestDispatched {
+        session_id: Option<SessionId>,
+        method: String,
+        target: Option<String>,
+    },
     /// A stderr line was captured from the agent subprocess.
     ///
     /// Bounded: the host keeps at most [`crate::process::STDERR_MAX_LINES`]

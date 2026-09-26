@@ -1,5 +1,6 @@
 //! Host-flow tests: concurrency.
 use super::*;
+use ee_agent_host::{EvidenceRevision, TurnObservation, TurnTerminalStatus};
 
 #[tokio::test]
 async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
@@ -52,6 +53,105 @@ async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
     assert_eq!(paused.checkpoint_id.as_deref(), Some("s-1-0000000003"));
     assert_eq!(paused.completed_tool_calls, 4);
     assert_eq!(paused.resumed_count, 0);
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn resumed_turn_with_baseline_carries_revision_and_reduces_precisely() {
+    // Regression: resuming a paused turn with an editor-supplied baseline must
+    // record it on the reused evidence turn (synchronously, before the resumed
+    // response is awaited), so a write-less resumed chat turn reduces to
+    // `MissingChangedFiles` instead of `MissingRevision`.
+    let script = base_script()
+        .wait_for("session/prompt")
+        .respond_error_with_data(
+            -32603,
+            "recoverable turn interruption: paused after 300s",
+            json!({
+                "recoverable": {
+                    "fault": "deadline",
+                    "detail": "paused after 300s",
+                    "cause": null,
+                    "safe_resume": true,
+                    "retry_after": null,
+                    "checkpoint_id": "s-1-0000000003",
+                    "completed_tool_calls": 0,
+                    "resumed_count": 0,
+                }
+            }),
+        )
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let error =
+        thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await.unwrap_err();
+    assert!(matches!(error, AgentError::Rpc(_)), "wire error stays an Rpc error: {error:?}");
+    loop {
+        match next_event(&mut host.events).await {
+            AgentEvent::TurnPausedRecoverable { .. } => break,
+            AgentEvent::TurnEvidenceUpdated { summary, .. } => {
+                assert_eq!(summary.blocker, Some(TurnBlocker::PromptPausedRecoverable));
+                assert_eq!(summary.safe_follow_up, SafeFollowUp::ResumeOrDiscard);
+            }
+            AgentEvent::TurnStarted { .. }
+            | AgentEvent::SessionUpdate { .. }
+            | AgentEvent::ConnectionStateChanged { .. }
+            | AgentEvent::ThreadCreated { .. } => continue,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    let baseline_rev = format!("sha256:{}", "cd".repeat(32));
+    let response = thread
+        .resume_prompt_with_baseline(
+            vec![ContentBlock::Text(TextContent::new("hi"))],
+            Some(EvidenceRevision::new(&baseline_rev)),
+        )
+        .await
+        .expect("resumed prompt completes");
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+
+    let mut terminal = None;
+    while terminal.is_none() {
+        if let AgentEvent::TurnEvidenceUpdated { summary, .. } = next_event(&mut host.events).await
+            && summary.evidence_ids.len() == 3
+        {
+            terminal = Some(*summary);
+        }
+    }
+    let summary = terminal.expect("terminal evidence summary");
+    assert!(summary.terminal, "resumed completion summary is terminal");
+    assert_eq!(summary.key.turn_id(), 1, "resume reuses the paused turn");
+    assert_eq!(summary.status, TurnTerminalStatus::Unverified);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingChangedFiles));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectChangedFiles);
+
+    let evidence = thread.turn_evidence(summary.key.turn_id()).expect("evidence snapshot");
+    assert_eq!(evidence.base_revision().map(EvidenceRevision::as_str), Some(baseline_rev.as_str()));
+    assert_eq!(
+        evidence.current_revision().map(EvidenceRevision::as_str),
+        Some(baseline_rev.as_str())
+    );
+    let records = evidence.records();
+    assert_eq!(records.len(), 3, "pause, resumed baseline, prompt terminal");
+    assert!(
+        matches!(records[0].observation(), TurnObservation::PromptTerminal { .. }),
+        "pause fact stays first on the reused turn"
+    );
+    assert!(
+        matches!(records[1].observation(), TurnObservation::Revision { .. }),
+        "resumed baseline must be observed before completion"
+    );
+    assert!(
+        matches!(records[2].observation(), TurnObservation::PromptTerminal { .. }),
+        "completion must follow the resumed baseline"
+    );
 
     host.close().await;
     fake.join(TEST_TIMEOUT).await;

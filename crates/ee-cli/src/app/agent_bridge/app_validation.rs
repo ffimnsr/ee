@@ -21,7 +21,7 @@ impl App {
     /// Appends one host-owned observation only while this exact ACP session
     /// owns an active turn. Generic stdio MCP proxy calls use the synthetic
     /// `proxy` session and deliberately cannot borrow a pane turn's evidence.
-    pub(super) fn observe_active_turn(&self, session_id: &str, observation: TurnObservation) {
+    pub(crate) fn observe_active_turn(&self, session_id: &str, observation: TurnObservation) {
         let Some(index) = self.session_thread_by_id(session_id) else {
             return;
         };
@@ -197,6 +197,21 @@ impl App {
         }
         members.sort();
         Ok(EvidenceRevision::new(format!("sha256:{}", sha256_hex(members.join("\n").as_bytes()))))
+    }
+
+    /// Baseline workspace revision for one upcoming turn: hashes every open
+    /// buffer's current text/buffer state at prompt submit time. The host
+    /// records it as the turn's first observation before any response is
+    /// awaited, so even write-less turns reduce to a precise missing-evidence
+    /// blocker instead of `MissingRevision`. Turns with no path-backed open
+    /// buffers observe nothing and fail closed exactly as before.
+    pub(crate) fn workspace_baseline_revision(&self) -> Option<EvidenceRevision> {
+        let paths: Vec<PathBuf> =
+            self.backend.all_bufs().iter().filter_map(|buffer| buffer.path.clone()).collect();
+        if paths.is_empty() {
+            return None;
+        }
+        self.evidence_revision_for_paths(&paths).ok()
     }
 
     pub(super) fn has_dirty_buffer(&self, paths: &[PathBuf]) -> bool {

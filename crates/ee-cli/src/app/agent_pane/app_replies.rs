@@ -81,7 +81,7 @@ impl App {
                         ));
                         let child_thread = self.agents.threads[child].host.clone();
                         if let Some(host) = &self.agents.host {
-                            host.send_prompt(child_thread, fork.seed);
+                            host.send_prompt(child_thread, fork.seed, None);
                         }
                         if !fork.activate_child
                             && let Some(parent) = self.agents.thread_index(&fork.parent_session_id)

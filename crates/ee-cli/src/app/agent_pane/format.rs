@@ -68,6 +68,51 @@ pub(super) fn tool_kind_label(kind: ToolKind) -> &'static str {
     }
 }
 
+/// Friendly label for an agent-to-client (fs/terminal/editor proxy) request
+/// method, so chat system lines read like the action the agent took ("Read
+/// file") instead of the wire method ("fs/read_text_file"). `target` is the
+/// bounded request target (file path, search glob); unknown methods fall back
+/// to their raw wire name.
+#[must_use]
+pub(super) fn client_request_label(method: &str, target: Option<&str>) -> String {
+    let label = match method {
+        "fs/read_text_file" => String::from("Read file"),
+        "fs/write_text_file" => String::from("Write file"),
+        "terminal/create" => String::from("Create terminal"),
+        "terminal/output" => String::from("Read terminal output"),
+        "terminal/wait_for_exit" => String::from("Wait for terminal exit"),
+        "terminal/kill" => String::from("Kill terminal"),
+        "terminal/release" => String::from("Release terminal"),
+        "elicitation/create" => String::from("Request information"),
+        "_ee/fetch_url" => String::from("Fetch URL"),
+        "_ee/web_search" => String::from("Web search"),
+        "_ee/browser_run" => String::from("Run browser"),
+        "_ee/list_directory_all" => String::from("List all directories"),
+        "_ee/search_files" => String::from("Search files"),
+        "_ee/search_files_all" => String::from("Search all files"),
+        "_ee/search_text_regex" => String::from("Search text (regex)"),
+        "_ee/open_buffers" => String::from("List open buffers"),
+        "_ee/workspace_roots" => String::from("List workspace roots"),
+        "_ee/document_symbols" => String::from("List document symbols"),
+        "_ee/preview_rename_symbol" => String::from("Preview symbol rename"),
+        _ => {
+            if let Some(rest) = method.strip_prefix("_ee/") {
+                let mut words = rest.replace('_', " ");
+                if let Some(first) = words.chars().next() {
+                    words.replace_range(0..first.len_utf8(), &first.to_uppercase().to_string());
+                }
+                words
+            } else {
+                method.to_string()
+            }
+        }
+    };
+    match target {
+        Some(target) if !target.trim().is_empty() => format!("{label} {target}"),
+        _ => label,
+    }
+}
+
 pub(super) fn tool_call_content_summary(content: &ToolCallContent) -> String {
     match content {
         ToolCallContent::Content(content) => content_block_text(&content.content),
@@ -643,6 +688,46 @@ mod tests {
         assert_eq!(plan_entry_marker(PlanEntryStatus::Pending), '-');
         assert_eq!(plan_entry_marker(PlanEntryStatus::InProgress), '>');
         assert_eq!(plan_entry_marker(PlanEntryStatus::Completed), 'x');
+    }
+
+    #[test]
+    fn client_request_labels_are_friendly() {
+        assert_eq!(client_request_label("fs/read_text_file", None), "Read file");
+        assert_eq!(client_request_label("fs/write_text_file", None), "Write file");
+        assert_eq!(client_request_label("terminal/create", None), "Create terminal");
+        assert_eq!(client_request_label("terminal/output", None), "Read terminal output");
+        assert_eq!(client_request_label("terminal/wait_for_exit", None), "Wait for terminal exit");
+        assert_eq!(client_request_label("terminal/kill", None), "Kill terminal");
+        assert_eq!(client_request_label("terminal/release", None), "Release terminal");
+        assert_eq!(client_request_label("elicitation/create", None), "Request information");
+        assert_eq!(client_request_label("_ee/fetch_url", None), "Fetch URL");
+        assert_eq!(client_request_label("_ee/get_diagnostics", None), "Get diagnostics");
+        assert_eq!(client_request_label("_ee/apply_patch", None), "Apply patch");
+        assert_eq!(client_request_label("_ee/changed_files", None), "Changed files");
+        assert_eq!(client_request_label("_ee/read_buffer_lines", None), "Read buffer lines");
+        assert_eq!(client_request_label("_ee/list_directory_all", None), "List all directories");
+        assert_eq!(client_request_label("_ee/search_text_regex", None), "Search text (regex)");
+        assert_eq!(client_request_label("unknown/method", None), "unknown/method");
+    }
+
+    #[test]
+    fn client_request_labels_append_target_when_present() {
+        assert_eq!(
+            client_request_label("fs/read_text_file", Some("src/main.rs")),
+            "Read file src/main.rs"
+        );
+        assert_eq!(
+            client_request_label("_ee/search_files", Some("src/**/*.rs")),
+            "Search files src/**/*.rs"
+        );
+        assert_eq!(client_request_label("fs/read_text_file", Some("")), "Read file");
+        assert_eq!(
+            client_request_label(
+                "fs/read_text_file",
+                Some("/work/a/long/path".repeat(40).as_str())
+            ),
+            format!("Read file {}", "/work/a/long/path".repeat(40))
+        );
     }
 
     #[test]

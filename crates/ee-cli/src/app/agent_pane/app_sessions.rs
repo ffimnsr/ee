@@ -136,6 +136,31 @@ impl App {
         })
     }
 
+    /// Private per-session evidence audit log directory. Kept separate from
+    /// transcript exports so append-only logs never collide with create-new
+    /// exports.
+    pub(super) fn agent_evidence_dir(&self) -> io::Result<PathBuf> {
+        #[cfg(test)]
+        let resolved: io::Result<PathBuf> = {
+            // Tests without an explicit export base must fail closed instead
+            // of writing evidence logs into the real user state directory.
+            let Some(base) = &self.agents.test_export_base else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "test evidence logs require test_export_base",
+                ));
+            };
+            Ok(base.join("agent-evidence"))
+        };
+        #[cfg(not(test))]
+        let resolved: io::Result<PathBuf> = {
+            crate::logs::state_dir().map(|dir| dir.join("agent-evidence")).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "platform state directory is unavailable")
+            })
+        };
+        resolved
+    }
+
     /// Exports current local transcript, including redacted tool payloads, to private Markdown.
     pub(super) fn agents_export_transcript(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {

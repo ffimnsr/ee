@@ -355,7 +355,7 @@ fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
         fake.agent().requests_by_method("session/prompt").len() == 1
     });
     wait_until(&mut app, "turn completed notice", |app| {
-        app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))
+        app.agents.threads[0].state == ThreadUiState::Ready
     });
     assert_eq!(app.agents.threads[0].state, ThreadUiState::Ready);
 }

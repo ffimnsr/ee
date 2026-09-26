@@ -396,6 +396,99 @@ impl ClientRequest {
         }
     }
 
+    /// Bounded human target for a dispatched client request: file paths and
+    /// search globs only. Queries, URLs, note keys, terminal identities, and free
+    /// text never cross this boundary because they may carry secret values. Long
+    /// paths collapse their middle directories (`src/…/asds/hello.txt`); reads
+    /// with a line range append `(lines L-H)`.
+    #[must_use]
+    pub fn client_request_target(request: &ClientRequest) -> Option<String> {
+        const MAX_TARGET_CHARS: usize = 160;
+        let target = match request {
+            ClientRequest::ReadTextFile(request) => {
+                let mut target = Self::elide_middle_path(&request.path.display().to_string());
+                if let (Some(line), Some(limit)) = (request.line, request.limit)
+                    && line > 0
+                    && limit > 0
+                {
+                    let last = line.saturating_add(limit - 1);
+                    target.push_str(&format!(" (lines {line}-{last})"));
+                }
+                Some(target)
+            }
+            ClientRequest::WriteTextFile(request) => {
+                Some(Self::elide_middle_path(&request.path.display().to_string()))
+            }
+            ClientRequest::ProxyListDirectory { path }
+            | ClientRequest::ProxyListDirectoryAll { path } => Some(Self::elide_middle_path(path)),
+            ClientRequest::ProxySearchFiles { pattern }
+            | ClientRequest::ProxySearchFilesAll { pattern } => Some(pattern.clone()),
+            ClientRequest::ProxySearchTextInFiles { file_glob, .. } => Some(file_glob.clone()),
+            ClientRequest::ProxyReplaceText { path, .. }
+            | ClientRequest::ProxyApplyPatch { path, .. }
+            | ClientRequest::ProxyCreateTextFile { path, .. }
+            | ClientRequest::ProxyOverwriteTextFile { path, .. }
+            | ClientRequest::ProxyCreateDirectory { path }
+            | ClientRequest::ProxyDeletePath { path }
+            | ClientRequest::ProxyReadBuffer { path }
+            | ClientRequest::ProxyReadBufferLines { path, .. }
+            | ClientRequest::ProxyGetFileDiagnostics { path }
+            | ClientRequest::ProxyDocumentSymbols { path }
+            | ClientRequest::ProxyReferences { path, .. }
+            | ClientRequest::ProxyListCodeActions { path, .. }
+            | ClientRequest::ProxyApplyCodeAction { path, .. }
+            | ClientRequest::ProxyFormatFile { path }
+            | ClientRequest::ProxyPreviewRenameSymbol { path, .. }
+            | ClientRequest::ProxyRenameSymbol { path, .. }
+            | ClientRequest::ProxyGitDiffFile { path }
+            | ClientRequest::ProxyFileDependencyMap { path }
+            | ClientRequest::ProxySymbolDependencyMap { path, .. } => {
+                Some(Self::elide_middle_path(path))
+            }
+            ClientRequest::ProxyCopyPath { source_path, destination_path }
+            | ClientRequest::ProxyMovePath { source_path, destination_path } => Some(format!(
+                "{} \u{2192} {}",
+                Self::elide_middle_path(source_path),
+                Self::elide_middle_path(destination_path)
+            )),
+            _ => None,
+        };
+        target.map(|value| {
+            let mut chars = value.chars();
+            let truncated: String = chars.by_ref().take(MAX_TARGET_CHARS).collect();
+            if chars.next().is_some() { format!("{truncated}\u{2026}") } else { truncated }
+        })
+    }
+
+    /// Collapses the middle of a path display when it is long or deep: keeps the
+    /// first directory and the last two components joined by `…` (for example
+    /// `src/weadasdqweqweqwe/asdasd/asds/hello.txt` becomes
+    /// `src/…/asds/hello.txt`). Short and shallow paths stay untouched.
+    #[must_use]
+    fn elide_middle_path(path: &str) -> String {
+        const MAX_DISPLAY_CHARS: usize = 40;
+        const MAX_COMPONENTS: usize = 5;
+        let is_absolute = path.starts_with('/');
+        let components: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        const HEAD: usize = 1;
+        const TAIL: usize = 2;
+        let too_long = path.chars().count() > MAX_DISPLAY_CHARS;
+        let too_deep = components.len() > MAX_COMPONENTS;
+        if !too_long && !too_deep || components.len() <= HEAD + TAIL {
+            return path.to_string();
+        }
+        let head = components[..HEAD].join("/");
+        let tail = components[components.len() - TAIL..].join("/");
+        let mut out = String::new();
+        if is_absolute {
+            out.push('/');
+        }
+        out.push_str(&head);
+        out.push_str("/\u{2026}/");
+        out.push_str(&tail);
+        out
+    }
+
     /// The session this request targets, when it is session-scoped.
     ///
     /// Elicitation requests may be request-scoped (outside any session).
@@ -674,6 +767,119 @@ mod tests {
         let url_only = HandlerCapabilities { elicitation_url: true, ..HandlerCapabilities::none() };
         assert!(url_only.supports_request(&url_request));
         assert!(!url_only.supports_request(&form_request));
+    }
+
+    #[test]
+    fn client_request_targets_cover_path_bearing_requests_only() {
+        let session = SessionId::new("s1");
+        let read = ClientRequest::ReadTextFile(ReadTextFileRequest::new(session.clone(), "/tmp/x"));
+        assert_eq!(ClientRequest::client_request_target(&read).as_deref(), Some("/tmp/x"));
+
+        let write = ClientRequest::WriteTextFile(WriteTextFileRequest::new(session, "/tmp/y", "z"));
+        assert_eq!(ClientRequest::client_request_target(&write).as_deref(), Some("/tmp/y"));
+
+        let copy = ClientRequest::ProxyCopyPath {
+            source_path: String::from("/a"),
+            destination_path: String::from("/b"),
+        };
+        assert_eq!(ClientRequest::client_request_target(&copy).as_deref(), Some("/a \u{2192} /b"));
+
+        let search = ClientRequest::ProxySearchFiles { pattern: String::from("src/*.rs") };
+        assert_eq!(ClientRequest::client_request_target(&search).as_deref(), Some("src/*.rs"));
+
+        let search_in_files = ClientRequest::ProxySearchTextInFiles {
+            query: String::from("private query"),
+            file_glob: String::from("src/*.rs"),
+        };
+        assert_eq!(
+            ClientRequest::client_request_target(&search_in_files).as_deref(),
+            Some("src/*.rs"),
+            "the glob is safe to surface; the query is not"
+        );
+
+        let diagnostics =
+            ClientRequest::ProxyGetFileDiagnostics { path: String::from("/work/main.rs") };
+        assert_eq!(
+            ClientRequest::client_request_target(&diagnostics).as_deref(),
+            Some("/work/main.rs")
+        );
+
+        // Queries, URLs, and collection-style requests carry no target.
+        for request in [
+            ClientRequest::ProxyWorkspaceRoots,
+            ClientRequest::ProxyOpenBuffers,
+            ClientRequest::ProxyGitDiff,
+            ClientRequest::ProxySearchText { query: String::from("private query") },
+            ClientRequest::ProxyFetchUrl {
+                url: String::from("https://docs.example/private?token=secret"),
+                scope: String::new(),
+            },
+        ] {
+            assert_eq!(ClientRequest::client_request_target(&request), None, "{request:?}");
+        }
+
+        // Oversized targets are truncated at a char boundary with a marker.
+        let long = ClientRequest::ProxyReadBuffer { path: "x".repeat(500) };
+        let target = ClientRequest::client_request_target(&long).expect("long path has target");
+        assert_eq!(target.chars().count(), 161, "{target}");
+        assert!(target.ends_with('\u{2026}'), "{target}");
+    }
+
+    #[test]
+    fn client_request_targets_elide_middle_directories_and_read_ranges() {
+        let session = SessionId::new("s1");
+        // Long/deep paths collapse to head + tail.
+        let long_path = "/src/weadasdqweqweqwe/asdasd/asds/hello.txt".to_string();
+        let read_deep = ClientRequest::ProxyGetFileDiagnostics { path: long_path.clone() };
+        assert_eq!(
+            ClientRequest::client_request_target(&read_deep).as_deref(),
+            Some("/src/\u{2026}/asds/hello.txt")
+        );
+        // Same path as a range read carries the requested line window.
+        let mut ranged = ReadTextFileRequest::new(session.clone(), long_path);
+        ranged.line = Some(200);
+        ranged.limit = Some(6);
+        let read = ClientRequest::ReadTextFile(ranged);
+        assert_eq!(
+            ClientRequest::client_request_target(&read).as_deref(),
+            Some("/src/\u{2026}/asds/hello.txt (lines 200-205)")
+        );
+        // Shallow or short paths stay untouched.
+        let shallow =
+            ClientRequest::ProxyGetFileDiagnostics { path: String::from("/work/main.rs") };
+        assert_eq!(
+            ClientRequest::client_request_target(&shallow).as_deref(),
+            Some("/work/main.rs")
+        );
+        let shallow_deep =
+            ClientRequest::ProxyGetFileDiagnostics { path: String::from("/work/a/b/c.rs") };
+        assert_eq!(
+            ClientRequest::client_request_target(&shallow_deep).as_deref(),
+            Some("/work/a/b/c.rs")
+        );
+        // A read without a range has no lines suffix.
+        let plain = ReadTextFileRequest::new(session, "/work/main.rs");
+        let read = ClientRequest::ReadTextFile(plain);
+        assert_eq!(ClientRequest::client_request_target(&read).as_deref(), Some("/work/main.rs"));
+
+        // Hostile ranges cannot overflow the displayed bound.
+        let mut hostile = ReadTextFileRequest::new(SessionId::new("s2"), "/work/main.rs");
+        hostile.line = Some(u32::MAX - 1);
+        hostile.limit = Some(2);
+        let read = ClientRequest::ReadTextFile(hostile);
+        assert_eq!(
+            ClientRequest::client_request_target(&read).as_deref(),
+            Some(format!("/work/main.rs (lines {}-{})", u32::MAX - 1, u32::MAX).as_str())
+        );
+        // Copy targets elide each side independently when deep.
+        let copy = ClientRequest::ProxyCopyPath {
+            source_path: String::from("/one/long/name/stuff/here/source.rs"),
+            destination_path: String::from("/two/deep/tree/target.rs"),
+        };
+        assert_eq!(
+            ClientRequest::client_request_target(&copy).as_deref(),
+            Some("/one/\u{2026}/here/source.rs \u{2192} /two/deep/tree/target.rs")
+        );
     }
 
     #[test]

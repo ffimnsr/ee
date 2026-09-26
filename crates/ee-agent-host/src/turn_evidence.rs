@@ -306,6 +306,11 @@ pub struct TurnEvidenceSummary {
     pub blocker: Option<TurnBlocker>,
     pub safe_follow_up: SafeFollowUp,
     pub evidence_ids: Vec<String>,
+    /// Whether the latest observation is the prompt-terminal fact. Only the
+    /// final summary of a turn carries the complete evidence id list;
+    /// intermediate summaries stop at the observation that caused them.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 /// Append-only in-memory evidence ledger for one ACP session.
@@ -395,6 +400,10 @@ pub fn reduce_terminal_state(evidence: &TurnEvidence) -> TurnEvidenceSummary {
         blocker,
         safe_follow_up,
         evidence_ids: ids,
+        terminal: matches!(
+            evidence.records.last().map(|record| &record.observation),
+            Some(TurnObservation::PromptTerminal { .. })
+        ),
     };
 
     if evidence.observation_capacity_exhausted {

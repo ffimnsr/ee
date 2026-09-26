@@ -53,7 +53,7 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
         // Footer: nick, state, current mode, unread, stop reason (left), and
         // the session's ACP context-window usage (used/size tokens) right-aligned
         // — this is the row directly above the composer. The stop reason is omitted
-        // because the transcript already logs `turn completed (stop: …)`.
+        // because the evidence audit log records `turn completed (stop: …)`.
         let state_label = match thread.state {
             ThreadUiState::Starting => "starting".into(),
             ThreadUiState::Ready => "ready".into(),

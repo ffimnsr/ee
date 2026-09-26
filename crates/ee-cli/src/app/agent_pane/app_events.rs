@@ -18,8 +18,8 @@ use super::pump;
 use super::constants::AGENT_PROMPT_HISTORY_MAX;
 use super::elicitation::ElicitationPrompt;
 use super::format::{
-    content_block_text, plan_entry_marker, plan_entry_priority_label, thread_display_name,
-    tool_call_detail_from_state, tool_call_status_label,
+    client_request_label, content_block_text, plan_entry_marker, plan_entry_priority_label,
+    thread_display_name, tool_call_detail_from_state, tool_call_status_label,
 };
 use super::state::{AgentPaneLayout, AgentPaneState, PermissionPrompt};
 use super::thread_ui::{
@@ -37,7 +37,24 @@ pub(super) fn session_update_replays_transcript(update: &SessionUpdate) -> bool 
     )
 }
 
+fn format_evidence_timestamp(time: SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 impl App {
+    /// Appends one line to the session's private evidence audit log. Turn
+    /// lifecycle markers and verification summaries are debugging aids, not
+    /// user-facing chat content.
+    fn append_evidence_log(&self, session_id: &str, line: &str) {
+        if let Ok(directory) = self.agent_evidence_dir()
+            && let Err(error) =
+                crate::app::agent_export::append_agent_evidence_log(&directory, session_id, line)
+        {
+            tracing::warn!(?error, "agent evidence log append failed");
+        }
+    }
+
     /// Whether the agents pane owns keyboard focus.
     pub(crate) fn agents_focused(&self) -> bool {
         self.mode == Mode::Agent
@@ -149,7 +166,7 @@ impl App {
                     self.notify_unread(index);
                 }
             }
-            AgentEvent::TurnStarted { session_id, .. } => {
+            AgentEvent::TurnStarted { session_id, turn } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state =
                         pump::state_after_turn_activity(self.agents.threads[index].state);
@@ -157,7 +174,16 @@ impl App {
                     self.agents.threads[index].verification_revision = None;
                     self.agents.threads[index].active_response_group = None;
                     self.agents.threads[index].turn_started_at = Some(Instant::now());
-                    self.agents.threads[index].push_system(String::from("turn started"));
+                    // Lifecycle markers are debugging aids, not chat content;
+                    // they live in the private evidence audit log.
+                    self.append_evidence_log(
+                        session_id.0.as_ref(),
+                        &format!(
+                            "{} turn:{} started",
+                            format_evidence_timestamp(SystemTime::now()),
+                            turn.turn_id()
+                        ),
+                    );
                     self.notify_unread(index);
                 }
             }
@@ -177,17 +203,47 @@ impl App {
             }
 
             AgentEvent::TurnEvidenceUpdated { session_id, summary } => {
+                // Verification summaries are host diagnostics, not user-facing
+                // chat content: keep them out of the thread transcript and
+                // append them to the private per-session evidence audit log.
+                // Intermediate observations log only their new evidence ids;
+                // the terminal summary carries the complete id list.
+                let previous_ids = self
+                    .agents
+                    .thread_index(session_id.0.as_ref())
+                    .and_then(|index| self.agents.threads[index].terminal_evidence.clone())
+                    .map(|previous| previous.evidence_ids)
+                    .unwrap_or_default();
+                let new_ids: Vec<String> = summary
+                    .evidence_ids
+                    .iter()
+                    .filter(|id| !previous_ids.contains(id))
+                    .cloned()
+                    .collect();
+                let timestamp = format_evidence_timestamp(SystemTime::now());
+                let line = if summary.terminal {
+                    format!(
+                        "{timestamp} turn:{} verification: {:?}; blocker: {:?}; follow_up: {:?}; evidence: {}",
+                        summary.key.turn_id(),
+                        summary.status,
+                        summary.blocker,
+                        summary.safe_follow_up,
+                        summary.evidence_ids.join(", "),
+                    )
+                } else {
+                    format!(
+                        "{timestamp} turn:{} verification: {:?}; blocker: {:?}; follow_up: {:?}; new evidence: {}",
+                        summary.key.turn_id(),
+                        summary.status,
+                        summary.blocker,
+                        summary.safe_follow_up,
+                        new_ids.join(", "),
+                    )
+                };
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    let thread = &mut self.agents.threads[index];
-                    let evidence_ids = summary.evidence_ids.join(", ");
-                    thread.terminal_evidence = Some(*summary);
-                    let status =
-                        thread.terminal_evidence.as_ref().expect("evidence summary just stored");
-                    thread.push_system(format!(
-                        "verification: {:?}; blocker: {:?}; evidence: {evidence_ids}",
-                        status.status, status.blocker
-                    ));
+                    self.agents.threads[index].terminal_evidence = Some(*summary);
                     self.notify_unread(index);
+                    self.append_evidence_log(session_id.0.as_ref(), &line);
                 }
             }
             AgentEvent::SessionUpdate { session_id, update } => {
@@ -212,8 +268,15 @@ impl App {
                     self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].pending_recovery = None;
                     self.agents.threads[index].last_prompt = None;
-                    self.agents.threads[index]
-                        .push_system(format!("turn completed (stop: {stop_reason:?})"));
+                    // Lifecycle markers are debugging aids, not chat content;
+                    // they live in the private evidence audit log.
+                    self.append_evidence_log(
+                        session_id.0.as_ref(),
+                        &format!(
+                            "{} turn completed (stop: {stop_reason:?})",
+                            format_evidence_timestamp(SystemTime::now())
+                        ),
+                    );
                     self.notify_unread(index);
                 }
                 // The turn is no longer resumable; drop the persisted prompt before
@@ -306,8 +369,8 @@ impl App {
                     elicitation_id.0.as_ref(),
                 );
             }
-            AgentEvent::ClientRequestDispatched { session_id, method } => {
-                let notice = format!("client request dispatched: {method}");
+            AgentEvent::ClientRequestDispatched { session_id, method, target } => {
+                let notice = client_request_label(&method, target.as_deref());
                 match session_id {
                     Some(session_id) => {
                         if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {

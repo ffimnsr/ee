@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentThread, CriticAgentBroker, CriticRevisionObserver,
-    ExternalCriticConfig, ExternalCritiqueOutcome, ExternalCritiqueRequest,
+    EvidenceRevision, ExternalCriticConfig, ExternalCritiqueOutcome, ExternalCritiqueRequest,
 };
 use ee_agent_protocol::{
     ContentBlock, McpServer, McpServerStdio, SessionConfigOptionValue, SessionModeId,
@@ -51,10 +51,16 @@ pub(super) enum HostCommand {
     SendPrompt {
         thread: AgentThread,
         blocks: Vec<ContentBlock>,
+        /// Editor-computed workspace baseline revision recorded as the turn's
+        /// first evidence observation (see [`AgentThread::send_prompt_with_baseline`]).
+        baseline: Option<EvidenceRevision>,
     },
     ResumePrompt {
         thread: AgentThread,
         blocks: Vec<ContentBlock>,
+        /// Editor-computed workspace baseline revision recorded on the reused
+        /// evidence turn (see [`AgentThread::resume_prompt_with_baseline`]).
+        baseline: Option<EvidenceRevision>,
     },
     SetMode {
         thread: AgentThread,
@@ -180,7 +186,7 @@ pub(super) fn host_worker(
                         let _ = reply.send(result.map_err(|error| error.to_string()));
                     });
                 }
-                HostCommand::SendPrompt { thread, blocks } => {
+                HostCommand::SendPrompt { thread, blocks, baseline } => {
                     // Detached: the turn streams through host events, and a
                     // later `Cancel` command must be able to run while the
                     // prompt is still in flight (sequential execution would
@@ -188,10 +194,14 @@ pub(super) fn host_worker(
                     // before answering the prompt).  Terminal turn events
                     // (completed/cancelled/failed) arrive through the event
                     // stream; the host's `send_prompt` owns them.
-                    std::mem::drop(tokio::spawn(async move { thread.send_prompt(blocks).await }));
+                    std::mem::drop(tokio::spawn(async move {
+                        thread.send_prompt_with_baseline(blocks, baseline).await
+                    }));
                 }
-                HostCommand::ResumePrompt { thread, blocks } => {
-                    std::mem::drop(tokio::spawn(async move { thread.resume_prompt(blocks).await }));
+                HostCommand::ResumePrompt { thread, blocks, baseline } => {
+                    std::mem::drop(tokio::spawn(async move {
+                        thread.resume_prompt_with_baseline(blocks, baseline).await
+                    }));
                 }
                 HostCommand::SetMode { thread, mode_id, reply } => {
                     let message = format!("mode set: {}", mode_id.0);
@@ -303,13 +313,27 @@ impl AgentHostBridge {
     }
 
     /// Enqueues a prompt turn (fire-and-forget; events carry the outcome).
-    pub(super) fn send_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
-        let _ = self.commands.send(HostCommand::SendPrompt { thread, blocks });
+    /// `baseline` is the editor workspace revision recorded as the turn's
+    /// first evidence observation.
+    pub(super) fn send_prompt(
+        &self,
+        thread: AgentThread,
+        blocks: Vec<ContentBlock>,
+        baseline: Option<EvidenceRevision>,
+    ) {
+        let _ = self.commands.send(HostCommand::SendPrompt { thread, blocks, baseline });
     }
 
-    /// Enqueues a recoverable-turn resume without allocating a new host evidence turn.
-    pub(super) fn resume_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
-        let _ = self.commands.send(HostCommand::ResumePrompt { thread, blocks });
+    /// Enqueues a recoverable-turn resume without allocating a new host
+    /// evidence turn. `baseline` is the editor workspace revision recorded on
+    /// the reused turn before the resumed response is awaited.
+    pub(super) fn resume_prompt(
+        &self,
+        thread: AgentThread,
+        blocks: Vec<ContentBlock>,
+        baseline: Option<EvidenceRevision>,
+    ) {
+        let _ = self.commands.send(HostCommand::ResumePrompt { thread, blocks, baseline });
     }
 
     /// Enqueues a mode change.

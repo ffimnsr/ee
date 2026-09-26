@@ -16,13 +16,9 @@ fn separate_user_turns_do_not_concatenate_without_message_ids() {
     for (index, prompt) in ["one", "two", "three"].into_iter().enumerate() {
         type_text(&mut app, prompt);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        wait_until(&mut app, "turn completed", |app| {
-            app.agents.threads[0]
-                .system_notices()
-                .iter()
-                .filter(|notice| notice.contains("turn completed"))
-                .count()
-                > index
+        wait_until(&mut app, &format!("turn completed {prompt}"), |app| {
+            app.agents.threads[0].state == ThreadUiState::Ready
+                && app.agents.threads[0].message_pairs().len() == index + 1
         });
     }
 

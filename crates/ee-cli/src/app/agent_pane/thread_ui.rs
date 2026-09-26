@@ -317,14 +317,18 @@ impl AgentThreadUi {
                 target.push_str(text);
                 return;
             }
-        } else if let Some(TranscriptItem::Message {
-            kind: existing_kind,
-            message_id: None,
-            text: target,
-            ..
-        }) = self.transcript.last_mut()
+        } else if kind != MessageRenderKind::User
+            && let Some(TranscriptItem::Message {
+                kind: existing_kind,
+                message_id: None,
+                text: target,
+                ..
+            }) = self.transcript.last_mut()
             && *existing_kind == kind
         {
+            // Id-less merge applies only to streamed assistant/thought chunks.
+            // User prompts are always distinct turns: merging them would
+            // concatenate separate prompts into one message.
             target.push_str(text);
             return;
         }

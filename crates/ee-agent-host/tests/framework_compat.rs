@@ -23,6 +23,7 @@ use ee_acp_agent_server::{
 use ee_agent_host::fake::FakeAgentTransport;
 use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentEvent, AgentThread, DenyAllHandler,
+    EvidenceRevision, SafeFollowUp, TurnBlocker, TurnObservation, TurnTerminalStatus,
 };
 use ee_agent_protocol::{
     AgentCapabilities, ContentBlock, Error as RpcError, Implementation, PromptResponse,
@@ -278,6 +279,107 @@ async fn host_drives_framework_initialize_session_prompt_and_close() {
     assert!(matches!(next_event(&mut host.events).await, AgentEvent::ThreadClosed { .. }));
 
     // Tear down: host first, then the bridge and the framework server.
+    host.connection.close().await;
+    bridge.shutdown(server_task).await;
+}
+
+#[tokio::test]
+async fn baseline_revision_is_first_observation_and_reduces_chat_turn_precisely() {
+    // Regression: an editor-supplied baseline recorded at turn start must be
+    // the first evidence observation even when the agent answers instantly,
+    // so write-less chat turns reduce to a precise missing-evidence blocker
+    // (`MissingChangedFiles`) instead of `MissingRevision`.
+    let provider = CompatProvider { next_session: Mutex::new(1) };
+    let server = AcpAgentServer::new(provider, AcpAgentServerConfig::default());
+    let (transport, handle) = MemoryTransport::new();
+    let server_task = tokio::spawn(async move { server.run_with_transport(transport).await });
+
+    let (bridge, agent_transport) = Bridge::spawn(handle);
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let options = AgentConnectionOptions {
+        handshake_timeout: TEST_TIMEOUT,
+        request_timeout: TEST_TIMEOUT,
+        ..Default::default()
+    };
+    let connection = AgentConnection::connect_with_transport(
+        "compat".into(),
+        std::sync::Arc::new(DenyAllHandler),
+        events_tx,
+        options,
+        agent_transport,
+    )
+    .expect("host connects over the bridge");
+    let mut host = TestHost { connection, events: events_rx };
+
+    host.connection.wait_ready().await.expect("initialize handshake succeeds");
+    assert!(matches!(
+        next_event(&mut host.events).await,
+        AgentEvent::ConnectionStateChanged {
+            state: ee_agent_host::AgentConnectionState::Ready { .. },
+            ..
+        }
+    ));
+    let thread: AgentThread = host
+        .connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), None)
+        .await
+        .expect("session/new succeeds");
+    assert!(matches!(next_event(&mut host.events).await, AgentEvent::ThreadCreated { .. }));
+
+    let baseline_rev = format!("sha256:{}", "ab".repeat(32));
+    let baseline = EvidenceRevision::new(&baseline_rev);
+    let response = thread
+        .send_prompt_with_baseline(
+            vec![ContentBlock::Text(TextContent::new("hello"))],
+            Some(baseline.clone()),
+        )
+        .await
+        .expect("prompt completes");
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+
+    // Collect events until the terminal evidence summary appears. The first
+    // `TurnEvidenceUpdated` (baseline only) arrives before `TurnStarted` and
+    // must not be marked terminal; the terminal one carries the prompt-
+    // completion fact.
+    let mut terminal = None;
+    while terminal.is_none() {
+        if let AgentEvent::TurnEvidenceUpdated { summary, .. } = next_event(&mut host.events).await
+        {
+            if summary.evidence_ids.len() == 2 {
+                terminal = Some(*summary);
+            } else {
+                assert!(!summary.terminal, "intermediate summaries are not terminal");
+            }
+        }
+    }
+    let summary = terminal.expect("terminal evidence summary");
+    assert!(summary.terminal, "prompt-completion summary is terminal");
+    assert_eq!(summary.status, TurnTerminalStatus::Unverified);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingChangedFiles));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectChangedFiles);
+
+    let evidence = thread.turn_evidence(summary.key.turn_id()).expect("evidence snapshot");
+    assert_eq!(evidence.base_revision().map(EvidenceRevision::as_str), Some(baseline_rev.as_str()));
+    assert_eq!(
+        evidence.current_revision().map(EvidenceRevision::as_str),
+        Some(baseline_rev.as_str())
+    );
+    let records = evidence.records();
+    assert_eq!(records.len(), 2, "baseline revision plus prompt terminal");
+    assert!(
+        matches!(records[0].observation(), TurnObservation::Revision { .. }),
+        "baseline must be the first observation"
+    );
+    assert!(
+        matches!(records[1].observation(), TurnObservation::PromptTerminal { .. }),
+        "prompt completion must follow the baseline"
+    );
+
+    host.connection
+        .close_session(thread.session_id().clone())
+        .await
+        .expect("session/close succeeds");
+    assert!(matches!(next_event(&mut host.events).await, AgentEvent::ThreadClosed { .. }));
     host.connection.close().await;
     bridge.shutdown(server_task).await;
 }

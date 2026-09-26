@@ -466,8 +466,9 @@ impl App {
             thread.host.clone()
         };
         self.persist_agent_workspace();
+        let baseline = self.workspace_baseline_revision();
         let host = self.agents.host.as_ref().expect("host present");
-        host.send_prompt(thread_handle, blocks);
+        host.send_prompt(thread_handle, blocks, baseline);
     }
 
     /// Resumes the paused turn: re-sends the exact prompt blocks that started
@@ -482,12 +483,13 @@ impl App {
             self.agents.error = Some(String::from("no paused turn to resume"));
             return;
         };
+        let baseline = self.workspace_baseline_revision();
         let thread = &mut self.agents.threads[active];
         thread.state = ThreadUiState::Running;
         thread.turn_started_at = Some(Instant::now());
         thread.push_system(String::from("resuming paused turn"));
         let host = self.agents.host.as_ref().expect("host present");
-        host.resume_prompt(thread.host.clone(), blocks);
+        host.resume_prompt(thread.host.clone(), blocks, baseline);
     }
 
     /// Discards the paused turn: tells the agent to drop its checkpoint and
@@ -505,7 +507,7 @@ impl App {
         thread.push_system(String::from("discarding paused turn"));
         let host = self.agents.host.as_ref().expect("host present");
         let blocks = vec![ContentBlock::Text(TextContent::new(String::from("/discard")))];
-        host.send_prompt(thread.host.clone(), blocks);
+        host.send_prompt(thread.host.clone(), blocks, None);
     }
 
     fn submit_without_session(&mut self) {

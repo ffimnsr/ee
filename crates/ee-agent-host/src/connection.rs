@@ -1871,6 +1871,7 @@ fn dispatch_client_request(
 ) -> Result<(), RpcError> {
     let method = request.method().to_string();
     let session_id = request.session_id().cloned();
+    let target = ClientRequest::client_request_target(&request);
     // Fail closed: never invoke a handler for a capability we did not
     // advertise during initialize.
     if !inner.handler_capabilities.supports_request(&request) {
@@ -1890,6 +1891,7 @@ fn dispatch_client_request(
     let _ = inner.events.send(AgentEvent::ClientRequestDispatched {
         session_id: session_id.clone(),
         method: method.clone(),
+        target,
     });
     let request_id = responder.id().clone();
     let handler = inner.handler.clone();

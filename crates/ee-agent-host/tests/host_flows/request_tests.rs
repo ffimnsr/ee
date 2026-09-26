@@ -123,7 +123,7 @@ async fn fs_and_terminal_optional_requests_route_and_serialize_expected_shapes()
         terminal: true,
         ..HandlerCapabilities::none()
     });
-    let (fake, host) = spawn_host(script, Arc::new(handler.clone())).await;
+    let (fake, mut host) = spawn_host(script, Arc::new(handler.clone())).await;
     let connection = ready_connection(&fake, &host).await;
     let thread =
         connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
@@ -155,6 +155,37 @@ async fn fs_and_terminal_optional_requests_route_and_serialize_expected_shapes()
     assert_eq!(await_response(&fake, 105).await["result"]["exitCode"], 0);
     assert!(await_response(&fake, 106).await.get("result").is_some());
     assert!(await_response(&fake, 107).await.get("result").is_some());
+
+    // Dispatched events carry a bounded, friendly target for path-bearing
+    // requests so panes can render "Read file /work/Cargo.toml" instead of
+    // the raw wire method.
+    let mut targets = Vec::new();
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, host.events.recv()).await {
+            Ok(Some(AgentEvent::ClientRequestDispatched { method, target, .. })) => {
+                targets.push((method, target));
+                if targets.len() == 7 {
+                    break;
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                panic!("event stream ended before all dispatched requests were observed")
+            }
+        }
+    }
+    assert_eq!(
+        targets,
+        vec![
+            (String::from("fs/read_text_file"), Some(String::from("/work/Cargo.toml"))),
+            (String::from("fs/write_text_file"), Some(String::from("/work/Cargo.toml"))),
+            (String::from("terminal/create"), None),
+            (String::from("terminal/output"), None),
+            (String::from("terminal/wait_for_exit"), None),
+            (String::from("terminal/kill"), None),
+            (String::from("terminal/release"), None),
+        ]
+    );
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
 }

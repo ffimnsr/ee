@@ -1,4 +1,5 @@
-//! Private Markdown export for locally retained agent transcripts.
+//! Locally retained private agent artifacts: transcript exports, workspace
+//! memory exports, and the append-only per-session evidence audit log.
 
 use std::fs;
 #[cfg(unix)]
@@ -267,6 +268,38 @@ pub(super) fn write_workspace_memory_export(
     ))
 }
 
+/// Appends one evidence audit line to a private per-session log. The file is
+/// created on first write; later lines never replace earlier audit facts.
+pub(super) fn append_agent_evidence_log(
+    dir: &Path,
+    session_id: &str,
+    line: &str,
+) -> io::Result<PathBuf> {
+    ensure_private_export_dir(dir)?;
+    let session_id = sanitized_export_session_id(session_id);
+    let path = dir.join(format!("evidence-{session_id}.log"));
+    let mut file = open_private_append_file(&path)?;
+    writeln!(file, "{line}").and_then(|_| file.sync_all())?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn open_private_append_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).append(true).mode(0o600);
+    options.open(path)
+}
+
+#[cfg(not(unix))]
+fn open_private_append_file(_path: &Path) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private agent evidence log requires owner-only filesystem permissions",
+    ))
+}
+
 /// Writes a complete transcript without replacing existing exports.
 pub(super) fn write_agent_transcript_export(
     dir: &Path,
@@ -336,6 +369,32 @@ mod tests {
         let decoded: ee_agent_host::WorkspaceMemoryExportDto =
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(decoded, export);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_evidence_log_appends_private_lines() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("evidence");
+        let path = append_agent_evidence_log(&directory, "session-1", "first audit line")
+            .expect("append first line");
+        assert_eq!(
+            path.file_name().map(|name| name.to_string_lossy().into_owned()),
+            Some(String::from("evidence-session-1.log"))
+        );
+        append_agent_evidence_log(&directory, "session-1", "second audit line")
+            .expect("append second line");
+        let content = fs::read_to_string(&path).expect("read evidence log");
+        assert!(content.contains("first audit line"), "{content}");
+        assert!(content.contains("second audit line"), "{content}");
+        assert_eq!(content.lines().count(), 2, "appends must never replace lines: {content}");
+        assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        append_agent_evidence_log(&directory, "other-session", "other audit line")
+            .expect("append other session");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2, "per-session logs");
     }
 
     #[test]
