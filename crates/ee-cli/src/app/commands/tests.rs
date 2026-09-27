@@ -1,5 +1,5 @@
 //! Command surface tests.
-use super::App;
+use super::{App, SaveOutcome};
 use crate::app::Mode;
 
 #[test]
@@ -290,4 +290,95 @@ fn agents_command_opens_pane_when_runtime_config_on() {
     assert!(app.agents.host.is_some(), "host starts lazily for the pane");
     let status = app.backend.status_message.clone().unwrap_or_default();
     assert!(status.contains("agents"), "unexpected status: {status}");
+}
+
+#[test]
+fn format_on_save_defers_save_until_pump_settles() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("script.sh");
+    std::fs::write(&file, "echo hello\n").unwrap();
+
+    let mut app = App::from_path(Some(file.clone())).unwrap();
+    app.config.format_on_save = true;
+    let buf_id = app.backend.active().id;
+
+    let outcome = app.save_current_buffer().unwrap();
+    assert!(matches!(outcome, SaveOutcome::AwaitingFormat));
+    assert!(app.pending_format_saves.contains_key(&buf_id));
+
+    // Settle ticks: format request is sent and the pipeline completes.
+    for _ in 0..8 {
+        app.pump_format_on_save();
+    }
+    assert!(!app.pending_format_saves.contains_key(&buf_id));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "echo hello\n");
+
+    // Without format_on_save the save is immediate.
+    app.config.format_on_save = false;
+    let outcome = app.save_current_buffer().unwrap();
+    assert!(matches!(outcome, SaveOutcome::Saved));
+}
+
+#[test]
+fn set_formatonsave_toggles_config() {
+    let mut app = App::from_path(None).unwrap();
+    app.command_buffer = String::from("set formatonsave");
+    app.execute_command();
+    assert!(app.config.format_on_save);
+    app.command_buffer = String::from("set noformatonsave");
+    app.execute_command();
+    assert!(!app.config.format_on_save);
+}
+
+#[test]
+fn wq_quits_after_deferred_format_save_completes() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("script.sh");
+    std::fs::write(&file, "echo hello\n").unwrap();
+
+    let mut app = App::from_path(Some(file.clone())).unwrap();
+    app.config.format_on_save = true;
+
+    app.command_buffer = String::from("wq");
+    app.execute_command();
+    assert!(!app.should_quit, "wq must wait for the deferred save");
+    assert!(app.quit_after_format_save);
+    assert!(!app.pending_format_saves.is_empty());
+
+    for _ in 0..8 {
+        app.pump_format_on_save();
+    }
+    assert!(app.pending_format_saves.is_empty());
+    assert!(app.should_quit, "wq must quit once the deferred save completed");
+    assert!(!app.quit_after_format_save);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "echo hello\n");
+}
+
+#[test]
+fn wq_does_not_quit_when_deferred_save_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("sub");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("script.sh");
+    std::fs::write(&file, "echo hi\n").unwrap();
+
+    let mut app = App::from_path(Some(file.clone())).unwrap();
+    app.config.format_on_save = true;
+
+    app.command_buffer = String::from("wq");
+    app.execute_command();
+    assert!(!app.should_quit);
+    assert!(app.quit_after_format_save);
+
+    // Break the save target after the pipeline started: replace the file with
+    // a directory so save_buffer fails for a non-permission reason.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir_all(&file).unwrap();
+
+    for _ in 0..8 {
+        app.pump_format_on_save();
+    }
+    assert!(app.pending_format_saves.is_empty());
+    assert!(!app.should_quit, "wq must not quit when the deferred save failed");
+    assert!(!app.quit_after_format_save);
 }

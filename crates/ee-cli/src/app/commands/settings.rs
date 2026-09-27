@@ -78,6 +78,9 @@ impl App {
             "insertfinalnewline" | "insert_final_newline" => {
                 set_bool_value(&mut self.config.insert_final_newline, value)
             }
+            "formatonsave" | "format_on_save" => {
+                set_bool_value(&mut self.config.format_on_save, value)
+            }
             "number" | "nu" => parse_bool_value(value).map(|on| {
                 self.config.number_style =
                     if on { NumberStyle::Absolute } else { NumberStyle::None };
@@ -184,6 +187,7 @@ impl App {
             "insertfinalnewline" | "insert_final_newline" => {
                 self.config.insert_final_newline.to_string()
             }
+            "formatonsave" | "format_on_save" => self.config.format_on_save.to_string(),
             "number" | "nu" => {
                 matches!(self.config.number_style, NumberStyle::Absolute).to_string()
             }
@@ -273,6 +277,7 @@ impl App {
             "smartindent" => defaults.smart_indent.to_string(),
             "trimtrailingwhitespace" => defaults.trim_trailing_whitespace.to_string(),
             "insertfinalnewline" => defaults.insert_final_newline.to_string(),
+            "formatonsave" => defaults.format_on_save.to_string(),
             "number" => {
                 matches!(defaults.number_style, crate::config::NumberStyle::Absolute).to_string()
             }

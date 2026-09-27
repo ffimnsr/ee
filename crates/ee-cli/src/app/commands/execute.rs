@@ -94,6 +94,10 @@ impl App {
                     Err(message) => self.backend.status_message = Some(message),
                     Ok(SaveOutcome::Saved) => self.should_quit = true,
                     Ok(SaveOutcome::AwaitingPrivilegeConfirm) => {}
+                    Ok(SaveOutcome::AwaitingFormat) => {
+                        // Quit after the deferred format-on-save pipeline saves.
+                        self.quit_after_format_save = true;
+                    }
                 }
             }
             "wa" | "wa!" | "write_all" | "write_all!" => {
@@ -105,7 +109,8 @@ impl App {
                 match self.save_all_dirty_buffers() {
                     Err(message) => self.backend.status_message = Some(message),
                     Ok(SaveOutcome::Saved) => self.should_quit = true,
-                    Ok(SaveOutcome::AwaitingPrivilegeConfirm) => {}
+                    Ok(SaveOutcome::AwaitingPrivilegeConfirm) | Ok(SaveOutcome::AwaitingFormat) => {
+                    }
                 }
             }
             cmd if cmd == "s"

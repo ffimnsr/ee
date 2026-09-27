@@ -41,6 +41,7 @@ pub(crate) struct EeToml {
     pub charset: Option<String>,
     pub trim_trailing_whitespace: Option<bool>,
     pub insert_final_newline: Option<bool>,
+    pub format_on_save: Option<bool>,
     pub auto_indent: Option<bool>,
     pub smart_indent: Option<bool>,
     // ── Display options ───────────────────────────────────────────────────

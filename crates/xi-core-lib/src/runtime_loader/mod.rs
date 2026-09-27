@@ -1,6 +1,6 @@
 mod build_stamps;
 pub mod builtin;
-mod builtin_zed_generated;
+mod builtin_catalog_generated;
 pub mod errors;
 pub mod grammar;
 mod grammar_layout;

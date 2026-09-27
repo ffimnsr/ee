@@ -157,7 +157,7 @@ impl LspPlugin {
                     .map(|state| state.uri.clone())
                     .ok_or_else(|| format!("missing open document for view {view_id}"))?;
                 ls_client
-                    .request_code_actions(view_id, range, move |ls_client, result| {
+                    .request_code_actions(view_id, range, None, move |ls_client, result| {
                         let payload = result
                             .map_err(|err| {
                                 LanguageResponseError::LanguageServerError(format!("{err:?}"))

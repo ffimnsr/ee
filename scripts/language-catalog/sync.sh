@@ -2,11 +2,11 @@
 # Sync Zed language catalog into ee.
 #
 # Fetches upstream zed docs (docs/src/languages/*.md), pins every grammar repo
-# to an exact git rev (git ls-remote HEAD), merges scripts/zed-catalog/overrides.toml,
+# to an exact git rev (git ls-remote HEAD), merges scripts/language-catalog/overrides.toml,
 # and regenerates:
-#   references/zed-language-catalog.json                      (full manifest)
-#   crates/xi-core-lib/src/runtime_loader/builtin_zed_generated.rs
-#   crates/xi-lsp-lib/src/bundled_zed_generated.rs
+#   references/language-catalog.json                      (full manifest)
+#   crates/xi-core-lib/src/runtime_loader/builtin_catalog_generated.rs
+#   crates/xi-lsp-lib/src/bundled_catalog_generated.rs
 #
 # Network: needs raw.githubusercontent.com (docs) + github.com (git ls-remote).
 # Regeneration is explicit; run with --refresh-remote only on purpose.
@@ -14,12 +14,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CATALOG_DIR="$REPO_ROOT/scripts/zed-catalog"
+CATALOG_DIR="$REPO_ROOT/scripts/language-catalog"
 DOCS_DIR="$CATALOG_DIR/docs"
-MANIFEST="$REPO_ROOT/references/zed-language-catalog.json"
+MANIFEST="$REPO_ROOT/references/language-catalog.json"
 GENERATOR="$CATALOG_DIR/generate.py"
-ZED_REF="${ZED_REF:-refs/heads/main}"
-BASE_URL="https://raw.githubusercontent.com/zed-industries/zed/${ZED_REF}/docs/src/languages"
+SOURCE_REF="${SOURCE_REF:-refs/heads/main}"
+BASE_URL="https://raw.githubusercontent.com/zed-industries/zed/${SOURCE_REF}/docs/src/languages"
 
 # Upstream doc inventory (mirrors docs/src/languages directory listing).
 DOCS=(
@@ -33,7 +33,7 @@ DOCS=(
 
 usage() {
   cat <<'EOF'
-Usage: scripts/zed-catalog/sync.sh [--fetch-only]
+Usage: scripts/language-catalog/sync.sh [--fetch-only]
 
   --fetch-only   Fetch docs and refresh manifest pins without emitting Rust.
   (default)      Full sync: fetch docs, pin revs, emit manifest + Rust catalogs.
@@ -72,11 +72,11 @@ python3 "$GENERATOR" \
   --manifest "$MANIFEST" \
   --queries-root "$REPO_ROOT/runtime/queries" \
   ${EMIT_FLAG[@]} \
-  --grammar-rust "$REPO_ROOT/crates/xi-core-lib/src/runtime_loader/builtin_zed_generated.rs" \
-  --lsp-rust "$REPO_ROOT/crates/xi-lsp-lib/src/bundled_zed_generated.rs"
+  --grammar-rust "$REPO_ROOT/crates/xi-core-lib/src/runtime_loader/builtin_catalog_generated.rs" \
+  --lsp-rust "$REPO_ROOT/crates/xi-lsp-lib/src/bundled_catalog_generated.rs"
 
 echo "sync complete: manifest at $MANIFEST"
 
 if command -v rustfmt >/dev/null 2>&1; then
-  rustfmt "$REPO_ROOT/crates/xi-core-lib/src/runtime_loader/builtin_zed_generated.rs" "$REPO_ROOT/crates/xi-lsp-lib/src/bundled_zed_generated.rs" --edition 2021 || true
+  rustfmt "$REPO_ROOT/crates/xi-core-lib/src/runtime_loader/builtin_catalog_generated.rs" "$REPO_ROOT/crates/xi-lsp-lib/src/bundled_catalog_generated.rs" --edition 2021 || true
 fi

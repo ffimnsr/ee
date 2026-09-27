@@ -173,6 +173,9 @@ pub struct BufferItems {
     pub autodetect_whitespace: bool,
     pub surrounding_pairs: Vec<(String, String)>,
     pub save_with_newline: bool,
+    /// Trim trailing spaces/tabs from every line in the on-disk snapshot.
+    #[serde(default)]
+    pub trim_trailing_whitespace: bool,
     /// Opt-in word wrap for VLF buffers (Stage A Phase 4): a width pass over
     /// the visible window only, byte-column (`wrap_width`) based; `Width`
     /// (frontend-measured, `word_wrap`) stays unwrapped for VLF.
@@ -202,6 +205,7 @@ impl Default for BufferItems {
                 ("[".to_owned(), "]".to_owned()),
             ],
             save_with_newline: true,
+            trim_trailing_whitespace: false,
             vlf_wrap: false,
         }
     }

@@ -6,16 +6,18 @@
 
 - add incremental runtime grammar builds: build stamps (pin + rev + staged source mtimes) skip recompiling unchanged grammars; rev-pinned git fetches skip the network fetch when the staged checkout already matches (`mk install` no longer rebuilds daily)
 - beautify `ee do runtime fetch/build` output: short source refs (`crate:tree-sitter-ruby@0.23.1`, `github:owner/repo@<sha>`), `--verbose`/`-v` prints full staged/output paths, ANSI colors for labels when stdout is a tty
-- add Zed language catalog parity: 36 git-pinned tree-sitter grammars and 18 bundled LSP servers generated from `zed-industries/zed` docs/src/languages
+- add language catalog parity (sourced from the upstream zed editor docs): 36 git-pinned tree-sitter grammars and 18 bundled LSP servers generated from `zed-industries/zed` docs/src/languages
 - add `filenames` + `globs` detection dimensions to `LanguageDefinition` with glob > basename > extension precedence; makefile, docker, and just now detect by filename/glob
 - add external formatters: `[formatters.<id>]` definitions + `[languages.<id>].formatter` attachments with `external`/`language_server`/`none` dispatch; stdin/stdout runner with timeout + output cap (`docs/upgrades/external-formatters.md`)
+- add format/checks on save: `format_on_save` (global + per-language), `code_actions_on_save` kinds auto-applied before save (`context.only` passthrough), and wire `trim_trailing_whitespace` into the save snapshot
+- `:wq`/`:x` now fully exit once a deferred format-on-save pipeline completes; failed deferred saves clear the quit request and keep the session
 
 ### Fixes
 
 - runtime build/fetch now skip per-grammar failures instead of aborting the whole run: each failure is logged with language + stage + reason, remaining grammars still build, command exits 0
 - defer swift grammar: tree-sitter-swift is codegen-only (no `src/parser.c` in the repo), recorded in the catalog and manifest
 - fix multi-grammar repo dialect selection: tree-sitter.json manifests now win over the repo-root parser shortcut, so helm builds `go-template-helm` (`tree_sitter_helm`) instead of the root `go-template` grammar
-- add `scripts/zed-catalog/sync.sh` + `generate.py` pipeline emitting `references/zed-language-catalog.json` and checked-in Rust catalogs
+- add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
 ## 0.11.10 - 2026-09-22
@@ -47,6 +49,7 @@
 ### Maintenance
 
 - update install script to properly setup the completions (`8b2fc0d2`)
+- rename Zed-branded artifacts to neutral catalog names (`builtin_catalog_generated.rs`, `bundled_catalog_generated.rs`, `scripts/language-catalog/`, `references/language-catalog.json`, `docs/upgrades/language-catalog.md`); manifest key `zed_ref` to `source_ref`
 
 
 ## 0.11.9 - 2026-09-08

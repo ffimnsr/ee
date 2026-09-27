@@ -9,6 +9,26 @@ use crate::registers::RegisterName;
 enum SaveOutcome {
     Saved,
     AwaitingPrivilegeConfirm,
+    /// Code actions / formatting were triggered; the save completes on the
+    /// pump loop once the plugin results settle.
+    AwaitingFormat,
+}
+
+/// One phase of the pre-save pipeline for a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SavePipelinePhase {
+    /// Waiting for `code_actions_on_save` results to settle.
+    PreSave,
+    /// Waiting for `format_document` edits to settle.
+    Format,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingSavePipeline {
+    pub(crate) needs_format: bool,
+    pub(crate) phase: SavePipelinePhase,
+    pub(crate) phase_ticks: u32,
+    pub(crate) total_ticks: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

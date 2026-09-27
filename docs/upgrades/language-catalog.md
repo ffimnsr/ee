@@ -1,4 +1,4 @@
-# Zed Language Catalog Parity — Design + Plan
+# Language Catalog Parity — Design + Plan
 
 Status: **mock design, pending review** · Scope: `docs/src/languages` of `zed-industries/zed` @ `main`
 
@@ -58,14 +58,14 @@ Tooling: a sync+generator pipeline so the catalog is reproducible when Zed docs 
 
 ```
 zed docs (raw.githubusercontent, 71 files)
-        │  scripts/zed-catalog/sync.sh (bash + python3 stdlib, no new deps)
+        │  scripts/language-catalog/sync.sh (bash + python3 stdlib, no new deps)
         ▼
-scripts/zed-catalog/overrides.toml   ← curated: binary names/args/init options,
+scripts/language-catalog/overrides.toml   ← curated: binary names/args/init options,
         │                               file types, comment styles, git-source
         │                               fallbacks (verified by hand once)
         ▼
-references/zed-language-catalog.json  ← checked-in generated manifest
-        │  scripts/zed-catalog/generate.py
+references/language-catalog.json  ← checked-in generated manifest
+        │  scripts/language-catalog/generate.py
         ▼
 generated Rust catalogs (checked in, "GENERATED FILE — do not edit" header):
   crates/xi-core-lib/src/runtime_loader/builtin_languages/…rs  (grammar entries)
@@ -75,7 +75,7 @@ generated Rust catalogs (checked in, "GENERATED FILE — do not edit" header):
 - Docs supply: grammar repo URL, LSP name. Overrides supply: binary command/args, routing (extensions/filenames/workspace id), init options, line/block comments, indentation strategy, and repo corrections when the doc link points at a monorepo or stray fork.
 - Grammar resolution at sync time: doc-linked repo → `git ls-remote` → head rev pinned into the manifest → `RuntimeGrammarSource::Git { url, rev }` (branch/tag recorded too, rev wins). No crates.io lookup, no semver guessing. Existing git fetch path (`fetch_git_grammar_source`, rev/tag/branch pinning) used end-to-end; only catalog entries are new.
 - Existing 20 builtin entries keep their current crate sources — migration to git is optional follow-up, not part of this work.
-- Regeneration is explicit (`scripts/zed-catalog/sync.sh --refresh-remote`), not on every build. Pins are exact; upgrades are deliberate PRs.
+- Regeneration is explicit (`scripts/language-catalog/sync.sh --refresh-remote`), not on every build. Pins are exact; upgrades are deliberate PRs.
 
 ### 5.2 Grammar catalog layout (file-size rule compliance)
 
@@ -134,12 +134,12 @@ Macro gains a `with_git_source` variant (or table form) mapping to `RuntimeGramm
 ## 6. Plan
 
 ### Phase 0 — Issue + scaffolding
-- Add ISSUES.md section "Zed Language Catalog Parity" with phases below + exit criteria (AGENTS.md consistency).
-- Create `scripts/zed-catalog/{sync.sh,generate.py,overrides.toml}` skeleton + `references/zed-language-catalog.json` schema doc.
+- Add ISSUES.md section "Language Catalog Parity" with phases below + exit criteria (AGENTS.md consistency).
+- Create `scripts/language-catalog/{sync.sh,generate.py,overrides.toml}` skeleton + `references/language-catalog.json` schema doc.
 
 ### Phase 1 — Extraction script + manifest
 - `sync.sh` fetches 71 docs (raw.githubusercontent, `--fail` per file), parses front-matter + `Tree-sitter:`/`Language Server:` bullets (python3 stdlib; tolerant of per-variant bullets, N/A, multiline links).
-- Pins every grammar repo via `git ls-remote` (rev recorded; branch/tag kept informational); merges `overrides.toml`; emits `references/zed-language-catalog.json`.
+- Pins every grammar repo via `git ls-remote` (rev recorded; branch/tag kept informational); merges `overrides.toml`; emits `references/language-catalog.json`.
 - Exit: manifest regenerates deterministically without network beyond `git ls-remote`; diff shows expected 71 entries with url+rev pairs; spot-check 10 entries vs docs + `git ls-remote` output.
 
 ### Phase 2 — Grammar catalog refactor + generator

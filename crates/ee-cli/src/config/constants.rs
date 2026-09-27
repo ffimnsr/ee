@@ -35,6 +35,7 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # charset = "utf-8"
 # trim_trailing_whitespace = false
 # insert_final_newline = false
+# format_on_save = false
 # auto_indent = true
 # smart_indent = true
 # number_style = "absolute"

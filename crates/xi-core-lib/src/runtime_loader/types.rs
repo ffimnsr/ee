@@ -308,6 +308,11 @@ pub struct RuntimeLanguageConfig {
     /// `lsp` attachment field: definitions live in the plugin config, this
     /// field only wires language -> formatter.
     pub formatter: Option<FormatterAttachment>,
+    /// Format the buffer before saving (per-language `format_on_save`).
+    pub format_on_save: Option<bool>,
+    /// LSP code-action kinds to auto-apply before saving (`source.fixAll`, …).
+    #[serde(default)]
+    pub code_actions_on_save: Option<Vec<String>>,
     pub name: Option<String>,
     pub query_language: Option<String>,
     pub scope: Option<String>,

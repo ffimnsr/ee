@@ -30,6 +30,10 @@ pub(crate) struct LspSettings {
     pub language_servers: BTreeMap<String, Vec<String>>,
     pub formatters: BTreeMap<String, FormatterSettings>,
     pub language_formatters: BTreeMap<String, PluginFormatterAttachment>,
+    /// Per-language `format_on_save` override (falls back to the global flag).
+    pub language_format_on_save: BTreeMap<String, bool>,
+    /// Per-language LSP code-action kinds to auto-apply on save.
+    pub language_code_actions_on_save: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +101,8 @@ impl LspSettings {
                 })
                 .collect(),
             language_formatters: config.language_formatters.into_iter().collect(),
+            language_format_on_save: BTreeMap::new(),
+            language_code_actions_on_save: BTreeMap::new(),
         }
     }
 
@@ -207,6 +213,8 @@ pub(super) struct LspSettingsBuilder {
     disabled_languages: BTreeSet<String>,
     formatters: BTreeMap<String, FormatterSettingsBuilder>,
     language_formatters: BTreeMap<String, PluginFormatterAttachment>,
+    language_format_on_save: BTreeMap<String, bool>,
+    language_code_actions_on_save: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for LspSettingsBuilder {
@@ -257,6 +265,8 @@ impl LspSettingsBuilder {
                 })
                 .collect(),
             language_formatters: settings.language_formatters.clone(),
+            language_format_on_save: settings.language_format_on_save.clone(),
+            language_code_actions_on_save: settings.language_code_actions_on_save.clone(),
         }
     }
 
@@ -330,7 +340,13 @@ impl LspSettingsBuilder {
                 .insert(normalized_id.clone(), normalize_lsp_server_ids(language_id, server_ids));
         }
         if let Some(attachment) = &patch.formatter {
-            self.language_formatters.insert(normalized_id, attachment.clone());
+            self.language_formatters.insert(normalized_id.clone(), attachment.clone());
+        }
+        if let Some(format_on_save) = patch.format_on_save {
+            self.language_format_on_save.insert(normalized_id.clone(), format_on_save);
+        }
+        if let Some(actions) = &patch.code_actions_on_save {
+            self.language_code_actions_on_save.insert(normalized_id.clone(), actions.clone());
         }
     }
 
@@ -455,7 +471,15 @@ impl LspSettingsBuilder {
             language_formatters.insert(language_id, attachment);
         }
 
-        LspSettings { servers, disabled_servers, language_servers, formatters, language_formatters }
+        LspSettings {
+            servers,
+            disabled_servers,
+            language_servers,
+            formatters,
+            language_formatters,
+            language_format_on_save: self.language_format_on_save,
+            language_code_actions_on_save: self.language_code_actions_on_save,
+        }
     }
 }
 

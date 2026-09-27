@@ -542,3 +542,28 @@ fn formatters_roundtrip_through_merged_config_document() {
     assert!(merged.contains("[formatters.shfmt]"));
     assert!(merged.contains("command = \"shfmt\""));
 }
+
+#[test]
+fn per_language_format_on_save_and_code_actions_are_merged() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".ee.toml"),
+        "[languages.shell]\nformat_on_save = true\ncode_actions_on_save = [\"source.fixAll\"]\n[languages.markdown]\nformat_on_save = false\n",
+    )
+    .unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+    assert_eq!(settings.lsp.language_format_on_save.get("shell"), Some(&true));
+    assert_eq!(
+        settings.lsp.language_code_actions_on_save.get("shell"),
+        Some(&vec![String::from("source.fixAll")])
+    );
+    assert_eq!(settings.lsp.language_format_on_save.get("markdown"), Some(&false));
+    assert!(!settings.format_on_save, "global format_on_save defaults to false");
+
+    let table = settings.lsp.to_config_table();
+    assert_eq!(table.get("language_format_on_save"), None); // frontend-only, not plugin config
+}

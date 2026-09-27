@@ -108,14 +108,21 @@ impl<'a> EventContext<'a> {
         self.render();
     }
 
-    /// Returns a cheap rope snapshot for saving, appending a newline if needed.
+    /// Returns a cheap rope snapshot for saving, trimming trailing whitespace
+    /// and appending a final newline as configured.
     pub(crate) fn rope_snapshot_for_save(&mut self) -> (Rope, xi_rope::engine::RevId) {
         let editor = self.editor.borrow();
         let saved_rev_id = editor.get_head_rev_id();
         let mut rope = editor.get_buffer().clone();
         let rope_len = rope.len();
 
-        if rope_len < 1 || !self.config.save_with_newline {
+        if rope_len < 1 {
+            return (rope, saved_rev_id);
+        }
+        if self.config.trim_trailing_whitespace {
+            trim_trailing_whitespace_in_rope(&mut rope);
+        }
+        if !self.config.save_with_newline {
             return (rope, saved_rev_id);
         }
 
@@ -130,9 +137,47 @@ impl<'a> EventContext<'a> {
 
         if !has_newline_at_eof {
             let line_ending = &self.config.line_ending;
-            rope.edit(rope_len.., line_ending);
+            rope.edit(rope.len().., line_ending);
         }
         (rope, saved_rev_id)
+    }
+}
+
+/// Remove spaces/tabs at the end of every line (before `\n` and at EOF) from
+/// the snapshot rope. Runs are collected in one pass over the leaves and
+/// applied back-to-front so earlier offsets stay valid.
+fn trim_trailing_whitespace_in_rope(rope: &mut Rope) {
+    let mut edits = Vec::new();
+    let mut global_offset = 0usize;
+    let mut ws_start: Option<usize> = None;
+    for leaf in rope.chunks() {
+        for (index, ch) in leaf.char_indices() {
+            let position = global_offset + index;
+            match ch {
+                ' ' | '\t' => {
+                    if ws_start.is_none() {
+                        ws_start = Some(position);
+                    }
+                }
+                '\n' => {
+                    if let Some(start) = ws_start.take()
+                        && start < position
+                    {
+                        edits.push((start, position));
+                    }
+                }
+                _ => ws_start = None,
+            }
+        }
+        global_offset += leaf.len();
+    }
+    if let Some(start) = ws_start
+        && start < rope.len()
+    {
+        edits.push((start, rope.len()));
+    }
+    for (start, end) in edits.into_iter().rev() {
+        rope.edit(start..end, "");
     }
 }
 
@@ -249,5 +294,43 @@ impl<'a> EventContext<'a> {
         if self.view.borrow().vlf_find_in_progress() {
             self.schedule_find();
         }
+    }
+}
+
+#[cfg(test)]
+mod save_snapshot_tests {
+    use super::trim_trailing_whitespace_in_rope;
+    use xi_rope::Rope;
+
+    #[test]
+    fn trims_trailing_spaces_and_tabs_per_line() {
+        let mut rope = Rope::from("a  \nbb\t\nc   \n");
+        trim_trailing_whitespace_in_rope(&mut rope);
+        assert_eq!(rope.to_string(), "a\nbb\nc\n");
+    }
+
+    #[test]
+    fn trims_trailing_whitespace_at_eof_without_newline() {
+        let mut rope = Rope::from("a  \nb\t\t");
+        trim_trailing_whitespace_in_rope(&mut rope);
+        assert_eq!(rope.to_string(), "a\nb");
+    }
+
+    #[test]
+    fn keeps_internal_and_leading_whitespace() {
+        let mut rope = Rope::from("  x y  \n\tz  \n");
+        trim_trailing_whitespace_in_rope(&mut rope);
+        assert_eq!(rope.to_string(), "  x y\n\tz\n");
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_rope_stays_valid() {
+        let mut rope = Rope::from("   \n\t\n");
+        trim_trailing_whitespace_in_rope(&mut rope);
+        assert_eq!(rope.to_string(), "\n\n");
+
+        let mut empty = Rope::from("");
+        trim_trailing_whitespace_in_rope(&mut empty);
+        assert_eq!(empty.to_string(), "");
     }
 }

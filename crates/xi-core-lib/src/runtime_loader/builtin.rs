@@ -16,8 +16,8 @@ use crate::tree_sitter_support::{
 #[cfg(any(test, feature = "test-grammars"))]
 use ee_ts_test_grammars as test_grammars;
 
-use super::builtin_zed_generated::{
-    generated_zed_language_definitions, generated_zed_language_overrides,
+use super::builtin_catalog_generated::{
+    generated_catalog_language_definitions, generated_catalog_language_overrides,
 };
 use super::errors::RuntimeLoaderError;
 use super::helpers::{bundled_runtime_root_from_env, normalize_lookup_key};
@@ -67,7 +67,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         builtin_language_definition("typescript", &["cts", "mts", "ts", "tsx"]),
         builtin_language_definition("yaml", &["yaml", "yml"]),
     ];
-    definitions.extend(generated_zed_language_definitions());
+    definitions.extend(generated_catalog_language_definitions());
     let standard_and_ee = RuntimeQueryKind::STANDARD
         .into_iter()
         .chain(RuntimeQueryKind::EE_OWNED)
@@ -407,7 +407,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
 
-    for (language_id, config) in generated_zed_language_overrides() {
+    for (language_id, config) in generated_catalog_language_overrides() {
         overrides.insert(language_id, config);
     }
 

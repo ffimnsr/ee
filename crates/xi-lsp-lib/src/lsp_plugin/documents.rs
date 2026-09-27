@@ -230,7 +230,7 @@ impl LspPlugin {
                     .map(|state| state.uri.clone())
                     .ok_or_else(|| format!("missing open document for view {view_id}"))?;
                 ls_client
-                    .request_code_actions(view_id, range, move |ls_client, result| {
+                    .request_code_actions(view_id, range, None, move |ls_client, result| {
                         let response = result
                             .map_err(|err| {
                                 LanguageResponseError::LanguageServerError(format!("{err:?}"))
@@ -257,6 +257,65 @@ impl LspPlugin {
             });
         if let Err(err) = request {
             self.record_view_failure(view, format!("code actions failed: {err}"));
+        }
+    }
+
+    /// Code actions for `code_actions_on_save`: request only the configured
+    /// kinds over the current range and push an `AutoCodeActions` result that
+    /// the idle loop applies without a picker.
+    pub(super) fn request_code_actions_on_save(
+        &mut self,
+        view: &mut View<ChunkCache>,
+        only: Vec<String>,
+    ) {
+        let view_id = view.get_id();
+        let range = match self.current_range(view) {
+            Ok(range) => range,
+            Err(err) => {
+                self.record_view_failure(view, format!("code actions on save failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                let document_uri = ls_client
+                    .opened_documents
+                    .get(&view_id)
+                    .map(|state| state.uri.clone())
+                    .ok_or_else(|| format!("missing open document for view {view_id}"))?;
+                ls_client
+                    .request_code_actions(view_id, range, Some(only), move |ls_client, result| {
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<CodeActionResponse>>(value).map_err(
+                                    |err| LanguageResponseError::Transport(err.to_string()),
+                                )
+                            })
+                            .and_then(|response| {
+                                response
+                                    .map(|response| {
+                                        code_actions_from_response(response, &document_uri)
+                                    })
+                                    .transpose()
+                                    .map(|response| response.unwrap_or_default())
+                            });
+                        ls_client
+                            .result_queue
+                            .push_result(view_id.into(), LspResponse::AutoCodeActions(response));
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("code actions on save failed: {err}"));
         }
     }
 

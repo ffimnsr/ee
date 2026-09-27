@@ -86,6 +86,8 @@ pub(crate) struct EditorSettings {
     pub charset: String,
     pub trim_trailing_whitespace: bool,
     pub insert_final_newline: bool,
+    /// Format the buffer (formatter or LSP) before saving.
+    pub format_on_save: bool,
     pub auto_indent: bool,
     pub smart_indent: bool,
     // ── Display options ───────────────────────────────────────────────────
@@ -125,6 +127,7 @@ impl Default for EditorSettings {
             charset: "utf-8".to_owned(),
             trim_trailing_whitespace: false,
             insert_final_newline: false,
+            format_on_save: false,
             auto_indent: true,
             smart_indent: true,
             number_style: NumberStyle::Absolute,
@@ -171,6 +174,7 @@ impl EditorSettings {
             ]),
         );
         table.insert("save_with_newline".into(), Value::Bool(self.insert_final_newline));
+        table.insert("trim_trailing_whitespace".into(), Value::Bool(self.trim_trailing_whitespace));
         table
     }
 }
@@ -242,6 +246,9 @@ impl EditorSettings {
         }
         if let Some(v) = patch.insert_final_newline {
             self.insert_final_newline = v;
+        }
+        if let Some(v) = patch.format_on_save {
+            self.format_on_save = v;
         }
         if let Some(v) = patch.auto_indent {
             self.auto_indent = v;

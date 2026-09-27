@@ -14,7 +14,7 @@
 use xi_plugin_lib::Plugin;
 use xi_plugin_lib::mainloop;
 
-mod bundled_zed_generated;
+mod bundled_catalog_generated;
 pub mod conversion_utils;
 mod document_symbols;
 mod external_format;

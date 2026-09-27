@@ -239,6 +239,18 @@ impl Plugin for LspPlugin {
                     .get("index")
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok());
+                if let Some(only) = params.get("only").and_then(Value::as_array) {
+                    let only = only
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    if !only.is_empty() {
+                        // `code_actions_on_save`: auto-apply the requested kinds.
+                        self.request_code_actions_on_save(view, only);
+                        return;
+                    }
+                }
                 self.request_or_apply_code_action(view, index);
             }
             "ee.agent.list_code_actions" => self.request_agent_code_actions(view),
@@ -332,6 +344,17 @@ impl Plugin for LspPlugin {
                     Err(err) => {
                         self.record_view_failure(view, format!("code actions failed: {err:?}"))
                     }
+                },
+                LspResponse::AutoCodeActions(result) => match result {
+                    Ok(actions) => {
+                        // `code_actions_on_save`: apply every returned action
+                        // with edits; command-only actions still execute.
+                        for action in actions {
+                            self.apply_code_action(view, &action);
+                        }
+                    }
+                    Err(err) => self
+                        .record_view_failure(view, format!("code actions on save failed: {err:?}")),
                 },
                 LspResponse::Rename { title, result } => match result {
                     Ok(edit) => self.handle_rename_result(view, &title, edit),

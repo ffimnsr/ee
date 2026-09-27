@@ -141,7 +141,7 @@ Query overlays merge deterministically in bundled, then user, then workspace ord
 
 ## Language servers
 
-`ee` ships bundled LSP definitions for 49 servers covering the Zed-documented language catalog (Rust, JSON, YAML, TypeScript/JavaScript, Go, Python, Ruby, Terraform, Astro, Dart, Clojure, Elm, Erlang, Julia, Lua/Luau, Nix, OCaml, SML, XML, and more). Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`. The bundled set is generated from the Zed language docs by `scripts/zed-catalog/sync.sh`; the full inventory lives in `references/zed-language-catalog.json`.
+`ee` ships bundled LSP definitions for 49 servers covering the Zed-documented language catalog (Rust, JSON, YAML, TypeScript/JavaScript, Go, Python, Ruby, Terraform, Astro, Dart, Clojure, Elm, Erlang, Julia, Lua/Luau, Nix, OCaml, SML, XML, and more). Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`. The bundled set is generated from the Zed language docs by `scripts/language-catalog/sync.sh`; the full inventory lives in `references/language-catalog.json`.
 
 Enabled servers require `language_name` and `command`. `extensions` stays supported as legacy extension fallback and server metadata, but preferred routing now lives under `[languages.<id>].lsp`. Optional fields are `args`, `extensions`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
 
@@ -368,6 +368,18 @@ formatter = false     # disable formatting
 ```
 
 External formatters read the buffer text on stdin and write formatted text to stdout. Missing binaries, timeouts, and oversized/non-UTF-8 output fail closed with a status item; the buffer is never touched on failure. Attaching an undefined formatter id warns and drops the attachment. With no attachment, `format` keeps using LSP `textDocument/formatting`.
+
+### Format / checks on save
+
+```toml
+format_on_save = true            # global default (false)
+
+[languages.shell]
+format_on_save = true            # per-language override
+code_actions_on_save = ["source.fixAll"]
+```
+
+With `format_on_save`, saving runs the language's formatter (external or LSP) first and writes once the edits settle; a bounded wait falls back to saving unformatted with a status warning. `code_actions_on_save` auto-applies the given LSP code-action kinds (`source.fixAll`, `source.organizeImports`, …) before formatting; the plugin sends `CodeActionParams.context.only` so servers only return matching fixes. `trim_trailing_whitespace` / `insert_final_newline` are applied to the on-disk snapshot, and LSP servers still receive `didSave` (their own on-save checks keep working).
 
 ### Runtime language config
 

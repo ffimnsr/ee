@@ -3,7 +3,7 @@
 
 Inputs:
   --docs-dir      directory containing <slug>.md Zed language docs
-  --overrides     curated TOML (scripts/zed-catalog/overrides.toml)
+  --overrides     curated TOML (scripts/language-catalog/overrides.toml)
   --manifest      output JSON manifest path
   --queries-root  ee runtime/queries dir (query-dir presence check)
   --grammar-rust  output Rust catalog for xi-core-lib (optional)
@@ -120,7 +120,7 @@ def metadata_expr(overlay: dict) -> str:
 def grammar_rust_fn(entries: list[dict]) -> str:
     lines = [
         "// GENERATED FILE - do not edit by hand.",
-        "// Regenerate with scripts/zed-catalog/sync.sh.",
+        "// Regenerate with scripts/language-catalog/sync.sh.",
         "",
         "use std::collections::BTreeSet;",
         "",
@@ -135,7 +135,7 @@ def grammar_rust_fn(entries: list[dict]) -> str:
         "};",
         "",
         "/// Builtin language definitions for Zed-documented languages.",
-        "pub(crate) fn generated_zed_language_definitions() -> Vec<LanguageDefinition> {",
+        "pub(crate) fn generated_catalog_language_definitions() -> Vec<LanguageDefinition> {",
         "    vec![",
     ]
     for entry in entries:
@@ -155,7 +155,7 @@ def grammar_rust_fn(entries: list[dict]) -> str:
         "}",
         "",
         "/// Grammar source overrides for Zed-documented languages (git-pinned).",
-        "pub(crate) fn generated_zed_language_overrides() -> Vec<(String, RuntimeLanguageConfig)> {",
+        "pub(crate) fn generated_catalog_language_overrides() -> Vec<(String, RuntimeLanguageConfig)> {",
         "    let standard_and_ee = RuntimeQueryKind::STANDARD",
         "        .into_iter()",
         "        .chain(RuntimeQueryKind::EE_OWNED)",
@@ -202,14 +202,14 @@ def grammar_rust_fn(entries: list[dict]) -> str:
 def lsp_rust_fn(servers: list[dict], attachments: list[dict]) -> str:
     lines = [
         "// GENERATED FILE - do not edit by hand.",
-        "// Regenerate with scripts/zed-catalog/sync.sh.",
+        "// Regenerate with scripts/language-catalog/sync.sh.",
         "",
         "use std::collections::BTreeMap;",
         "",
         "use crate::types::LanguageConfig;",
         "",
         "/// Bundled LSP servers for Zed-documented languages.",
-        "pub(crate) fn bundled_zed_servers() -> Vec<(String, LanguageConfig)> {",
+        "pub(crate) fn bundled_catalog_servers() -> Vec<(String, LanguageConfig)> {",
         "    vec![",
     ]
     for server in sorted(servers, key=lambda s: s["id"]):
@@ -240,7 +240,7 @@ def lsp_rust_fn(servers: list[dict], attachments: list[dict]) -> str:
         "}",
         "",
         "/// Language -> server attachment routing for Zed-documented languages.",
-        "pub(crate) fn bundled_zed_routing() -> Vec<(String, Vec<String>)> {",
+        "pub(crate) fn bundled_catalog_routing() -> Vec<(String, Vec<String>)> {",
         "    vec![",
     ]
     for server in sorted(servers, key=lambda s: s["id"]):
@@ -268,7 +268,7 @@ def main() -> None:
     parser.add_argument("--grammar-rust")
     parser.add_argument("--lsp-rust")
     parser.add_argument("--emit-rust", action="store_true")
-    parser.add_argument("--zed-ref", default="refs/heads/main")
+    parser.add_argument("--source-ref", default="refs/heads/main")
     args = parser.parse_args()
 
     if args.emit_rust and (not args.grammar_rust or not args.lsp_rust):
@@ -389,7 +389,7 @@ def main() -> None:
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "zed_ref": args.zed_ref,
+        "source_ref": args.source_ref,
         "doc_count": len(doc_slugs),
         "docs_failed": failed_docs,
         "grammar_entries": sum(

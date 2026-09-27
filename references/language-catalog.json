@@ -11,7 +11,7 @@
   ],
   "doc_count": 71,
   "docs_failed": [],
-  "generated_at": "2026-09-27T06:04:20+00:00",
+  "generated_at": "2026-09-27T07:35:40+00:00",
   "grammar_entries": 38,
   "languages": {
     "ansible": {
@@ -2354,5 +2354,5 @@
       "workspace_identifier": ""
     }
   ],
-  "zed_ref": "refs/heads/main"
+  "source_ref": "refs/heads/main"
 }

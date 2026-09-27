@@ -1,12 +1,12 @@
 // GENERATED FILE - do not edit by hand.
-// Regenerate with scripts/zed-catalog/sync.sh.
+// Regenerate with scripts/language-catalog/sync.sh.
 
 use std::collections::BTreeMap;
 
 use crate::types::LanguageConfig;
 
 /// Bundled LSP servers for Zed-documented languages.
-pub(crate) fn bundled_zed_servers() -> Vec<(String, LanguageConfig)> {
+pub(crate) fn bundled_catalog_servers() -> Vec<(String, LanguageConfig)> {
     vec![
         (
             "ansible-language-server".to_string(),
@@ -278,7 +278,7 @@ pub(crate) fn bundled_zed_servers() -> Vec<(String, LanguageConfig)> {
 }
 
 /// Language -> server attachment routing for Zed-documented languages.
-pub(crate) fn bundled_zed_routing() -> Vec<(String, Vec<String>)> {
+pub(crate) fn bundled_catalog_routing() -> Vec<(String, Vec<String>)> {
     vec![
         ("ansible-language-server".to_string(), vec!["ansible-language-server".to_string()]),
         ("astro-ls".to_string(), vec!["astro-ls".to_string()]),

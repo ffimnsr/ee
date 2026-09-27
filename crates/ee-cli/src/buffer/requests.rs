@@ -79,6 +79,12 @@ impl BufferManager {
         self.send_edit("request_code_actions", json!({ "index": index }))
     }
 
+    /// Ask the LSP plugin to auto-apply only the given code-action kinds
+    /// (used by `code_actions_on_save`).
+    pub(crate) fn request_code_actions_on_save(&mut self, only: Vec<String>) -> io::Result<()> {
+        self.send_edit("request_code_actions", json!({ "only": only }))
+    }
+
     pub(crate) fn request_rename(&mut self, new_name: &str) -> io::Result<()> {
         self.send_edit("request_rename", json!({ "new_name": new_name }))
     }

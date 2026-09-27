@@ -1,5 +1,5 @@
 // GENERATED FILE - do not edit by hand.
-// Regenerate with scripts/zed-catalog/sync.sh.
+// Regenerate with scripts/language-catalog/sync.sh.
 
 use std::collections::BTreeSet;
 
@@ -14,7 +14,7 @@ use super::types::{
 };
 
 /// Builtin language definitions for Zed-documented languages.
-pub(crate) fn generated_zed_language_definitions() -> Vec<LanguageDefinition> {
+pub(crate) fn generated_catalog_language_definitions() -> Vec<LanguageDefinition> {
     vec![
         LanguageDefinition {
             name: "ansible".into(),
@@ -374,7 +374,7 @@ pub(crate) fn generated_zed_language_definitions() -> Vec<LanguageDefinition> {
 }
 
 /// Grammar source overrides for Zed-documented languages (git-pinned).
-pub(crate) fn generated_zed_language_overrides() -> Vec<(String, RuntimeLanguageConfig)> {
+pub(crate) fn generated_catalog_language_overrides() -> Vec<(String, RuntimeLanguageConfig)> {
     let standard_and_ee = RuntimeQueryKind::STANDARD
         .into_iter()
         .chain(RuntimeQueryKind::EE_OWNED)

@@ -161,7 +161,6 @@ pub(crate) fn full_document_edit(text: &str, formatted: &str) -> Option<TextEdit
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
 
@@ -182,8 +181,10 @@ mod tests {
     fn fixture_formatter(mode: &str, dir: &TempDir) -> FormatterConfig {
         let script = dir.path().join(format!("fake-formatter-{mode}.sh"));
         fs::write(&script, fixture_script(mode)).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        FormatterConfig::external(script.to_string_lossy().to_string(), Vec::new())
+        // Run through `sh script` instead of exec'ing the file: exec of a
+        // freshly written script races with the kernel (ETXTBSY) under
+        // parallel test threads.
+        FormatterConfig::external(String::from("sh"), vec![script.to_string_lossy().to_string()])
     }
 
     #[test]

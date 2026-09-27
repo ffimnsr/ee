@@ -61,6 +61,12 @@
         "null"
       ]
     },
+    "format_on_save": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "auto_indent": {
       "type": [
         "boolean",
@@ -338,6 +344,25 @@
               "type": "null"
             }
           ],
+          "default": null
+        },
+        "format_on_save": {
+          "description": "Format the buffer before saving (per-language `format_on_save`).",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "code_actions_on_save": {
+          "description": "LSP code-action kinds to auto-apply before saving (`source.fixAll`, …).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
           "default": null
         },
         "name": {

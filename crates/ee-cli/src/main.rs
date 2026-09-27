@@ -656,6 +656,8 @@ fn run_app(
         // Apply backend responses from just-handled input before drawing, after
         // dropping stale repeated arrow motion from the same input tick.
         app.backend.drain_events()?;
+        // Complete deferred saves after format/code-action results settled.
+        app.pump_format_on_save();
         app.sync_status_toast();
 
         if app.redraw_requested {

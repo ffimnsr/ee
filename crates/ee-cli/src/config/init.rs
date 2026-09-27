@@ -56,6 +56,7 @@ pub(crate) fn resolved_config_with_env(
         charset: Some(settings.charset),
         trim_trailing_whitespace: Some(settings.trim_trailing_whitespace),
         insert_final_newline: Some(settings.insert_final_newline),
+        format_on_save: Some(settings.format_on_save),
         auto_indent: Some(settings.auto_indent),
         smart_indent: Some(settings.smart_indent),
         number_style: Some(match settings.number_style {

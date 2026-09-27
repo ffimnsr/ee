@@ -1,14 +1,14 @@
 //! Runtime-loader tests: generated Zed language catalog invariants.
 //!
 //! These tests are network-free; they validate that the generated catalog
-//! (scripts/zed-catalog) stays structurally sound:
+//! (scripts/language-catalog) stays structurally sound:
 //! - every non-deferred entry has a Git-pinned grammar source,
 //! - definitions and overrides agree per language id,
 //! - the default loader resolves new languages and retains detection data.
 use super::*;
 
-use crate::runtime_loader::builtin_zed_generated::{
-    generated_zed_language_definitions, generated_zed_language_overrides,
+use crate::runtime_loader::builtin_catalog_generated::{
+    generated_catalog_language_definitions, generated_catalog_language_overrides,
 };
 use crate::runtime_loader::{
     TreeSitterPackageGrammar, TreeSitterPackageManifest, select_manifest_grammar,
@@ -16,8 +16,8 @@ use crate::runtime_loader::{
 
 #[test]
 fn generated_catalog_definitions_and_overrides_are_aligned() {
-    let definitions = generated_zed_language_definitions();
-    let overrides = generated_zed_language_overrides();
+    let definitions = generated_catalog_language_definitions();
+    let overrides = generated_catalog_language_overrides();
 
     assert!(!definitions.is_empty(), "generated catalog must not be empty");
     assert_eq!(
@@ -66,7 +66,7 @@ fn generated_catalog_definitions_and_overrides_are_aligned() {
 
 #[test]
 fn generated_catalog_ids_are_distinct_and_have_detection_surface() {
-    let definitions = generated_zed_language_definitions();
+    let definitions = generated_catalog_language_definitions();
     let mut ids = BTreeSet::new();
     for def in &definitions {
         let key = normalize_lookup_key(def.name.as_ref());

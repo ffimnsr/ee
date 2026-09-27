@@ -1,5 +1,7 @@
 use super::*;
 
+use super::commands::PendingSavePipeline;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Operator {
     Delete,
@@ -396,6 +398,12 @@ pub(crate) struct App {
     pub(crate) redraw_requested: bool,
     /// Per-session render observability counters.
     pub(crate) render_metrics: crate::render_metrics::RenderMetrics,
+    /// Buffers waiting for code-actions/format settle before the save
+    /// completes (`format_on_save` / `code_actions_on_save`).
+    pub(crate) pending_format_saves: std::collections::HashMap<u32, PendingSavePipeline>,
+    /// `:wq`/`:x` requested a quit; defer it until the pending deferred save
+    /// completes (or the pipeline fails to save).
+    pub(crate) quit_after_format_save: bool,
 }
 
 impl App {
@@ -479,6 +487,8 @@ impl App {
             location_list_open: false,
             location_list_focused: false,
             recovery_last_check: Instant::now(),
+            pending_format_saves: HashMap::new(),
+            quit_after_format_save: false,
             highlighter: crate::highlight::Highlighter::new(),
             folds: FoldStore::new(),
             search_pattern: None,

@@ -158,6 +158,43 @@ impl App {
         Ok(format!("inserted register {name}"))
     }
     pub(super) fn save_current_buffer(&mut self) -> Result<SaveOutcome, String> {
+        let buf_id = self.backend.active().id;
+        if self.pending_format_saves.contains_key(&buf_id) {
+            return Ok(SaveOutcome::AwaitingFormat);
+        }
+        let (actions, format) = self.save_pipeline_plan();
+        if !actions.is_empty() {
+            self.backend
+                .request_code_actions_on_save(actions)
+                .map_err(|err| format!("code actions on save failed: {err}"))?;
+            self.pending_format_saves.insert(
+                buf_id,
+                PendingSavePipeline {
+                    needs_format: format,
+                    phase: SavePipelinePhase::PreSave,
+                    phase_ticks: 0,
+                    total_ticks: 0,
+                },
+            );
+            self.backend.status_message = Some(String::from("code actions on save running..."));
+            return Ok(SaveOutcome::AwaitingFormat);
+        }
+        if format {
+            self.backend
+                .format_document()
+                .map_err(|err| format!("format on save failed: {err}"))?;
+            self.pending_format_saves.insert(
+                buf_id,
+                PendingSavePipeline {
+                    needs_format: true,
+                    phase: SavePipelinePhase::Format,
+                    phase_ticks: 0,
+                    total_ticks: 0,
+                },
+            );
+            self.backend.status_message = Some(String::from("format on save running..."));
+            return Ok(SaveOutcome::AwaitingFormat);
+        }
         match self.backend.save() {
             Ok(()) => Ok(SaveOutcome::Saved),
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -210,6 +247,115 @@ impl App {
         }
         Ok(SaveOutcome::Saved)
     }
+
+    /// Resolve `code_actions_on_save` kinds + `format_on_save` for the active
+    /// buffer: per-language overrides win, then the global `format_on_save`.
+    fn save_pipeline_plan(&mut self) -> (Vec<String>, bool) {
+        let language_id = self.backend.active().path.clone().and_then(|path| {
+            xi_core_lib::runtime_loader::with_default_runtime_loader_mut(|loader| {
+                loader.language_for_path(&path).map(|language| language.canonical_id().to_string())
+            })
+        });
+        let actions = language_id
+            .as_deref()
+            .and_then(|language| self.config.lsp.language_code_actions_on_save.get(language))
+            .cloned()
+            .unwrap_or_default();
+        let format = language_id
+            .as_deref()
+            .and_then(|language| self.config.lsp.language_format_on_save.get(language))
+            .copied()
+            .unwrap_or(self.config.format_on_save);
+        (actions, format)
+    }
+
+    /// Advance pending pre-save pipelines. Called every pump tick after
+    /// backend events have been drained so plugin edits have been applied.
+    /// Runs code actions, then formatting, then the actual save; a bounded
+    /// wait guards against a stuck plugin (save happens anyway on timeout).
+    pub(crate) fn pump_format_on_save(&mut self) {
+        const SETTLE_TICKS: u32 = 3;
+        const MAX_WAIT_TICKS: u32 = 180;
+
+        let mut ready = Vec::new();
+        let mut expired: Vec<(u32, u32)> = Vec::new();
+        for (buf_id, pending) in self.pending_format_saves.iter_mut() {
+            pending.total_ticks += 1;
+            pending.phase_ticks += 1;
+            if pending.total_ticks >= MAX_WAIT_TICKS {
+                expired.push((*buf_id, pending.total_ticks));
+                continue;
+            }
+            if pending.phase_ticks < SETTLE_TICKS {
+                continue;
+            }
+            match pending.phase {
+                SavePipelinePhase::PreSave => {
+                    if pending.needs_format {
+                        if let Err(err) = self.backend.format_document() {
+                            self.backend.status_message =
+                                Some(format!("format on save failed: {err}"));
+                        }
+                        pending.phase = SavePipelinePhase::Format;
+                    } else {
+                        ready.push(*buf_id);
+                    }
+                    pending.phase_ticks = 0;
+                }
+                SavePipelinePhase::Format => ready.push(*buf_id),
+            }
+        }
+
+        for buf_id in expired.into_iter().map(|(id, _)| id) {
+            self.pending_format_saves.remove(&buf_id);
+            self.backend.status_message =
+                Some(String::from("format on save timed out; saved unformatted"));
+            self.complete_pending_save(buf_id);
+        }
+        for buf_id in ready {
+            self.pending_format_saves.remove(&buf_id);
+            self.complete_pending_save(buf_id);
+        }
+    }
+
+    /// Writes the deferred buffer and honours a pending `:wq`/`:x` quit once
+    /// the pipeline actually saved (failed saves clear the quit request).
+    fn complete_pending_save(&mut self, buf_id: u32) {
+        let saved = self.finish_pending_save(buf_id);
+        if self.quit_after_format_save {
+            self.quit_after_format_save = false;
+            if saved {
+                self.should_quit = true;
+            }
+        }
+    }
+
+    /// Returns `true` when the buffer was written to disk.
+    fn finish_pending_save(&mut self, buf_id: u32) -> bool {
+        match self.backend.save_buffer(buf_id) {
+            Ok(()) => {
+                if buf_id == self.backend.active().id {
+                    self.backend.status_message = Some(String::from("saved (format on save)"));
+                }
+                true
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                if buf_id == self.backend.active().id {
+                    let _ = self.start_privileged_save_confirm();
+                } else {
+                    self.backend.status_message =
+                        Some(format!("save failed after format-on-save: {err}"));
+                }
+                false
+            }
+            Err(err) => {
+                self.backend.status_message =
+                    Some(format!("save failed after format-on-save: {err}"));
+                false
+            }
+        }
+    }
+
     pub(super) fn reload_all_buffers(&mut self) -> Result<(), String> {
         let ids = self.backend.all_bufs().iter().map(|buf| buf.id).collect::<Vec<_>>();
         for id in ids {

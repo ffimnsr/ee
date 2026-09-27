@@ -528,7 +528,7 @@ impl Config {
             ),
         ]);
 
-        language_config.extend(crate::bundled_zed_generated::bundled_zed_servers());
+        language_config.extend(crate::bundled_catalog_generated::bundled_catalog_servers());
 
         let mut language_servers = HashMap::from([
             bundled_language_server("bash"),
@@ -563,7 +563,7 @@ impl Config {
             bundled_language_server("yaml"),
             bundled_language_server("zig"),
         ]);
-        language_servers.extend(crate::bundled_zed_generated::bundled_zed_routing());
+        language_servers.extend(crate::bundled_catalog_generated::bundled_catalog_routing());
 
         Self {
             language_config,
@@ -692,11 +692,26 @@ pub enum LspResponse {
     Hover(Result<Hover, LanguageResponseError>),
     Diagnostics(Result<Vec<CoreDiagnostic>, LanguageResponseError>),
     Completions(Result<Vec<PendingCompletionItem>, LanguageResponseError>),
-    Locations { title: String, result: Result<Vec<NavigationTarget>, LanguageResponseError> },
-    Symbols { title: String, result: Result<Vec<SymbolItem>, LanguageResponseError> },
-    Formatting { title: String, result: Result<Vec<TextEdit>, LanguageResponseError> },
+    Locations {
+        title: String,
+        result: Result<Vec<NavigationTarget>, LanguageResponseError>,
+    },
+    Symbols {
+        title: String,
+        result: Result<Vec<SymbolItem>, LanguageResponseError>,
+    },
+    Formatting {
+        title: String,
+        result: Result<Vec<TextEdit>, LanguageResponseError>,
+    },
     CodeActions(Result<Vec<LspCodeAction>, LanguageResponseError>),
-    Rename { title: String, result: Result<Option<WorkspaceEdit>, LanguageResponseError> },
+    /// Code actions requested for save (`code_actions_on_save`): every returned
+    /// action is applied automatically instead of showing a picker.
+    AutoCodeActions(Result<Vec<LspCodeAction>, LanguageResponseError>),
+    Rename {
+        title: String,
+        result: Result<Option<WorkspaceEdit>, LanguageResponseError>,
+    },
 }
 
 #[cfg(test)]

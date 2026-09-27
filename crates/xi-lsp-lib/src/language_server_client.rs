@@ -809,6 +809,7 @@ impl LanguageServerClient {
         &mut self,
         view_id: ViewId,
         range: Range,
+        only: Option<Vec<String>>,
         on_result: CB,
     ) -> Result<u64, LspError>
     where
@@ -824,14 +825,16 @@ impl LanguageServerClient {
             )));
         }
 
+        let mut context = json!({ "diagnostics": state.diagnostics });
+        if let Some(only) = only {
+            context["only"] = json!(only);
+        }
         self.try_send_request(
             "textDocument/codeAction",
             Params::from(json!({
                 "textDocument": { "uri": state.uri.clone() },
                 "range": range,
-                "context": {
-                    "diagnostics": state.diagnostics,
-                },
+                "context": context,
             })),
             Box::new(on_result),
         )
