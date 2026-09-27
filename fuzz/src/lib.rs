@@ -197,6 +197,7 @@ fn make_config(input: &CoreTextInput) -> BufferItems {
         autodetect_whitespace: false,
         surrounding_pairs: Vec::new(),
         save_with_newline: false,
+        trim_trailing_whitespace: false,
         vlf_wrap: false,
     }
 }

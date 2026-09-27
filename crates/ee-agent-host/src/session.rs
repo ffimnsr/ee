@@ -388,7 +388,7 @@ impl AgentThread {
         self.send_prompt_inner(prompt, false, None).await
     }
 
-    /// Like [`send_prompt`], but stores an editor-supplied workspace baseline
+    /// Like [`Self::send_prompt`], but stores an editor-supplied workspace baseline
     /// revision as the turn's first observation before any response is
     /// awaited. Observing inside the host keeps the baseline deterministically
     /// ahead of the terminal fact even when an agent answers instantly.
@@ -410,7 +410,7 @@ impl AgentThread {
         self.resume_prompt_with_baseline(prompt, None).await
     }
 
-    /// Like [`resume_prompt`], but records an editor-supplied workspace
+    /// Like [`Self::resume_prompt`], but records an editor-supplied workspace
     /// baseline revision as a fresh observation on the reused evidence turn.
     /// The observation lands synchronously before the resumed response is
     /// awaited, so resumed turns carry a revision even when the agent answers

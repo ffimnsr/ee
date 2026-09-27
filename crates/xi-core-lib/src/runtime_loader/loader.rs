@@ -525,7 +525,7 @@ impl RuntimeLoader {
                         .map_err(|error| {
                         RuntimeOperationError::runtime_asset(format!(
                             "failed copying queries for `{}`: {error}",
-                            &language_id
+                            language_id
                         ))
                     })?;
                 query_paths.extend(
@@ -533,7 +533,7 @@ impl RuntimeLoader {
                         |error| {
                             RuntimeOperationError::runtime_asset(format!(
                                 "failed copying bundled standard queries for `{}`: {error}",
-                                &language_id
+                                language_id
                             ))
                         },
                     )?,
@@ -543,7 +543,7 @@ impl RuntimeLoader {
                         |error| {
                             RuntimeOperationError::runtime_asset(format!(
                                 "failed copying bundled ee-owned queries for `{}`: {error}",
-                                &language_id
+                                language_id
                             ))
                         },
                     )?,
