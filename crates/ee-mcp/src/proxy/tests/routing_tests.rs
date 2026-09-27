@@ -172,10 +172,12 @@ async fn search_tools_return_structured_content() {
 
     let regex = tokio::time::timeout(
         REQUEST_TIMEOUT,
-        client.call_tool(
-            CallToolRequestParams::new("ee_search_text_regex")
-                .with_arguments(arguments(json!({ "pattern": "main" }))),
-        ),
+        client.call_tool(CallToolRequestParams::new("ee_search_text_regex").with_arguments(
+            arguments(json!({
+                "pattern": "main",
+                "file_glob": "src/*.rs",
+            })),
+        )),
     )
     .await
     .expect("search_text_regex timed out")
@@ -200,7 +202,7 @@ async fn search_tools_return_structured_content() {
             String::from("search_files:src/*.rs"),
             String::from("search_files_all:.git/*"),
             String::from("search_text:needle"),
-            String::from("search_text_regex:main"),
+            String::from("search_text_regex:main:src/*.rs"),
             String::from("search_text_in_files:needle:src/main.rs"),
         ]
     );

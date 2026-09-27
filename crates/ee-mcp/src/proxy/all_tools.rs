@@ -68,11 +68,12 @@ impl EeMcpProxy {
             ),
             Tool::new(
                 "ee_search_text_regex",
-                "Perform regex text search across workspace files. Results are bounded by the host default cap and regex execution is safety-limited by the host.",
+                "Perform regex text search across workspace files. Prefer this over directory traversal for content discovery. Scope results with optional file_glob (e.g. \"**/*.rs\") to filter files by path; results are bounded by the host default cap and regex execution is safety-limited by the host.",
                 schema(json!({
                     "type": "object",
                     "properties": {
                         "pattern": { "type": "string" },
+                        "file_glob": { "type": "string" },
                     },
                     "required": ["pattern"],
                 })),

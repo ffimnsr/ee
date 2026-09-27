@@ -271,6 +271,9 @@
       },
       "inputSchema": {
         "properties": {
+          "file_glob": {
+            "type": "string"
+          },
           "pattern": {
             "type": "string"
           }

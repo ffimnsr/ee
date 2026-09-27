@@ -18,10 +18,11 @@ async fn tool_list_exposes_ee_namespaced_tools() {
     assert!(tools.iter().all(|tool| !tool.name.contains('.')));
     assert!(tools.iter().all(|tool| tool.input_schema.contains_key("properties")));
     assert!(tools.iter().any(|tool| tool.name == "ee_tools_manifest"));
-    assert!(tools.iter().find(|tool| tool.name == "ee_list_directory").is_some_and(|tool| {
-        tool.description
-            .as_ref()
-            .is_some_and(|description| description.contains("host default cap"))
+    assert!(tools.iter().find(|tool| tool.name == "ee_search_text_regex").is_some_and(|tool| {
+        let description = tool.description.as_deref().unwrap_or_default();
+        description.contains("safety-limited")
+            && description.contains("file_glob")
+            && description.contains("directory traversal")
     }));
     assert!(tools.iter().find(|tool| tool.name == "ee_search_text_regex").is_some_and(|tool| {
         tool.description.as_ref().is_some_and(|description| description.contains("safety-limited"))
@@ -374,6 +375,31 @@ fn argument_cap_accepts_exact_boundary_and_rejects_one_byte_over() {
     })));
     assert!(EeMcpProxy::new(over_backend.clone()).dispatch_tool(&over).is_err());
     assert!(over_backend.calls().is_empty(), "over-boundary input never dispatches");
+}
+
+#[test]
+fn search_text_regex_rejects_bad_file_glob_before_backend_dispatch() {
+    let backend = Arc::new(ScriptedBackend::default());
+    let proxy = EeMcpProxy::new(backend.clone());
+
+    let empty = CallToolRequestParams::new("ee_search_text_regex")
+        .with_arguments(arguments(json!({ "pattern": "main", "file_glob": "" })));
+    assert!(proxy.dispatch_tool(&empty).is_err(), "empty file_glob must be rejected");
+    assert!(backend.calls().is_empty(), "empty file_glob never reaches the backend");
+
+    let non_string = CallToolRequestParams::new("ee_search_text_regex")
+        .with_arguments(arguments(json!({ "pattern": "main", "file_glob": 7 })));
+    assert!(proxy.dispatch_tool(&non_string).is_err(), "non-string file_glob must be rejected");
+    assert!(backend.calls().is_empty(), "non-string file_glob never reaches the backend");
+
+    let valid = CallToolRequestParams::new("ee_search_text_regex")
+        .with_arguments(arguments(json!({ "pattern": "main", "file_glob": "**/*.rs" })));
+    assert!(proxy.dispatch_tool(&valid).is_ok(), "valid file_glob dispatches");
+    assert_eq!(
+        backend.calls(),
+        vec![String::from("search_text_regex:main:**/*.rs")],
+        "file_glob is forwarded verbatim"
+    );
 }
 
 #[test]

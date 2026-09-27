@@ -26,8 +26,14 @@ pub trait EeProxyBackend: Send + Sync + 'static {
     /// Searches file text literally and case-sensitively across allowed roots.
     fn search_text(&self, query: String) -> Result<SearchTextResult, ProxyToolError>;
 
-    /// Searches file text with a regex across allowed roots.
-    fn search_text_regex(&self, pattern: String) -> Result<SearchTextResult, ProxyToolError>;
+    /// Searches file text with a regex across allowed roots. `file_glob`
+    /// optionally restricts matching to files whose path matches the glob
+    /// (`None` searches all files).
+    fn search_text_regex(
+        &self,
+        pattern: String,
+        file_glob: Option<String>,
+    ) -> Result<SearchTextResult, ProxyToolError>;
 
     /// Searches a configured public index. Default implementation fails closed.
     fn web_search(&self, request: WebSearchRequest) -> Result<WebSearchResult, ProxyToolError> {

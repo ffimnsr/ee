@@ -151,7 +151,7 @@ pub(crate) fn decode_spans(
     }
     let mut spans = Vec::with_capacity(flat.len() / 3);
     let mut cursor = 0usize;
-    for triple in flat.chunks_exact(3) {
+    for triple in flat.as_chunks::<3>().0 {
         let (start, end, scope_id) = (triple[0] as usize, triple[1] as usize, triple[2]);
         if end < start {
             return Err(io::Error::new(

@@ -84,8 +84,12 @@ impl EeProxyBackend for ScriptedBackend {
         })
     }
 
-    fn search_text_regex(&self, pattern: String) -> Result<SearchTextResult, ProxyToolError> {
-        self.record(format!("search_text_regex:{pattern}"));
+    fn search_text_regex(
+        &self,
+        pattern: String,
+        file_glob: Option<String>,
+    ) -> Result<SearchTextResult, ProxyToolError> {
+        self.record(format!("search_text_regex:{pattern}:{}", file_glob.unwrap_or_default()));
         Ok(SearchTextResult {
             matches: vec![TextMatch {
                 path: String::from("/abs/work/src/lib.rs"),

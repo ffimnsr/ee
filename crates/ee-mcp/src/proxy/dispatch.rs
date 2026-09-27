@@ -75,9 +75,10 @@ impl EeMcpProxy {
             "ee_search_text_regex" => {
                 let arguments = require_arguments(request)?;
                 let pattern = require_nonempty_string(arguments, "pattern")?;
+                let file_glob = optional_nonempty_string(arguments, "file_glob")?;
                 Ok(self
                     .backend
-                    .search_text_regex(pattern.to_owned())
+                    .search_text_regex(pattern.to_owned(), file_glob)
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }

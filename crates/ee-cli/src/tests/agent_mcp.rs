@@ -804,6 +804,21 @@ fn proxy_phase1_extras_return_structured_results() {
     let scoped_matches = scoped_reply["result"]["value"]["matches"].as_array().unwrap();
     assert_eq!(scoped_matches.len(), 1, "scoped reply: {scoped_reply}");
     assert_eq!(scoped_matches[0]["path"], json!(canonical_visible.display().to_string()));
+
+    proxy_send(
+        &mut stream,
+        5,
+        json!({
+            "method": "search_text_regex",
+            "pattern": "regex-hit",
+            "file_glob": "*.rs",
+        }),
+    );
+    settle(&mut app);
+    let regex_scoped_reply = proxy_recv(&mut stream);
+    let regex_scoped_matches = regex_scoped_reply["result"]["value"]["matches"].as_array().unwrap();
+    assert_eq!(regex_scoped_matches.len(), 1, "regex scoped reply: {regex_scoped_reply}");
+    assert_eq!(regex_scoped_matches[0]["path"], json!(canonical_visible.display().to_string()));
 }
 
 #[test]

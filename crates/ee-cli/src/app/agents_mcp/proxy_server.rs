@@ -117,7 +117,9 @@ pub(super) fn start_proxy_call_to_bridge(
         ProxyCall::SearchFiles { pattern } => ProxyToolCall::SearchFiles { pattern },
         ProxyCall::SearchFilesAll { pattern } => ProxyToolCall::SearchFilesAll { pattern },
         ProxyCall::SearchText { query } => ProxyToolCall::SearchText { query },
-        ProxyCall::SearchTextRegex { pattern } => ProxyToolCall::SearchTextRegex { pattern },
+        ProxyCall::SearchTextRegex { pattern, file_glob } => {
+            ProxyToolCall::SearchTextRegex { pattern, file_glob }
+        }
         ProxyCall::WebSearch { query } => {
             ProxyToolCall::WebSearch { query, approval_scope: scope.to_owned(), cancellation }
         }

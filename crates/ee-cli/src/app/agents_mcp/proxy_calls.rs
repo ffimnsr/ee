@@ -52,6 +52,8 @@ pub(crate) enum ProxyCall {
     },
     SearchTextRegex {
         pattern: String,
+        #[serde(default)]
+        file_glob: Option<String>,
     },
     WebSearch {
         query: String,
@@ -306,6 +308,7 @@ pub(crate) enum ProxyToolCall {
     },
     SearchTextRegex {
         pattern: String,
+        file_glob: Option<String>,
     },
     WebSearch {
         query: String,

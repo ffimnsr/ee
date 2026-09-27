@@ -131,8 +131,12 @@ impl EeProxyBackend for HostProxyBackend {
         }
     }
 
-    fn search_text_regex(&self, pattern: String) -> Result<SearchTextResult, ProxyToolError> {
-        match self.call(ClientRequest::ProxySearchTextRegex { pattern })? {
+    fn search_text_regex(
+        &self,
+        pattern: String,
+        file_glob: Option<String>,
+    ) -> Result<SearchTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchTextRegex { pattern, file_glob })? {
             ClientRequestResponse::ProxyValue(value) => {
                 serde_json::from_value(value).map_err(|error| ProxyToolError {
                     message: format!("proxy search_text returned invalid payload: {error}"),

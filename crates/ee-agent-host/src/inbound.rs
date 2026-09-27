@@ -198,6 +198,7 @@ pub enum ClientRequest {
     },
     ProxySearchTextRegex {
         pattern: String,
+        file_glob: Option<String>,
     },
     ProxySearchTextInFiles {
         query: String,
@@ -425,6 +426,7 @@ impl ClientRequest {
             ClientRequest::ProxySearchFiles { pattern }
             | ClientRequest::ProxySearchFilesAll { pattern } => Some(pattern.clone()),
             ClientRequest::ProxySearchTextInFiles { file_glob, .. } => Some(file_glob.clone()),
+            ClientRequest::ProxySearchTextRegex { file_glob: Some(glob), .. } => Some(glob.clone()),
             ClientRequest::ProxyReplaceText { path, .. }
             | ClientRequest::ProxyApplyPatch { path, .. }
             | ClientRequest::ProxyCreateTextFile { path, .. }
@@ -798,6 +800,26 @@ mod tests {
             "the glob is safe to surface; the query is not"
         );
 
+        let regex_scoped = ClientRequest::ProxySearchTextRegex {
+            pattern: String::from("private pattern"),
+            file_glob: Some(String::from("src/*.rs")),
+        };
+        assert_eq!(
+            ClientRequest::client_request_target(&regex_scoped).as_deref(),
+            Some("src/*.rs"),
+            "the glob is safe to surface; the pattern is not"
+        );
+
+        let regex_unscoped = ClientRequest::ProxySearchTextRegex {
+            pattern: String::from("needle"),
+            file_glob: None,
+        };
+        assert_eq!(
+            ClientRequest::client_request_target(&regex_unscoped).as_deref(),
+            None,
+            "an unscoped pattern carries no path target"
+        );
+
         let diagnostics =
             ClientRequest::ProxyGetFileDiagnostics { path: String::from("/work/main.rs") };
         assert_eq!(
@@ -907,7 +929,8 @@ mod tests {
         assert_eq!(move_path.method(), "_ee/move_path");
         assert_eq!(move_path.session_id(), None);
 
-        let proxy_regex = ClientRequest::ProxySearchTextRegex { pattern: String::from("main") };
+        let proxy_regex =
+            ClientRequest::ProxySearchTextRegex { pattern: String::from("main"), file_glob: None };
         assert_eq!(proxy_regex.method(), "_ee/search_text_regex");
         assert_eq!(proxy_regex.session_id(), None);
 

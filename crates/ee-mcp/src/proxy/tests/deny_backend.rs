@@ -35,7 +35,11 @@ impl EeProxyBackend for DenyWriteBackend {
         Ok(SearchTextResult { matches: Vec::new(), truncated: false })
     }
 
-    fn search_text_regex(&self, _pattern: String) -> Result<SearchTextResult, ProxyToolError> {
+    fn search_text_regex(
+        &self,
+        _pattern: String,
+        _file_glob: Option<String>,
+    ) -> Result<SearchTextResult, ProxyToolError> {
         Ok(SearchTextResult { matches: Vec::new(), truncated: false })
     }
 

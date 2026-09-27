@@ -300,11 +300,12 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
     fn search_text_regex(
         &self,
         pattern: String,
+        file_glob: Option<String>,
     ) -> Result<ee_mcp::SearchTextResult, ee_mcp::ProxyToolError> {
         serde_json::from_value(
-            self.call_value(ProxyCall::SearchTextRegex { pattern }).map_err(|message| {
-                ee_mcp::ProxyToolError { message, is_permission_denied: false }
-            })?,
+            self.call_value(ProxyCall::SearchTextRegex { pattern, file_glob }).map_err(
+                |message| ee_mcp::ProxyToolError { message, is_permission_denied: false },
+            )?,
         )
         .map_err(|error| ee_mcp::ProxyToolError {
             message: format!("proxy search_text_regex reply invalid: {error}"),

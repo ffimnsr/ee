@@ -323,8 +323,11 @@ impl App {
     pub(super) fn proxy_search_text_regex(
         &self,
         pattern: &str,
+        file_glob: Option<&str>,
     ) -> Result<serde_json::Value, AgentError> {
         let regex = compile_search_regex(pattern)?;
+        let matcher = file_glob.map(build_path_matcher).transpose()?;
+        let roots = self.canonical_workspace_roots();
         let deadline = Instant::now() + PROXY_SEARCH_REGEX_TIMEOUT;
         let matches = self.collect_text_matches(|path, line_number, line| {
             if Instant::now() >= deadline {
@@ -332,6 +335,13 @@ impl App {
                     "regex search timed out after {:?}",
                     PROXY_SEARCH_REGEX_TIMEOUT
                 )));
+            }
+            if let Some(matcher) = &matcher {
+                let rel =
+                    roots.iter().find_map(|root| path.strip_prefix(root).ok()).unwrap_or(path);
+                if !matcher(rel, path) {
+                    return Ok(None);
+                }
             }
             Ok(regex.is_match(line).then(|| ee_mcp::TextMatch {
                 path: path.display().to_string(),

@@ -613,6 +613,29 @@ Measure reliability, safety, and efficiency without storing workspace secrets or
 - [x] Observability artifacts remain useful for replay while preserving workspace privacy boundaries.
 - [x] No raw secret, token, environment value, or unapproved workspace content enters telemetry by default.
 
+## Agent Regex-Search Reach: Zed-Style Scoping [2026-09-27]
+
+Make the in-editor agent reach for regex content search before directory traversal, matching the Zed "Search files for regex" pattern (`regex` + optional `include_pattern` glob).
+
+### Phase 1: Schema and wiring
+
+- [x] Add optional `file_glob` to `ee_search_text_regex` (schema + description steer toward regex-first search; glob default `**/*` when omitted).
+- [x] Thread `file_glob` through `EeProxyBackend::search_text_regex`, `ProxyCall`/`ProxyToolCall`, `ClientRequest`, and host impls.
+- [x] Host impl scopes matches with `build_path_matcher` while omitted glob preserves prior behavior.
+- [x] Regenerate versioned manifest fixture for the new schema.
+
+### Phase 2: Agent steering
+
+- [x] Add `SEARCH_GUIDANCE` prompt guidance (mirrors `WEB_RESEARCH_GUIDANCE`) injected when `ee_` file search tools are registered.
+
+### Phase 3: Tests
+
+- [x] Routing/scripted-backend tests cover `file_glob` argument; proxy round-trip asserts scoped regex matches only glob-matching files.
+- [x] Empty and non-string `file_glob` rejected before backend dispatch; valid glob forwarded verbatim.
+- [x] Manifest/tool-list assertions pin the regex-first description wording and `file_glob` schema.
+- [x] Strategy unit tests cover `has_file_search_tools` and guidance content.
+- [x] `cargo clippy` and targeted `cargo test --quiet` pass across `ee-mcp`, `ee-cli`, `ee-agent-host`, `ee-agent-orchestrator`.
+
 ## ACP v1 Optional Method Gap Closure Plan
 
 Close remaining ACP v1 host/client gaps found during protocol audit. Host already uses official `agent-client-protocol` v1 types and method constants; this plan finishes missing notification handling, confirms production bridges, and adds regression coverage for every optional method.

@@ -180,10 +180,13 @@ impl ClientRequestHandler for BridgeUiHandler {
                     })
                     .await
                 }
-                ClientRequest::ProxySearchTextRegex { pattern } => {
+                ClientRequest::ProxySearchTextRegex { pattern, file_glob } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
-                        call: crate::app::agents_mcp::ProxyToolCall::SearchTextRegex { pattern },
+                        call: crate::app::agents_mcp::ProxyToolCall::SearchTextRegex {
+                            pattern,
+                            file_glob,
+                        },
                         reply,
                     })
                     .await

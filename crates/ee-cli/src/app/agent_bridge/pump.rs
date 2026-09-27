@@ -409,9 +409,10 @@ impl App {
                 let _ = reply
                     .send(self.proxy_search_text(&query).map(ClientRequestResponse::ProxyValue));
             }
-            crate::app::agents_mcp::ProxyToolCall::SearchTextRegex { pattern } => {
+            crate::app::agents_mcp::ProxyToolCall::SearchTextRegex { pattern, file_glob } => {
                 let _ = reply.send(
-                    self.proxy_search_text_regex(&pattern).map(ClientRequestResponse::ProxyValue),
+                    self.proxy_search_text_regex(&pattern, file_glob.as_deref())
+                        .map(ClientRequestResponse::ProxyValue),
                 );
             }
             crate::app::agents_mcp::ProxyToolCall::WebSearch {
