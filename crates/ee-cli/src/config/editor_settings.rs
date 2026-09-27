@@ -17,8 +17,11 @@ use super::agents_settings::{
 use super::discovery::ConfigLayerKind;
 use super::init::load_config;
 use super::lsp::LspSettings;
-use super::mcp::{McpSettings, resolve_mcp_server};
-use super::raw::{AgentsToml, EeToml, KeymapToml, McpToml};
+use super::mcp::{
+    McpServerSettings, McpSettings, is_partial_patch, merge_mcp_server_onto, merge_mcp_server_toml,
+    resolve_mcp_server,
+};
+use super::raw::{AgentsToml, EeToml, KeymapToml, McpToml, McpTransportToml};
 use super::rubber_duck::merge_rubber_duck;
 use super::workspace_memory::merge_workspace_memory;
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
@@ -462,11 +465,43 @@ impl EditorSettings {
             }
         }
         for (id, server) in &patch.servers {
-            match resolve_mcp_server(id, server) {
+            let combined = if let Some(existing) = self.mcp.servers.get(id) {
+                let transport_matches = matches!(
+                    (existing, server.transport),
+                    (McpServerSettings::Stdio { .. }, McpTransportToml::Stdio)
+                        | (
+                            McpServerSettings::StreamableHttp { .. },
+                            McpTransportToml::StreamableHttp
+                        )
+                );
+                if !transport_matches {
+                    server.clone()
+                } else {
+                    match merge_mcp_server_onto(existing.clone(), server) {
+                        Ok(resolved) => {
+                            self.mcp.servers.insert(id.clone(), resolved);
+                            self.mcp.partial.remove(id);
+                            continue;
+                        }
+                        Err(_) => server.clone(),
+                    }
+                }
+            } else if let Some(base) = self.mcp.partial.get(id) {
+                merge_mcp_server_toml(base, server)
+            } else {
+                server.clone()
+            };
+            match resolve_mcp_server(id, &combined) {
                 Ok(resolved) => {
                     self.mcp.servers.insert(id.clone(), resolved);
+                    self.mcp.partial.remove(id);
                 }
-                Err(err) => eprintln!("ee: warning: invalid mcp server `{id}`: {err}"),
+                Err(_) if is_partial_patch(&combined) => {
+                    // Split-layer patch waiting for a higher-priority layer to
+                    // supply the transport-required field; stays inert.
+                    self.mcp.partial.insert(id.clone(), combined);
+                }
+                Err(error) => eprintln!("ee: warning: invalid mcp server `{id}`: {error}"),
             }
         }
     }

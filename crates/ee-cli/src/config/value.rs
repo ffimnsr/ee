@@ -37,6 +37,39 @@ pub(super) fn ensure_table(
     }
 }
 
+#[cfg(feature = "agents")]
+pub(super) fn ensure_named_table<'a>(
+    table: &'a mut toml::map::Map<String, toml::Value>,
+    key: &str,
+    what: &str,
+) -> Result<&'a mut toml::map::Map<String, toml::Value>, String> {
+    match table.entry(key.to_owned()).or_insert_with(|| toml::Value::Table(toml::map::Map::new())) {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(format!("config key `{what}` already exists and is not table")),
+    }
+}
+
+#[cfg(feature = "agents")]
+pub(super) fn mutate_config_at_scope(
+    scope: ConfigScope,
+    env: &ConfigEnvironment,
+    mutate: impl FnOnce(&mut toml::map::Map<String, toml::Value>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let path = config_path_for_scope_with_env(scope, env)?;
+    let mut document = parse_config_document(&path)?;
+    let root = ensure_table(&mut document)?;
+    mutate(root)?;
+    let text = toml::to_string_pretty(&document)
+        .map_err(|error| format!("cannot serialize config {}: {error}", path.display()))?;
+    validate_config_contents(&path, &text)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+    }
+    fs::write(&path, text).map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 fn set_value_at_path(root: &mut toml::Value, key: &str, value: toml::Value) -> Result<(), String> {
     let mut parts = key.split('.').peekable();
     if parts.peek().is_none() {

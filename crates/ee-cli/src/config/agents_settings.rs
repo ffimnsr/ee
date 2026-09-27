@@ -12,21 +12,15 @@
 
 use super::discovery::ConfigLayerKind;
 #[cfg(feature = "agents")]
-use super::discovery::{ConfigEnvironment, ConfigScope, config_path_for_scope_with_env};
-#[cfg(feature = "agents")]
-use super::init::validate_config_contents;
-#[cfg(feature = "agents")]
-use super::raw::parse_config_document;
+use super::discovery::{ConfigEnvironment, ConfigScope};
 use super::raw::{AgentServerToml, AgentsToml, RubberDuckToml, WorkspaceMemoryToml};
 use super::rubber_duck::{RubberDuckModeSetting, RubberDuckSettings};
 #[cfg(feature = "agents")]
-use super::value::ensure_table;
+use super::value::{ensure_named_table, mutate_config_at_scope};
 #[cfg(any(feature = "agents", test))]
 use super::web_context::agent_web_context_settings_to_toml;
 use super::workspace_memory::WorkspaceMemorySettings;
 use std::collections::BTreeMap;
-#[cfg(feature = "agents")]
-use std::fs;
 #[cfg(feature = "agents")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -237,8 +231,9 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
 #[cfg(feature = "agents")]
 /// Writes one complete agent-server definition to the user config layer.
 ///
-/// Agent setup is deliberately global: workspace config must never receive
-/// machine-local executable paths or encrypted secret references.
+/// Agent setup is deliberately global when the user asks for `--user`:
+/// workspace config must never receive machine-local executable paths or
+/// encrypted secret references.
 pub(crate) fn configure_global_agent_server(
     agent_id: &str,
     command: &Path,
@@ -262,55 +257,180 @@ pub(super) fn configure_global_agent_server_with_env(
     env_values: &BTreeMap<String, String>,
     env: &ConfigEnvironment,
 ) -> Result<PathBuf, String> {
+    configure_agent_server_with_env(ConfigScope::Global, agent_id, command, args, env_values, env)
+}
+
+#[cfg(feature = "agents")]
+/// Writes one complete agent-server definition to the workspace config layer.
+///
+/// Secret `secret://` references must NOT be written here: the merge layer
+/// validation only accepts them in user-owned layers. Callers split env values
+/// and route references through [`configure_agent_server_user_env`].
+pub(crate) fn configure_local_agent_server(
+    agent_id: &str,
+    command: &Path,
+    args: &[String],
+    env_values: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
+    configure_agent_server_with_env(
+        ConfigScope::Local,
+        agent_id,
+        command,
+        args,
+        env_values,
+        &ConfigEnvironment::from_process(),
+    )
+}
+
+#[cfg(feature = "agents")]
+pub(super) fn configure_agent_server_with_env(
+    scope: ConfigScope,
+    agent_id: &str,
+    command: &Path,
+    args: &[String],
+    env_values: &BTreeMap<String, String>,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
     let command =
         command.to_str().ok_or_else(|| String::from("agent executable path is not valid UTF-8"))?;
-    let path = config_path_for_scope_with_env(ConfigScope::Global, env)?;
-    let mut document = parse_config_document(&path)?;
-    let root = ensure_table(&mut document)?;
-    let agents = match root
-        .entry(String::from("agents"))
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-    {
-        toml::Value::Table(table) => table,
-        _ => return Err(String::from("config key `agents` already exists and is not table")),
-    };
-    agents.insert(String::from("enabled"), toml::Value::Boolean(true));
-    agents.insert(String::from("default_agent"), toml::Value::String(agent_id.to_owned()));
-    let servers = match agents
-        .entry(String::from("servers"))
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-    {
-        toml::Value::Table(table) => table,
-        _ => {
-            return Err(String::from(
-                "config key `agents.servers` already exists and is not table",
-            ));
+    if scope == ConfigScope::Local {
+        for (name, value) in env_values {
+            if crate::secrets::is_secret_reference_text(value) {
+                return Err(format!(
+                    "secret reference cannot be written to workspace config; \
+                     route agents.servers.{agent_id}.env.{name} through the user config layer"
+                ));
+            }
         }
-    };
-    let mut server = toml::map::Map::new();
-    server.insert(String::from("command"), toml::Value::String(command.to_owned()));
-    server.insert(
-        String::from("args"),
-        toml::Value::Array(args.iter().cloned().map(toml::Value::String).collect()),
-    );
-    server.insert(
-        String::from("env"),
-        toml::Value::Table(
-            env_values
-                .iter()
-                .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
-                .collect(),
-        ),
-    );
-    servers.insert(agent_id.to_owned(), toml::Value::Table(server));
-
-    let text = toml::to_string_pretty(&document)
-        .map_err(|error| format!("cannot serialize config {}: {error}", path.display()))?;
-    validate_config_contents(&path, &text)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
     }
-    fs::write(&path, text).map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
-    Ok(path)
+    mutate_config_at_scope(scope, env, |root| {
+        let agents = ensure_named_table(root, "agents", "agents")?;
+        agents.insert(String::from("enabled"), toml::Value::Boolean(true));
+        agents.insert(String::from("default_agent"), toml::Value::String(agent_id.to_owned()));
+        let servers = ensure_named_table(agents, "servers", "agents.servers")?;
+        let mut server = toml::map::Map::new();
+        server.insert(String::from("command"), toml::Value::String(command.to_owned()));
+        server.insert(
+            String::from("args"),
+            toml::Value::Array(args.iter().cloned().map(toml::Value::String).collect()),
+        );
+        server.insert(
+            String::from("env"),
+            toml::Value::Table(
+                env_values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
+                    .collect(),
+            ),
+        );
+        servers.insert(agent_id.to_owned(), toml::Value::Table(server));
+        Ok(())
+    })
+}
+
+#[cfg(feature = "agents")]
+/// Writes only `secret://` env references for an agent server into the user
+/// config layer. The server definition itself stays in the workspace layer;
+/// split-layer merging completes the server at load time.
+pub(crate) fn configure_agent_server_user_env(
+    agent_id: &str,
+    env_values: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
+    configure_agent_server_user_env_with_env(
+        agent_id,
+        env_values,
+        &ConfigEnvironment::from_process(),
+    )
+}
+
+#[cfg(feature = "agents")]
+pub(super) fn configure_agent_server_user_env_with_env(
+    agent_id: &str,
+    env_values: &BTreeMap<String, String>,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
+    mutate_config_at_scope(ConfigScope::Global, env, |root| {
+        let agents = ensure_named_table(root, "agents", "agents")?;
+        let servers = ensure_named_table(agents, "servers", "agents.servers")?;
+        let server = ensure_named_table(servers, agent_id, &format!("agents.servers.{agent_id}"))?;
+        let env_table =
+            ensure_named_table(server, "env", &format!("agents.servers.{agent_id}.env"))?;
+        for (name, value) in env_values {
+            env_table.insert(name.clone(), toml::Value::String(value.clone()));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(feature = "agents")]
+/// Writes `[agents.rubber_duck]` mode and one backend id into the chosen
+/// config layer. Limits stay at defaults unless already configured; the other
+/// backend key is removed so a re-run cannot leave an ambiguous pair.
+pub(crate) fn configure_rubber_duck(
+    scope: ConfigScope,
+    mode: RubberDuckModeSetting,
+    internal_model_id: Option<&str>,
+    external_agent_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    configure_rubber_duck_with_env(
+        scope,
+        mode,
+        internal_model_id,
+        external_agent_id,
+        &ConfigEnvironment::from_process(),
+    )
+}
+
+#[cfg(feature = "agents")]
+pub(super) fn configure_rubber_duck_with_env(
+    scope: ConfigScope,
+    mode: RubberDuckModeSetting,
+    internal_model_id: Option<&str>,
+    external_agent_id: Option<&str>,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
+    if internal_model_id.is_some() && external_agent_id.is_some() {
+        return Err(String::from(
+            "rubber duck internal model id and external agent id are mutually exclusive",
+        ));
+    }
+    if matches!(mode, RubberDuckModeSetting::Off) {
+        return Err(String::from("rubber duck setup cannot write mode `off`"));
+    }
+    if internal_model_id.is_none() && external_agent_id.is_none() {
+        return Err(String::from("rubber duck backend is required"));
+    }
+    mutate_config_at_scope(scope, env, |root| {
+        let agents = ensure_named_table(root, "agents", "agents")?;
+        let duck = ensure_named_table(agents, "rubber_duck", "agents.rubber_duck")?;
+        duck.insert(
+            String::from("mode"),
+            toml::Value::String(
+                match mode {
+                    RubberDuckModeSetting::Manual => "manual",
+                    RubberDuckModeSetting::Automatic => "automatic",
+                    RubberDuckModeSetting::Off => unreachable!("rejected above"),
+                }
+                .to_owned(),
+            ),
+        );
+        match (internal_model_id, external_agent_id) {
+            (Some(model_id), None) => {
+                duck.insert(
+                    String::from("internal_model_id"),
+                    toml::Value::String(model_id.to_owned()),
+                );
+                duck.remove("external_agent_id");
+            }
+            (None, Some(agent_id)) => {
+                duck.insert(
+                    String::from("external_agent_id"),
+                    toml::Value::String(agent_id.to_owned()),
+                );
+                duck.remove("internal_model_id");
+            }
+            _ => unreachable!("backend shape validated above"),
+        }
+        Ok(())
+    })
 }

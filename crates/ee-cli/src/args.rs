@@ -126,6 +126,12 @@ pub(crate) enum AgentCommands {
         #[command(subcommand)]
         command: AgentTrustCommands,
     },
+    /// Discover and configure an installed ACP agent server
+    Setup {
+        /// Write agent server configuration to the user config layer instead of the workspace
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        user: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -248,7 +254,17 @@ pub(crate) enum ConfigCommands {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ConfigSetupCommands {
     /// Discover and configure an installed ACP agent server
-    Agent,
+    Agent {
+        /// Write agent server configuration to the user config layer instead of the workspace
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        user: bool,
+    },
+    /// Add or remove MCP servers interactively
+    Mcp {
+        /// Write MCP server configuration to the user config layer instead of the workspace
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        user: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

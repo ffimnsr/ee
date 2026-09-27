@@ -272,3 +272,166 @@ fn merged_config_document_includes_agents_and_mcp() {
     assert!(text.contains("transport = \"stdio\""));
     assert!(text.contains("command = \"mcp-tools\""));
 }
+#[test]
+fn mcp_server_field_merge_completes_split_layer_secret_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    // User layer: split-layer patch with only the secret env.
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        "[mcp.servers.github]\ntransport = \"stdio\"\nenv = { GITHUB_TOKEN = \"ghp_secret\" }\n",
+    );
+    // Workspace layer: operational server definition.
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        "[mcp.servers.github]\ntransport = \"stdio\"\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\n",
+    );
+
+    let settings = load_config_with_env(None, &env);
+    match settings.mcp.servers.get("github").expect("merged server") {
+        McpServerSettings::Stdio { command, args, env, .. } => {
+            assert_eq!(command, "npx");
+            assert_eq!(
+                args,
+                &vec!["-y".to_owned(), "@modelcontextprotocol/server-github".to_owned()]
+            );
+            assert_eq!(env.get("GITHUB_TOKEN").map(String::as_str), Some("ghp_secret"));
+        }
+        other => panic!("expected stdio transport, got {other:?}"),
+    }
+}
+#[test]
+fn mcp_partial_entry_without_completion_stays_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        "[mcp.servers.orphan]\ntransport = \"stdio\"\nenv = { TOKEN = \"x\" }\n",
+    );
+
+    let settings = load_config_with_env(None, &env);
+    assert!(settings.mcp.servers.is_empty(), "uncompleted partial stays inert");
+    assert_eq!(settings.mcp.partial.len(), 1, "partial parked for later layers");
+}
+#[test]
+fn mcp_http_headers_field_merge_and_transport_mismatch_replace() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    // User layer: partial streamable_http entry with secret headers.
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        "[mcp.servers.remote]\ntransport = \"streamable_http\"\nheaders = { Authorization = \"Bearer abc\" }\n",
+    );
+    // Workspace layer: complete http entry, different id overrides nothing.
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        "[mcp.servers.remote]\ntransport = \"streamable_http\"\nurl = \"https://example.com/mcp\"\n[mcp.servers.other]\ntransport = \"stdio\"\ncommand = \"x\"\n",
+    );
+
+    let settings = load_config_with_env(None, &env);
+    match settings.mcp.servers.get("remote").expect("merged http server") {
+        McpServerSettings::StreamableHttp { url, headers, timeout_ms } => {
+            assert_eq!(url, "https://example.com/mcp");
+            assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer abc"));
+            assert_eq!(*timeout_ms, DEFAULT_MCP_HTTP_TIMEOUT_MS);
+        }
+        other => panic!("expected streamable_http transport, got {other:?}"),
+    }
+    assert!(settings.mcp.servers.contains_key("other"));
+}
+#[test]
+fn mcp_transport_mismatch_between_layers_replaces_whole_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        "[mcp.servers.mix]\ntransport = \"stdio\"\ncommand = \"old\"\nenv = { OLD = \"1\" }\n",
+    );
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        "[mcp.servers.mix]\ntransport = \"streamable_http\"\nurl = \"https://example.com/mcp\"\n",
+    );
+
+    let settings = load_config_with_env(None, &env);
+    assert!(matches!(
+        settings.mcp.servers.get("mix"),
+        Some(McpServerSettings::StreamableHttp { url, .. }) if url == "https://example.com/mcp"
+    ));
+}
+#[test]
+fn validate_config_file_accepts_partial_mcp_server_patch() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".ee.toml");
+    std::fs::write(
+        &path,
+        "[mcp.servers.partial]\ntransport = \"stdio\"\nenv = { TOKEN = \"x\" }\n",
+    )
+    .unwrap();
+
+    validate_config_file(&path).expect("split-layer patch is valid file shape");
+}
+#[test]
+fn mcp_setup_writes_split_secret_patch_to_user_layer() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    let server = McpServerToml {
+        transport: McpTransportToml::Stdio,
+        command: Some(String::from("npx")),
+        args: Some(vec![String::from("-y"), String::from("@modelcontextprotocol/server-github")]),
+        env: BTreeMap::new(),
+        cwd: None,
+        url: None,
+        headers: BTreeMap::new(),
+        timeout_ms: None,
+    };
+
+    let path = write_mcp_server_with_env(ConfigScope::Local, "github", &server, &env)
+        .expect("write workspace server");
+    let user_path = write_mcp_server_user_partial_with_env(
+        "github",
+        McpTransportToml::Stdio,
+        &BTreeMap::from([(String::from("GITHUB_TOKEN"), String::from("ghp_secret"))]),
+        &BTreeMap::new(),
+        &env,
+    )
+    .expect("write user secret patch");
+
+    let workspace: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(workspace["mcp"]["servers"]["github"]["command"].as_str(), Some("npx"));
+    assert_eq!(
+        workspace["mcp"]["servers"]["github"]["env"].get("GITHUB_TOKEN"),
+        None,
+        "workspace config must not carry the secret"
+    );
+
+    let user: toml::Value = toml::from_str(&std::fs::read_to_string(&user_path).unwrap()).unwrap();
+    assert_eq!(
+        user["mcp"]["servers"]["github"]["env"]["GITHUB_TOKEN"].as_str(),
+        Some("ghp_secret")
+    );
+    assert_eq!(user["mcp"]["servers"]["github"]["transport"].as_str(), Some("stdio"));
+    assert!(user["mcp"]["servers"]["github"].get("command").is_none());
+
+    // Removal from the local scope also drops the user-layer patch.
+    remove_mcp_server_with_env(ConfigScope::Local, "github", &env).expect("remove local");
+    remove_mcp_server_with_env(ConfigScope::Global, "github", &env).expect("remove user");
+    assert!(list_mcp_servers_with_env(ConfigScope::Local, &env).expect("list").is_empty());
+    assert!(list_mcp_servers_with_env(ConfigScope::Global, &env).expect("list").is_empty());
+}

@@ -391,7 +391,7 @@ pub(crate) struct McpProxyToml {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServerToml {
     /// Transport discriminator: `"stdio"` or `"streamable_http"`.

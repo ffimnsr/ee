@@ -5221,6 +5221,28 @@ Prove critic quality before automatic enablement. Use existing replay harness an
 - [x] Root remains sole decision/writer and completion remains derived from current host evidence.
 - [x] CI replay data demonstrates quality gain without policy, privacy, completion, or boundedness regression.
 
+### Phase 9: Agent setup wizard
+
+- [x] Add `ee do agent setup` alias mirroring `ee do config setup agent` help text and flags.
+- [x] Default agent-server setup to the workspace config layer (`.ee.toml`); keep `secret://` env references in the user config layer.
+  - [x] Reject `secret://` references in workspace-layer setup writes with routing guidance.
+- [x] Ask for the `[agents.servers.<name>]` server name, defaulting to the agent's own id.
+- [x] Add `--user` flag to write the complete server definition to the user config layer.
+- [x] Ask whether to enable the rubber duck critic after agent-server setup.
+  - [x] Offer internal model or external agent server backends.
+  - [x] Reuse the full candidate picker and normal setup flow for an unconfigured duck server.
+  - [x] Ask rubber duck mode (`manual`/`automatic`) and write `[agents.rubber_duck]`, removing stale backend keys.
+  - [x] Add `ee do config setup mcp` with `--user` flag for interactive MCP server add/remove.
+    - [x] Support stdio and streamable_http transport prompts (command/args/env, url/headers/timeout).
+    - [x] Write secret env/headers to the user config layer as split-layer patches; workspace config stays clean.
+    - [x] Remove workspace-scoped servers along with their user-layer patches.
+    - [x] Field-level MCP server merge across layers with partial parking; transport mismatch replaces wholesale.
+
+#### Exit criteria
+
+- [x] `ee do config setup agent` and `ee do agent setup` behave identically, scoping to workspace by default.
+- [x] Workspace `.ee.toml` never contains `secret://` references; secret values stay in the secrets store and references in the user config layer.
+
 ## Parallel Top-Level Agent Sessions Plan
 
 Enable true concurrent top-level sessions, including multiple sessions sharing one configured agent connection. ACP server concurrency already works across sessions, but the ee host connection driver currently serializes prompt requests. Preserve one active turn per session while allowing independent sessions to progress, request user input, cancel, and shut down without blocking each other.

@@ -440,3 +440,216 @@ fn agent_setup_writes_complete_server_to_global_config_only() {
         Some("existing-agent")
     );
 }
+#[test]
+fn agent_setup_local_scope_writes_server_to_workspace_and_secret_refs_to_user_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+
+    let path = configure_agent_server_with_env(
+        ConfigScope::Local,
+        "openrouter",
+        Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+        &[String::from("--stdio")],
+        &BTreeMap::from([(String::from("OPENROUTER_MODEL"), String::from("example/model"))]),
+        &env,
+    )
+    .expect("configure workspace agent");
+    let user_path = configure_agent_server_user_env_with_env(
+        "openrouter",
+        &BTreeMap::from([(
+            String::from("OPENROUTER_API_KEY"),
+            String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
+        )]),
+        &env,
+    )
+    .expect("configure user env refs");
+
+    assert_eq!(path, env.cwd.join(".ee.toml"));
+    let workspace: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(workspace["agents"]["enabled"].as_bool(), Some(true));
+    assert_eq!(workspace["agents"]["default_agent"].as_str(), Some("openrouter"));
+    assert_eq!(
+        workspace["agents"]["servers"]["openrouter"]["command"].as_str(),
+        Some("/home/example/.local/bin/ee-openrouter-agent")
+    );
+    assert_eq!(
+        workspace["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_MODEL"].as_str(),
+        Some("example/model")
+    );
+    assert!(
+        workspace["agents"]["servers"]["openrouter"]["env"].get("OPENROUTER_API_KEY").is_none(),
+        "secret reference stays out of workspace config"
+    );
+
+    assert_eq!(user_path, env.config_dir.as_ref().unwrap().join("ee").join("config.toml"));
+    let user: toml::Value = toml::from_str(&std::fs::read_to_string(&user_path).unwrap()).unwrap();
+    assert_eq!(
+        user["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_API_KEY"].as_str(),
+        Some("secret://agent.openrouter.OPENROUTER_API_KEY")
+    );
+    assert!(user["agents"].get("enabled").is_none(), "user layer only carries env refs");
+
+    // Merged settings complete the server from the workspace command.
+    let settings = load_for(&env);
+    let server = settings.agents.servers.get("openrouter").expect("merged server");
+    assert_eq!(server.command, "/home/example/.local/bin/ee-openrouter-agent");
+    assert_eq!(
+        server.env.get("OPENROUTER_API_KEY").map(|value| value.raw.as_str()),
+        Some("secret://agent.openrouter.OPENROUTER_API_KEY")
+    );
+    assert_eq!(
+        server.env.get("OPENROUTER_API_KEY").map(|value| value.layer),
+        Some(ConfigLayerKind::UserXdg)
+    );
+    assert_eq!(
+        server.env.get("OPENROUTER_MODEL").map(|value| value.raw.as_str()),
+        Some("example/model")
+    );
+}
+#[test]
+fn agent_setup_local_scope_rejects_secret_reference_in_workspace_layer() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    let values = BTreeMap::from([(
+        String::from("OPENROUTER_API_KEY"),
+        String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
+    )]);
+
+    let error = configure_agent_server_with_env(
+        ConfigScope::Local,
+        "openrouter",
+        Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+        &[],
+        &values,
+        &env,
+    )
+    .expect_err("workspace secret reference rejected");
+
+    assert!(error.contains("user config layer"), "error: {error}");
+    assert!(!env.cwd.join(".ee.toml").exists(), "no partial workspace write");
+}
+#[test]
+fn agent_setup_local_scope_without_secrets_writes_no_user_layer() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    let values = BTreeMap::from([(String::from("MODEL"), String::from("example/model"))]);
+
+    let path = configure_agent_server_with_env(
+        ConfigScope::Local,
+        "helper",
+        Path::new("/home/example/.local/bin/ee-helper-agent"),
+        &[],
+        &values,
+        &env,
+    )
+    .expect("configure workspace agent");
+
+    assert_eq!(path, env.cwd.join(".ee.toml"));
+    assert!(
+        !env.config_dir.as_ref().unwrap().join("ee").join("config.toml").exists(),
+        "no secret refs, no user-layer write"
+    );
+}
+#[test]
+fn rubber_duck_setup_writes_mode_and_backend_to_chosen_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+    let path = configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Automatic,
+        None,
+        Some("claude-code"),
+        &env,
+    )
+    .expect("configure local rubber duck");
+
+    assert_eq!(path, env.cwd.join(".ee.toml"));
+    let document: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(document["agents"]["rubber_duck"]["mode"].as_str(), Some("automatic"));
+    assert_eq!(
+        document["agents"]["rubber_duck"]["external_agent_id"].as_str(),
+        Some("claude-code")
+    );
+    assert!(document["agents"]["rubber_duck"].get("internal_model_id").is_none());
+}
+#[test]
+fn rubber_duck_reconfigure_removes_stale_backend_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+    configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Manual,
+        None,
+        Some("claude-code"),
+        &env,
+    )
+    .expect("first backend");
+    configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Manual,
+        Some("critic/model"),
+        None,
+        &env,
+    )
+    .expect("second backend");
+
+    let document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(env.cwd.join(".ee.toml")).unwrap()).unwrap();
+    assert_eq!(
+        document["agents"]["rubber_duck"]["internal_model_id"].as_str(),
+        Some("critic/model")
+    );
+    assert!(
+        document["agents"]["rubber_duck"].get("external_agent_id").is_none(),
+        "stale backend key must be removed"
+    );
+
+    let settings = load_for(&env);
+    assert_eq!(settings.agents.rubber_duck.internal_model_id.as_deref(), Some("critic/model"));
+    assert!(settings.agents.rubber_duck.external_agent_id.is_none());
+}
+#[test]
+fn rubber_duck_setup_rejects_ambiguous_or_missing_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+    let error = configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Manual,
+        Some("critic/model"),
+        Some("critic-agent"),
+        &env,
+    )
+    .expect_err("ambiguous backend rejected");
+    assert!(error.contains("mutually exclusive"));
+
+    let error = configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Manual,
+        None,
+        None,
+        &env,
+    )
+    .expect_err("missing backend rejected");
+    assert!(error.contains("backend is required"));
+
+    let error = configure_rubber_duck_with_env(
+        ConfigScope::Local,
+        RubberDuckModeSetting::Off,
+        None,
+        Some("critic-agent"),
+        &env,
+    )
+    .expect_err("off mode rejected");
+    assert!(error.contains("mode `off`"));
+}

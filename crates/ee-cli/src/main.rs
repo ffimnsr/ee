@@ -45,6 +45,10 @@ mod git;
 mod highlight;
 mod keymap;
 mod logs;
+#[cfg(feature = "agents")]
+mod mcp_setup;
+#[cfg(feature = "agents")]
+mod setup_prompt;
 // Host-local workspace trust policy (Phase 1 foundation); CLI surface for
 // persistent grants arrives in later phases, so module items stay unused
 // until then.
@@ -136,7 +140,8 @@ use args::{
     DoCommands, FileCommands, LanguageCommands, PluginCommands, RuntimeCommands, SchemaCommands,
 };
 use config_cmd::{
-    cmd_config_get, cmd_config_init, cmd_config_set, cmd_config_setup_agent, cmd_config_show,
+    cmd_config_get, cmd_config_init, cmd_config_set, cmd_config_setup_agent, cmd_config_setup_mcp,
+    cmd_config_show,
 };
 use doctor::cmd_doctor;
 use file_cmd::{cmd_file_head, cmd_file_line_check, cmd_file_tail};
@@ -259,8 +264,11 @@ fn main() -> io::Result<()> {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
                 DoCommands::Config { command } => match command {
-                    ConfigCommands::Setup { command: ConfigSetupCommands::Agent } => {
-                        cmd_config_setup_agent()
+                    ConfigCommands::Setup { command: ConfigSetupCommands::Agent { user } } => {
+                        cmd_config_setup_agent(user)
+                    }
+                    ConfigCommands::Setup { command: ConfigSetupCommands::Mcp { user } } => {
+                        cmd_config_setup_mcp(user)
                     }
                     ConfigCommands::Init { global } => cmd_config_init(if global {
                         config::ConfigScope::Global
@@ -285,6 +293,9 @@ fn main() -> io::Result<()> {
                         AgentCommands::Trust { command: AgentTrustCommands::Revoke { profiles } },
                 } => {
                     cmd_agent_trust_revoke(&profiles)?;
+                }
+                DoCommands::Agent { command: AgentCommands::Setup { user } } => {
+                    cmd_config_setup_agent(user)
                 }
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),

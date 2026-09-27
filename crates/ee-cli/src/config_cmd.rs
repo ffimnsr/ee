@@ -46,15 +46,29 @@ pub(crate) fn cmd_config_set(scope: config::ConfigScope, key: &str, value: &str)
 }
 
 #[cfg(feature = "agents")]
-pub(crate) fn cmd_config_setup_agent() {
-    if let Err(error) = agent_setup::run() {
+pub(crate) fn cmd_config_setup_agent(user: bool) {
+    if let Err(error) = agent_setup::run(user) {
         eprintln!("agent setup failed: {error}");
         std::process::exit(1);
     }
 }
 
 #[cfg(not(feature = "agents"))]
-pub(crate) fn cmd_config_setup_agent() {
+pub(crate) fn cmd_config_setup_agent(_user: bool) {
     eprintln!("agent setup unavailable: rebuild ee with `--features agents`");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "agents")]
+pub(crate) fn cmd_config_setup_mcp(user: bool) {
+    if let Err(error) = mcp_setup::run(user) {
+        eprintln!("mcp setup failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "agents"))]
+pub(crate) fn cmd_config_setup_mcp(_user: bool) {
+    eprintln!("mcp setup unavailable: rebuild ee with `--features agents`");
     std::process::exit(1);
 }

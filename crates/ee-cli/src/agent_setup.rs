@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 use ee_agent_protocol::setup::{SETUP_MANIFEST_SCHEMA_VERSION, SetupManifest};
 
 use crate::agent_registry::{self, RegistryAgent};
+use crate::setup_prompt::{
+    confirm, prompt_line, prompt_value, read_hidden_value, validate_env_name, validate_server_name,
+};
 use crate::{config, secrets};
 
 const AGENT_BIN_DIRECTORY: [&str; 2] = [".local", "bin"];
@@ -34,7 +37,18 @@ enum SetupCandidate {
     Registry(Box<RegistryAgent>),
 }
 
-pub(crate) fn run() -> Result<(), String> {
+pub(crate) fn run(user: bool) -> Result<(), String> {
+    let scope = if user { config::ConfigScope::Global } else { config::ConfigScope::Local };
+    let candidates = collect_candidates()?;
+    let candidate = select_agent(&candidates)?;
+    match candidate {
+        SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope)?,
+        SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope)?,
+    };
+    setup_rubber_duck(&candidates, scope)
+}
+
+fn collect_candidates() -> Result<Vec<SetupCandidate>, String> {
     let directory = dirs::home_dir()
         .map(|home| AGENT_BIN_DIRECTORY.iter().fold(home, |path, part| path.join(part)))
         .ok_or_else(|| String::from("cannot resolve home directory for agent setup"))?;
@@ -53,24 +67,26 @@ pub(crate) fn run() -> Result<(), String> {
         .chain(local.into_iter().map(SetupCandidate::Local))
         .collect::<Vec<_>>();
     candidates.sort_by_cached_key(candidate_sort_key);
-    let candidate = select_agent(&candidates)?;
-    match candidate {
-        SetupCandidate::Local(candidate) => setup_local_agent(candidate),
-        SetupCandidate::Registry(agent) => setup_registry_agent(agent),
-    }
+    Ok(candidates)
 }
 
-fn setup_local_agent(candidate: &AgentCandidate) -> Result<(), String> {
+fn setup_local_agent(
+    candidate: &AgentCandidate,
+    scope: config::ConfigScope,
+) -> Result<String, String> {
     let manifest = read_manifest(&candidate.path)?;
     println!("Setting up {}.", manifest.agent.display_name);
+    let server_id = prompt_server_name(&manifest.agent.display_name, &manifest.agent.id)?;
     let env = collect_setup_values(&manifest)?;
-    let path =
-        config::configure_global_agent_server(&manifest.agent.id, &candidate.path, &[], &env)?;
-    print_configured(&manifest.agent.id, &path);
-    Ok(())
+    let secret_names = manifest_secret_env_names(&manifest);
+    configure_agent_setup(&server_id, &candidate.path, &[], &env, &secret_names, scope)?;
+    Ok(server_id)
 }
 
-fn setup_registry_agent(agent: &RegistryAgent) -> Result<(), String> {
+fn setup_registry_agent(
+    agent: &RegistryAgent,
+    scope: config::ConfigScope,
+) -> Result<String, String> {
     println!("{} {}", agent.name, agent.version);
     if !agent.description.trim().is_empty() {
         println!("{}", agent.description.trim());
@@ -90,6 +106,7 @@ fn setup_registry_agent(agent: &RegistryAgent) -> Result<(), String> {
         return Err(String::from("agent setup cancelled"));
     }
 
+    let server_id = prompt_server_name(&agent.name, &agent.id)?;
     let prepared = agent.prepare()?;
     match agent_registry::bootstrap_first_run_config(
         agent,
@@ -106,23 +123,154 @@ fn setup_registry_agent(agent: &RegistryAgent) -> Result<(), String> {
         ),
         agent_registry::FirstRunBootstrap::NotApplicable => {}
     }
-    let path = config::configure_global_agent_server(
-        &prepared.id,
+    // Registry launch metadata carries no secret marker; provider credentials
+    // stay agent-owned, so no env values need the user config layer.
+    configure_agent_setup(
+        &server_id,
         &prepared.command,
         &prepared.args,
         &prepared.env,
+        &BTreeSet::new(),
+        scope,
     )?;
     println!(
         "Configured external agent {}. Authentication remains agent-owned.",
         prepared.display_name
     );
-    print_configured(&prepared.id, &path);
+    Ok(server_id)
+}
+
+/// Writes the server definition to the chosen config layer. In workspace
+/// scope, `secret://` env references are routed to the user config layer;
+/// the encrypted secrets store already holds the values themselves.
+fn configure_agent_setup(
+    agent_id: &str,
+    command: &Path,
+    args: &[String],
+    env_values: &BTreeMap<String, String>,
+    secret_names: &BTreeSet<String>,
+    scope: config::ConfigScope,
+) -> Result<(), String> {
+    match scope {
+        config::ConfigScope::Global => {
+            let path = config::configure_global_agent_server(agent_id, command, args, env_values)?;
+            println!("Configured agent `{agent_id}` in {}.", path.display());
+        }
+        config::ConfigScope::Local => {
+            let (local_env, secret_refs) = split_setup_env(env_values, secret_names);
+            let path = config::configure_local_agent_server(agent_id, command, args, &local_env)?;
+            println!("Configured agent `{agent_id}` in {}.", path.display());
+            if !secret_refs.is_empty() {
+                let user_path = config::configure_agent_server_user_env(agent_id, &secret_refs)?;
+                println!(
+                    "Stored env secrets for `{agent_id}` in {} (values stay in the secrets store).",
+                    user_path.display()
+                );
+            }
+        }
+    }
+    match scope {
+        config::ConfigScope::Global => {
+            println!("Agents mode enabled. Default agent: {agent_id} (user config).");
+        }
+        config::ConfigScope::Local => {
+            println!("Agents mode enabled. Default agent: {agent_id} (workspace config).");
+        }
+    }
     Ok(())
 }
 
-fn print_configured(agent_id: &str, path: &Path) {
-    println!("Configured agent `{agent_id}` in {}.", path.display());
-    println!("Agents mode enabled. Default agent: {agent_id}.");
+/// Partitions collected env values into workspace-safe literals and
+/// user-layer `secret://` references.
+fn split_setup_env(
+    env: &BTreeMap<String, String>,
+    secret_names: &BTreeSet<String>,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut literals = BTreeMap::new();
+    let mut refs = BTreeMap::new();
+    for (name, value) in env {
+        if secret_names.contains(name) {
+            refs.insert(name.clone(), value.clone());
+        } else {
+            literals.insert(name.clone(), value.clone());
+        }
+    }
+    (literals, refs)
+}
+
+fn manifest_secret_env_names(manifest: &SetupManifest) -> BTreeSet<String> {
+    manifest.env_vars.iter().filter(|env| env.secret).map(|env| env.name.clone()).collect()
+}
+
+enum RubberDuckBackendChoice {
+    InternalModel,
+    ExternalAgent,
+}
+
+/// Post-setup wizard: optionally enable the rubber duck critic, choose its
+/// backend (internal model or a fully configured agent server), and write
+/// `[agents.rubber_duck]` to the same config layer as the agent server.
+fn setup_rubber_duck(
+    candidates: &[SetupCandidate],
+    scope: config::ConfigScope,
+) -> Result<(), String> {
+    if !confirm("Enable rubber duck critic? [y/N]: ")? {
+        return Ok(());
+    }
+    println!("Rubber duck backend:");
+    println!("  1) Internal model (EE host model)");
+    println!("  2) External agent server");
+    let backend = loop {
+        let selected = prompt_line("Select backend [1-2]: ")?;
+        match selected.trim() {
+            "1" => break RubberDuckBackendChoice::InternalModel,
+            "2" => break RubberDuckBackendChoice::ExternalAgent,
+            _ => eprintln!("Enter 1 or 2."),
+        }
+    };
+    let (internal_model_id, external_agent_id) = match backend {
+        RubberDuckBackendChoice::InternalModel => {
+            let model_id =
+                prompt_value("Critic model id (e.g. openrouter/deepseek-v3)", None, true)?
+                    .expect("required prompt always returns a value");
+            (Some(model_id), None)
+        }
+        RubberDuckBackendChoice::ExternalAgent => {
+            let candidate = select_agent(candidates)?;
+            let agent_id = match candidate {
+                SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope)?,
+                SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope)?,
+            };
+            (None, Some(agent_id))
+        }
+    };
+    let mode = loop {
+        let value = prompt_line("Rubber duck mode (manual/automatic, default manual): ")?;
+        match value.trim() {
+            "" | "manual" => break config::RubberDuckModeSetting::Manual,
+            "automatic" => break config::RubberDuckModeSetting::Automatic,
+            _ => eprintln!("Mode must be manual or automatic."),
+        }
+    };
+    let path = config::configure_rubber_duck(
+        scope,
+        mode,
+        internal_model_id.as_deref(),
+        external_agent_id.as_deref(),
+    )?;
+    let backend = match (&internal_model_id, &external_agent_id) {
+        (Some(model_id), _) => format!("internal model `{model_id}`"),
+        (_, Some(agent_id)) => format!("external agent `{agent_id}`"),
+        (None, None) => String::from("none"),
+    };
+    let mode_name = match mode {
+        config::RubberDuckModeSetting::Manual => "manual",
+        config::RubberDuckModeSetting::Automatic => "automatic",
+        config::RubberDuckModeSetting::Off => unreachable!("wizard never writes off"),
+    };
+    println!("Rubber duck enabled (mode: {mode_name}, backend: {backend}).");
+    println!("Wrote [agents.rubber_duck] to {}.", path.display());
+    Ok(())
 }
 
 fn candidate_sort_key(candidate: &SetupCandidate) -> (u8, String) {
@@ -293,7 +441,7 @@ fn validate_manifest(manifest: SetupManifest) -> Result<SetupManifest, String> {
 
     let mut env_names = BTreeSet::new();
     for env in &manifest.env_vars {
-        validate_env_name(&env.name)?;
+        validate_env_name_manifest(&env.name)?;
         if !env_names.insert(env.name.clone()) {
             return Err(format!(
                 "agent setup manifest repeats environment variable `{}`",
@@ -315,7 +463,7 @@ fn validate_manifest(manifest: SetupManifest) -> Result<SetupManifest, String> {
         if input.label.trim().is_empty() {
             return Err(format!("agent setup manifest has no label for `{}`", input.key));
         }
-        validate_env_name(&input.config.env)?;
+        validate_env_name_manifest(&input.config.env)?;
         if !env_names.insert(input.config.env.clone()) {
             return Err(format!(
                 "agent setup manifest maps multiple values to `{}`",
@@ -326,13 +474,8 @@ fn validate_manifest(manifest: SetupManifest) -> Result<SetupManifest, String> {
     Ok(manifest)
 }
 
-fn validate_env_name(name: &str) -> Result<(), String> {
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(character) if character.is_ascii_alphabetic() || character == '_' => {}
-        _ => return Err(format!("agent setup manifest has invalid environment variable `{name}`")),
-    }
-    if characters.all(|character| character.is_ascii_alphanumeric() || character == '_') {
+fn validate_env_name_manifest(name: &str) -> Result<(), String> {
+    if validate_env_name(name) {
         Ok(())
     } else {
         Err(format!("agent setup manifest has invalid environment variable `{name}`"))
@@ -351,7 +494,7 @@ fn collect_setup_values(manifest: &SetupManifest) -> Result<BTreeMap<String, Str
             env.description
         );
         let value = if env.secret {
-            let value = read_secret_value(env.required)?;
+            let value = read_hidden_value(env.required)?;
             value
                 .map(|value| {
                     let secret_name = secrets::SecretName::new(&format!(
@@ -388,56 +531,20 @@ fn collect_setup_values(manifest: &SetupManifest) -> Result<BTreeMap<String, Str
     Ok(values)
 }
 
-fn read_secret_value(required: bool) -> Result<Option<zeroize::Zeroizing<String>>, String> {
-    let mut stdin = io::empty();
-    let mut terminal = secrets::cli::HiddenTerminalSecretSource;
-    match secrets::cli::read_secret_value(false, &mut stdin, &mut terminal) {
-        Ok(value) => Ok(Some(value)),
-        Err(secrets::cli::SecretsCliError::EmptySecret) if !required => Ok(None),
-        Err(error) => Err(format!("cannot read secret value: {error}")),
-    }
-}
-
-fn prompt_value(
-    label: &str,
-    default: Option<&str>,
-    required: bool,
-) -> Result<Option<String>, String> {
-    let prompt = match default {
-        Some(default) => format!("{label} [{default}]: "),
-        None if required => format!("{label}: "),
-        None => format!("{label} (press Enter to skip): "),
-    };
+/// Asks for the `[agents.servers.<name>]` key. Defaults to the agent's own
+/// id; a custom name lets one binary run as several servers (for example with
+/// different model env). Restricts to TOML bare-key and secret-store-safe
+/// characters so the name survives config serialization unchanged.
+fn prompt_server_name(display_name: &str, default: &str) -> Result<String, String> {
     loop {
-        let value = prompt_line(&prompt)?;
-        if !value.is_empty() {
-            return Ok(Some(value));
+        let value =
+            prompt_value(&format!("Agent server name for {display_name}"), Some(default), true)?
+                .expect("required prompt always returns a value");
+        if validate_server_name(&value) {
+            return Ok(value);
         }
-        if let Some(default) = default {
-            return Ok(Some(default.to_owned()));
-        }
-        if !required {
-            return Ok(None);
-        }
-        eprintln!("{label} is required.");
+        eprintln!("Server name must use only letters, digits, `-`, or `_` (max 64).");
     }
-}
-
-fn confirm(prompt: &str) -> Result<bool, String> {
-    Ok(matches!(prompt_line(prompt)?.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
-}
-
-fn prompt_line(prompt: &str) -> Result<String, String> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(|error| format!("cannot write setup prompt: {error}"))?;
-    let mut line = String::new();
-    let read = io::stdin()
-        .read_line(&mut line)
-        .map_err(|error| format!("cannot read setup input: {error}"))?;
-    if read == 0 {
-        return Err(String::from("setup input closed"));
-    }
-    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 #[cfg(test)]
@@ -616,5 +723,72 @@ mod tests {
         for root in ["https://opencode.ai/zen/v1", "https://opencode.ai/zen/go/v1"] {
             assert!(described.contains(root), "setup shows the `{root}` root");
         }
+    }
+
+    #[test]
+    fn split_setup_env_partitions_secret_references_from_literals() {
+        let env = BTreeMap::from([
+            (
+                String::from("OPENROUTER_API_KEY"),
+                String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
+            ),
+            (String::from("OPENROUTER_MODEL"), String::from("example/model")),
+        ]);
+        let secret_names = BTreeSet::from([String::from("OPENROUTER_API_KEY")]);
+
+        let (literals, refs) = split_setup_env(&env, &secret_names);
+
+        assert_eq!(
+            literals,
+            BTreeMap::from([(String::from("OPENROUTER_MODEL"), String::from("example/model"))])
+        );
+        assert_eq!(
+            refs,
+            BTreeMap::from([(
+                String::from("OPENROUTER_API_KEY"),
+                String::from("secret://agent.openrouter.OPENROUTER_API_KEY")
+            )])
+        );
+    }
+
+    #[test]
+    fn split_setup_env_without_secret_names_keeps_full_env_local() {
+        let env = BTreeMap::from([(String::from("MODEL"), String::from("example/model"))]);
+
+        let (literals, refs) = split_setup_env(&env, &BTreeSet::new());
+
+        assert_eq!(literals, env);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn manifest_secret_env_names_returns_only_secret_flagged_vars() {
+        let manifest = SetupManifest {
+            schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
+            agent: SetupAgent {
+                id: String::from("example"),
+                display_name: String::from("Example"),
+            },
+            env_vars: vec![
+                SetupEnvVar {
+                    name: String::from("SECRET_KEY"),
+                    required: true,
+                    secret: true,
+                    description: String::from("Secret."),
+                },
+                SetupEnvVar {
+                    name: String::from("MODEL"),
+                    required: false,
+                    secret: false,
+                    description: String::from("Model."),
+                },
+            ],
+            inputs: Vec::new(),
+        };
+
+        assert_eq!(
+            manifest_secret_env_names(&manifest),
+            BTreeSet::from([String::from("SECRET_KEY")])
+        );
     }
 }

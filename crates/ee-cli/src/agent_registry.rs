@@ -39,7 +39,6 @@ const INSTALL_MANIFEST_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedAgent {
-    pub(crate) id: String,
     pub(crate) display_name: String,
     pub(crate) command: PathBuf,
     pub(crate) args: Vec<String>,
@@ -357,7 +356,7 @@ impl RegistryAgent {
         args: Vec<String>,
         env: BTreeMap<String, String>,
     ) -> PreparedAgent {
-        PreparedAgent { id: self.id.clone(), display_name: self.name.clone(), command, args, env }
+        PreparedAgent { display_name: self.name.clone(), command, args, env }
     }
 }
 
