@@ -84,6 +84,61 @@ fn workspace_memory_mutations_require_typed_approval_without_value_disclosure() 
 }
 
 #[test]
+fn workspace_memory_replace_requires_approval_and_supersedes_previous_value() {
+    let (backend, mut jobs, _temp) = memory_backend();
+    let worker = std::thread::spawn(move || {
+        for (expected, key) in [
+            (WorkspaceMemoryMutationOperation::Remember, "architecture.parser"),
+            (WorkspaceMemoryMutationOperation::Replace, "architecture.parser"),
+            // Approval precedes storage, so the missing-key failure still
+            // resolves one typed approval request first.
+            (WorkspaceMemoryMutationOperation::Replace, "missing.key"),
+        ] {
+            let job = jobs.blocking_recv().expect("approval request");
+            match job.request {
+                ClientRequest::ApproveWorkspaceMemoryMutation { operation, key: actual } => {
+                    assert_eq!(operation, expected);
+                    assert_eq!(actual, key);
+                }
+                request => panic!("unexpected request: {request:?}"),
+            }
+            job.reply
+                .send(Ok(ClientRequestResponse::WorkspaceMemoryApproval { approved: true }))
+                .expect("approval response");
+        }
+    });
+
+    backend
+        .remember_workspace_fact(
+            "architecture.parser".to_string(),
+            "Tree-sitter remains backend-owned".to_string(),
+        )
+        .expect("approved remember");
+    let replaced = backend
+        .replace_workspace_fact(
+            "architecture.parser".to_string(),
+            "Tree-sitter owns parsing; frontend never forks a second parser".to_string(),
+        )
+        .expect("approved replace");
+    let fact = replaced.fact.expect("replaced fact");
+    assert_eq!(fact.authority, "user_asserted");
+    assert_eq!(fact.state, "active");
+    assert_eq!(fact.value, "Tree-sitter owns parsing; frontend never forks a second parser");
+
+    // Old value is superseded: reads return the replacement.
+    assert_eq!(
+        backend.read_workspace_fact("architecture.parser".to_string()).expect("direct read").value,
+        "Tree-sitter owns parsing; frontend never forks a second parser"
+    );
+    // Replacing a missing key fails closed with a typed error.
+    let missing = backend
+        .replace_workspace_fact("missing.key".to_string(), "value".to_string())
+        .expect_err("replace of missing key must fail");
+    assert!(missing.message.starts_with("workspace_fact_not_found:"));
+    worker.join().expect("approval worker");
+}
+
+#[test]
 fn workspace_memory_management_tools_use_bounded_metadata_without_values() {
     let (backend, mut jobs, _temp) = memory_backend();
     let secret_value = "Tree-sitter remains backend-owned";

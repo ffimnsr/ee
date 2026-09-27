@@ -16,6 +16,39 @@ fn manager(config: WorkspaceMemoryHostConfig) -> AgentManager {
 }
 
 #[test]
+fn manager_replace_requires_existing_key_and_supersedes_previous_value() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("workspace");
+    std::fs::create_dir(&root).expect("workspace root");
+    let manager = manager(WorkspaceMemoryHostConfig {
+        enabled: true,
+        trusted_roots: vec![root],
+        database_path: Some(temp.path().join("memory.sqlite3")),
+        ..Default::default()
+    });
+    let approved = WorkspaceMemoryMutationApproval::Approved;
+    manager
+        .workspace_memory_remember_approved("decision.parser", "first choice", approved)
+        .expect("remember approved");
+
+    let replaced = manager
+        .workspace_memory_replace_approved("decision.parser", "final choice", approved)
+        .expect("replace approved");
+    assert_eq!(replaced.operation, "replaced");
+    assert_eq!(replaced.fact.expect("replaced fact").value, "final choice");
+    assert_eq!(
+        manager.workspace_memory_read("decision.parser").expect("read after replace").value,
+        "final choice"
+    );
+    assert_eq!(manager.workspace_memory_status().active_facts, 1);
+
+    let missing = manager
+        .workspace_memory_replace_approved("decision.missing", "value", approved)
+        .expect_err("replace of missing key fails");
+    assert_eq!(missing.code, WorkspaceMemoryHostErrorCode::NotFound);
+}
+
+#[test]
 fn disabled_and_unavailable_management_statuses_fail_closed_without_paths() {
     let disabled = manager(WorkspaceMemoryHostConfig::default());
     let status = disabled.workspace_memory_status();

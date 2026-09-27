@@ -239,3 +239,137 @@ fn plan_updates_stay_hidden_until_toggled_and_replace_wholesale_without_scrollba
         "closing modal keeps latest plan snapshot"
     );
 }
+
+#[test]
+fn tool_call_completed_update_lands_even_when_sent_after_turn_end() {
+    // Provider streams the final response and only then marks the tool
+    // completed (Case B: late `tool_call_update`).
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_1",
+                "title": "Run tests",
+                "kind": "execute",
+                "status": "in_progress"
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed"
+            }),
+        ));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "completed update applied after turn end", |app| {
+        app.agents.threads[0].transcript.iter().any(|item| {
+            matches!(
+                item,
+                crate::app::TranscriptItem::ToolCall { id, status, .. }
+                    if id == "call_1" && status == "completed"
+            )
+        })
+    });
+}
+
+#[test]
+fn tool_call_update_for_unknown_id_is_dropped_and_original_stays_in_progress() {
+    // Provider completes under a different `toolCallId` with no title
+    // (Case C): the ordering tracker rejects the constructible-less update
+    // fail-closed, so the announced call stays `in_progress` forever.
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_1",
+                "title": "Run tests",
+                "kind": "execute",
+                "status": "in_progress"
+            }),
+        ))
+        .emit(wire::session_update(
+            "s1",
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_OTHER", "status": "completed" }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn done with tool still in progress", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].transcript.iter().any(|item| {
+                matches!(
+                    item,
+                    crate::app::TranscriptItem::ToolCall { id, status, .. }
+                        if id == "call_1" && status == "in_progress"
+                )
+            })
+    });
+    assert!(
+        !app.agents.threads[0].transcript.iter().any(|item| {
+            matches!(
+                item,
+                crate::app::TranscriptItem::ToolCall { id, .. } if id == "call_OTHER"
+            )
+        }),
+        "rejected update must not create a ghost tool row"
+    );
+}
+
+#[test]
+fn tool_call_update_without_status_field_keeps_in_progress_label() {
+    // Provider streams output content but never sends a status transition
+    // (Case D): the field merge leaves the announced status untouched.
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_1",
+                "title": "Run tests",
+                "kind": "execute",
+                "status": "in_progress"
+            }),
+        ))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "result landed" } }
+                ]
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "content applied while label stuck in progress", |app| {
+        app.agents.threads[0].transcript.iter().any(|item| {
+            matches!(
+                item,
+                crate::app::TranscriptItem::ToolCall { id, status, detail, .. }
+                    if id == "call_1"
+                        && status == "in_progress"
+                        && detail.contains("content: result landed")
+            )
+        })
+    });
+}

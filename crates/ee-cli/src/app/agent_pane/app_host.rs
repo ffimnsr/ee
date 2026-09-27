@@ -237,9 +237,18 @@ impl App {
             }
         }
         let memory = &self.config.agents.workspace_memory;
+        // Empty trusted roots make the memory host fail closed as
+        // unavailable; fall back to the process working directory so an
+        // enabled memory keeps working when no canonical workspace is open.
+        let mut trusted_roots = self.canonical_workspace_roots();
+        if trusted_roots.is_empty()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            trusted_roots.push(cwd);
+        }
         config.workspace_memory = ee_agent_host::WorkspaceMemoryHostConfig {
             enabled: memory.enabled,
-            trusted_roots: self.canonical_workspace_roots(),
+            trusted_roots,
             database_path: None,
             quotas: ee_agent_host::WorkspaceMemoryQuotas {
                 max_value_bytes: memory.max_value_bytes,

@@ -73,6 +73,7 @@ impl std::fmt::Debug for WebApprovalCall {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WorkspaceMemoryApprovalOperation {
     Remember,
+    Replace,
     Verify,
     Forget,
     Retract,
@@ -86,6 +87,7 @@ impl WorkspaceMemoryApprovalOperation {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Remember => "remember",
+            Self::Replace => "replace",
             Self::Verify => "verify",
             Self::Forget => "forget",
             Self::Retract => "retract",
@@ -100,6 +102,7 @@ impl WorkspaceMemoryApprovalOperation {
 pub(super) enum WorkspaceMemoryApprovalTarget {
     ApprovalOnly,
     Remember { value: String },
+    Replace { value: String },
     Forget,
     Retract,
     RetractKey { key: String },
@@ -115,6 +118,7 @@ impl std::fmt::Debug for WorkspaceMemoryApprovalTarget {
         match self {
             Self::ApprovalOnly => formatter.write_str("ApprovalOnly"),
             Self::Remember { .. } => formatter.write_str("Remember { value: [redacted] }"),
+            Self::Replace { .. } => formatter.write_str("Replace { value: [redacted] }"),
             Self::Forget => formatter.write_str("Forget"),
             Self::Retract => formatter.write_str("Retract"),
             Self::RetractKey { .. } => formatter.write_str("RetractKey { key: [redacted] }"),

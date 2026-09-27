@@ -168,6 +168,7 @@ pub struct ProxyTextEdit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceMemoryMutationOperation {
     Remember,
+    Replace,
     Verify,
     Forget,
 }

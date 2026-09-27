@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
 use ee_agent_host::AgentError;
@@ -10,12 +11,110 @@ const NOTES_PER_SCOPE: usize = 50;
 const NOTES_TOTAL_BYTES: usize = 128 * 1024;
 const NOTES_READ_LIMIT: usize = 50;
 
+/// Resolves the optional notes persistence path when `persist_notes` is
+/// enabled. Returns `None` when the platform state directory is unavailable.
+pub(crate) fn notes_persist_path(persist_notes: bool) -> Option<PathBuf> {
+    if !persist_notes {
+        return None;
+    }
+    match dirs::state_dir() {
+        Some(state) => Some(state.join("ee").join("agent-notes.json")),
+        None => {
+            eprintln!(
+                "ee: warning: agents.workspace_memory.persist_notes enabled but state directory is unavailable; notes stay in-memory"
+            );
+            None
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ProjectKnowledge {
     notes: BTreeMap<String, BTreeMap<String, String>>,
+    /// Optional durable notes file; `None` keeps notes in-memory only.
+    persist_path: Option<PathBuf>,
 }
 
 impl ProjectKnowledge {
+    /// Creates knowledge with optional durable note persistence. Existing
+    /// persisted notes are loaded; a corrupt file is ignored and overwritten
+    /// on the next save.
+    pub(crate) fn new(persist_path: Option<PathBuf>) -> Self {
+        let mut knowledge = Self { notes: BTreeMap::new(), persist_path };
+        if let Some(path) = &knowledge.persist_path
+            && let Ok(contents) = std::fs::read_to_string(path)
+        {
+            match serde_json::from_str::<BTreeMap<String, BTreeMap<String, String>>>(&contents) {
+                Ok(notes) => knowledge.notes = notes,
+                Err(error) => eprintln!(
+                    "ee: warning: ignoring corrupt agent-notes file {}: {error}",
+                    path.display()
+                ),
+            }
+        }
+        knowledge
+    }
+
+    /// Best-effort durable snapshot of all scoped notes. Failures never fail
+    /// the caller; they degrade to in-memory behavior with a warning.
+    fn persist_notes(&self) {
+        let Some(path) = &self.persist_path else { return };
+        let contents = match serde_json::to_vec(&self.notes) {
+            Ok(contents) => contents,
+            Err(error) => {
+                eprintln!("ee: warning: cannot serialize agent notes: {error}");
+                return;
+            }
+        };
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("ee: warning: cannot create {}: {error}", parent.display());
+            return;
+        }
+        let mut temporary = None;
+        for attempt in 0..100_u32 {
+            let candidate =
+                parent.join(format!(".agent-notes.{}.{}.tmp", std::process::id(), attempt));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            match options.open(&candidate) {
+                Ok(file) => {
+                    temporary = Some((candidate, file));
+                    break;
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    eprintln!("ee: warning: cannot create temporary notes file: {error}");
+                    return;
+                }
+            }
+        }
+        let (temporary_path, mut file) = match temporary {
+            Some(temporary) => temporary,
+            None => {
+                eprintln!("ee: warning: cannot allocate temporary notes file");
+                return;
+            }
+        };
+        let result = (|| -> Result<(), String> {
+            file.write_all(&contents)
+                .map_err(|error| format!("cannot write {}: {error}", temporary_path.display()))?;
+            file.sync_all()
+                .map_err(|error| format!("cannot sync {}: {error}", temporary_path.display()))?;
+            std::fs::rename(&temporary_path, path)
+                .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temporary_path);
+            eprintln!("ee: warning: agent notes persistence failed: {error}");
+        }
+    }
+
     pub(crate) fn save_note(
         &mut self,
         scope: &str,
@@ -34,6 +133,7 @@ impl ProjectKnowledge {
             return Err(AgentError::invalid_params("session note byte limit reached"));
         }
         notes.insert(key.to_owned(), content.to_owned());
+        self.persist_notes();
         Ok(note_result(key, content))
     }
 
@@ -199,5 +299,45 @@ mod tests {
         assert!(knowledge.save_note("one", "token", "TOKEN=secret").is_err());
         assert!(knowledge.read_note("two", "plan").is_err());
         assert_eq!(knowledge.read_note("one", "plan").expect("note").content, "ship it");
+    }
+
+    #[test]
+    fn notes_persist_opt_in_roundtrips_through_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent-notes.json");
+        {
+            let mut knowledge = ProjectKnowledge::new(Some(path.clone()));
+            knowledge.save_note("scope-a", "plan", "ship it").expect("save plan");
+            knowledge
+                .save_note("scope-a", "decision", "adopt bounded memory")
+                .expect("save decision");
+        }
+        let reloaded = ProjectKnowledge::new(Some(path.clone()));
+        assert_eq!(reloaded.read_note("scope-a", "plan").expect("plan").content, "ship it");
+        assert_eq!(
+            reloaded.read_note("scope-a", "decision").expect("decision").content,
+            "adopt bounded memory"
+        );
+        // Note writes are durable: replacing overwrites and persists.
+        let mut updated = ProjectKnowledge::new(Some(path.clone()));
+        updated
+            .save_note("scope-a", "decision", "reconsider bounded memory")
+            .expect("replace note");
+        let reloaded_again = ProjectKnowledge::new(Some(path));
+        assert_eq!(
+            reloaded_again.read_note("scope-a", "decision").expect("decision").content,
+            "reconsider bounded memory"
+        );
+    }
+
+    #[test]
+    fn notes_remain_memory_only_without_opt_in() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent-notes.json");
+        let mut knowledge = ProjectKnowledge::new(None);
+        knowledge.save_note("scope-a", "plan", "volatile").expect("save");
+        assert!(!path.exists(), "default notes never touch disk");
+        let reloaded = ProjectKnowledge::new(Some(path.clone()));
+        assert!(reloaded.read_note("scope-a", "plan").is_err(), "in-memory notes not persisted");
     }
 }

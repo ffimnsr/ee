@@ -18,7 +18,7 @@ fn workspace_memory_defaults_enabled_and_merges_field_by_field() {
     assert!(defaults.enabled, "workspace memory is on by default with agents mode");
 
     let first: EeToml = toml::from_str(
-            "[agents.workspace_memory]\nenabled = true\nmax_value_bytes = 8192\nmax_recall_results = 12\ndefault_expiry_days = 180\ncandidate_retention_days = 5\n",
+            "[agents.workspace_memory]\nenabled = true\npersist_notes = true\nmax_value_bytes = 8192\nmax_recall_results = 12\ndefault_expiry_days = 180\ncandidate_retention_days = 5\n",
         )
         .unwrap();
     settings.merge_toml(&first, ConfigLayerKind::System);
@@ -30,6 +30,7 @@ fn workspace_memory_defaults_enabled_and_merges_field_by_field() {
 
     let memory = &settings.agents.workspace_memory;
     assert!(memory.enabled);
+    assert!(memory.persist_notes);
     assert_eq!(memory.max_value_bytes, 8192);
     assert_eq!(memory.max_active_facts, 512);
     assert_eq!(memory.max_active_bytes, defaults.max_active_bytes);

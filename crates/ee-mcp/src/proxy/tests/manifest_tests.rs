@@ -75,7 +75,15 @@ fn workspace_memory_manifest_uses_exact_bounded_flat_inputs() {
             json!(["key", "value"]),
             json!({
                 "key": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "value": { "type": "string", "minLength": 1, "maxLength": 4096 }
+                "value": { "type": "string", "minLength": 1, "maxLength": 65536 }
+            }),
+        ),
+        (
+            "ee_replace_workspace_fact",
+            json!(["key", "value"]),
+            json!({
+                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "value": { "type": "string", "minLength": 1, "maxLength": 65536 }
             }),
         ),
         (
@@ -474,6 +482,11 @@ fn workspace_memory_tools_dispatch_strict_bounded_arguments_and_structured_resul
             "remember_workspace_fact:architecture.parser:Tree-sitter owns parsing",
         ),
         (
+            "ee_replace_workspace_fact",
+            json!({ "key": "architecture.parser", "value": "Tree-sitter owns parsing" }),
+            "replace_workspace_fact:architecture.parser:Tree-sitter owns parsing",
+        ),
+        (
             "ee_recall_workspace_facts",
             json!({ "query": "parser" }),
             "recall_workspace_facts:parser",
@@ -514,7 +527,16 @@ fn workspace_memory_tools_dispatch_strict_bounded_arguments_and_structured_resul
     for (name, args) in [
         ("ee_remember_workspace_fact", json!({ "key": "key", "value": "value", "extra": true })),
         ("ee_remember_workspace_fact", json!({ "key": "k".repeat(129), "value": "value" })),
-        ("ee_remember_workspace_fact", json!({ "key": "key", "value": "v".repeat(4097) })),
+        (
+            "ee_remember_workspace_fact",
+            json!({ "key": "key", "value": "v".repeat(MAX_WORKSPACE_FACT_VALUE_BYTES + 1) }),
+        ),
+        ("ee_replace_workspace_fact", json!({ "key": "key", "value": "value", "extra": true })),
+        ("ee_replace_workspace_fact", json!({ "key": "k".repeat(129), "value": "value" })),
+        (
+            "ee_replace_workspace_fact",
+            json!({ "key": "key", "value": "v".repeat(MAX_WORKSPACE_FACT_VALUE_BYTES + 1) }),
+        ),
         ("ee_recall_workspace_facts", json!({ "query": "q".repeat(1025) })),
         ("ee_read_workspace_fact", json!({ "key": "" })),
         ("ee_forget_workspace_fact", json!({ "key": "key", "extra": true })),
@@ -540,6 +562,7 @@ fn workspace_memory_tools_dispatch_strict_bounded_arguments_and_structured_resul
 fn default_workspace_memory_backend_methods_fail_closed() {
     let backend = DenyWriteBackend;
     assert!(backend.remember_workspace_fact(String::from("key"), String::from("value")).is_err());
+    assert!(backend.replace_workspace_fact(String::from("key"), String::from("value")).is_err());
     assert!(backend.recall_workspace_facts(String::from("query")).is_err());
     assert!(backend.read_workspace_fact(String::from("key")).is_err());
     assert!(backend.forget_workspace_fact(String::from("key")).is_err());

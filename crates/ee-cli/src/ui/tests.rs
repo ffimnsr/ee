@@ -312,3 +312,93 @@ fn rendered_spans_expand_tabs_to_spaces() {
     assert_eq!(joined, "ab  cd");
     assert_eq!(expanded[0].style.fg, Some(Color::Green));
 }
+
+#[cfg(feature = "agents")]
+#[test]
+fn draft_snippet_only_elides_when_draft_exceeds_composer_width() {
+    let draft = "fix the prompt section and keep everything visible";
+    // Wide composer: full draft fits, no elision.
+    assert_eq!(agents_draft_snippet(draft, 100), None);
+    // Same draft in a narrow pane: elided, trailing marker visible, and the
+    // snippet never exceeds the handed-in column count.
+    let snippet = agents_draft_snippet(draft, 40).expect("narrow pane elides");
+    assert!(snippet.ends_with('…'), "snippet: {snippet}");
+    assert!(snippet.width() <= 40, "snippet width {} > 40", snippet.width());
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn draft_snippet_boundary_elides_only_after_the_width_is_exceeded() {
+    // Draft exactly as wide as the reserved room stays unelided.
+    assert_eq!(agents_draft_snippet("abcdefgh", 10), None);
+    // One column more flips it into a `…` snippet that still fits the width.
+    let snippet = agents_draft_snippet("abcdefghi", 10).expect("overflow elides");
+    assert_eq!(snippet, "abcdefgh …");
+    assert_eq!(snippet.width(), 10);
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn draft_snippet_trims_wide_glyphs_without_splitting_chars() {
+    // CJK glyphs occupy two columns; truncation must stay on char boundaries.
+    let draft = "日本語のプロンプトテキスト";
+    let snippet = agents_draft_snippet(draft, 12).expect("overflow elides");
+    assert!(snippet.width() <= 12, "snippet width {} > 12", snippet.width());
+    assert_eq!(snippet, "日本語のプ …");
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn draft_snippet_multiline_shows_line_count_and_elides_first_line_only() {
+    // Short first line: indicator fits, first line untouched.
+    assert_eq!(agents_draft_snippet("one\ntwo three", 100), Some(String::from("one … (2 lines)")));
+    // Long first line: elided while the marker stays visible.
+    let snippet =
+        agents_draft_snippet("abcdefghijklmnopqrstuvwxyz\nmore", 20).expect("overflow elides");
+    assert_eq!(snippet, "abcdefgh … (2 lines)");
+    assert_eq!(snippet.width(), 20);
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn agents_draft_limit_reserves_prompt_marker_and_tab_hint() {
+    assert_eq!(agents_draft_limit(100, false), 91, "marker only");
+    assert_eq!(agents_draft_limit(100, true), 69, "marker plus tab hint");
+    assert_eq!(agents_draft_limit(3, false), 4, "floors instead of dropping");
+    assert!(agents_command_hint("/compact"), "slash command detected");
+    assert!(!agents_command_hint("/compact now"), "multi-token hint");
+    assert!(!agents_command_hint("plain text"), "plain draft");
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn composer_draft_shows_full_draft_when_it_fits() {
+    // 100-col composer, no tab hint: budget is 91 columns.
+    let draft = "x".repeat(89);
+    assert_eq!(agents_composer_draft(&draft, 100, false), None, "full draft fits");
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn composer_draft_elides_with_insert_hint_that_always_fits() {
+    let long = "y".repeat(100);
+    let snippet = agents_composer_draft(&long, 100, false).expect("overlong draft elides");
+    assert!(snippet.ends_with('…'), "snippet: {snippet}");
+    // Marker + snippet + the INSERT hint all fit inside the composer width.
+    assert!(
+        DRAFT_PREFIX_WIDTH + snippet.width() + DRAFT_INSERT_HINT.width() <= 100,
+        "composer line overflows"
+    );
+}
+
+#[cfg(feature = "agents")]
+#[test]
+fn composer_draft_multiline_always_elides_and_reserves_hint() {
+    let draft = "one\ntwo three four five";
+    let snippet = agents_composer_draft(draft, 100, false).expect("multiline elides");
+    assert!(snippet.contains("(2 lines)"), "snippet: {snippet}");
+    assert!(
+        DRAFT_PREFIX_WIDTH + snippet.width() + DRAFT_INSERT_HINT.width() <= 100,
+        "composer line overflows"
+    );
+}

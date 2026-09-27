@@ -166,7 +166,7 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
                 cols[1],
             );
         }
-        agents_composer_line(app, thread)
+        agents_composer_line(app, thread, composer_area.width as usize)
     } else {
         let mut lines = vec![Line::from(vec![
             Span::styled("-!- ", theme_style(theme::FG_DIM)),
@@ -218,18 +218,22 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
         // movement); overlays keep the end-of-line placement.
         let cursor_col = if let Some(active_index) = app.agents.active_thread {
             let thread = &app.agents.threads[active_index];
-            if let Some(snippet) = crate::ui::composer::agents_draft_snippet(
-                thread,
-                crate::ui::composer::DRAFT_SNIPPET_MAX_CHARS,
-            ) {
+            let command_hint = crate::ui::composer::agents_command_hint(&thread.draft);
+            let snippet = crate::ui::composer::agents_composer_draft(
+                &thread.draft,
+                composer_area.width as usize,
+                command_hint,
+            );
+            if let Some(snippet) = snippet {
                 // The prompt bar shows a collapsed snippet; the caret sits at
                 // the end of the displayed text.
-                8 + ratatui::text::Span::raw(snippet).width()
+                crate::ui::composer::DRAFT_PREFIX_WIDTH + ratatui::text::Span::raw(snippet).width()
             } else {
                 let byte = thread.draft_byte_at_cursor().min(thread.draft.len());
                 let prefix = &thread.draft[..byte];
                 let line_prefix = prefix.rsplit_once('\n').map_or(prefix, |(_, rest)| rest);
-                8 + ratatui::text::Span::raw(line_prefix).width()
+                crate::ui::composer::DRAFT_PREFIX_WIDTH
+                    + ratatui::text::Span::raw(line_prefix).width()
             }
         } else {
             composer.iter().map(|span| span.width()).sum::<usize>()

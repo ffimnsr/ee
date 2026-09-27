@@ -39,6 +39,7 @@ pub(super) const MAX_WORKSPACE_MEMORY_RETENTION_DAYS: u64 = 3_650;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceMemorySettings {
     pub enabled: bool,
+    pub persist_notes: bool,
     pub max_value_bytes: usize,
     pub max_active_facts: usize,
     pub max_active_bytes: usize,
@@ -59,6 +60,7 @@ impl Default for WorkspaceMemorySettings {
             let defaults = WorkspaceMemoryHostConfig::default();
             Self {
                 enabled: true,
+                persist_notes: false,
                 max_value_bytes: defaults.quotas.max_value_bytes,
                 max_active_facts: defaults.quotas.max_active_facts,
                 max_active_bytes: defaults.quotas.max_active_bytes,
@@ -77,7 +79,8 @@ impl Default for WorkspaceMemorySettings {
         {
             Self {
                 enabled: true,
-                max_value_bytes: 4 * 1024,
+                persist_notes: false,
+                max_value_bytes: 64 * 1024,
                 max_active_facts: 256,
                 max_active_bytes: 512 * 1024,
                 max_total_facts: 256,
@@ -99,6 +102,9 @@ pub(super) fn merge_workspace_memory(
 ) {
     if let Some(enabled) = patch.enabled {
         resolved.enabled = enabled;
+    }
+    if let Some(persist_notes) = patch.persist_notes {
+        resolved.persist_notes = persist_notes;
     }
     merge_bounded_usize(
         "agents.workspace_memory.max_value_bytes",

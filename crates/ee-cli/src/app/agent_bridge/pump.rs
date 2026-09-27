@@ -123,6 +123,23 @@ impl App {
         ))
     }
 
+    pub(super) fn workspace_memory_replace(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_replace_approved(
+            key,
+            value,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
     pub(super) fn workspace_memory_forget(
         &self,
         key: &str,
@@ -266,6 +283,14 @@ impl App {
                     ee_agent_host::WorkspaceMemoryMutationOperation::Remember,
                     key,
                     WorkspaceMemoryApprovalTarget::Remember { value },
+                    reply,
+                ));
+            }
+            crate::app::agents_mcp::ProxyToolCall::ReplaceWorkspaceFact { key, value } => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
+                    ee_agent_host::WorkspaceMemoryMutationOperation::Replace,
+                    key,
+                    WorkspaceMemoryApprovalTarget::Replace { value },
                     reply,
                 ));
             }

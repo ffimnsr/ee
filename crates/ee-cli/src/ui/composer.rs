@@ -388,6 +388,7 @@ pub(super) fn mode_selection_composer_lines(
 pub(super) fn agents_composer_line(
     app: &App,
     thread: &crate::app::AgentThreadUi,
+    composer_width: usize,
 ) -> Vec<Span<'static>> {
     if let Some(permission) = app.agents.permission() {
         let count = permission.options.len();
@@ -489,48 +490,102 @@ pub(super) fn agents_composer_line(
         return spans;
     }
     let draft = &thread.draft;
-    let command_hint = draft
-        .trim_start()
-        .strip_prefix('/')
-        .is_some_and(|prefix| !prefix.chars().any(char::is_whitespace));
+    let command_hint = agents_command_hint(draft);
+    let snippet = agents_composer_draft(draft, composer_width, command_hint);
     let mut spans = vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(
-            agents_draft_snippet(thread, DRAFT_SNIPPET_MAX_CHARS).unwrap_or_else(|| draft.clone()),
+            snippet.clone().unwrap_or_else(|| draft.to_owned()),
             Style::default().fg(theme::FG_TEXT),
         ),
     ];
+    if snippet.is_some() {
+        spans.push(Span::styled(DRAFT_INSERT_HINT, theme_style(theme::FG_DIM)));
+    }
     if command_hint {
-        spans.push(Span::styled("  Tab complete · /help", theme_style(theme::FG_DIM)));
+        spans.push(Span::styled(DRAFT_HINT, theme_style(theme::FG_DIM)));
     }
     spans
 }
 
-/// Maximum characters shown in the single-line composer before the prompt
-/// collapses to a snippet ending in `…`.
-pub(super) const DRAFT_SNIPPET_MAX_CHARS: usize = 60;
+/// Fixed composer chrome before the draft text: the `prompt> ` marker
+/// (keep in sync with the marker literals in this module).
+pub(super) const DRAFT_PREFIX_WIDTH: usize = 8;
 
-/// Snippet form of a long or multiline draft: the first line truncated to
-/// `max_chars` plus `…` (and a line count for multiline drafts). `None` means
-/// the draft fits the single-line prompt as-is.
-pub(super) fn agents_draft_snippet(
-    thread: &crate::app::AgentThreadUi,
-    max_chars: usize,
-) -> Option<String> {
-    let draft = &thread.draft;
+/// Tab-complete hint appended after the draft when it starts with a slash
+/// command; its width is reserved before eliding the draft.
+const DRAFT_HINT: &str = "  Tab complete · /help";
+
+/// Hint appended after the elided draft telling the user that INSERT opens
+/// the full prompt editor; its width is reserved while the draft elides so
+/// the hint text always renders fully.
+pub(super) const DRAFT_INSERT_HINT: &str = " [press INSERT key]";
+
+/// True while the draft looks like a slash command (a single token after `/`).
+pub(super) fn agents_command_hint(draft: &str) -> bool {
+    draft
+        .trim_start()
+        .strip_prefix('/')
+        .is_some_and(|prefix| !prefix.chars().any(char::is_whitespace))
+}
+
+/// Columns of the single-line composer available for the draft text after
+/// reserving the prompt marker and the optional tab hint. Floors at a small
+/// value so an extremely narrow pane never drops the draft entirely.
+pub(super) fn agents_draft_limit(composer_width: usize, command_hint: bool) -> usize {
+    let reserved = DRAFT_PREFIX_WIDTH + if command_hint { DRAFT_HINT.width() } else { 0 };
+    composer_width.saturating_sub(reserved + 1).max(4)
+}
+
+/// Snippet form of a draft that does not fit the single-line composer: the
+/// first line elided by display width so the trailing `…` stays visible.
+/// `None` means the draft fits the composer line as-is — elision only kicks
+/// in once the draft actually exceeds the column count handed in by
+/// [`agents_draft_limit`]. Multiline drafts always show the line-count marker.
+pub(super) fn agents_draft_snippet(draft: &str, max_width: usize) -> Option<String> {
+    let first_line = draft.split('\n').next().unwrap_or_default();
     let multiline = draft.contains('\n');
-    let overlong = draft.chars().count() > max_chars;
-    if !multiline && !overlong {
+    let suffix = if multiline {
+        format!(" \u{2026} ({} lines)", draft.split('\n').count())
+    } else {
+        String::from(" \u{2026}")
+    };
+    let room = max_width.saturating_sub(suffix.width());
+    if !multiline && first_line.width() <= room {
         return None;
     }
-    let first_line = draft.split('\n').next().unwrap_or_default();
-    let mut snippet: String = first_line.chars().take(max_chars).collect();
-    if multiline {
-        snippet.push_str(&format!(" \u{2026} ({} lines)", draft.split('\n').count()));
-    } else {
-        snippet.push_str(" \u{2026}");
-    }
+    let mut snippet = truncate_by_width(first_line, room).to_string();
+    snippet.push_str(&suffix);
     Some(snippet)
+}
+
+/// Draft text for the single-line composer: the full draft when it fits the
+/// composer width, or the elided snippet with the `press INSERT` hint budget
+/// reserved. `None` means the draft fits and no hints are shown.
+pub(super) fn agents_composer_draft(
+    draft: &str,
+    composer_width: usize,
+    command_hint: bool,
+) -> Option<String> {
+    let budget = agents_draft_limit(composer_width, command_hint);
+    // Full draft fits the composer: no elision and no hints.
+    agents_draft_snippet(draft, budget)?;
+    agents_draft_snippet(draft, budget.saturating_sub(DRAFT_INSERT_HINT.width()))
+}
+
+/// Longest prefix of `text` whose display width fits `width`; whole
+/// characters only, so wide (CJK) glyphs are never split.
+fn truncate_by_width(text: &str, width: usize) -> &str {
+    let mut used = 0usize;
+    for (index, ch) in text.char_indices() {
+        let mut encoded = [0u8; 4];
+        let ch_width = UnicodeWidthStr::width(ch.encode_utf8(&mut encoded));
+        if used + ch_width > width {
+            return &text[..index];
+        }
+        used += ch_width;
+    }
+    text
 }
 
 /// Builds the composer line shown while no session exists yet.

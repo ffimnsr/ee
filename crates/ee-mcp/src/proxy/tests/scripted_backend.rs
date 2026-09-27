@@ -591,6 +591,20 @@ impl EeProxyBackend for ScriptedBackend {
         })
     }
 
+    fn replace_workspace_fact(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<WorkspaceFactMutationResult, ProxyToolError> {
+        self.record(format!("replace_workspace_fact:{key}:{value}"));
+        Ok(WorkspaceFactMutationResult {
+            operation: String::from("replaced"),
+            key: key.clone(),
+            affected: 1,
+            fact: Some(workspace_fact(&key, None)),
+        })
+    }
+
     fn recall_workspace_facts(
         &self,
         query: String,

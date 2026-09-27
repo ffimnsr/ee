@@ -366,6 +366,16 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         unavailable_proxy_tool("Workspace memory")
     }
 
+    /// Replaces one approved workspace fact under the same key. Default implementation fails closed.
+    fn replace_workspace_fact(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<WorkspaceFactMutationResult, ProxyToolError> {
+        let _ = (key, value);
+        unavailable_proxy_tool("Workspace memory")
+    }
+
     /// Promotes one exact host-evidence-derived fact after required approval.
     fn verify_workspace_fact(
         &self,

@@ -134,6 +134,9 @@ pub(crate) struct WorkspaceMemoryToml {
     /// Enables durable workspace memory. Defaults to `true` when agents
     /// mode is enabled; set `false` to opt out.
     pub enabled: Option<bool>,
+    /// Persists session notes to the host state directory. Defaults to
+    /// `false`; notes stay in-memory only when disabled.
+    pub persist_notes: Option<bool>,
     /// Maximum UTF-8 bytes in one fact value.
     pub max_value_bytes: Option<usize>,
     /// Maximum active facts in one canonical workspace scope.

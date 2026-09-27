@@ -392,6 +392,26 @@ impl WorkspaceMemoryHost {
         })
     }
 
+    pub(crate) fn replace_primary_approved(
+        &self,
+        key: String,
+        value: String,
+        _approval: WorkspaceMemoryMutationApproval,
+    ) -> Result<WorkspaceFactMutationResult, WorkspaceMemoryHostError> {
+        let (service, primary) = self.host_resolved()?;
+        let source_id = frontend_source_id(primary, &key);
+        let fact = new_user_fact(key.clone(), value, "frontend_user_approved", source_id);
+        let stored = service
+            .replace(primary, fact, MutationApproval::Approved)
+            .map_err(host_memory_error)?;
+        Ok(WorkspaceFactMutationResult {
+            operation: "replaced".to_string(),
+            key,
+            affected: 1,
+            fact: Some(to_dto(stored, None)),
+        })
+    }
+
     pub(crate) fn promote_verified_primary_approved(
         &self,
         candidate: WorkspaceVerifiedFactCandidate,
@@ -600,6 +620,40 @@ impl WorkspaceMemoryHost {
             service.remember(primary, fact, MutationApproval::Approved).map_err(memory_error)?;
         Ok(WorkspaceFactMutationResult {
             operation: "remembered".to_string(),
+            key,
+            affected: 1,
+            fact: Some(to_dto(stored, None)),
+        })
+    }
+
+    pub(crate) fn replace(
+        &self,
+        key: String,
+        value: String,
+        source_id: String,
+    ) -> Result<WorkspaceFactMutationResult, ProxyToolError> {
+        let (service, _, primary) = self.resolved()?;
+        let fact = NewWorkspaceFact {
+            namespace: DEFAULT_NAMESPACE.to_string(),
+            key: key.clone(),
+            value,
+            kind: FactKind::Convention,
+            authority: FactAuthority::UserAsserted,
+            freshness: FactFreshness::Current,
+            provenance: FactProvenance {
+                source_kind: "mcp_user_approved".to_string(),
+                source_id,
+                source_revision: None,
+                source_fingerprint: None,
+                verified_at: None,
+            },
+            expires_at: None,
+            relations: Vec::new(),
+        };
+        let stored =
+            service.replace(primary, fact, MutationApproval::Approved).map_err(memory_error)?;
+        Ok(WorkspaceFactMutationResult {
+            operation: "replaced".to_string(),
             key,
             affected: 1,
             fact: Some(to_dto(stored, None)),

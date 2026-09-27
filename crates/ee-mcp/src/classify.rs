@@ -98,6 +98,7 @@ mod tests {
             "ee_rename_symbol",
             "ee_write_text_file",
             "ee_remember_workspace_fact",
+            "ee_replace_workspace_fact",
             "ee_verify_workspace_fact",
             "ee_forget_workspace_fact",
             "ee_retract_workspace_fact",

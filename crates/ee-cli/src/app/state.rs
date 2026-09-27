@@ -383,7 +383,8 @@ pub(crate) struct App {
     /// Agents pane state (feature `agents`); default is closed and inert.
     #[cfg(feature = "agents")]
     pub(crate) agents: super::agent_pane::AgentPaneState,
-    /// Runtime-only agent project guidance and session notes; never persisted.
+    /// Runtime-only agent project guidance and session notes. Notes persist
+    /// only when `agents.workspace_memory.persist_notes` is enabled.
     #[cfg(feature = "agents")]
     pub(crate) project_knowledge: super::agent_knowledge::ProjectKnowledge,
     /// Injectable trust-policy clock (Phase 6): production uses the system
@@ -436,6 +437,11 @@ impl App {
                 rp.display()
             ));
         }
+
+        #[cfg(feature = "agents")]
+        let notes_persist_path = super::agent_knowledge::notes_persist_path(
+            config.agents.workspace_memory.persist_notes,
+        );
 
         Ok(Self {
             config,
@@ -505,7 +511,7 @@ impl App {
             #[cfg(feature = "agents")]
             agents: super::agent_pane::AgentPaneState::default(),
             #[cfg(feature = "agents")]
-            project_knowledge: super::agent_knowledge::ProjectKnowledge::default(),
+            project_knowledge: super::agent_knowledge::ProjectKnowledge::new(notes_persist_path),
             #[cfg(feature = "agents")]
             trust_clock: crate::policy::PolicyClock::default(),
             #[cfg(all(test, feature = "agents"))]

@@ -107,6 +107,17 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         )
     }
 
+    fn replace_workspace_fact(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<ee_mcp::WorkspaceFactMutationResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::ReplaceWorkspaceFact { key, value }),
+            "replace_workspace_fact",
+        )
+    }
+
     fn recall_workspace_facts(
         &self,
         query: String,

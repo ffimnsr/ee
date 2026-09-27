@@ -704,7 +704,7 @@ pub const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 /// Maximum UTF-8 bytes accepted for a workspace-fact key.
 pub const MAX_WORKSPACE_FACT_KEY_BYTES: usize = 128;
 /// Maximum UTF-8 bytes accepted for a workspace-fact value.
-pub const MAX_WORKSPACE_FACT_VALUE_BYTES: usize = 4 * 1024;
+pub const MAX_WORKSPACE_FACT_VALUE_BYTES: usize = 64 * 1024;
 /// Maximum UTF-8 bytes accepted for a workspace-fact recall query.
 pub const MAX_WORKSPACE_FACT_QUERY_BYTES: usize = 1024;
 /// Maximum active facts returned by one explicit list call.

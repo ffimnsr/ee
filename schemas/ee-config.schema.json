@@ -915,6 +915,13 @@
             "null"
           ]
         },
+        "persist_notes": {
+          "description": "Persists session notes to the host state directory. Defaults to\n`false`; notes stay in-memory only when disabled.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "max_value_bytes": {
           "description": "Maximum UTF-8 bytes in one fact value.",
           "type": [

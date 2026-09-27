@@ -8,6 +8,10 @@ pub(crate) enum ProxyCall {
         key: String,
         value: String,
     },
+    ReplaceWorkspaceFact {
+        key: String,
+        value: String,
+    },
     RecallWorkspaceFacts {
         query: String,
     },
@@ -255,6 +259,10 @@ pub(super) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 /// approval and bridge paths are shared verbatim.
 pub(crate) enum ProxyToolCall {
     RememberWorkspaceFact {
+        key: String,
+        value: String,
+    },
+    ReplaceWorkspaceFact {
         key: String,
         value: String,
     },

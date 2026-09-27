@@ -86,6 +86,9 @@ impl ApprovalPrompt {
             ee_agent_host::WorkspaceMemoryMutationOperation::Remember => {
                 WorkspaceMemoryApprovalOperation::Remember
             }
+            ee_agent_host::WorkspaceMemoryMutationOperation::Replace => {
+                WorkspaceMemoryApprovalOperation::Replace
+            }
             ee_agent_host::WorkspaceMemoryMutationOperation::Verify => {
                 WorkspaceMemoryApprovalOperation::Verify
             }

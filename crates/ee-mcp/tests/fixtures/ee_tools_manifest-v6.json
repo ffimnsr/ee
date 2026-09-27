@@ -2742,7 +2742,7 @@
             "type": "string"
           },
           "value": {
-            "maxLength": 4096,
+            "maxLength": 65536,
             "minLength": 1,
             "type": "string"
           }
@@ -2754,6 +2754,60 @@
         "type": "object"
       },
       "name": "ee_remember_workspace_fact",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 1
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 6,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "key": "project.architecture",
+        "value": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "ee_replace_workspace_fact",
       "outputCaps": [
         {
           "kind": "result_items",

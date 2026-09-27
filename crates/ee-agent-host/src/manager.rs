@@ -58,7 +58,8 @@ pub struct AgentManagerConfig {
     /// hosting on every connection; the agent still has to advertise
     /// `mcp_capabilities.acp`).
     pub ee_proxy_enabled: bool,
-    /// Resolved, explicit workspace-memory settings. Disabled by default.
+    /// Resolved workspace-memory settings. The editor enables memory by
+    /// default via `[agents.workspace_memory]`; hosts may opt out explicitly.
     pub workspace_memory: WorkspaceMemoryHostConfig,
     /// Test-only: agent id → fake transport factory.  When present for an
     /// agent, the manager connects over the fake transport instead of
@@ -193,6 +194,16 @@ impl AgentManager {
         approval: WorkspaceMemoryMutationApproval,
     ) -> Result<WorkspaceFactMutationResult, WorkspaceMemoryHostError> {
         self.workspace_memory.remember_primary_approved(key.into(), value.into(), approval)
+    }
+
+    /// Stores one explicitly confirmed replacement for an existing exact key.
+    pub fn workspace_memory_replace_approved(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        approval: WorkspaceMemoryMutationApproval,
+    ) -> Result<WorkspaceFactMutationResult, WorkspaceMemoryHostError> {
+        self.workspace_memory.replace_primary_approved(key.into(), value.into(), approval)
     }
 
     /// Derives narrow host-verified candidates from one immutable turn snapshot.

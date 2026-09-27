@@ -581,6 +581,18 @@ impl EeProxyBackend for HostProxyBackend {
         self.workspace_memory.remember(key, value, self.memory_source_id())
     }
 
+    fn replace_workspace_fact(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<WorkspaceFactMutationResult, ProxyToolError> {
+        self.approve_workspace_memory_mutation(
+            WorkspaceMemoryMutationOperation::Replace,
+            key.clone(),
+        )?;
+        self.workspace_memory.replace(key, value, self.memory_source_id())
+    }
+
     fn verify_workspace_fact(
         &self,
         session_id: String,

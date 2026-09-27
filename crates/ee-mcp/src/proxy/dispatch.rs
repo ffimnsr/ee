@@ -606,7 +606,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee_remember_workspace_fact" => {
+            "ee_remember_workspace_fact" | "ee_replace_workspace_fact" => {
                 let arguments = require_arguments(request)?;
                 require_exact_argument_keys(arguments, &["key", "value"])?;
                 let key = require_bounded_nonempty_string(
@@ -619,9 +619,12 @@ impl EeMcpProxy {
                     "value",
                     MAX_WORKSPACE_FACT_VALUE_BYTES,
                 )?;
-                Ok(self
-                    .backend
-                    .remember_workspace_fact(key.to_owned(), value.to_owned())
+                let result = if request.name.as_ref() == "ee_replace_workspace_fact" {
+                    self.backend.replace_workspace_fact(key.to_owned(), value.to_owned())
+                } else {
+                    self.backend.remember_workspace_fact(key.to_owned(), value.to_owned())
+                };
+                Ok(result
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }

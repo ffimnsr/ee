@@ -196,6 +196,7 @@ impl App {
                         Ok(ClientRequestResponse::WorkspaceMemoryApproval { approved: false })
                     }
                     WorkspaceMemoryApprovalTarget::Remember { .. }
+                    | WorkspaceMemoryApprovalTarget::Replace { .. }
                     | WorkspaceMemoryApprovalTarget::Forget
                     | WorkspaceMemoryApprovalTarget::Retract
                     | WorkspaceMemoryApprovalTarget::RetractKey { .. }
@@ -216,6 +217,9 @@ impl App {
                     }
                     WorkspaceMemoryApprovalTarget::Remember { value } => self
                         .workspace_memory_remember(&key, &value)
+                        .map(ClientRequestResponse::ProxyValue),
+                    WorkspaceMemoryApprovalTarget::Replace { value } => self
+                        .workspace_memory_replace(&key, &value)
                         .map(ClientRequestResponse::ProxyValue),
                     WorkspaceMemoryApprovalTarget::Forget => {
                         self.workspace_memory_forget(&key).map(ClientRequestResponse::ProxyValue)

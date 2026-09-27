@@ -165,6 +165,7 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
         max_concurrent_prompts: Some(agents.max_concurrent_prompts),
         workspace_memory: Some(WorkspaceMemoryToml {
             enabled: Some(agents.workspace_memory.enabled),
+            persist_notes: Some(agents.workspace_memory.persist_notes),
             max_value_bytes: Some(agents.workspace_memory.max_value_bytes),
             max_active_facts: Some(agents.workspace_memory.max_active_facts),
             max_active_bytes: Some(agents.workspace_memory.max_active_bytes),

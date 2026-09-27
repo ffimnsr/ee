@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_MAX_VALUE_BYTES: usize = 4 * 1024;
+pub const DEFAULT_MAX_VALUE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_ACTIVE_FACTS: usize = 256;
 pub const DEFAULT_MAX_ACTIVE_BYTES: usize = 512 * 1024;
 pub const DEFAULT_MAX_TOTAL_FACTS: usize = 256;

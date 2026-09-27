@@ -295,6 +295,7 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_write_text_file"
         | "ee_save_note" => write(),
         "ee_remember_workspace_fact"
+        | "ee_replace_workspace_fact"
         | "ee_forget_workspace_fact"
         | "ee_retract_workspace_fact"
         | "ee_import_workspace_memory"
@@ -407,6 +408,7 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_read_notes",
     "ee_read_note",
     "ee_remember_workspace_fact",
+    "ee_replace_workspace_fact",
     "ee_verify_workspace_fact",
     "ee_recall_workspace_facts",
     "ee_read_workspace_fact",

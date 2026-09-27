@@ -53,6 +53,7 @@ fn stdio_tool_list_contains_exact_workspace_memory_surface() {
     let names = ee_mcp::tool_names_for_transport(ee_mcp::ToolTransport::Stdio);
     for name in [
         "ee_remember_workspace_fact",
+        "ee_replace_workspace_fact",
         "ee_recall_workspace_facts",
         "ee_read_workspace_fact",
         "ee_forget_workspace_fact",
@@ -73,6 +74,10 @@ fn workspace_memory_stdio_calls_route_all_exact_tools() {
             key: String::from("key"),
             value: String::from("secret-value"),
         },
+        ProxyCall::ReplaceWorkspaceFact {
+            key: String::from("key"),
+            value: String::from("secret-value"),
+        },
         ProxyCall::RecallWorkspaceFacts { query: String::from("build") },
         ProxyCall::ReadWorkspaceFact { key: String::from("key") },
         ProxyCall::ForgetWorkspaceFact { key: String::from("key") },
@@ -84,6 +89,7 @@ fn workspace_memory_stdio_calls_route_all_exact_tools() {
     ];
     let expected_methods = [
         "remember_workspace_fact",
+        "replace_workspace_fact",
         "recall_workspace_facts",
         "read_workspace_fact",
         "forget_workspace_fact",
@@ -112,6 +118,10 @@ fn workspace_memory_stdio_calls_route_all_exact_tools() {
         assert_eq!(route, ProxyRoute::Stdio);
         match (expected_method, call) {
             ("remember_workspace_fact", ProxyToolCall::RememberWorkspaceFact { key, value }) => {
+                assert_eq!(key, "key");
+                assert_eq!(value, "secret-value");
+            }
+            ("replace_workspace_fact", ProxyToolCall::ReplaceWorkspaceFact { key, value }) => {
                 assert_eq!(key, "key");
                 assert_eq!(value, "secret-value");
             }

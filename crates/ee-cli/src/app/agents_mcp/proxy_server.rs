@@ -96,6 +96,9 @@ pub(super) fn start_proxy_call_to_bridge(
         ProxyCall::RememberWorkspaceFact { key, value } => {
             ProxyToolCall::RememberWorkspaceFact { key, value }
         }
+        ProxyCall::ReplaceWorkspaceFact { key, value } => {
+            ProxyToolCall::ReplaceWorkspaceFact { key, value }
+        }
         ProxyCall::RecallWorkspaceFacts { query } => ProxyToolCall::RecallWorkspaceFacts { query },
         ProxyCall::ReadWorkspaceFact { key } => ProxyToolCall::ReadWorkspaceFact { key },
         ProxyCall::ForgetWorkspaceFact { key } => ProxyToolCall::ForgetWorkspaceFact { key },
