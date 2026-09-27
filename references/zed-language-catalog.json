@@ -6,12 +6,13 @@
     "powershell",
     "roc",
     "sh",
+    "swift",
     "uiua"
   ],
   "doc_count": 71,
   "docs_failed": [],
-  "generated_at": "2026-09-27T04:16:33+00:00",
-  "grammar_entries": 39,
+  "generated_at": "2026-09-27T06:04:20+00:00",
+  "grammar_entries": 38,
   "languages": {
     "ansible": {
       "aliases": [
@@ -758,7 +759,7 @@
       "query_language": "helm",
       "rev": "aa71f63de226c5592dfbfc1f29949522d7c95fac",
       "status": "ok",
-      "symbol": "tree_sitter_go_template"
+      "symbol": "tree_sitter_helm"
     },
     "html": {
       "aliases": [
@@ -1753,14 +1754,11 @@
       "aliases": [
         "swift"
       ],
-      "attach_lsp": "sourcekit-lsp",
-      "block_comment": [
-        "/*",
-        "*/"
-      ],
+      "attach_lsp": null,
+      "block_comment": null,
       "defer_lsp": false,
-      "defer_reason": null,
-      "deferred": false,
+      "defer_reason": "tree-sitter-swift is codegen-only: the repo ships grammar.js + scanner.c but no src/parser.c, so a bare checkout cannot compile; requires a codegen step",
+      "deferred": true,
       "display_name": "Swift",
       "doc": "swift.md",
       "file_types": [
@@ -1768,17 +1766,17 @@
       ],
       "filenames": [],
       "globs": [],
-      "grammar_url": "https://github.com/alex-pinkus/tree-sitter-swift",
-      "indentation": "treesitter",
-      "library": "tree-sitter-swift",
-      "line_comment": "//",
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
       "lsp_doc_name": "swiftlang/sourcekit-lsp",
-      "lsp_server": "sourcekit-lsp",
+      "lsp_server": null,
       "queries_present": true,
       "query_language": "swift",
-      "rev": "187fd4d3e55e2088da9cb31e414a2bac866292e8",
+      "rev": null,
       "status": "ok",
-      "symbol": "tree_sitter_swift"
+      "symbol": null
     },
     "tailwindcss": {
       "aliases": [

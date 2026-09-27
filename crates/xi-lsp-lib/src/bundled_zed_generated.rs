@@ -306,7 +306,6 @@ pub(crate) fn bundled_zed_routing() -> Vec<(String, Vec<String>)> {
         ("ocaml".to_string(), vec!["ocamllsp".to_string()]),
         ("opentofu".to_string(), vec!["terraform-ls".to_string()]),
         ("svelte".to_string(), vec!["svelteserver".to_string()]),
-        ("swift".to_string(), vec!["sourcekit-lsp".to_string()]),
         ("terraform".to_string(), vec!["terraform-ls".to_string()]),
         ("toml".to_string(), vec!["taplo".to_string()]),
         ("vue".to_string(), vec!["vue-language-server".to_string()]),

@@ -4,9 +4,17 @@
 
 ### Features
 
+- add incremental runtime grammar builds: build stamps (pin + rev + staged source mtimes) skip recompiling unchanged grammars; rev-pinned git fetches skip the network fetch when the staged checkout already matches (`mk install` no longer rebuilds daily)
+- beautify `ee do runtime fetch/build` output: short source refs (`crate:tree-sitter-ruby@0.23.1`, `github:owner/repo@<sha>`), `--verbose`/`-v` prints full staged/output paths, ANSI colors for labels when stdout is a tty
 - add Zed language catalog parity: 36 git-pinned tree-sitter grammars and 18 bundled LSP servers generated from `zed-industries/zed` docs/src/languages
 - add `filenames` + `globs` detection dimensions to `LanguageDefinition` with glob > basename > extension precedence; makefile, docker, and just now detect by filename/glob
-- add external formatters: `[formatters.<id>]` with `external`/`language_server`/`none` modes; stdin/stdout runner with timeout + output cap (`docs/upgrades/external-formatters.md`)
+- add external formatters: `[formatters.<id>]` definitions + `[languages.<id>].formatter` attachments with `external`/`language_server`/`none` dispatch; stdin/stdout runner with timeout + output cap (`docs/upgrades/external-formatters.md`)
+
+### Fixes
+
+- runtime build/fetch now skip per-grammar failures instead of aborting the whole run: each failure is logged with language + stage + reason, remaining grammars still build, command exits 0
+- defer swift grammar: tree-sitter-swift is codegen-only (no `src/parser.c` in the repo), recorded in the catalog and manifest
+- fix multi-grammar repo dialect selection: tree-sitter.json manifests now win over the repo-root parser shortcut, so helm builds `go-template-helm` (`tree_sitter_helm`) instead of the root `go-template` grammar
 - add `scripts/zed-catalog/sync.sh` + `generate.py` pipeline emitting `references/zed-language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 

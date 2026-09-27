@@ -1,3 +1,4 @@
+mod build_stamps;
 pub mod builtin;
 mod builtin_zed_generated;
 pub mod errors;

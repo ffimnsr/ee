@@ -115,14 +115,16 @@ fn runtime_loader_fetches_git_branch_source_and_reuses_checkout() {
     let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
     let source_root = temp_dir.path().join("sources");
 
-    let fetched =
+    let (fetched, failures) =
         loader.fetch_grammar_sources(&[String::from("Demo")], false, &source_root, false).unwrap();
+    assert!(failures.is_empty());
     assert_eq!(fetched[0].resolved_rev.as_deref(), Some(branch_rev.as_str()));
     assert!(fetched[0].source_pin.contains(&format!("branch:{branch_name}")));
 
     fs::write(fetched[0].source_dir.join("cache-marker"), "keep\n").unwrap();
-    let fetched_again =
+    let (fetched_again, failures_again) =
         loader.fetch_grammar_sources(&[String::from("Demo")], false, &source_root, false).unwrap();
+    assert!(failures_again.is_empty());
     assert_eq!(fetched_again[0].resolved_rev.as_deref(), Some(branch_rev.as_str()));
     assert!(fetched_again[0].source_dir.join("cache-marker").exists());
 }
@@ -134,7 +136,7 @@ fn runtime_loader_fetches_git_tag_source_with_resolved_commit() {
     let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
     let loader = demo_git_loader(&repo, "tag", "v1.0.0", "tree_sitter_demo");
 
-    let fetched = loader
+    let (fetched, failures) = loader
         .fetch_grammar_sources(
             &[String::from("Demo")],
             false,
@@ -142,6 +144,7 @@ fn runtime_loader_fetches_git_tag_source_with_resolved_commit() {
             false,
         )
         .unwrap();
+    assert!(failures.is_empty());
 
     assert_eq!(fetched[0].resolved_rev.as_deref(), Some(tag_rev.as_str()));
     assert!(fetched[0].source_pin.contains("tag:v1.0.0"));
@@ -154,7 +157,7 @@ fn runtime_loader_fetches_git_rev_source_with_exact_commit() {
     let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
     let loader = demo_git_loader(&repo, "rev", &tag_rev, "tree_sitter_demo");
 
-    let fetched = loader
+    let (fetched, failures) = loader
         .fetch_grammar_sources(
             &[String::from("Demo")],
             false,
@@ -162,6 +165,7 @@ fn runtime_loader_fetches_git_rev_source_with_exact_commit() {
             false,
         )
         .unwrap();
+    assert!(failures.is_empty());
 
     assert_eq!(fetched[0].resolved_rev.as_deref(), Some(tag_rev.as_str()));
 }
@@ -173,16 +177,19 @@ fn runtime_loader_rejects_missing_git_ref() {
     let (repo, _tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
     let loader = demo_git_loader(&repo, "tag", "missing-tag", "tree_sitter_demo");
 
-    let error = loader
+    let (fetched, failures) = loader
         .fetch_grammar_sources(
             &[String::from("Demo")],
             false,
             &temp_dir.path().join("sources"),
             false,
         )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("missing tag `missing-tag`"));
+        .unwrap();
+    assert!(fetched.is_empty());
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].language_id, "Demo");
+    assert_eq!(failures[0].stage, "fetch");
+    assert!(failures[0].message.contains("missing tag `missing-tag`"));
 }
 
 #[test]
@@ -192,7 +199,7 @@ fn runtime_loader_builds_runtime_assets_from_git_sources_and_manifest_queries() 
     let (repo, _tag_rev, branch_name, branch_rev) = create_demo_git_repo(&temp_dir);
     let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
-    let built = loader
+    let (built, failures) = loader
         .build_runtime_assets(
             &[String::from("Demo")],
             false,
@@ -202,6 +209,7 @@ fn runtime_loader_builds_runtime_assets_from_git_sources_and_manifest_queries() 
             true,
         )
         .unwrap();
+    assert!(failures.is_empty());
 
     assert_eq!(built[0].resolved_rev.as_deref(), Some(branch_rev.as_str()));
     assert!(built[0].grammar_path.exists());
@@ -229,7 +237,7 @@ fn runtime_loader_build_fails_when_git_source_missing_parser() {
     run_git_fixture(&repo, &["commit", "-m", "remove parser"]);
     let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
-    let error = loader
+    let (built, failures) = loader
         .build_runtime_assets(
             &[String::from("Demo")],
             false,
@@ -238,10 +246,12 @@ fn runtime_loader_build_fails_when_git_source_missing_parser() {
             true,
             true,
         )
-        .unwrap_err();
-
-    assert_eq!(error.kind(), RuntimeOperationErrorKind::GrammarSource);
-    assert!(error.to_string().contains("missing parser source"));
+        .unwrap();
+    assert!(built.is_empty());
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].language_id, "Demo");
+    assert_eq!(failures[0].stage, "build");
+    assert!(failures[0].message.contains("missing parser source"));
 }
 
 #[test]
@@ -254,7 +264,7 @@ fn runtime_loader_build_fails_for_bad_git_tree_sitter_manifest() {
     run_git_fixture(&repo, &["commit", "-m", "break manifest"]);
     let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
-    let error = loader
+    let (built, failures) = loader
         .build_runtime_assets(
             &[String::from("Demo")],
             false,
@@ -263,9 +273,10 @@ fn runtime_loader_build_fails_for_bad_git_tree_sitter_manifest() {
             true,
             true,
         )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("failed parsing tree-sitter manifest"));
+        .unwrap();
+    assert!(built.is_empty());
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("failed parsing tree-sitter manifest"));
 }
 
 #[test]
@@ -282,7 +293,7 @@ fn runtime_loader_build_fails_for_grammar_symbol_mismatch() {
         env::remove_var("TARGET");
     }
 
-    let error = loader
+    let (built, failures) = loader
         .build_runtime_assets(
             &[String::from("Demo")],
             false,
@@ -291,7 +302,10 @@ fn runtime_loader_build_fails_for_grammar_symbol_mismatch() {
             true,
             false,
         )
-        .unwrap_err();
+        .unwrap();
+    assert!(built.is_empty());
+    assert_eq!(failures.len(), 1);
+    let error = &failures[0].message;
 
     unsafe {
         if let Some(value) = original_host {
@@ -306,9 +320,67 @@ fn runtime_loader_build_fails_for_grammar_symbol_mismatch() {
         }
     }
 
-    assert!(matches!(
-        error.kind(),
-        RuntimeOperationErrorKind::GrammarSource | RuntimeOperationErrorKind::RuntimeAsset
-    ));
-    assert!(!error.to_string().trim().is_empty());
+    assert!(matches!(failures[0].stage.as_str(), "build"));
+    assert!(!error.trim().is_empty());
+}
+
+#[test]
+fn runtime_build_skips_unchanged_rev_pinned_grammar_on_second_run() {
+    let _guard = env_lock();
+    let temp_dir = TempDir::new().unwrap();
+    let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
+    let loader = demo_git_loader(&repo, "rev", &tag_rev, "tree_sitter_demo");
+    let source_root = temp_dir.path().join("sources");
+    let output_root = temp_dir.path().join("runtime");
+
+    let (first, first_failures) = loader
+        .build_runtime_assets(
+            &[String::from("Demo")],
+            false,
+            &source_root,
+            &output_root,
+            false,
+            true,
+        )
+        .unwrap();
+    assert!(first_failures.is_empty());
+    assert_eq!(first.len(), 1);
+    assert!(first[0].built, "first build must compile the grammar");
+
+    let library_mtime = fs::metadata(&first[0].grammar_path).unwrap().modified().unwrap();
+    let stamps_dir = output_root.join("grammars").join(".stamps");
+    assert!(stamps_dir.is_dir(), "build stamps must be recorded");
+
+    let (second, second_failures) = loader
+        .build_runtime_assets(
+            &[String::from("Demo")],
+            false,
+            &source_root,
+            &output_root,
+            false,
+            true,
+        )
+        .unwrap();
+    assert!(second_failures.is_empty());
+    assert_eq!(second.len(), 1);
+    assert!(!second[0].built, "second build must skip the unchanged grammar");
+    assert_eq!(
+        fs::metadata(&second[0].grammar_path).unwrap().modified().unwrap(),
+        library_mtime,
+        "skipped build must not rewrite the library"
+    );
+
+    // --force bypasses the stamp and recompiles.
+    let (forced, forced_failures) = loader
+        .build_runtime_assets(
+            &[String::from("Demo")],
+            false,
+            &source_root,
+            &output_root,
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(forced_failures.is_empty());
+    assert!(forced[0].built, "--force must recompile even when fresh");
 }

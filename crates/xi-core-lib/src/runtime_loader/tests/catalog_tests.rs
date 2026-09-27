@@ -10,6 +10,9 @@ use super::*;
 use crate::runtime_loader::builtin_zed_generated::{
     generated_zed_language_definitions, generated_zed_language_overrides,
 };
+use crate::runtime_loader::{
+    TreeSitterPackageGrammar, TreeSitterPackageManifest, select_manifest_grammar,
+};
 
 #[test]
 fn generated_catalog_definitions_and_overrides_are_aligned() {
@@ -155,4 +158,114 @@ fn default_loader_resolves_generated_languages() {
         loader.language_for_path(Path::new("Justfile")).is_some(),
         "just must detect Justfile by filename"
     );
+}
+
+#[test]
+fn manifest_grammar_selection_prefers_exact_then_dialect_suffix() {
+    let helm_manifest = TreeSitterPackageManifest {
+        grammars: vec![
+            TreeSitterPackageGrammar {
+                name: String::from("go-template"),
+                path: Some(String::from(".")),
+                highlights: None,
+                injections: None,
+                locals: None,
+                tags: None,
+            },
+            TreeSitterPackageGrammar {
+                name: String::from("go-template-helm"),
+                path: Some(String::from("dialects/helm")),
+                highlights: None,
+                injections: None,
+                locals: None,
+                tags: None,
+            },
+        ],
+    };
+    let helm = crate::runtime_loader::RuntimeLanguage::from_definition(
+        &super::language_definition("helm", &["tpl"]),
+    );
+    let selected = select_manifest_grammar(&helm_manifest, &helm).unwrap();
+    assert_eq!(selected.name, "go-template-helm");
+    assert_eq!(selected.path.as_deref(), Some("dialects/helm"));
+
+    let md_manifest = TreeSitterPackageManifest {
+        grammars: vec![
+            TreeSitterPackageGrammar {
+                name: String::from("markdown"),
+                path: Some(String::from(".")),
+                highlights: None,
+                injections: None,
+                locals: None,
+                tags: None,
+            },
+            TreeSitterPackageGrammar {
+                name: String::from("markdown-inline"),
+                path: Some(String::from("inline")),
+                highlights: None,
+                injections: None,
+                locals: None,
+                tags: None,
+            },
+        ],
+    };
+    let markdown = crate::runtime_loader::RuntimeLanguage::from_definition(
+        &super::language_definition("markdown", &["md"]),
+    );
+    let selected = select_manifest_grammar(&md_manifest, &markdown).unwrap();
+    assert_eq!(selected.name, "markdown");
+
+    // No `-helm` variant: fall back to the first grammar instead of failing.
+    let plain_manifest = TreeSitterPackageManifest {
+        grammars: vec![TreeSitterPackageGrammar {
+            name: String::from("go-template"),
+            path: Some(String::from(".")),
+            highlights: None,
+            injections: None,
+            locals: None,
+            tags: None,
+        }],
+    };
+    let selected = select_manifest_grammar(&plain_manifest, &helm).unwrap();
+    assert_eq!(selected.name, "go-template");
+}
+
+#[test]
+fn staged_build_dir_prefers_manifest_dialect_over_root_parser() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("tree-sitter-go-template");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("dialects").join("helm").join("src")).unwrap();
+    // Root has its own parser: previously this short-circuited manifest lookup.
+    fs::write(root.join("src").join("parser.c"), "int tree_sitter_gotmpl(void) { return 1; }\n")
+        .unwrap();
+    fs::write(
+        root.join("dialects").join("helm").join("src").join("parser.c"),
+        "int tree_sitter_helm(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tree-sitter.json"),
+        r#"{
+  "grammars": [
+    { "name": "go-template", "path": "." },
+    { "name": "go-template-helm", "path": "dialects/helm" }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let loader = default_runtime_loader();
+    let helm = loader.language_for_name("helm").unwrap();
+    let resolved = resolve_staged_grammar_build_dir(&root, helm).unwrap();
+    assert_eq!(resolved, root.join("dialects").join("helm"));
+
+    // Manifest-less repos keep the root parser short-circuit.
+    let plain = temp.path().join("plain-grammar");
+    fs::create_dir_all(plain.join("src")).unwrap();
+    fs::write(plain.join("src").join("parser.c"), "int tree_sitter_plain(void) { return 1; }\n")
+        .unwrap();
+    let toml = loader.language_for_name("toml").unwrap();
+    let resolved = resolve_staged_grammar_build_dir(&plain, toml).unwrap();
+    assert_eq!(resolved, plain);
 }

@@ -285,6 +285,9 @@ pub(crate) enum RuntimeCommands {
         /// Replace any existing staged source trees
         #[arg(long, action = clap::ArgAction::SetTrue)]
         force: bool,
+        /// Print staged source directories instead of short references
+        #[arg(short, long)]
+        verbose: bool,
         /// Trust ancestor `.ee.toml` runtime grammar overrides in current workspace
         #[arg(long, action = clap::ArgAction::SetTrue)]
         trust_workspace: bool,
@@ -309,6 +312,9 @@ pub(crate) enum RuntimeCommands {
         /// Skip host-side dynamic library load validation after compile
         #[arg(long, action = clap::ArgAction::SetTrue)]
         skip_load: bool,
+        /// Print full output paths instead of short references
+        #[arg(short, long)]
+        verbose: bool,
         /// Trust ancestor `.ee.toml` runtime grammar overrides in current workspace
         #[arg(long, action = clap::ArgAction::SetTrue)]
         trust_workspace: bool,

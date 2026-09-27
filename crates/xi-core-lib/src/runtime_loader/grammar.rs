@@ -475,6 +475,23 @@ pub fn fetch_git_grammar_source(
                 source_dir.display()
             )));
         }
+        // Fast path for rev-pinned sources: if the staged checkout is already
+        // at the pinned rev, skip the network fetch and checkout entirely so
+        // build --all / mk install stays incremental.
+        if let (None, None, Some(rev)) = (&spec.branch, &spec.tag, &spec.rev) {
+            let pinned_local = git_rev_parse(
+                source_dir,
+                &format!("{rev}^{{commit}}"),
+                &format!("rev `{rev}`"),
+                &source_label,
+            );
+            let head = git_rev_parse(source_dir, "HEAD^{commit}", "HEAD", &source_label);
+            if let (Ok(pinned_local), Ok(head)) = (pinned_local, head)
+                && head == pinned_local
+            {
+                return Ok(rev.clone());
+            }
+        }
     } else {
         run_git(None, ["clone", "--no-checkout", &spec.url, &source_dir.display().to_string()])
             .map_err(|error| {
@@ -826,12 +843,24 @@ pub(crate) fn select_manifest_grammar<'a>(
         .into_iter()
         .map(normalize_lookup_key)
         .collect::<Vec<_>>();
+
+    // Exact grammar-name match first (e.g. `markdown` in tree-sitter-md).
+    if let Some(grammar) = manifest.grammars.iter().find(|grammar| {
+        target_names.iter().any(|target| *target == normalize_lookup_key(&grammar.name))
+    }) {
+        return Some(grammar);
+    }
+
+    // Dialect packages: repo with one main grammar plus `-<dialect>` variants
+    // (e.g. tree-sitter-go-template ships `go-template` and `go-template-helm`;
+    // language `helm` must select the `-helm` grammar, not the repo root).
+    // The suffix check runs on the raw name: `normalize_lookup_key` strips
+    // hyphens, which would defeat the `-<dialect>` boundary.
+    let target = language.canonical_id().trim().to_ascii_lowercase();
     manifest
         .grammars
         .iter()
-        .find(|grammar| {
-            target_names.iter().any(|target| *target == normalize_lookup_key(&grammar.name))
-        })
+        .find(|grammar| grammar.name.trim().to_ascii_lowercase().ends_with(&format!("-{target}")))
         .or_else(|| manifest.grammars.first())
 }
 
@@ -873,12 +902,16 @@ pub fn resolve_staged_grammar_build_dir(
     source_dir: &Path,
     language: &RuntimeLanguage,
 ) -> Result<PathBuf, RuntimeOperationError> {
-    if source_dir.join("src").join("parser.c").exists() {
-        return Ok(source_dir.to_path_buf());
-    }
-
+    // A tree-sitter.json manifest is authoritative for grammar layout: repos can
+    // ship several dialects (tree-sitter-go-template: `go-template` at the root
+    // plus `go-template-helm` in dialects/helm), so consult it before assuming
+    // the repo root's src/parser.c is the grammar for this language.
     if let Some(path) = resolve_manifest_grammar_subdir(source_dir, language)? {
         return Ok(path);
+    }
+
+    if source_dir.join("src").join("parser.c").exists() {
+        return Ok(source_dir.to_path_buf());
     }
 
     if let Some(path) = resolve_nested_grammar_subdir(source_dir, language)? {

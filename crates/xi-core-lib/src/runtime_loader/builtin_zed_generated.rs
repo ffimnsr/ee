@@ -317,15 +317,6 @@ pub(crate) fn generated_zed_language_definitions() -> Vec<LanguageDefinition> {
             default_config: None,
         },
         LanguageDefinition {
-            name: "swift".into(),
-            extensions: vec!["swift".to_string()],
-            filenames: vec![],
-            globs: vec![],
-            first_line_match: None,
-            scope: "source.swift".into(),
-            default_config: None,
-        },
-        LanguageDefinition {
             name: "terraform".into(),
             extensions: vec!["tf".to_string(), "tfvars".to_string()],
             filenames: vec![],
@@ -663,7 +654,7 @@ pub(crate) fn generated_zed_language_overrides() -> Vec<(String, RuntimeLanguage
                 supported_query_kinds: Some(standard_and_ee.clone()),
                 grammar: Some(RuntimeGrammarConfig {
                     library: Some("tree-sitter-go-template".to_string()),
-                    symbol: Some("tree_sitter_go_template".to_string()),
+                    symbol: Some("tree_sitter_helm".to_string()),
                     source: Some(RuntimeGrammarSource::Git(RuntimeGrammarGitSource {
                         url: "https://github.com/ngalaiko/tree-sitter-go-template".to_string(),
                         rev: Some("aa71f63de226c5592dfbfc1f29949522d7c95fac".to_string()),
@@ -1158,30 +1149,6 @@ pub(crate) fn generated_zed_language_overrides() -> Vec<(String, RuntimeLanguage
                 metadata: Some(LanguageMetadata {
                     line_comment: LineCommentStyle::Unsupported,
                     block_comment: BlockCommentStyle::Tokens { open: "<!--", close: "-->" },
-                    indentation: IndentationStrategy::TreeSitter,
-                    unsupported_semantic_targets: &[],
-                }),
-                ..RuntimeLanguageConfig::default()
-            },
-        ),
-        (
-            "swift".to_string(),
-            RuntimeLanguageConfig {
-                aliases: Some(vec!["swift".to_string()]),
-                supported_query_kinds: Some(standard_and_ee.clone()),
-                grammar: Some(RuntimeGrammarConfig {
-                    library: Some("tree-sitter-swift".to_string()),
-                    symbol: Some("tree_sitter_swift".to_string()),
-                    source: Some(RuntimeGrammarSource::Git(RuntimeGrammarGitSource {
-                        url: "https://github.com/alex-pinkus/tree-sitter-swift".to_string(),
-                        rev: Some("187fd4d3e55e2088da9cb31e414a2bac866292e8".to_string()),
-                        branch: None,
-                        tag: None,
-                    })),
-                }),
-                metadata: Some(LanguageMetadata {
-                    line_comment: LineCommentStyle::Token("//"),
-                    block_comment: BlockCommentStyle::Tokens { open: "/*", close: "*/" },
                     indentation: IndentationStrategy::TreeSitter,
                     unsupported_semantic_targets: &[],
                 }),

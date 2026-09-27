@@ -7,9 +7,10 @@ fn runtime_loader_fetches_grammar_source_from_cargo_registry() {
     let loader = default_runtime_loader();
     let temp_dir = TempDir::new().unwrap();
 
-    let fetched = loader
+    let (fetched, failures) = loader
         .fetch_grammar_sources(&[String::from("rust")], false, temp_dir.path(), true)
         .unwrap();
+    assert!(failures.is_empty());
 
     assert_eq!(fetched.len(), 1);
     assert!(fetched[0].source_pin.starts_with("crate:"));
@@ -67,7 +68,7 @@ fn runtime_loader_fetches_versioned_grammar_without_workspace_dependency_edit() 
         env::set_var("CARGO", &cargo_script);
     }
 
-    let fetched = loader
+    let (fetched, failures) = loader
         .fetch_grammar_sources(
             &[String::from("Demo")],
             false,
@@ -75,6 +76,7 @@ fn runtime_loader_fetches_versioned_grammar_without_workspace_dependency_edit() 
             true,
         )
         .unwrap();
+    assert!(failures.is_empty());
 
     unsafe {
         if let Some(value) = original_cargo_home {
@@ -148,7 +150,8 @@ fn runtime_loader_builds_runtime_assets_from_fetched_sources() {
         }
     }
 
-    let built = built.unwrap();
+    let (built, failures) = built.unwrap();
+    assert!(failures.is_empty());
 
     assert_eq!(built.len(), 1);
     assert!(built[0].source_pin.starts_with("crate:"));
@@ -179,7 +182,7 @@ fn runtime_loader_builds_runtime_assets_without_host_load_validation() {
     let source_root = temp_dir.path().join("sources");
     let output_root = temp_dir.path().join("runtime");
 
-    let built = loader
+    let (built, _failures) = loader
         .build_runtime_assets(
             &[String::from("rust")],
             false,

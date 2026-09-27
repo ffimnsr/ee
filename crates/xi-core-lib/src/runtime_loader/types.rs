@@ -651,6 +651,20 @@ pub struct RuntimeBuiltGrammar {
     pub resolved_rev: Option<String>,
     pub grammar_path: PathBuf,
     pub query_paths: Vec<PathBuf>,
+    /// True when the grammar was recompiled; false when an up-to-date stamp
+    /// caused the build to be skipped.
+    pub built: bool,
+}
+
+/// One language whose runtime grammar could not be fetched or built.
+/// Builds continue past these; each failure is logged instead of aborting
+/// the whole run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeGrammarFailure {
+    pub language_id: String,
+    /// `fetch` or `build`.
+    pub stage: String,
+    pub message: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -23,9 +23,9 @@ use super::languages::apply_runtime_language_config;
 use super::types::{
     CompiledQueryArtifact, FileTypeOwner, GRAMMARS_DIR_NAME, GrammarFetchPlan, GrammarHandle,
     QUERIES_DIR_NAME, QueryArtifactCacheEntry, ResolvedQuerySource, RuntimeBuiltGrammar,
-    RuntimeConfigSource, RuntimeFetchedGrammar, RuntimeInjectionMatch, RuntimeLanguage,
-    RuntimeLanguageDetectionSource, RuntimeLanguageMatch, RuntimeOperationError, RuntimeQueryKind,
-    RuntimeRoots, RuntimeStandardQueryPaths, WorkspaceRuntimeOverrides,
+    RuntimeConfigSource, RuntimeFetchedGrammar, RuntimeGrammarFailure, RuntimeInjectionMatch,
+    RuntimeLanguage, RuntimeLanguageDetectionSource, RuntimeLanguageMatch, RuntimeOperationError,
+    RuntimeQueryKind, RuntimeRoots, RuntimeStandardQueryPaths, WorkspaceRuntimeOverrides,
 };
 
 pub struct RuntimeLoader {
@@ -291,7 +291,8 @@ impl RuntimeLoader {
         include_all: bool,
         source_root: &Path,
         force: bool,
-    ) -> Result<Vec<RuntimeFetchedGrammar>, RuntimeOperationError> {
+    ) -> Result<(Vec<RuntimeFetchedGrammar>, Vec<RuntimeGrammarFailure>), RuntimeOperationError>
+    {
         let selected_languages =
             self.resolve_languages_for_operation(requested_languages, include_all)?;
         fs::create_dir_all(source_root).map_err(|error| {
@@ -301,10 +302,18 @@ impl RuntimeLoader {
             ))
         })?;
 
-        let fetch_plans = selected_languages
-            .iter()
-            .map(grammar_fetch_plan_for_language)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut fetch_plans = Vec::new();
+        let mut failures = Vec::new();
+        for language in &selected_languages {
+            match grammar_fetch_plan_for_language(language) {
+                Ok(plan) => fetch_plans.push(plan),
+                Err(error) => failures.push(RuntimeGrammarFailure {
+                    language_id: language.canonical_id().to_string(),
+                    stage: String::from("fetch"),
+                    message: error.to_string(),
+                }),
+            }
+        }
 
         let crate_specs = fetch_plans
             .iter()
@@ -346,53 +355,63 @@ impl RuntimeLoader {
 
         let mut results = Vec::new();
         for (language, plan) in selected_languages.into_iter().zip(fetch_plans) {
-            let crate_name = plan.crate_name(&language);
-            let source_pin = plan.source_pin();
-            let source_dir = source_root.join(plan.stage_dir_name(&language));
-            if force && source_dir.exists() {
-                fs::remove_dir_all(&source_dir).map_err(|error| {
-                    RuntimeOperationError::grammar_source(format!(
-                        "failed clearing grammar source {}: {error}",
-                        source_dir.display()
-                    ))
-                })?;
-            }
-            let resolved_rev = match &plan {
-                GrammarFetchPlan::Crate(spec) => {
-                    if !source_dir.exists() {
-                        let registry_source =
-                            source_dirs.get(&spec.crate_name).ok_or_else(|| {
-                                RuntimeOperationError::grammar_source(format!(
-                                    "grammar crate source for `{}` not found in cargo registry",
-                                    spec.crate_name
-                                ))
-                            })?;
-                        super::helpers::copy_dir_recursive(registry_source, &source_dir).map_err(
-                            |error| {
-                                RuntimeOperationError::grammar_source(format!(
-                                    "failed copying grammar source from {} to {}: {error}",
-                                    registry_source.display(),
-                                    source_dir.display()
-                                ))
-                            },
-                        )?;
+            let language_id = language.canonical_id().to_string();
+            let outcome = (|| -> Result<RuntimeFetchedGrammar, RuntimeOperationError> {
+                let crate_name = plan.crate_name(&language);
+                let source_pin = plan.source_pin();
+                let source_dir = source_root.join(plan.stage_dir_name(&language));
+                if force && source_dir.exists() {
+                    fs::remove_dir_all(&source_dir).map_err(|error| {
+                        RuntimeOperationError::grammar_source(format!(
+                            "failed clearing grammar source {}: {error}",
+                            source_dir.display()
+                        ))
+                    })?;
+                }
+                let resolved_rev = match &plan {
+                    GrammarFetchPlan::Crate(spec) => {
+                        if !source_dir.exists() {
+                            let registry_source =
+                                source_dirs.get(&spec.crate_name).ok_or_else(|| {
+                                    RuntimeOperationError::grammar_source(format!(
+                                        "grammar crate source for `{}` not found in cargo registry",
+                                        spec.crate_name
+                                    ))
+                                })?;
+                            super::helpers::copy_dir_recursive(registry_source, &source_dir)
+                                .map_err(|error| {
+                                    RuntimeOperationError::grammar_source(format!(
+                                        "failed copying grammar source from {} to {}: {error}",
+                                        registry_source.display(),
+                                        source_dir.display()
+                                    ))
+                                })?;
+                        }
+                        None
                     }
-                    None
-                }
-                GrammarFetchPlan::Git(spec) => {
-                    Some(fetch_git_grammar_source(language.canonical_id(), spec, &source_dir)?)
-                }
-            };
-            results.push(RuntimeFetchedGrammar {
-                language_id: language.canonical_id().to_string(),
-                crate_name,
-                source_pin,
-                resolved_rev,
-                source_dir,
-            });
+                    GrammarFetchPlan::Git(spec) => {
+                        Some(fetch_git_grammar_source(&language_id, spec, &source_dir)?)
+                    }
+                };
+                Ok(RuntimeFetchedGrammar {
+                    language_id: language_id.clone(),
+                    crate_name,
+                    source_pin,
+                    resolved_rev,
+                    source_dir,
+                })
+            })();
+            match outcome {
+                Ok(grammar) => results.push(grammar),
+                Err(error) => failures.push(RuntimeGrammarFailure {
+                    language_id: language_id.clone(),
+                    stage: String::from("fetch"),
+                    message: error.to_string(),
+                }),
+            }
         }
 
-        Ok(results)
+        Ok((results, failures))
     }
 
     pub fn build_runtime_assets(
@@ -403,10 +422,10 @@ impl RuntimeLoader {
         output_root: &Path,
         force: bool,
         skip_load: bool,
-    ) -> Result<Vec<RuntimeBuiltGrammar>, RuntimeOperationError> {
+    ) -> Result<(Vec<RuntimeBuiltGrammar>, Vec<RuntimeGrammarFailure>), RuntimeOperationError> {
         let selected_languages =
             self.resolve_languages_for_operation(requested_languages, include_all)?;
-        let fetched =
+        let (fetched, mut failures) =
             self.fetch_grammar_sources(requested_languages, include_all, source_root, false)?;
         let fetched_by_language = fetched
             .into_iter()
@@ -435,13 +454,25 @@ impl RuntimeLoader {
                     language.canonical_id()
                 ))
             })?;
-            let fetched = fetched_by_language.get(language.canonical_id()).ok_or_else(|| {
-                RuntimeOperationError::grammar_source(format!(
-                    "no fetched grammar source staged for `{}`",
-                    language.canonical_id()
-                ))
-            })?;
-            let grammar_path = grammar_dir.join(shared_library_filename(crate_name));
+            let Some(fetched) = fetched_by_language.get(language.canonical_id()) else {
+                // Fetch failure for this language is already recorded above.
+                continue;
+            };
+            let language_id = language.canonical_id().to_string();
+            let build_source_dir =
+                match resolve_staged_grammar_build_dir(&fetched.source_dir, &language) {
+                    Ok(dir) => dir,
+                    Err(error) => {
+                        failures.push(RuntimeGrammarFailure {
+                            language_id: language_id.clone(),
+                            stage: String::from("build"),
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+            let library = crate_name.to_string();
+            let grammar_path = grammar_dir.join(shared_library_filename(&library));
             if force && grammar_path.exists() {
                 fs::remove_file(&grammar_path).map_err(|error| {
                     RuntimeOperationError::runtime_asset(format!(
@@ -450,56 +481,104 @@ impl RuntimeLoader {
                     ))
                 })?;
             }
-            let build_source_dir =
-                resolve_staged_grammar_build_dir(&fetched.source_dir, &language)?;
-            compile_runtime_grammar(
-                &builder,
-                &build_source_dir,
-                &grammar_path,
-                skip_load,
-                language.canonical_id(),
-            )?;
-            if !skip_load {
-                validate_built_grammar_symbol(&grammar_path, &language)?;
+
+            // Incremental build: skip recompiling when the stamp matches the
+            // current pin/rev/staged sources and the library still exists.
+            let plan = grammar_fetch_plan_for_language(&language)?;
+            let fresh = !force
+                && super::build_stamps::load_stamp(output_root, &language_id).is_some_and(
+                    |stamp| {
+                        stamp.is_fresh(
+                            &plan.source_pin(),
+                            fetched.resolved_rev.as_deref(),
+                            &library,
+                            &grammar_path,
+                            &build_source_dir,
+                        )
+                    },
+                );
+            if fresh {
+                built.push(RuntimeBuiltGrammar {
+                    language_id: language_id.clone(),
+                    source_pin: fetched.source_pin.clone(),
+                    resolved_rev: fetched.resolved_rev.clone(),
+                    grammar_path,
+                    query_paths: Vec::new(),
+                    built: false,
+                });
+                continue;
             }
-            let mut query_paths =
-                copy_standard_queries_to_runtime(&fetched.source_dir, output_root, &language)
-                    .map_err(|error| {
+
+            let outcome = (|| -> Result<RuntimeBuiltGrammar, RuntimeOperationError> {
+                compile_runtime_grammar(
+                    &builder,
+                    &build_source_dir,
+                    &grammar_path,
+                    skip_load,
+                    &language_id,
+                )?;
+                if !skip_load {
+                    validate_built_grammar_symbol(&grammar_path, &language)?;
+                }
+                let mut query_paths =
+                    copy_standard_queries_to_runtime(&fetched.source_dir, output_root, &language)
+                        .map_err(|error| {
                         RuntimeOperationError::runtime_asset(format!(
                             "failed copying queries for `{}`: {error}",
-                            language.canonical_id()
+                            &language_id
                         ))
                     })?;
-            query_paths.extend(
-                copy_bundled_standard_queries_to_runtime(output_root, &language).map_err(
-                    |error| {
-                        RuntimeOperationError::runtime_asset(format!(
-                            "failed copying bundled standard queries for `{}`: {error}",
-                            language.canonical_id()
-                        ))
-                    },
-                )?,
-            );
-            query_paths.extend(
-                copy_bundled_ee_owned_queries_to_runtime(output_root, &language).map_err(
-                    |error| {
-                        RuntimeOperationError::runtime_asset(format!(
-                            "failed copying bundled ee-owned queries for `{}`: {error}",
-                            language.canonical_id()
-                        ))
-                    },
-                )?,
-            );
-            built.push(RuntimeBuiltGrammar {
-                language_id: language.canonical_id().to_string(),
-                source_pin: fetched.source_pin.clone(),
-                resolved_rev: fetched.resolved_rev.clone(),
-                grammar_path,
-                query_paths,
-            });
+                query_paths.extend(
+                    copy_bundled_standard_queries_to_runtime(output_root, &language).map_err(
+                        |error| {
+                            RuntimeOperationError::runtime_asset(format!(
+                                "failed copying bundled standard queries for `{}`: {error}",
+                                &language_id
+                            ))
+                        },
+                    )?,
+                );
+                query_paths.extend(
+                    copy_bundled_ee_owned_queries_to_runtime(output_root, &language).map_err(
+                        |error| {
+                            RuntimeOperationError::runtime_asset(format!(
+                                "failed copying bundled ee-owned queries for `{}`: {error}",
+                                &language_id
+                            ))
+                        },
+                    )?,
+                );
+                super::build_stamps::write_stamp(
+                    &super::build_stamps::GrammarBuildStamp::capture(
+                        &language_id,
+                        &fetched.source_pin,
+                        fetched.resolved_rev.as_deref(),
+                        &library,
+                        &build_source_dir,
+                    ),
+                    output_root,
+                )
+                .map_err(RuntimeOperationError::runtime_asset)?;
+                Ok(RuntimeBuiltGrammar {
+                    language_id: language_id.clone(),
+                    source_pin: fetched.source_pin.clone(),
+                    resolved_rev: fetched.resolved_rev.clone(),
+                    grammar_path,
+                    query_paths,
+                    built: true,
+                })
+            })();
+            match outcome {
+                Ok(grammar) => built.push(grammar),
+                Err(error) => failures.push(RuntimeGrammarFailure {
+                    language_id: language_id.clone(),
+                    stage: String::from("build"),
+                    message: error.to_string(),
+                }),
+            }
         }
 
-        Ok(built)
+        Ok((built, failures))
     }
 
     // -----------------------------------------------------------------------

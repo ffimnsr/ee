@@ -318,12 +318,14 @@ fn main() -> io::Result<()> {
                             languages,
                             source_root,
                             force,
+                            verbose,
                             trust_workspace,
                         }) => cmd_runtime_fetch(
                             &languages,
                             all,
                             source_root.as_deref(),
                             force,
+                            verbose,
                             trust_workspace,
                         ),
                         Some(RuntimeCommands::Build {
@@ -333,6 +335,7 @@ fn main() -> io::Result<()> {
                             output_root,
                             force,
                             skip_load,
+                            verbose,
                             trust_workspace,
                         }) => cmd_runtime_build(
                             &languages,
@@ -341,6 +344,7 @@ fn main() -> io::Result<()> {
                             output_root.as_deref(),
                             force,
                             skip_load,
+                            verbose,
                             trust_workspace,
                         ),
                     }

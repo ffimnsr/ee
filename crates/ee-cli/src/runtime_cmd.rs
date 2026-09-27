@@ -2,6 +2,10 @@
 use super::language_cmd::query_kind_label;
 use super::*;
 
+use std::io::IsTerminal;
+
+use xi_core_lib::runtime_loader::RuntimeGrammarFailure;
+
 pub(crate) fn read_runtime_probe(path: &Path) -> io::Result<(Option<String>, Option<String>)> {
     let file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
@@ -69,6 +73,29 @@ pub(crate) fn runtime_report_exit_code(report: &RuntimeHealthReport) -> i32 {
 pub(crate) fn exit_with_runtime_operation_error(context: &str, error: RuntimeOperationError) -> ! {
     eprintln!("{context}: {error}");
     std::process::exit(runtime_operation_exit_code(error.kind()));
+}
+
+/// Log per-grammar fetch/build failures on stderr; the overall command still
+/// succeeds so remaining grammars and later build steps are not blocked.
+pub(crate) fn report_runtime_failures(failures: &[RuntimeGrammarFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+    let paint = CliColor::new();
+    for failure in failures {
+        eprintln!(
+            "{} runtime grammar `{}` {} failed: {}",
+            paint.yellow("warning:"),
+            paint.bold(&terminal_runtime_language_name(&failure.language_id)),
+            paint.red(&failure.stage),
+            failure.message
+        );
+    }
+    eprintln!(
+        "{} {} runtime grammar(s) not built; fix or configure them to proceed",
+        paint.yellow("warning:"),
+        paint.bold(&failures.len().to_string())
+    );
 }
 
 pub(crate) fn render_runtime_report(report: &RuntimeHealthReport) -> String {
@@ -377,11 +404,95 @@ pub(crate) fn default_runtime_output_root() -> PathBuf {
     with_default_runtime_loader_mut(|loader| loader.runtime_roots().user_root().to_path_buf())
 }
 
+/// Minimal ANSI coloring for CLI output. Colors are only emitted when stdout
+/// or stderr is a terminal, so piped output stays plain.
+pub(crate) struct CliColor(bool);
+
+impl CliColor {
+    pub(crate) fn new() -> Self {
+        Self(std::io::stdout().is_terminal() || std::io::stderr().is_terminal())
+    }
+
+    pub(crate) fn bold(&self, text: &str) -> String {
+        self.paint("1", text)
+    }
+
+    pub(crate) fn dim(&self, text: &str) -> String {
+        self.paint("2", text)
+    }
+
+    pub(crate) fn blue(&self, text: &str) -> String {
+        self.paint("34", text)
+    }
+
+    pub(crate) fn magenta(&self, text: &str) -> String {
+        self.paint("35", text)
+    }
+
+    pub(crate) fn green(&self, text: &str) -> String {
+        self.paint("32", text)
+    }
+
+    pub(crate) fn yellow(&self, text: &str) -> String {
+        self.paint("33", text)
+    }
+
+    pub(crate) fn red(&self, text: &str) -> String {
+        self.paint("31", text)
+    }
+
+    fn paint(&self, code: &str, text: &str) -> String {
+        if self.0 { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() }
+    }
+}
+
+/// Paint the `crate:` / `github:` / `git:` prefix of a short source reference
+/// so source kinds are distinguishable at a glance.
+pub(crate) fn paint_source_reference(paint: &CliColor, reference: &str) -> String {
+    let Some((prefix, rest)) = reference.split_once(':') else {
+        return reference.to_string();
+    };
+    let colored_prefix = match prefix {
+        "crate" => paint.blue(prefix),
+        "github" | "git" => paint.magenta(prefix),
+        _ => paint.bold(prefix),
+    };
+    format!("{colored_prefix}:{rest}")
+}
+
+/// Short human-readable source reference for one grammar:
+/// `crate:tree-sitter-ruby@0.23.1`, `github:owner/repo@<sha>`, or
+/// `git:<host>/path@<ref>` for non-github hosts.
+pub(crate) fn short_source_reference(source_pin: &str) -> String {
+    if let Some(crate_pin) = source_pin.strip_prefix("crate:") {
+        return format!("crate:{crate_pin}");
+    }
+    if let Some(git_pin) = source_pin.strip_prefix("git:") {
+        let (url, ref_part) = git_pin.split_once('#').unwrap_or((git_pin, ""));
+        let ref_label = match ref_part.strip_prefix("rev:") {
+            Some(rev) => rev.to_string(),
+            None => ref_part.to_string(),
+        };
+        let host_path = url
+            .trim_end_matches('/')
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("git://")
+            .trim_start_matches("ssh://");
+        if let Some(repo) = host_path.strip_prefix("github.com/") {
+            return format!("github:{repo}@{ref_label}");
+        }
+        return format!("git:{host_path}@{ref_label}");
+    }
+    source_pin.to_string()
+}
+
 pub(crate) fn cmd_runtime_fetch(
     languages: &[String],
     include_all: bool,
     source_root: Option<&Path>,
     force: bool,
+    verbose: bool,
     trust_workspace: bool,
 ) {
     if let Err(error) = config::configure_runtime_loader_for_file(None, trust_workspace) {
@@ -390,25 +501,40 @@ pub(crate) fn cmd_runtime_fetch(
     }
     let source_root =
         source_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_source_root);
-    let fetched = with_default_runtime_loader_mut(|loader| {
+    let (fetched, failures) = with_default_runtime_loader_mut(|loader| {
         loader.fetch_grammar_sources(languages, include_all, &source_root, force)
     })
     .unwrap_or_else(|error| exit_with_runtime_operation_error("runtime fetch failed", error));
+    report_runtime_failures(&failures);
 
-    println!("fetched {} grammar source trees into {}", fetched.len(), source_root.display());
+    let paint = CliColor::new();
+    println!(
+        "{} {} grammar source trees into {}",
+        paint.green("fetched"),
+        paint.bold(&fetched.len().to_string()),
+        source_root.display()
+    );
     for grammar in fetched {
-        let revision_suffix =
-            grammar.resolved_rev.as_deref().map(|rev| format!(" @ {rev}")).unwrap_or_default();
-        println!(
-            "  {} -> {} ({}){}",
-            terminal_runtime_language_name(&grammar.language_id),
-            grammar.source_dir.display(),
-            grammar.source_pin,
-            revision_suffix
-        );
+        if verbose {
+            println!(
+                "  {} {} {} ({})",
+                paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                paint.dim("->"),
+                grammar.source_dir.display(),
+                grammar.source_pin
+            );
+        } else {
+            println!(
+                "  {} {} {}",
+                paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                paint.dim("->"),
+                paint_source_reference(&paint, &short_source_reference(&grammar.source_pin))
+            );
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_runtime_build(
     languages: &[String],
     include_all: bool,
@@ -416,6 +542,7 @@ pub(crate) fn cmd_runtime_build(
     output_root: Option<&Path>,
     force: bool,
     skip_load: bool,
+    verbose: bool,
     trust_workspace: bool,
 ) {
     if let Err(error) = config::configure_runtime_loader_for_file(None, trust_workspace) {
@@ -426,7 +553,7 @@ pub(crate) fn cmd_runtime_build(
         source_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_source_root);
     let output_root =
         output_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_output_root);
-    let built = with_default_runtime_loader_mut(|loader| {
+    let (built, failures) = with_default_runtime_loader_mut(|loader| {
         loader.build_runtime_assets(
             languages,
             include_all,
@@ -437,22 +564,67 @@ pub(crate) fn cmd_runtime_build(
         )
     })
     .unwrap_or_else(|error| exit_with_runtime_operation_error("runtime build failed", error));
+    report_runtime_failures(&failures);
 
-    println!("built {} runtime grammars into {}", built.len(), output_root.display());
+    let paint = CliColor::new();
+    let built_count = built.iter().filter(|grammar| grammar.built).count();
+    let up_to_date = built.len() - built_count;
+    println!(
+        "{} {} runtime grammars into {} ({} {})",
+        paint.green("built"),
+        paint.bold(&built_count.to_string()),
+        output_root.display(),
+        paint.green(&up_to_date.to_string()),
+        paint.green("up to date")
+    );
     for grammar in built {
+        if !grammar.built {
+            if verbose {
+                println!(
+                    "  {} {} {} ({}) at {}",
+                    paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                    paint.dim("->"),
+                    paint.green("up to date"),
+                    grammar.source_pin,
+                    grammar.grammar_path.display()
+                );
+            } else {
+                println!(
+                    "  {} {} {} ({})",
+                    paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                    paint.dim("->"),
+                    paint.green("up to date"),
+                    paint_source_reference(&paint, &short_source_reference(&grammar.source_pin))
+                );
+            }
+            continue;
+        }
         let query_summary = if grammar.query_paths.is_empty() {
             String::from("no standard queries copied")
         } else {
             format!("{} query files", grammar.query_paths.len())
         };
-        let revision_suffix =
-            grammar.resolved_rev.as_deref().map(|rev| format!(", rev {rev}")).unwrap_or_default();
-        println!(
-            "  {} -> {} ({query_summary}, {}{})",
-            terminal_runtime_language_name(&grammar.language_id),
-            grammar.grammar_path.display(),
-            grammar.source_pin,
-            revision_suffix
-        );
+        if verbose {
+            println!(
+                "  {} {} {} ({query_summary}, {})",
+                paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                paint.dim("->"),
+                grammar.grammar_path.display(),
+                grammar.source_pin
+            );
+        } else {
+            let library_name = grammar
+                .grammar_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| grammar.grammar_path.display().to_string());
+            println!(
+                "  {} {} {} ({query_summary}, {})",
+                paint.bold(&terminal_runtime_language_name(&grammar.language_id)),
+                paint.dim("->"),
+                paint_source_reference(&paint, &library_name),
+                paint_source_reference(&paint, &short_source_reference(&grammar.source_pin))
+            );
+        }
     }
 }

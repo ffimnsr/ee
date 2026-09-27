@@ -85,6 +85,10 @@ attach_lsp = "terraform-ls"
 [languages.helm]
 file_types = ["tpl"]
 query_language = "helm"
+# tree-sitter-go-template ships `go-template` (root) and `go-template-helm`
+# (dialects/helm) grammars in one repo; select_manifest_grammar picks the
+# `-helm` dialect by suffix, which exports `tree_sitter_helm`.
+symbol = "tree_sitter_helm"
 
 [languages.proto]
 query_language = "protobuf"
@@ -138,13 +142,6 @@ file_types = ["svelte"]
 block_comment = ["<!--", "-->"]
 indentation = "treesitter"
 attach_lsp = "svelteserver"
-
-[languages.swift]
-file_types = ["swift"]
-line_comment = "//"
-block_comment = ["/*", "*/"]
-indentation = "treesitter"
-attach_lsp = "sourcekit-lsp"
 
 [languages.toml]
 file_types = ["toml"]
@@ -416,6 +413,10 @@ line_comment = "//"
 [languages.sh]
 defer = true
 reason = "shell script grammar is the builtin bash entry; no dedicated LSP"
+
+[languages.swift]
+defer = true
+reason = "tree-sitter-swift is codegen-only: the repo ships grammar.js + scanner.c but no src/parser.c, so a bare checkout cannot compile; requires a codegen step"
 
 [languages.asciidoc]
 file_types = ["adoc", "asciidoc"]
