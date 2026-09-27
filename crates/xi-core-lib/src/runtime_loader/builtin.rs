@@ -16,6 +16,9 @@ use crate::tree_sitter_support::{
 #[cfg(any(test, feature = "test-grammars"))]
 use ee_ts_test_grammars as test_grammars;
 
+use super::builtin_zed_generated::{
+    generated_zed_language_definitions, generated_zed_language_overrides,
+};
 use super::errors::RuntimeLoaderError;
 use super::helpers::{bundled_runtime_root_from_env, normalize_lookup_key};
 use super::loader::RuntimeLoader;
@@ -32,6 +35,8 @@ fn builtin_language_definition(name: &str, file_types: &[&str]) -> LanguageDefin
     LanguageDefinition {
         name: name.into(),
         extensions: file_types.iter().map(|value| (*value).to_string()).collect(),
+        filenames: Vec::new(),
+        globs: Vec::new(),
         first_line_match: None,
         scope: format!("source.{}", normalize_lookup_key(name)),
         default_config: None,
@@ -40,7 +45,7 @@ fn builtin_language_definition(name: &str, file_types: &[&str]) -> LanguageDefin
 
 fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
     let mut overrides = RuntimeLanguageOverrides::new();
-    let definitions = vec![
+    let mut definitions = vec![
         builtin_language_definition("bash", &["sh", "bash", ".bashrc", ".zshrc"]),
         builtin_language_definition("c", &["c", "h"]),
         builtin_language_definition("csharp", &["cs"]),
@@ -62,6 +67,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         builtin_language_definition("typescript", &["cts", "mts", "ts", "tsx"]),
         builtin_language_definition("yaml", &["yaml", "yml"]),
     ];
+    definitions.extend(generated_zed_language_definitions());
     let standard_and_ee = RuntimeQueryKind::STANDARD
         .into_iter()
         .chain(RuntimeQueryKind::EE_OWNED)
@@ -400,6 +406,10 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
             ]
         )
     );
+
+    for (language_id, config) in generated_zed_language_overrides() {
+        overrides.insert(language_id, config);
+    }
 
     (Languages::new(&definitions), overrides)
 }

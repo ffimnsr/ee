@@ -1,0 +1,422 @@
+# Curated per-language data for the Zed language catalog sync.
+#
+# The generator merges this file with doc-extracted facts ("Tree-sitter:" /
+# "Language Server:" bullets). Docs give grammar repo + LSP name; this file
+# supplies what docs omit: binary command/args, routing, file types, aliases,
+# query-language mapping, comment metadata, git rev fallbacks, and deferrals.
+#
+# Language keys are the doc slugs (doc file name without .md).
+
+# ---------------------------------------------------------------------------
+# Deferred languages: recorded in manifest, never emitted into Rust.
+# ---------------------------------------------------------------------------
+[languages.diff]
+file_types = ["diff", "patch"]
+
+[languages.gdscript]
+defer = true
+reason = "godot LSP binary/env varies per project; grammar alone insufficient"
+
+[languages.glsl]
+defer = true
+reason = "no stable LSP binary; GLSL is often injected into shader strings"
+
+[languages.groovy]
+defer = true
+reason = "no stable LSP binary"
+
+[languages.makefile]
+filenames = [
+    "Makefile", "makefile", "GNUmakefile", "gnumakefile",
+    "BSDmakefile", "bsdmakefile",
+]
+file_types = ["mk", "mak"]
+query_language = "make"
+line_comment = "#"
+
+[languages.powershell]
+defer = true
+reason = "PowerShellEditorServices wrapper is environment-specific"
+
+[languages.roc]
+defer = true
+reason = "no bundled queries, fringe grammar"
+
+[languages.uiua]
+defer = true
+reason = "no bundled queries, fringe grammar"
+
+[languages.csharp]
+defer_lsp = true
+reason_lsp = "omnisharp requires dotnet/roslyn plugin environment; grammar already builtin"
+
+[languages.ansible]
+query_language = "yaml"
+file_types = ["ansible"]
+
+[servers.ansible-language-server]
+language_name = "Ansible"
+command = "ansible-language-server"
+args = ["--stdio"]
+extensions = []
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+# ---------------------------------------------------------------------------
+# Query-language and file-type corrections
+# ---------------------------------------------------------------------------
+[languages.terraform]
+file_types = ["tf", "tfvars"]
+query_language = "hcl"
+line_comment = "//"
+block_comment = ["/*", "*/"]
+indentation = "treesitter"
+attach_lsp = "terraform-ls"
+
+[languages.opentofu]
+file_types = ["tofu"]
+query_language = "hcl"
+line_comment = "//"
+block_comment = ["/*", "*/"]
+indentation = "treesitter"
+attach_lsp = "terraform-ls"
+
+[languages.helm]
+file_types = ["tpl"]
+query_language = "helm"
+
+[languages.proto]
+query_language = "protobuf"
+
+[languages.just]
+grammar_url = "https://github.com/IndianBoy42/tree-sitter-just"
+filenames = ["Justfile", "justfile"]
+query_language = "just"
+line_comment = "#"
+indentation = "treesitter"
+attach_lsp = "just"
+
+[languages.docker]
+query_language = "dockerfile"
+file_types = []
+filenames = ["Dockerfile", "Containerfile"]
+globs = ["**/Dockerfile*", "**/Containerfile*"]
+attach_lsp = "dockerfile"
+
+# ---------------------------------------------------------------------------
+# LSP servers: new bundled servers (command/args/routing/init).
+# `attach` reuses an already-bundled server id.
+# ---------------------------------------------------------------------------
+[languages.gleam]
+file_types = ["gleam"]
+line_comment = "//"
+indentation = "treesitter"
+attach_lsp = "gleam"
+
+[languages.kotlin]
+file_types = ["kt", "kts"]
+line_comment = "//"
+indentation = "treesitter"
+attach_lsp = "kotlin-language-server"
+
+[languages.lua]
+file_types = ["lua"]
+line_comment = "--"
+indentation = "treesitter"
+attach_lsp = "lua-language-server"
+
+[languages.ocaml]
+file_types = ["ml", "mli"]
+line_comment = "//"
+indentation = "treesitter"
+attach_lsp = "ocamllsp"
+symbol = "tree_sitter_ocaml"
+
+[languages.svelte]
+file_types = ["svelte"]
+block_comment = ["<!--", "-->"]
+indentation = "treesitter"
+attach_lsp = "svelteserver"
+
+[languages.swift]
+file_types = ["swift"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+indentation = "treesitter"
+attach_lsp = "sourcekit-lsp"
+
+[languages.toml]
+file_types = ["toml"]
+line_comment = "#"
+attach_lsp = "taplo"
+
+[languages.vue]
+file_types = ["vue"]
+block_comment = ["<!--", "-->"]
+indentation = "treesitter"
+attach_lsp = "vue-language-server"
+
+[languages.zig]
+file_types = ["zig"]
+line_comment = "//"
+indentation = "treesitter"
+attach_lsp = "zls"
+
+# Terraform/OpenTofu server (one id, shared by both languages).
+[servers.terraform-ls]
+language_name = "Terraform"
+command = "terraform-ls"
+args = []
+extensions = ["tf", "tfvars", "tofu"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.astro]
+file_types = ["astro"]
+line_comment = "//"
+block_comment = ["<!--", "-->"]
+indentation = "treesitter"
+
+[servers.astro-ls]
+language_name = "Astro"
+command = "astro-ls"
+args = ["--stdio"]
+extensions = ["astro"]
+filenames = []
+supports_single_file = true
+workspace_identifier = "package.json"
+
+[languages.clojure]
+file_types = ["clj", "cljs", "cljc", "edn"]
+line_comment = ";"
+indentation = "treesitter"
+
+[servers.clojure-lsp]
+language_name = "Clojure"
+command = "clojure-lsp"
+args = []
+extensions = ["clj", "cljs", "cljc", "edn"]
+filenames = []
+supports_single_file = true
+workspace_identifier = "deps.edn"
+
+[languages.dart]
+file_types = ["dart"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+indentation = "treesitter"
+
+[servers.dart]
+language_name = "Dart"
+command = "dart"
+args = ["language-server", "--protocol=lsp"]
+extensions = ["dart"]
+filenames = []
+supports_single_file = false
+workspace_identifier = "pubspec.yaml"
+
+[languages.elm]
+file_types = ["elm"]
+line_comment = "--"
+block_comment = ["{-", "-}"]
+indentation = "treesitter"
+
+[servers.elm-language-server]
+language_name = "Elm"
+command = "elm-language-server"
+args = []
+extensions = ["elm"]
+filenames = []
+supports_single_file = true
+workspace_identifier = "elm.json"
+
+[languages.erlang]
+file_types = ["erl", "hrl"]
+line_comment = "%"
+
+[servers.erlang_ls]
+language_name = "Erlang"
+command = "erlang_ls"
+args = []
+extensions = ["erl", "hrl"]
+filenames = []
+supports_single_file = true
+workspace_identifier = "rebar.config"
+
+[languages.fish]
+file_types = ["fish"]
+line_comment = "#"
+
+[languages.jsonnet]
+file_types = ["jsonnet", "libsonnet"]
+line_comment = "//"
+block_comment = ["/*", "*/"]
+indentation = "treesitter"
+
+[servers.jsonnet-language-server]
+language_name = "Jsonnet"
+command = "jsonnet-language-server"
+args = []
+extensions = ["jsonnet", "libsonnet"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.julia]
+file_types = ["jl"]
+line_comment = "#"
+
+[servers.julia]
+language_name = "Julia"
+command = "julia"
+args = ["--startup-file=no", "--history-file=no", "-e", "using LanguageServer; runserver()"]
+extensions = ["jl"]
+filenames = []
+supports_single_file = false
+workspace_identifier = "Project.toml"
+
+[languages.luau]
+file_types = ["luau"]
+line_comment = "--"
+indentation = "treesitter"
+
+[servers.luau-lsp]
+language_name = "Luau"
+command = "luau-lsp"
+args = []
+extensions = ["luau"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.nim]
+file_types = ["nim", "nimble", "nims"]
+line_comment = "#"
+indentation = "treesitter"
+
+[servers.nimlangserver]
+language_name = "Nim"
+command = "nimlangserver"
+args = []
+extensions = ["nim", "nimble", "nims"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.prisma]
+file_types = ["prisma"]
+line_comment = "//"
+
+[servers.prisma-language-server]
+language_name = "Prisma"
+command = "prisma-language-server"
+args = ["--stdio"]
+extensions = ["prisma"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.purescript]
+file_types = ["purs"]
+line_comment = "--"
+block_comment = ["{-", "-}"]
+indentation = "treesitter"
+
+[servers.purescript-language-server]
+language_name = "PureScript"
+command = "purescript-language-server"
+args = ["--stdio"]
+extensions = ["purs"]
+filenames = []
+supports_single_file = false
+workspace_identifier = "spago.yaml"
+
+[languages.r]
+file_types = ["r"]
+line_comment = "#"
+
+[servers.r]
+language_name = "R"
+command = "R"
+args = ["--no-echo", "-e", "languageserver::run()"]
+extensions = ["r"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.racket]
+file_types = ["rkt", "scrbl"]
+line_comment = ";"
+block_comment = ["#|", "|#"]
+
+[servers.racket]
+language_name = "Racket"
+command = "racket"
+args = ["--lib", "racket-langserver"]
+extensions = ["rkt", "scrbl"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.rego]
+file_types = ["rego"]
+line_comment = "#"
+
+[servers.regal]
+language_name = "Rego"
+command = "regal"
+args = ["lsp"]
+extensions = ["rego"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.rst]
+file_types = ["rst"]
+
+[languages.scheme]
+file_types = ["scm", "ss"]
+line_comment = ";"
+
+[languages.sml]
+file_types = ["sml", "sig"]
+block_comment = ["(*", "*)"]
+
+[servers.millet]
+language_name = "Standard ML"
+command = "millet"
+args = []
+extensions = ["sml", "sig"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.sql]
+file_types = ["sql"]
+
+[languages.xml]
+file_types = ["xml", "xsd", "svg"]
+block_comment = ["<!--", "-->"]
+
+[servers.lemminx]
+language_name = "XML"
+command = "lemminx"
+args = []
+extensions = ["xml", "xsd", "svg"]
+filenames = []
+supports_single_file = true
+workspace_identifier = ""
+
+[languages.yara]
+file_types = ["yar", "yara"]
+line_comment = "//"
+
+[languages.sh]
+defer = true
+reason = "shell script grammar is the builtin bash entry; no dedicated LSP"
+
+[languages.asciidoc]
+file_types = ["adoc", "asciidoc"]
+line_comment = "//"

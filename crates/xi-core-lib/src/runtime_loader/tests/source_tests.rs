@@ -36,6 +36,7 @@ fn test_runtime_language(name: &str) -> RuntimeLanguage {
         injection_regex: None,
         aliases: Vec::new(),
         file_types: Vec::new(),
+        filenames: Vec::new(),
         globs: Vec::new(),
         shebangs: Vec::new(),
         supported_query_kinds: BTreeSet::new(),

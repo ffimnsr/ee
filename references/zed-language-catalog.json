@@ -1,0 +1,2360 @@
+{
+  "deferred": [
+    "gdscript",
+    "glsl",
+    "groovy",
+    "powershell",
+    "roc",
+    "sh",
+    "uiua"
+  ],
+  "doc_count": 71,
+  "docs_failed": [],
+  "generated_at": "2026-09-27T04:16:33+00:00",
+  "grammar_entries": 39,
+  "languages": {
+    "ansible": {
+      "aliases": [
+        "ansible"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Ansible",
+      "doc": "ansible.md",
+      "file_types": [
+        "ansible"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/zed-industries/tree-sitter-yaml",
+      "indentation": null,
+      "library": "tree-sitter-yaml",
+      "line_comment": null,
+      "lsp_doc_name": "ansible/vscode-ansible",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "yaml",
+      "rev": "baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a",
+      "status": "ok",
+      "symbol": "tree_sitter_yaml"
+    },
+    "asciidoc": {
+      "aliases": [
+        "asciidoc"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "AsciiDoc",
+      "doc": "asciidoc.md",
+      "file_types": [
+        "adoc",
+        "asciidoc"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/cathaysia/tree-sitter-asciidoc",
+      "indentation": null,
+      "library": "tree-sitter-asciidoc",
+      "line_comment": "//",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "asciidoc",
+      "rev": "ade998931aeac0a10ca592b421cdb1f2f088f6c9",
+      "status": "ok",
+      "symbol": "tree_sitter_asciidoc"
+    },
+    "astro": {
+      "aliases": [
+        "astro"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "<!--",
+        "-->"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Astro",
+      "doc": "astro.md",
+      "file_types": [
+        "astro"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/virchau13/tree-sitter-astro",
+      "indentation": "treesitter",
+      "library": "tree-sitter-astro",
+      "line_comment": "//",
+      "lsp_doc_name": "withastro/language-tools",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "astro",
+      "rev": "213f6e6973d9b456c6e50e86f19f66877e7ef0ee",
+      "status": "ok",
+      "symbol": "tree_sitter_astro"
+    },
+    "bash": {
+      "aliases": [
+        "bash"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Bash",
+      "doc": "bash.md",
+      "file_types": [
+        "bash"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "bash-lsp/bash-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "bash",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "biome": {
+      "aliases": [
+        "biome"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Biome",
+      "doc": "biome.md",
+      "file_types": [
+        "biome"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "biomejs/biome",
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "biome",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "c": {
+      "aliases": [
+        "c"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "C",
+      "doc": "c.md",
+      "file_types": [
+        "c"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "clangd/clangd",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "c",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "clojure": {
+      "aliases": [
+        "clojure"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Clojure",
+      "doc": "clojure.md",
+      "file_types": [
+        "clj",
+        "cljs",
+        "cljc",
+        "edn"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/prcastro/tree-sitter-clojure",
+      "indentation": "treesitter",
+      "library": "tree-sitter-clojure",
+      "line_comment": ";",
+      "lsp_doc_name": "clojure-lsp/clojure-lsp",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "clojure",
+      "rev": "e43eff80d17cf34852dcd92ca5e6986d23a7040f",
+      "status": "ok",
+      "symbol": "tree_sitter_clojure"
+    },
+    "cpp": {
+      "aliases": [
+        "cpp"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "C++",
+      "doc": "cpp.md",
+      "file_types": [
+        "cpp"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "clangd/clangd",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "cpp",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "csharp": {
+      "aliases": [
+        "csharp"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": true,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "C#",
+      "doc": "csharp.md",
+      "file_types": [
+        "csharp"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "csharp",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "css": {
+      "aliases": [
+        "css"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "CSS",
+      "doc": "css.md",
+      "file_types": [
+        "css"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "css",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "dart": {
+      "aliases": [
+        "dart"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Dart",
+      "doc": "dart.md",
+      "file_types": [
+        "dart"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/UserNobody14/tree-sitter-dart",
+      "indentation": "treesitter",
+      "library": "tree-sitter-dart",
+      "line_comment": "//",
+      "lsp_doc_name": "dart language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "dart",
+      "rev": "be07cf7118d3dba06236a3f19541685a68209934",
+      "status": "ok",
+      "symbol": "tree_sitter_dart"
+    },
+    "deno": {
+      "aliases": [
+        "deno"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Deno",
+      "doc": "deno.md",
+      "file_types": [
+        "deno"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "deno",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "diff": {
+      "aliases": [
+        "diff"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Diff",
+      "doc": "diff.md",
+      "file_types": [
+        "diff",
+        "patch"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/the-mikedavis/tree-sitter-diff",
+      "indentation": null,
+      "library": "tree-sitter-diff",
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "diff",
+      "rev": "ada384ac7bfc1307f32de474620120add29998fb",
+      "status": "ok",
+      "symbol": "tree_sitter_diff"
+    },
+    "docker": {
+      "aliases": [
+        "docker"
+      ],
+      "attach_lsp": "dockerfile",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Docker",
+      "doc": "docker.md",
+      "file_types": [],
+      "filenames": [
+        "Dockerfile",
+        "Containerfile"
+      ],
+      "globs": [
+        "**/Dockerfile*",
+        "**/Containerfile*"
+      ],
+      "grammar_url": "https://github.com/camdencheek/tree-sitter-dockerfile",
+      "indentation": null,
+      "library": "tree-sitter-dockerfile",
+      "line_comment": null,
+      "lsp_doc_name": "microsoft/compose-language-service",
+      "lsp_server": "dockerfile",
+      "queries_present": true,
+      "query_language": "dockerfile",
+      "rev": "971acdd908568b4531b0ba28a445bf0bb720aba5",
+      "status": "ok",
+      "symbol": "tree_sitter_dockerfile"
+    },
+    "elixir": {
+      "aliases": [
+        "elixir"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Elixir",
+      "doc": "elixir.md",
+      "file_types": [
+        "elixir"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "elixir",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "elm": {
+      "aliases": [
+        "elm"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "{-",
+        "-}"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Elm",
+      "doc": "elm.md",
+      "file_types": [
+        "elm"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/elm-tooling/tree-sitter-elm",
+      "indentation": "treesitter",
+      "library": "tree-sitter-elm",
+      "line_comment": "--",
+      "lsp_doc_name": "elm-tooling/elm-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "elm",
+      "rev": "e1e8fea161a1e66f3997855d316be2a43e4e956f",
+      "status": "ok",
+      "symbol": "tree_sitter_elm"
+    },
+    "emmet": {
+      "aliases": [
+        "emmet"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Emmet",
+      "doc": "emmet.md",
+      "file_types": [
+        "emmet"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "olrtg/emmet-language-server",
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "emmet",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "erlang": {
+      "aliases": [
+        "erlang"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Erlang",
+      "doc": "erlang.md",
+      "file_types": [
+        "erl",
+        "hrl"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/WhatsApp/tree-sitter-erlang",
+      "indentation": null,
+      "library": "tree-sitter-erlang",
+      "line_comment": "%",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "erlang",
+      "rev": "6ba4c762eb3065495e3db85697ffeecdf364ce35",
+      "status": "ok",
+      "symbol": "tree_sitter_erlang"
+    },
+    "fish": {
+      "aliases": [
+        "fish"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Fish",
+      "doc": "fish.md",
+      "file_types": [
+        "fish"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/ram02z/tree-sitter-fish",
+      "indentation": null,
+      "library": "tree-sitter-fish",
+      "line_comment": "#",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "fish",
+      "rev": "b7f1d682941e0c62dfcd6bf9ef481638351bab16",
+      "status": "ok",
+      "symbol": "tree_sitter_fish"
+    },
+    "gdscript": {
+      "aliases": [
+        "gdscript"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "godot LSP binary/env varies per project; grammar alone insufficient",
+      "deferred": true,
+      "display_name": "GDScript",
+      "doc": "gdscript.md",
+      "file_types": [
+        "gdscript"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "gdscript-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "gdscript",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "gleam": {
+      "aliases": [
+        "gleam"
+      ],
+      "attach_lsp": "gleam",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Gleam",
+      "doc": "gleam.md",
+      "file_types": [
+        "gleam"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/gleam-lang/tree-sitter-gleam",
+      "indentation": "treesitter",
+      "library": "tree-sitter-gleam",
+      "line_comment": "//",
+      "lsp_doc_name": "gleam lsp",
+      "lsp_server": "gleam",
+      "queries_present": true,
+      "query_language": "gleam",
+      "rev": "fa6d0d94804f1b342e175865a3dbeb316ee5115e",
+      "status": "ok",
+      "symbol": "tree_sitter_gleam"
+    },
+    "glsl": {
+      "aliases": [
+        "glsl"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "no stable LSP binary; GLSL is often injected into shader strings",
+      "deferred": true,
+      "display_name": "GLSL",
+      "doc": "glsl.md",
+      "file_types": [
+        "glsl"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "nolanderc/glsl_analyzer",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "glsl",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "go": {
+      "aliases": [
+        "go"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Go",
+      "doc": "go.md",
+      "file_types": [
+        "go"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "golang/tools/tree/master/gopls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "go",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "groovy": {
+      "aliases": [
+        "groovy"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "no stable LSP binary",
+      "deferred": true,
+      "display_name": "Groovy",
+      "doc": "groovy.md",
+      "file_types": [
+        "groovy"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "GroovyLanguageServer/groovy-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "groovy",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "haskell": {
+      "aliases": [
+        "haskell"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Haskell",
+      "doc": "haskell.md",
+      "file_types": [
+        "haskell"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "haskell-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "haskell",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "helm": {
+      "aliases": [
+        "helm"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Helm",
+      "doc": "helm.md",
+      "file_types": [
+        "tpl"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/ngalaiko/tree-sitter-go-template",
+      "indentation": null,
+      "library": "tree-sitter-go-template",
+      "line_comment": null,
+      "lsp_doc_name": "mrjosh/helm-ls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "helm",
+      "rev": "aa71f63de226c5592dfbfc1f29949522d7c95fac",
+      "status": "ok",
+      "symbol": "tree_sitter_go_template"
+    },
+    "html": {
+      "aliases": [
+        "html"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "HTML",
+      "doc": "html.md",
+      "file_types": [
+        "html"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "microsoft/vscode-html-languageservice",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "html",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "java": {
+      "aliases": [
+        "java"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Java",
+      "doc": "java.md",
+      "file_types": [
+        "java"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "eclipse-jdtls/eclipse.jdt.ls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "java",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "javascript": {
+      "aliases": [
+        "javascript"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "JavaScript",
+      "doc": "javascript.md",
+      "file_types": [
+        "javascript"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "yioneko/vtsls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "javascript",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "json": {
+      "aliases": [
+        "json"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "JSON",
+      "doc": "json.md",
+      "file_types": [
+        "json"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "zed-industries/json-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "json",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "jsonnet": {
+      "aliases": [
+        "jsonnet"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Jsonnet",
+      "doc": "jsonnet.md",
+      "file_types": [
+        "jsonnet",
+        "libsonnet"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/sourcegraph/tree-sitter-jsonnet",
+      "indentation": "treesitter",
+      "library": "tree-sitter-jsonnet",
+      "line_comment": "//",
+      "lsp_doc_name": "grafana/jsonnet-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "jsonnet",
+      "rev": "ddd075f1939aed8147b7aa67f042eda3fce22790",
+      "status": "ok",
+      "symbol": "tree_sitter_jsonnet"
+    },
+    "julia": {
+      "aliases": [
+        "julia"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Julia",
+      "doc": "julia.md",
+      "file_types": [
+        "jl"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter/tree-sitter-julia",
+      "indentation": null,
+      "library": "tree-sitter-julia",
+      "line_comment": "#",
+      "lsp_doc_name": "julia-vscode/LanguageServer.jl",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "julia",
+      "rev": "e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3",
+      "status": "ok",
+      "symbol": "tree_sitter_julia"
+    },
+    "just": {
+      "aliases": [
+        "just"
+      ],
+      "attach_lsp": "just",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Just",
+      "doc": null,
+      "file_types": [
+        "just"
+      ],
+      "filenames": [
+        "Justfile",
+        "justfile"
+      ],
+      "globs": [],
+      "grammar_url": "https://github.com/IndianBoy42/tree-sitter-just",
+      "indentation": "treesitter",
+      "library": "tree-sitter-just",
+      "line_comment": "#",
+      "lsp_doc_name": null,
+      "lsp_server": "just",
+      "queries_present": true,
+      "query_language": "just",
+      "rev": "5685543a6e64f66335e25518c9ae8ffa1dae3d01",
+      "status": "ok",
+      "symbol": "tree_sitter_just"
+    },
+    "kotlin": {
+      "aliases": [
+        "kotlin"
+      ],
+      "attach_lsp": "kotlin-language-server",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Kotlin",
+      "doc": "kotlin.md",
+      "file_types": [
+        "kt",
+        "kts"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/fwcd/tree-sitter-kotlin",
+      "indentation": "treesitter",
+      "library": "tree-sitter-kotlin",
+      "line_comment": "//",
+      "lsp_doc_name": "kotlin/kotlin-lsp",
+      "lsp_server": "kotlin-language-server",
+      "queries_present": true,
+      "query_language": "kotlin",
+      "rev": "1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1",
+      "status": "ok",
+      "symbol": "tree_sitter_kotlin"
+    },
+    "lua": {
+      "aliases": [
+        "lua"
+      ],
+      "attach_lsp": "lua-language-server",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Lua",
+      "doc": "lua.md",
+      "file_types": [
+        "lua"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-lua",
+      "indentation": "treesitter",
+      "library": "tree-sitter-lua",
+      "line_comment": "--",
+      "lsp_doc_name": null,
+      "lsp_server": "lua-language-server",
+      "queries_present": true,
+      "query_language": "lua",
+      "rev": "10fe0054734eec83049514ea2e718b2a56acd0c9",
+      "status": "ok",
+      "symbol": "tree_sitter_lua"
+    },
+    "luau": {
+      "aliases": [
+        "luau"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Luau",
+      "doc": "luau.md",
+      "file_types": [
+        "luau"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/4teapo/tree-sitter-luau",
+      "indentation": "treesitter",
+      "library": "tree-sitter-luau",
+      "line_comment": "--",
+      "lsp_doc_name": "JohnnyMorganz/luau-lsp",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "luau",
+      "rev": "5c708649dd8d26735f8d6cca022195325ea27086",
+      "status": "ok",
+      "symbol": "tree_sitter_luau"
+    },
+    "makefile": {
+      "aliases": [
+        "makefile"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Makefile",
+      "doc": "makefile.md",
+      "file_types": [
+        "mk",
+        "mak"
+      ],
+      "filenames": [
+        "Makefile",
+        "makefile",
+        "GNUmakefile",
+        "gnumakefile",
+        "BSDmakefile",
+        "bsdmakefile"
+      ],
+      "globs": [],
+      "grammar_url": "https://github.com/caius/tree-sitter-make",
+      "indentation": null,
+      "library": "tree-sitter-make",
+      "line_comment": "#",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "make",
+      "rev": "3a295ac70ae1f738c5f96a316ac523a5a213d658",
+      "status": "ok",
+      "symbol": "tree_sitter_make"
+    },
+    "markdown": {
+      "aliases": [
+        "markdown"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Markdown",
+      "doc": "markdown.md",
+      "file_types": [
+        "markdown"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "markdown",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "nim": {
+      "aliases": [
+        "nim"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Nim",
+      "doc": "nim.md",
+      "file_types": [
+        "nim",
+        "nimble",
+        "nims"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/alaviss/tree-sitter-nim",
+      "indentation": "treesitter",
+      "library": "tree-sitter-nim",
+      "line_comment": "#",
+      "lsp_doc_name": "nim-lang/langserver",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "nim",
+      "rev": "ac72ba30d16edf0be021588a9301ede4accd6cf4",
+      "status": "ok",
+      "symbol": "tree_sitter_nim"
+    },
+    "ocaml": {
+      "aliases": [
+        "ocaml"
+      ],
+      "attach_lsp": "ocamllsp",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "OCaml",
+      "doc": "ocaml.md",
+      "file_types": [
+        "ml",
+        "mli"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter/tree-sitter-ocaml",
+      "indentation": "treesitter",
+      "library": "tree-sitter-ocaml",
+      "line_comment": "//",
+      "lsp_doc_name": "ocaml/ocaml-lsp",
+      "lsp_server": "ocamllsp",
+      "queries_present": true,
+      "query_language": "ocaml",
+      "rev": "3b2e14e0697d405c9aa0beddfa09b71f45abc504",
+      "status": "ok",
+      "symbol": "tree_sitter_ocaml"
+    },
+    "opentofu": {
+      "aliases": [
+        "opentofu"
+      ],
+      "attach_lsp": "terraform-ls",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "OpenTofu",
+      "doc": "opentofu.md",
+      "file_types": [
+        "tofu"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-hcl",
+      "indentation": "treesitter",
+      "library": "tree-sitter-hcl",
+      "line_comment": "//",
+      "lsp_doc_name": "opentofu/tofu-ls",
+      "lsp_server": "terraform-ls",
+      "queries_present": true,
+      "query_language": "hcl",
+      "rev": "64ad62785d442eb4d45df3a1764962dafd5bc98b",
+      "status": "ok",
+      "symbol": "tree_sitter_hcl"
+    },
+    "php": {
+      "aliases": [
+        "php"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "PHP",
+      "doc": "php.md",
+      "file_types": [
+        "php"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "phpactor/phpactor",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "php",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "powershell": {
+      "aliases": [
+        "powershell"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "PowerShellEditorServices wrapper is environment-specific",
+      "deferred": true,
+      "display_name": "PowerShell",
+      "doc": "powershell.md",
+      "file_types": [
+        "powershell"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "PowerShell/PowerShellEditorServices",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "powershell",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "prisma": {
+      "aliases": [
+        "prisma"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Prisma",
+      "doc": "prisma.md",
+      "file_types": [
+        "prisma"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/victorhqc/tree-sitter-prisma",
+      "indentation": null,
+      "library": "tree-sitter-prisma",
+      "line_comment": "//",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "prisma",
+      "rev": "3556b2c1f20ec9ac91e92d32c43d9d2a0ca3cc49",
+      "status": "ok",
+      "symbol": "tree_sitter_prisma"
+    },
+    "proto": {
+      "aliases": [
+        "proto"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Proto",
+      "doc": "proto.md",
+      "file_types": [
+        "proto"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/coder3101/tree-sitter-proto",
+      "indentation": null,
+      "library": "tree-sitter-proto",
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "protobuf",
+      "rev": "be5691cf82ca284f83e68b9c8cdc4cac5d7fa208",
+      "status": "ok",
+      "symbol": "tree_sitter_proto"
+    },
+    "purescript": {
+      "aliases": [
+        "purescript"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "{-",
+        "-}"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "PureScript",
+      "doc": "purescript.md",
+      "file_types": [
+        "purs"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/postsolar/tree-sitter-purescript",
+      "indentation": "treesitter",
+      "library": "tree-sitter-purescript",
+      "line_comment": "--",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "purescript",
+      "rev": "f541f95ffd6852fbbe88636317c613285bc105af",
+      "status": "ok",
+      "symbol": "tree_sitter_purescript"
+    },
+    "python": {
+      "aliases": [
+        "python"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Python",
+      "doc": "python.md",
+      "file_types": [
+        "python"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "python",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "r": {
+      "aliases": [
+        "r"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "R",
+      "doc": "r.md",
+      "file_types": [
+        "r"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": "#",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "r",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "racket": {
+      "aliases": [
+        "racket"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "#|",
+        "|#"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Racket",
+      "doc": "racket.md",
+      "file_types": [
+        "rkt",
+        "scrbl"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/zed-industries/tree-sitter-racket",
+      "indentation": null,
+      "library": "tree-sitter-racket",
+      "line_comment": ";",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "racket",
+      "rev": "d9858a0f607578814f2d34662ad4bc21aa37a455",
+      "status": "ok",
+      "symbol": "tree_sitter_racket"
+    },
+    "rego": {
+      "aliases": [
+        "rego"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Rego",
+      "doc": "rego.md",
+      "file_types": [
+        "rego"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/FallenAngel97/tree-sitter-rego",
+      "indentation": null,
+      "library": "tree-sitter-rego",
+      "line_comment": "#",
+      "lsp_doc_name": "open-policy-agent/regal",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "rego",
+      "rev": "da2a1f63cd877efb05d56de61fe516e90012b9a7",
+      "status": "ok",
+      "symbol": "tree_sitter_rego"
+    },
+    "roc": {
+      "aliases": [
+        "roc"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "no bundled queries, fringe grammar",
+      "deferred": true,
+      "display_name": "Roc",
+      "doc": "roc.md",
+      "file_types": [
+        "roc"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "roc-lang/roc/tree/main/crates/language_server",
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "roc",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "rst": {
+      "aliases": [
+        "rst"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "reStructuredText",
+      "doc": "rst.md",
+      "file_types": [
+        "rst"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/stsewd/tree-sitter-rst",
+      "indentation": null,
+      "library": "tree-sitter-rst",
+      "line_comment": null,
+      "lsp_doc_name": "swyddfa/esbonio",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "rst",
+      "rev": "a60f1070b824cb8bb8409b4b6d7da0d07997c30e",
+      "status": "ok",
+      "symbol": "tree_sitter_rst"
+    },
+    "ruby": {
+      "aliases": [
+        "ruby"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Ruby",
+      "doc": "ruby.md",
+      "file_types": [
+        "ruby"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "ruby",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "rust": {
+      "aliases": [
+        "rust"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Rust",
+      "doc": "rust.md",
+      "file_types": [
+        "rust"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "rust-lang/rust-analyzer",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "rust",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "scala": {
+      "aliases": [
+        "scala"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Scala",
+      "doc": "scala.md",
+      "file_types": [
+        "scala"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "scalameta/metals",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "scala",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "scheme": {
+      "aliases": [
+        "scheme"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Scheme",
+      "doc": "scheme.md",
+      "file_types": [
+        "scm",
+        "ss"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/6cdh/tree-sitter-scheme",
+      "indentation": null,
+      "library": "tree-sitter-scheme",
+      "line_comment": ";",
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "scheme",
+      "rev": "1b112d9571e4f62fb3d095d52a51f1da7756fb94",
+      "status": "ok",
+      "symbol": "tree_sitter_scheme"
+    },
+    "sh": {
+      "aliases": [
+        "sh"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "shell script grammar is the builtin bash entry; no dedicated LSP",
+      "deferred": true,
+      "display_name": "Shell Script",
+      "doc": "sh.md",
+      "file_types": [
+        "sh"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "sh",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "sml": {
+      "aliases": [
+        "sml"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "(*",
+        "*)"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Standard ML",
+      "doc": "sml.md",
+      "file_types": [
+        "sml",
+        "sig"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/MatthewFluet/tree-sitter-sml",
+      "indentation": null,
+      "library": "tree-sitter-sml",
+      "line_comment": null,
+      "lsp_doc_name": "Millet",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "sml",
+      "rev": "fd4b4955bb998262840ab8119885b3edf20ea75a",
+      "status": "ok",
+      "symbol": "tree_sitter_sml"
+    },
+    "sql": {
+      "aliases": [
+        "sql"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "SQL",
+      "doc": "sql.md",
+      "file_types": [
+        "sql"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/nervenes/tree-sitter-sql",
+      "indentation": null,
+      "library": "tree-sitter-sql",
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "sql",
+      "rev": "6dfca8b6dcb196d943c10e9cabab25e60232d332",
+      "status": "ok",
+      "symbol": "tree_sitter_sql"
+    },
+    "svelte": {
+      "aliases": [
+        "svelte"
+      ],
+      "attach_lsp": "svelteserver",
+      "block_comment": [
+        "<!--",
+        "-->"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Svelte",
+      "doc": "svelte.md",
+      "file_types": [
+        "svelte"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-svelte",
+      "indentation": "treesitter",
+      "library": "tree-sitter-svelte",
+      "line_comment": null,
+      "lsp_doc_name": "sveltejs/language-tools",
+      "lsp_server": "svelteserver",
+      "queries_present": true,
+      "query_language": "svelte",
+      "rev": "ae5199db47757f785e43a14b332118a5474de1a2",
+      "status": "ok",
+      "symbol": "tree_sitter_svelte"
+    },
+    "swift": {
+      "aliases": [
+        "swift"
+      ],
+      "attach_lsp": "sourcekit-lsp",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Swift",
+      "doc": "swift.md",
+      "file_types": [
+        "swift"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/alex-pinkus/tree-sitter-swift",
+      "indentation": "treesitter",
+      "library": "tree-sitter-swift",
+      "line_comment": "//",
+      "lsp_doc_name": "swiftlang/sourcekit-lsp",
+      "lsp_server": "sourcekit-lsp",
+      "queries_present": true,
+      "query_language": "swift",
+      "rev": "187fd4d3e55e2088da9cb31e414a2bac866292e8",
+      "status": "ok",
+      "symbol": "tree_sitter_swift"
+    },
+    "tailwindcss": {
+      "aliases": [
+        "tailwindcss"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Tailwind CSS",
+      "doc": "tailwindcss.md",
+      "file_types": [
+        "tailwindcss"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "tailwindlabs/tailwindcss-intellisense",
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "tailwindcss",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "terraform": {
+      "aliases": [
+        "terraform"
+      ],
+      "attach_lsp": "terraform-ls",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Terraform",
+      "doc": "terraform.md",
+      "file_types": [
+        "tf",
+        "tfvars"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-hcl",
+      "indentation": "treesitter",
+      "library": "tree-sitter-hcl",
+      "line_comment": "//",
+      "lsp_doc_name": "hashicorp/terraform-ls",
+      "lsp_server": "terraform-ls",
+      "queries_present": true,
+      "query_language": "hcl",
+      "rev": "64ad62785d442eb4d45df3a1764962dafd5bc98b",
+      "status": "ok",
+      "symbol": "tree_sitter_hcl"
+    },
+    "toml": {
+      "aliases": [
+        "toml"
+      ],
+      "attach_lsp": "taplo",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "TOML",
+      "doc": "toml.md",
+      "file_types": [
+        "toml"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter/tree-sitter-toml",
+      "indentation": null,
+      "library": "tree-sitter-toml",
+      "line_comment": "#",
+      "lsp_doc_name": null,
+      "lsp_server": "taplo",
+      "queries_present": true,
+      "query_language": "toml",
+      "rev": "342d9be207c2dba869b9967124c679b5e6fd0ebe",
+      "status": "ok",
+      "symbol": "tree_sitter_toml"
+    },
+    "typescript": {
+      "aliases": [
+        "typescript"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "TypeScript",
+      "doc": "typescript.md",
+      "file_types": [
+        "typescript"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "yioneko/vtsls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "typescript",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "uiua": {
+      "aliases": [
+        "uiua"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": "no bundled queries, fringe grammar",
+      "deferred": true,
+      "display_name": "Uiua",
+      "doc": "uiua.md",
+      "file_types": [
+        "uiua"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "uiua-lang/uiua",
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "uiua",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "vue": {
+      "aliases": [
+        "vue"
+      ],
+      "attach_lsp": "vue-language-server",
+      "block_comment": [
+        "<!--",
+        "-->"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Vue",
+      "doc": "vue.md",
+      "file_types": [
+        "vue"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-vue",
+      "indentation": "treesitter",
+      "library": "tree-sitter-vue",
+      "line_comment": null,
+      "lsp_doc_name": "vuejs/language-tools",
+      "lsp_server": "vue-language-server",
+      "queries_present": true,
+      "query_language": "vue",
+      "rev": "ce8011a414fdf8091f4e4071752efc376f4afb08",
+      "status": "ok",
+      "symbol": "tree_sitter_vue"
+    },
+    "xml": {
+      "aliases": [
+        "xml"
+      ],
+      "attach_lsp": null,
+      "block_comment": [
+        "<!--",
+        "-->"
+      ],
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "XML",
+      "doc": "xml.md",
+      "file_types": [
+        "xml",
+        "xsd",
+        "svg"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-xml",
+      "indentation": null,
+      "library": "tree-sitter-xml",
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "xml",
+      "rev": "5000ae8f22d11fbe93939b05c1e37cf21117162d",
+      "status": "ok",
+      "symbol": "tree_sitter_xml"
+    },
+    "yaml": {
+      "aliases": [
+        "yaml"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "YAML",
+      "doc": "yaml.md",
+      "file_types": [
+        "yaml"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": "redhat-developer/yaml-language-server",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "yaml",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "yara": {
+      "aliases": [
+        "yara"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "YARA",
+      "doc": "yara.md",
+      "file_types": [
+        "yar",
+        "yara"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/egibs/tree-sitter-yara",
+      "indentation": null,
+      "library": "tree-sitter-yara",
+      "line_comment": "//",
+      "lsp_doc_name": "avast/yls",
+      "lsp_server": null,
+      "queries_present": true,
+      "query_language": "yara",
+      "rev": "eb3ede203275c38000177f72ec0f9965312806ef",
+      "status": "ok",
+      "symbol": "tree_sitter_yara"
+    },
+    "yarn": {
+      "aliases": [
+        "yarn"
+      ],
+      "attach_lsp": null,
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Yarn",
+      "doc": "yarn.md",
+      "file_types": [
+        "yarn"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": null,
+      "indentation": null,
+      "library": null,
+      "line_comment": null,
+      "lsp_doc_name": null,
+      "lsp_server": null,
+      "queries_present": false,
+      "query_language": "yarn",
+      "rev": null,
+      "status": "ok",
+      "symbol": null
+    },
+    "zig": {
+      "aliases": [
+        "zig"
+      ],
+      "attach_lsp": "zls",
+      "block_comment": null,
+      "defer_lsp": false,
+      "defer_reason": null,
+      "deferred": false,
+      "display_name": "Zig",
+      "doc": "zig.md",
+      "file_types": [
+        "zig"
+      ],
+      "filenames": [],
+      "globs": [],
+      "grammar_url": "https://github.com/tree-sitter-grammars/tree-sitter-zig",
+      "indentation": "treesitter",
+      "library": "tree-sitter-zig",
+      "line_comment": "//",
+      "lsp_doc_name": "zls",
+      "lsp_server": "zls",
+      "queries_present": true,
+      "query_language": "zig",
+      "rev": "6479aa13f32f701c383083d8b28360ebd682fb7d",
+      "status": "ok",
+      "symbol": "tree_sitter_zig"
+    }
+  },
+  "servers": [
+    {
+      "args": [
+        "--stdio"
+      ],
+      "command": "ansible-language-server",
+      "extensions": [],
+      "filenames": [],
+      "id": "ansible-language-server",
+      "language_name": "Ansible",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "--stdio"
+      ],
+      "command": "astro-ls",
+      "extensions": [
+        "astro"
+      ],
+      "filenames": [],
+      "id": "astro-ls",
+      "language_name": "Astro",
+      "supports_single_file": true,
+      "workspace_identifier": "package.json"
+    },
+    {
+      "args": [],
+      "command": "clojure-lsp",
+      "extensions": [
+        "clj",
+        "cljs",
+        "cljc",
+        "edn"
+      ],
+      "filenames": [],
+      "id": "clojure-lsp",
+      "language_name": "Clojure",
+      "supports_single_file": true,
+      "workspace_identifier": "deps.edn"
+    },
+    {
+      "args": [
+        "language-server",
+        "--protocol=lsp"
+      ],
+      "command": "dart",
+      "extensions": [
+        "dart"
+      ],
+      "filenames": [],
+      "id": "dart",
+      "language_name": "Dart",
+      "supports_single_file": false,
+      "workspace_identifier": "pubspec.yaml"
+    },
+    {
+      "args": [],
+      "command": "elm-language-server",
+      "extensions": [
+        "elm"
+      ],
+      "filenames": [],
+      "id": "elm-language-server",
+      "language_name": "Elm",
+      "supports_single_file": true,
+      "workspace_identifier": "elm.json"
+    },
+    {
+      "args": [],
+      "command": "erlang_ls",
+      "extensions": [
+        "erl",
+        "hrl"
+      ],
+      "filenames": [],
+      "id": "erlang_ls",
+      "language_name": "Erlang",
+      "supports_single_file": true,
+      "workspace_identifier": "rebar.config"
+    },
+    {
+      "args": [],
+      "command": "jsonnet-language-server",
+      "extensions": [
+        "jsonnet",
+        "libsonnet"
+      ],
+      "filenames": [],
+      "id": "jsonnet-language-server",
+      "language_name": "Jsonnet",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "--startup-file=no",
+        "--history-file=no",
+        "-e",
+        "using LanguageServer; runserver()"
+      ],
+      "command": "julia",
+      "extensions": [
+        "jl"
+      ],
+      "filenames": [],
+      "id": "julia",
+      "language_name": "Julia",
+      "supports_single_file": false,
+      "workspace_identifier": "Project.toml"
+    },
+    {
+      "args": [],
+      "command": "lemminx",
+      "extensions": [
+        "xml",
+        "xsd",
+        "svg"
+      ],
+      "filenames": [],
+      "id": "lemminx",
+      "language_name": "XML",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [],
+      "command": "luau-lsp",
+      "extensions": [
+        "luau"
+      ],
+      "filenames": [],
+      "id": "luau-lsp",
+      "language_name": "Luau",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [],
+      "command": "millet",
+      "extensions": [
+        "sml",
+        "sig"
+      ],
+      "filenames": [],
+      "id": "millet",
+      "language_name": "Standard ML",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [],
+      "command": "nimlangserver",
+      "extensions": [
+        "nim",
+        "nimble",
+        "nims"
+      ],
+      "filenames": [],
+      "id": "nimlangserver",
+      "language_name": "Nim",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "--stdio"
+      ],
+      "command": "prisma-language-server",
+      "extensions": [
+        "prisma"
+      ],
+      "filenames": [],
+      "id": "prisma-language-server",
+      "language_name": "Prisma",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "--stdio"
+      ],
+      "command": "purescript-language-server",
+      "extensions": [
+        "purs"
+      ],
+      "filenames": [],
+      "id": "purescript-language-server",
+      "language_name": "PureScript",
+      "supports_single_file": false,
+      "workspace_identifier": "spago.yaml"
+    },
+    {
+      "args": [
+        "--no-echo",
+        "-e",
+        "languageserver::run()"
+      ],
+      "command": "R",
+      "extensions": [
+        "r"
+      ],
+      "filenames": [],
+      "id": "r",
+      "language_name": "R",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "--lib",
+        "racket-langserver"
+      ],
+      "command": "racket",
+      "extensions": [
+        "rkt",
+        "scrbl"
+      ],
+      "filenames": [],
+      "id": "racket",
+      "language_name": "Racket",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [
+        "lsp"
+      ],
+      "command": "regal",
+      "extensions": [
+        "rego"
+      ],
+      "filenames": [],
+      "id": "regal",
+      "language_name": "Rego",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    },
+    {
+      "args": [],
+      "command": "terraform-ls",
+      "extensions": [
+        "tf",
+        "tfvars",
+        "tofu"
+      ],
+      "filenames": [],
+      "id": "terraform-ls",
+      "language_name": "Terraform",
+      "supports_single_file": true,
+      "workspace_identifier": ""
+    }
+  ],
+  "zed_ref": "refs/heads/main"
+}

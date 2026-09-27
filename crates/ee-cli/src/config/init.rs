@@ -18,7 +18,7 @@ use super::discovery::{
 use super::editor_settings::{
     EditorSettings, EndOfLine, IndentStyle, NumberStyle, StatuslineFormat,
 };
-use super::lsp::lsp_settings_to_toml;
+use super::lsp::{formatters_to_toml, lsp_settings_to_toml};
 use super::mcp::{mcp_settings_to_toml, validate_agents_mcp_config};
 use super::raw::{EeToml, keymap_settings_to_toml};
 use super::runtime_languages::{runtime_languages_to_toml, runtime_languages_with_env};
@@ -75,6 +75,7 @@ pub(crate) fn resolved_config_with_env(
             StatuslineFormat::Minimal => String::from("minimal"),
         }),
         lsp: lsp_settings_to_toml(&settings.lsp),
+        formatters: formatters_to_toml(&settings.lsp.formatters),
         languages: runtime_languages,
         keymap: keymap_settings_to_toml(&settings.keymap),
         agents: agents_settings_to_toml(&settings.agents),

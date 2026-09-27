@@ -58,6 +58,8 @@ pub(crate) struct EeToml {
     pub statusline_format: Option<String>,
     pub lsp: Option<LspToml>,
     #[serde(default)]
+    pub formatters: BTreeMap<String, FormatterToml>,
+    #[serde(default)]
     pub languages: BTreeMap<String, RuntimeLanguageConfig>,
     pub keymap: Option<KeymapToml>,
     pub agents: Option<AgentsToml>,
@@ -85,6 +87,21 @@ pub(crate) struct LspServerToml {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub initialization_options: Option<Value>,
+}
+
+/// Raw `[formatters.<id>]` table: shared formatter definition.
+///
+/// One definition can be attached to many languages via
+/// `[languages.<id>].formatter = "<id>"` (or `false` to disable formatting).
+/// `command`/`args` drive the external runner; `timeout_ms` and
+/// `max_output_bytes` are optional runner bounds.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FormatterToml {
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub timeout_ms: Option<u64>,
+    pub max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

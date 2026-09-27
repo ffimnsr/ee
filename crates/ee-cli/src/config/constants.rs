@@ -61,6 +61,7 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # [languages.example]
 # name = "Example"
 # file_types = ["example"]
+# filenames = ["Examplefile"]
 # aliases = ["example-lang"]
 # globs = ["*.example"]
 # shebangs = ["example"]
@@ -88,6 +89,20 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # # rev = "0123456789abcdef0123456789abcdef01234567"
 # # branch = "main"
 # # tag = "v1.0.0"
+#
+# # Per-language formatter dispatch mirrors lsp: define shared formatter
+# # commands under [formatters.<id>], then attach per language via
+# # [languages.<id>].formatter = "<id>". Set `formatter = false` to disable
+# # formatting for a language. External formatters read the buffer on stdin
+# # and write formatted text to stdout.
+# [formatters.shfmt]
+# command = "shfmt"
+# args = ["-"]
+# timeout_ms = 5000
+# max_output_bytes = 8388608
+#
+# [languages.shell]
+# formatter = "shfmt"
 #
 # [keymap]
 # inherit_defaults = true

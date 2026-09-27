@@ -90,6 +90,9 @@ fn merge_runtime_language_patch(
     if let Some(lsp) = &patch.lsp {
         target.lsp = Some(normalize_lsp_server_ids(language_id, lsp));
     }
+    if let Some(formatter) = &patch.formatter {
+        target.formatter = Some(formatter.clone());
+    }
     if let Some(name) = &patch.name {
         target.name = Some(name.clone());
     }

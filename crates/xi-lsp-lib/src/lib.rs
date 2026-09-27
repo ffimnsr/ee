@@ -14,8 +14,10 @@
 use xi_plugin_lib::Plugin;
 use xi_plugin_lib::mainloop;
 
+mod bundled_zed_generated;
 pub mod conversion_utils;
 mod document_symbols;
+mod external_format;
 pub mod language_server_client;
 pub mod lsp_plugin;
 mod result_queue;
@@ -23,7 +25,7 @@ pub mod types;
 mod utils;
 pub use crate::lsp_plugin::LspPlugin;
 pub use crate::result_queue::ResultQueue;
-pub use crate::types::{Config, DisabledLanguageConfig, LanguageConfig};
+pub use crate::types::{Config, DisabledLanguageConfig, FormatterConfig, LanguageConfig};
 pub use crate::utils::{
     ServerStartOptions, read_transport_message, shutdown_language_server, start_new_server,
 };

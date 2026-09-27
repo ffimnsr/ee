@@ -34,7 +34,8 @@ impl RuntimeLanguage {
             injection_regex: None,
             aliases: Vec::new(),
             file_types: definition.extensions.clone(),
-            globs: Vec::new(),
+            filenames: definition.filenames.clone(),
+            globs: definition.globs.clone(),
             shebangs: Vec::new(),
             supported_query_kinds: BTreeSet::new(),
             match_priority: 0,
@@ -66,6 +67,7 @@ impl RuntimeLanguage {
             injection_regex: None,
             aliases: Vec::new(),
             file_types: Vec::new(),
+            filenames: Vec::new(),
             globs: Vec::new(),
             shebangs: Vec::new(),
             supported_query_kinds: RuntimeQueryKind::STANDARD
@@ -173,10 +175,10 @@ impl RuntimeLanguage {
                 message: format!("runtime language `{}` has empty name", self.canonical_id),
             });
         }
-        if self.file_types.is_empty() {
+        if self.file_types.is_empty() && self.filenames.is_empty() && self.globs.is_empty() {
             return Err(RuntimeLoaderError::InvalidConfig {
                 message: format!(
-                    "runtime language `{}` is missing non-empty file_types",
+                    "runtime language `{}` is missing non-empty detection (file_types, filenames, or globs)",
                     self.canonical_id
                 ),
             });
@@ -212,10 +214,16 @@ impl RuntimeLanguage {
             validate_runtime_grammar_source(&self.canonical_id, source)
                 .map_err(|message| RuntimeLoaderError::InvalidConfig { message })?;
         }
-        if self.file_types.iter().any(|file_type| file_type.trim().is_empty()) {
+        if self
+            .file_types
+            .iter()
+            .chain(&self.filenames)
+            .chain(&self.globs)
+            .any(|entry| entry.trim().is_empty())
+        {
             return Err(RuntimeLoaderError::InvalidConfig {
                 message: format!(
-                    "runtime language `{}` has empty file_types entry",
+                    "runtime language `{}` has empty detection entry",
                     self.canonical_id
                 ),
             });
@@ -265,6 +273,10 @@ impl RuntimeLanguage {
 
     pub fn file_types(&self) -> &[String] {
         &self.file_types
+    }
+
+    pub fn filenames(&self) -> &[String] {
+        &self.filenames
     }
 
     pub fn globs(&self) -> &[String] {

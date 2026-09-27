@@ -5484,3 +5484,23 @@ already exists.
 - [ ] The probe keeps both paths (real render path and direct `chunk_syntax_spans`)
       so a future change cannot hide the difference.
 - [ ] YAML typing and scrolling stay within frame budget on the reference fixture.
+
+## Zed Language Catalog Parity [2026-09-27]
+Scope: extend runtime grammar catalog + bundled LSP defaults to match zed `docs/src/languages` (71 pages). Grammar sources git-pinned (url + rev), no crates.io for new entries. Design: docs/upgrades/zed-language-catalog.md.
+### Phase 0: Scaffolding
+- [x] ISSUES.md entry + scripts/zed-catalog skeleton
+- [x] overrides.toml curation + generate.py parse pipeline
+### Phase 1: Sync + manifest
+- [x] fetch docs, pin git revs, emit references/zed-language-catalog.json
+- [x] manifest spot-checks vs docs
+### Phase 2: Grammar catalog
+- [x] generated git-sourced entries wired into runtime loader
+- [x] catalog validation tests
+- [x] runtime fetch/build subset verified
+### Phase 3: LSP bundled defaults
+- [x] bundled defaults split + generated servers/routing
+- [x] bundled defaults test updated
+### Phase 4: Queries
+- [x] query dir verification + backfill for new languages (verification done; asciidoc corpus backfill deferred)
+### Phase 5: Validation + docs
+- [x] fmt/clippy/tests pass, README/CHANGELOG updated, tick items

@@ -276,6 +276,7 @@ pub(super) fn load_config_with_env(
             if let Some(lsp_patch) = &patch.lsp {
                 lsp.merge_toml(lsp_patch);
             }
+            lsp.merge_formatters_toml(&patch.formatters);
             for (language_id, language_patch) in &patch.languages {
                 lsp.merge_language_toml(language_id, language_patch);
             }

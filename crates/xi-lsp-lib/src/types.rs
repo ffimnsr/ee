@@ -68,6 +68,39 @@ pub struct DisabledLanguageConfig {
     pub filenames: Vec<String>,
 }
 
+/// External formatter definition, shared across languages via
+/// `[languages.<id>].formatter` attachments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormatterConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_formatter_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_formatter_max_output_bytes")]
+    pub max_output_bytes: usize,
+}
+
+impl FormatterConfig {
+    pub fn external(command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            command: command.into(),
+            args,
+            timeout_ms: default_formatter_timeout_ms(),
+            max_output_bytes: default_formatter_max_output_bytes(),
+        }
+    }
+}
+
+fn default_formatter_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_formatter_max_output_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
 /// Represents the config for the Language Plugin
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -76,6 +109,12 @@ pub struct Config {
     pub disabled_language_config: HashMap<String, DisabledLanguageConfig>,
     #[serde(default)]
     pub language_servers: HashMap<String, Vec<String>>,
+    /// Formatter definitions keyed by id (`[formatters.<id>]`).
+    #[serde(default)]
+    pub formatters: HashMap<String, FormatterConfig>,
+    /// Language -> formatter attachment (`[languages.<id>].formatter`).
+    #[serde(default)]
+    pub language_formatters: HashMap<String, xi_core_lib::runtime_loader::FormatterAttachment>,
 }
 
 struct BundledRouting<'a> {
@@ -114,415 +153,424 @@ fn bundled_language_server(id: &str) -> (String, Vec<String>) {
 
 impl Config {
     pub fn bundled() -> Self {
+        let mut language_config = HashMap::from([
+            bundled_language(
+                "bash",
+                "Bash",
+                "bash-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["sh", "bash"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "c",
+                "C",
+                "clangd",
+                &[],
+                BundledRouting {
+                    extensions: &["c"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "cpp",
+                "C++",
+                "clangd",
+                &[],
+                BundledRouting {
+                    extensions: &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "cmake",
+                "CMake",
+                "cmake-language-server",
+                &[],
+                BundledRouting {
+                    extensions: &["cmake"],
+                    filenames: &["CMakeLists.txt"],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "css",
+                "CSS",
+                "vscode-css-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["css", "scss"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "dockerfile",
+                "Dockerfile",
+                "docker-langserver",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &[],
+                    filenames: &["Dockerfile", "Containerfile"],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "elixir",
+                "Elixir",
+                "elixir-ls",
+                &[],
+                BundledRouting {
+                    extensions: &["ex", "exs", "heex"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("mix.exs"),
+                },
+            ),
+            bundled_language(
+                "gleam",
+                "Gleam",
+                "gleam",
+                &["lsp"],
+                BundledRouting {
+                    extensions: &["gleam"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("gleam.toml"),
+                },
+            ),
+            bundled_language(
+                "go",
+                "Go",
+                "gopls",
+                &[],
+                BundledRouting {
+                    extensions: &["go"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("go.mod"),
+                },
+            ),
+            bundled_language(
+                "html",
+                "HTML",
+                "vscode-html-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["html", "htm"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "javascript",
+                "JavaScript",
+                "typescript-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["js", "jsx", "mjs", "cjs"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("package.json"),
+                },
+            ),
+            bundled_language(
+                "json",
+                "Json",
+                "vscode-json-languageserver",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["json", "jsonc"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "java",
+                "Java",
+                "jdtls",
+                &[],
+                BundledRouting {
+                    extensions: &["java"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "just",
+                "Just",
+                "just-lsp",
+                &[],
+                BundledRouting {
+                    extensions: &[],
+                    filenames: &["justfile", "Justfile"],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "kotlin",
+                "Kotlin",
+                "kotlin-language-server",
+                &[],
+                BundledRouting {
+                    extensions: &["kt", "kts"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "lua",
+                "Lua",
+                "lua-language-server",
+                &[],
+                BundledRouting {
+                    extensions: &["lua"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "markdown",
+                "Markdown",
+                "marksman",
+                &[],
+                BundledRouting {
+                    extensions: &["md", "markdown"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "nix",
+                "Nix",
+                "nil",
+                &[],
+                BundledRouting {
+                    extensions: &["nix"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "ocaml",
+                "OCaml",
+                "ocamllsp",
+                &[],
+                BundledRouting {
+                    extensions: &["ml", "mli"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "php",
+                "PHP",
+                "intelephense",
+                &[],
+                BundledRouting {
+                    extensions: &["php"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "python",
+                "Python",
+                "jedi-language-server",
+                &[],
+                BundledRouting {
+                    extensions: &["py", "pyi"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "ruby",
+                "Ruby",
+                "ruby-lsp",
+                &[],
+                BundledRouting {
+                    extensions: &["rb"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "scala",
+                "Scala",
+                "metals",
+                &[],
+                BundledRouting {
+                    extensions: &["scala"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "rust",
+                "rust",
+                "rust-analyzer",
+                &[],
+                BundledRouting {
+                    extensions: &["rs"],
+                    filenames: &[],
+                    supports_single_file: false,
+                    workspace_identifier: Some("Cargo.toml"),
+                },
+            ),
+            bundled_language(
+                "toml",
+                "TOML",
+                "taplo",
+                &[],
+                BundledRouting {
+                    extensions: &["toml"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "typescript",
+                "TypeScript",
+                "typescript-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["ts", "tsx", "mts", "cts"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("package.json"),
+                },
+            ),
+            bundled_language(
+                "svelte",
+                "Svelte",
+                "svelteserver",
+                &[],
+                BundledRouting {
+                    extensions: &["svelte"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("package.json"),
+                },
+            ),
+            bundled_language(
+                "swift",
+                "Swift",
+                "sourcekit-lsp",
+                &[],
+                BundledRouting {
+                    extensions: &["swift"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "vue",
+                "Vue",
+                "vue-language-server",
+                &[],
+                BundledRouting {
+                    extensions: &["vue"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: Some("package.json"),
+                },
+            ),
+            bundled_language(
+                "yaml",
+                "Yaml",
+                "yaml-language-server",
+                &["--stdio"],
+                BundledRouting {
+                    extensions: &["yaml", "yml"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+            bundled_language(
+                "zig",
+                "Zig",
+                "zls",
+                &[],
+                BundledRouting {
+                    extensions: &["zig"],
+                    filenames: &[],
+                    supports_single_file: true,
+                    workspace_identifier: None,
+                },
+            ),
+        ]);
+
+        language_config.extend(crate::bundled_zed_generated::bundled_zed_servers());
+
+        let mut language_servers = HashMap::from([
+            bundled_language_server("bash"),
+            bundled_language_server("c"),
+            bundled_language_server("cpp"),
+            bundled_language_server("cmake"),
+            bundled_language_server("css"),
+            bundled_language_server("dockerfile"),
+            bundled_language_server("elixir"),
+            bundled_language_server("gleam"),
+            bundled_language_server("go"),
+            bundled_language_server("html"),
+            bundled_language_server("java"),
+            bundled_language_server("javascript"),
+            bundled_language_server("just"),
+            bundled_language_server("json"),
+            bundled_language_server("kotlin"),
+            bundled_language_server("lua"),
+            bundled_language_server("markdown"),
+            bundled_language_server("nix"),
+            bundled_language_server("ocaml"),
+            bundled_language_server("php"),
+            bundled_language_server("python"),
+            bundled_language_server("ruby"),
+            bundled_language_server("rust"),
+            bundled_language_server("scala"),
+            bundled_language_server("svelte"),
+            bundled_language_server("swift"),
+            bundled_language_server("toml"),
+            bundled_language_server("typescript"),
+            bundled_language_server("vue"),
+            bundled_language_server("yaml"),
+            bundled_language_server("zig"),
+        ]);
+        language_servers.extend(crate::bundled_zed_generated::bundled_zed_routing());
+
         Self {
-            language_config: HashMap::from([
-                bundled_language(
-                    "bash",
-                    "Bash",
-                    "bash-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["sh", "bash"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "c",
-                    "C",
-                    "clangd",
-                    &[],
-                    BundledRouting {
-                        extensions: &["c"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "cpp",
-                    "C++",
-                    "clangd",
-                    &[],
-                    BundledRouting {
-                        extensions: &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "cmake",
-                    "CMake",
-                    "cmake-language-server",
-                    &[],
-                    BundledRouting {
-                        extensions: &["cmake"],
-                        filenames: &["CMakeLists.txt"],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "css",
-                    "CSS",
-                    "vscode-css-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["css", "scss"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "dockerfile",
-                    "Dockerfile",
-                    "docker-langserver",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &[],
-                        filenames: &["Dockerfile", "Containerfile"],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "elixir",
-                    "Elixir",
-                    "elixir-ls",
-                    &[],
-                    BundledRouting {
-                        extensions: &["ex", "exs", "heex"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("mix.exs"),
-                    },
-                ),
-                bundled_language(
-                    "gleam",
-                    "Gleam",
-                    "gleam",
-                    &["lsp"],
-                    BundledRouting {
-                        extensions: &["gleam"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("gleam.toml"),
-                    },
-                ),
-                bundled_language(
-                    "go",
-                    "Go",
-                    "gopls",
-                    &[],
-                    BundledRouting {
-                        extensions: &["go"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("go.mod"),
-                    },
-                ),
-                bundled_language(
-                    "html",
-                    "HTML",
-                    "vscode-html-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["html", "htm"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "javascript",
-                    "JavaScript",
-                    "typescript-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["js", "jsx", "mjs", "cjs"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("package.json"),
-                    },
-                ),
-                bundled_language(
-                    "json",
-                    "Json",
-                    "vscode-json-languageserver",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["json", "jsonc"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "java",
-                    "Java",
-                    "jdtls",
-                    &[],
-                    BundledRouting {
-                        extensions: &["java"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "just",
-                    "Just",
-                    "just-lsp",
-                    &[],
-                    BundledRouting {
-                        extensions: &[],
-                        filenames: &["justfile", "Justfile"],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "kotlin",
-                    "Kotlin",
-                    "kotlin-language-server",
-                    &[],
-                    BundledRouting {
-                        extensions: &["kt", "kts"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "lua",
-                    "Lua",
-                    "lua-language-server",
-                    &[],
-                    BundledRouting {
-                        extensions: &["lua"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "markdown",
-                    "Markdown",
-                    "marksman",
-                    &[],
-                    BundledRouting {
-                        extensions: &["md", "markdown"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "nix",
-                    "Nix",
-                    "nil",
-                    &[],
-                    BundledRouting {
-                        extensions: &["nix"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "ocaml",
-                    "OCaml",
-                    "ocamllsp",
-                    &[],
-                    BundledRouting {
-                        extensions: &["ml", "mli"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "php",
-                    "PHP",
-                    "intelephense",
-                    &[],
-                    BundledRouting {
-                        extensions: &["php"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "python",
-                    "Python",
-                    "jedi-language-server",
-                    &[],
-                    BundledRouting {
-                        extensions: &["py", "pyi"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "ruby",
-                    "Ruby",
-                    "ruby-lsp",
-                    &[],
-                    BundledRouting {
-                        extensions: &["rb"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "scala",
-                    "Scala",
-                    "metals",
-                    &[],
-                    BundledRouting {
-                        extensions: &["scala"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "rust",
-                    "rust",
-                    "rust-analyzer",
-                    &[],
-                    BundledRouting {
-                        extensions: &["rs"],
-                        filenames: &[],
-                        supports_single_file: false,
-                        workspace_identifier: Some("Cargo.toml"),
-                    },
-                ),
-                bundled_language(
-                    "toml",
-                    "TOML",
-                    "taplo",
-                    &[],
-                    BundledRouting {
-                        extensions: &["toml"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "typescript",
-                    "TypeScript",
-                    "typescript-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["ts", "tsx", "mts", "cts"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("package.json"),
-                    },
-                ),
-                bundled_language(
-                    "svelte",
-                    "Svelte",
-                    "svelteserver",
-                    &[],
-                    BundledRouting {
-                        extensions: &["svelte"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("package.json"),
-                    },
-                ),
-                bundled_language(
-                    "swift",
-                    "Swift",
-                    "sourcekit-lsp",
-                    &[],
-                    BundledRouting {
-                        extensions: &["swift"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "vue",
-                    "Vue",
-                    "vue-language-server",
-                    &[],
-                    BundledRouting {
-                        extensions: &["vue"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: Some("package.json"),
-                    },
-                ),
-                bundled_language(
-                    "yaml",
-                    "Yaml",
-                    "yaml-language-server",
-                    &["--stdio"],
-                    BundledRouting {
-                        extensions: &["yaml", "yml"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-                bundled_language(
-                    "zig",
-                    "Zig",
-                    "zls",
-                    &[],
-                    BundledRouting {
-                        extensions: &["zig"],
-                        filenames: &[],
-                        supports_single_file: true,
-                        workspace_identifier: None,
-                    },
-                ),
-            ]),
+            language_config,
             disabled_language_config: HashMap::new(),
-            language_servers: HashMap::from([
-                bundled_language_server("bash"),
-                bundled_language_server("c"),
-                bundled_language_server("cpp"),
-                bundled_language_server("cmake"),
-                bundled_language_server("css"),
-                bundled_language_server("dockerfile"),
-                bundled_language_server("elixir"),
-                bundled_language_server("gleam"),
-                bundled_language_server("go"),
-                bundled_language_server("html"),
-                bundled_language_server("java"),
-                bundled_language_server("javascript"),
-                bundled_language_server("just"),
-                bundled_language_server("json"),
-                bundled_language_server("kotlin"),
-                bundled_language_server("lua"),
-                bundled_language_server("markdown"),
-                bundled_language_server("nix"),
-                bundled_language_server("ocaml"),
-                bundled_language_server("php"),
-                bundled_language_server("python"),
-                bundled_language_server("ruby"),
-                bundled_language_server("rust"),
-                bundled_language_server("scala"),
-                bundled_language_server("svelte"),
-                bundled_language_server("swift"),
-                bundled_language_server("toml"),
-                bundled_language_server("typescript"),
-                bundled_language_server("vue"),
-                bundled_language_server("yaml"),
-                bundled_language_server("zig"),
-            ]),
+            language_servers,
+            formatters: HashMap::new(),
+            language_formatters: HashMap::new(),
         }
     }
 }
@@ -710,9 +758,54 @@ mod tests {
                 String::from("vue"),
                 String::from("yaml"),
                 String::from("zig"),
+                String::from("ansible-language-server"),
+                String::from("astro-ls"),
+                String::from("clojure-lsp"),
+                String::from("dart"),
+                String::from("elm-language-server"),
+                String::from("erlang_ls"),
+                String::from("jsonnet-language-server"),
+                String::from("julia"),
+                String::from("lemminx"),
+                String::from("luau-lsp"),
+                String::from("millet"),
+                String::from("nimlangserver"),
+                String::from("prisma-language-server"),
+                String::from("purescript-language-server"),
+                String::from("r"),
+                String::from("racket"),
+                String::from("regal"),
+                String::from("terraform-ls"),
             ])
         );
-        assert_eq!(config.language_config.len(), config.language_servers.len());
+        // Attachments add language->server routing beyond the server ids.
+        assert!(config.language_servers.len() > config.language_config.len());
+        assert_eq!(
+            config.language_servers.get("terraform"),
+            Some(&vec![String::from("terraform-ls")])
+        );
+        assert_eq!(
+            config.language_servers.get("opentofu"),
+            Some(&vec![String::from("terraform-ls")])
+        );
+        assert_eq!(
+            config.language_servers.get("kotlin"),
+            Some(&vec![String::from("kotlin-language-server")])
+        );
+
+        let astro = config.language_config.get("astro-ls").unwrap();
+        assert_eq!(astro.language_name, "Astro");
+        assert_eq!(astro.start_command, "astro-ls");
+        assert_eq!(astro.start_arguments, vec!["--stdio"]);
+        assert_eq!(astro.extensions, vec!["astro"]);
+        assert_eq!(astro.workspace_identifier.as_deref(), Some("package.json"));
+
+        let terraform = config.language_config.get("terraform-ls").unwrap();
+        assert_eq!(terraform.language_name, "Terraform");
+        assert_eq!(terraform.start_command, "terraform-ls");
+        assert_eq!(terraform.extensions, vec!["tf", "tfvars", "tofu"]);
+
+        assert!(config.formatters.is_empty(), "no formatters in bundled defaults yet");
 
         let rust = config.language_config.get("rust").unwrap();
         assert_eq!(rust.language_name, "rust");

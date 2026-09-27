@@ -27,6 +27,8 @@ fn language_definition(name: &str, extensions: &[&str]) -> LanguageDefinition {
     LanguageDefinition {
         name: name.into(),
         extensions: extensions.iter().map(|value| (*value).to_string()).collect(),
+        filenames: Vec::new(),
+        globs: Vec::new(),
         first_line_match: None,
         scope: format!("source.{}", name.to_ascii_lowercase()),
         default_config: None,
@@ -66,6 +68,7 @@ fn write_until_modified(path: &Path, contents: impl Into<Vec<u8>>) {
 
 mod assets_tests;
 mod cache_tests;
+mod catalog_tests;
 mod fetch_tests;
 mod git_tests;
 mod health_tests;

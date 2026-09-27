@@ -44,6 +44,8 @@ fn changed_language_ids_only_reports_modified_servers() {
             (String::from("rust"), vec![String::from("rust")]),
             (String::from("json"), vec![String::from("json")]),
         ]),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     };
     let next = Config {
         language_config: HashMap::from([
@@ -67,6 +69,8 @@ fn changed_language_ids_only_reports_modified_servers() {
             (String::from("rust"), vec![String::from("rust")]),
             (String::from("gleam"), vec![String::from("gleam")]),
         ]),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     };
 
     let plugin = LspPlugin::new(current);
@@ -86,6 +90,8 @@ fn parse_plugin_config_update_merges_partial_changes() {
         )]),
         disabled_language_config: HashMap::new(),
         language_servers: HashMap::from([(String::from("rust"), vec![String::from("rust")])]),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     let next = plugin
@@ -135,6 +141,8 @@ fn path_matching_reports_disabled_server() {
             DisabledLanguageConfig { extensions: vec![String::from("ts")], filenames: Vec::new() },
         )]),
         language_servers: HashMap::new(),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     assert_eq!(
@@ -158,6 +166,8 @@ fn path_matching_uses_exact_filename_before_extension() {
         ]),
         disabled_language_config: HashMap::new(),
         language_servers: HashMap::new(),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     assert_eq!(
@@ -178,6 +188,8 @@ fn path_matching_reports_disabled_filename_server() {
             },
         )]),
         language_servers: HashMap::new(),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     assert_eq!(
@@ -195,6 +207,8 @@ fn unsupported_single_file_server_has_no_key_without_workspace_root() {
         )]),
         disabled_language_config: HashMap::new(),
         language_servers: HashMap::new(),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     assert_eq!(plugin.language_server_key("gleam", &None), None);
@@ -228,6 +242,8 @@ fn language_matches_use_explicit_language_attachments_before_extensions() {
             String::from("typescript"),
             vec![String::from("typescript"), String::from("eslint")],
         )]),
+        formatters: HashMap::new(),
+        language_formatters: HashMap::new(),
     });
 
     assert_eq!(

@@ -36,6 +36,7 @@ pub struct RuntimeLoader {
     languages: BTreeMap<String, RuntimeLanguage>,
     alias_index: HashMap<String, String>,
     file_type_index: HashMap<String, FileTypeOwner>,
+    globs_index: Vec<(String, Vec<String>)>,
     pub(crate) preloaded_grammars: HashMap<String, GrammarHandle>,
     pub(crate) grammar_cache: HashMap<PathBuf, GrammarHandle>,
     pub(crate) query_cache: HashMap<(String, RuntimeQueryKind), QueryArtifactCacheEntry>,
@@ -60,6 +61,7 @@ impl RuntimeLoader {
             languages: BTreeMap::new(),
             alias_index: HashMap::new(),
             file_type_index: HashMap::new(),
+            globs_index: Vec::new(),
             preloaded_grammars: HashMap::new(),
             grammar_cache: HashMap::new(),
             query_cache: HashMap::new(),
@@ -99,13 +101,20 @@ impl RuntimeLoader {
     }
 
     pub fn language_for_path(&self, path: &Path) -> Option<&RuntimeLanguage> {
-        let file_type = path
-            .extension()
-            .or_else(|| path.file_name())
-            .and_then(|segment| segment.to_str())?
-            .to_ascii_lowercase();
-        self.file_type_index
-            .get(&file_type)
+        // Precedence: glob > exact basename > extension.
+        if let Some(file_name) = path.file_name().and_then(|segment| segment.to_str()) {
+            if let Some((canonical_id, _)) = self.globs_index.iter().find(|(_, patterns)| {
+                patterns.iter().any(|pattern| crate::syntax::glob_matches(pattern, path))
+            }) {
+                return self.languages.get(canonical_id);
+            }
+            if let Some(owner) = self.file_type_index.get(&file_name.to_ascii_lowercase()) {
+                return self.languages.get(&owner.canonical_id);
+            }
+        }
+        path.extension()
+            .and_then(|segment| segment.to_str())
+            .and_then(|extension| self.file_type_index.get(&extension.to_ascii_lowercase()))
             .and_then(|owner| self.languages.get(&owner.canonical_id))
     }
 
@@ -197,6 +206,7 @@ impl RuntimeLoader {
         let mut merged = BTreeMap::new();
         let mut alias_index = HashMap::new();
         let mut file_type_index = HashMap::new();
+        let mut globs_index = Vec::new();
 
         let mut configured_ids = languages
             .iter()
@@ -252,12 +262,16 @@ impl RuntimeLoader {
             language.validate_configured()?;
             self.index_language_aliases(&language, &mut alias_index)?;
             self.index_language_file_types(&language, &mut file_type_index)?;
+            if !language.globs.is_empty() {
+                globs_index.push((language.canonical_id.clone(), language.globs.clone()));
+            }
             merged.insert(language.canonical_id.clone(), language);
         }
 
         self.languages = merged;
         self.alias_index = alias_index;
         self.file_type_index = file_type_index;
+        self.globs_index = globs_index;
         Ok(())
     }
 
@@ -892,30 +906,39 @@ impl RuntimeLoader {
         language: &RuntimeLanguage,
         file_type_index: &mut HashMap<String, FileTypeOwner>,
     ) -> Result<(), RuntimeLoaderError> {
-        for file_type in &language.file_types {
+        let register = |file_type: &str, index: &mut HashMap<String, FileTypeOwner>| {
             let normalized = file_type.to_ascii_lowercase();
-            match file_type_index.get(&normalized) {
+            match index.get(&normalized) {
                 Some(existing)
                     if existing.canonical_id != language.canonical_id
                         && existing.priority == language.match_priority =>
                 {
-                    return Err(RuntimeLoaderError::AmbiguousFileType {
+                    Err(RuntimeLoaderError::AmbiguousFileType {
                         file_type: normalized,
                         first_language: existing.canonical_id.clone(),
                         second_language: language.canonical_id.clone(),
-                    });
+                    })
                 }
-                Some(existing) if existing.priority > language.match_priority => {}
+                Some(existing) if existing.priority > language.match_priority => Ok(()),
                 _ => {
-                    file_type_index.insert(
+                    index.insert(
                         normalized,
                         FileTypeOwner {
                             canonical_id: language.canonical_id.clone(),
                             priority: language.match_priority,
                         },
                     );
+                    Ok(())
                 }
             }
+        };
+        // Extensions first, then exact basenames so a basename wins the
+        // shared lowercased key space against another language's extension.
+        for file_type in &language.file_types {
+            register(file_type, file_type_index)?;
+        }
+        for filename in &language.filenames {
+            register(filename, file_type_index)?;
         }
         Ok(())
     }

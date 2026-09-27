@@ -302,6 +302,12 @@ impl RuntimeRoots {
 pub struct RuntimeLanguageConfig {
     pub enabled: Option<bool>,
     pub lsp: Option<Vec<String>>,
+    /// Formatter attachment: the id of a `[formatters.<id>]` definition, or
+    /// `false` to disable formatting for this language. Absent means the
+    /// attached language server handles formatting (default). Mirrors the
+    /// `lsp` attachment field: definitions live in the plugin config, this
+    /// field only wires language -> formatter.
+    pub formatter: Option<FormatterAttachment>,
     pub name: Option<String>,
     pub query_language: Option<String>,
     pub scope: Option<String>,
@@ -322,6 +328,19 @@ pub struct RuntimeLanguageConfig {
 }
 
 pub type RuntimeLanguageOverrides = BTreeMap<String, RuntimeLanguageConfig>;
+
+/// Per-language formatter attachment inside `[languages.<id>]`.
+///
+/// Serde-untagged so TOML accepts either a formatter id string (`"shfmt"`)
+/// or the literal `false` to disable formatting for the language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum FormatterAttachment {
+    /// Disable formatting for the language (`formatter = false`).
+    Disabled(bool),
+    /// Attach a `[formatters.<id>]` definition.
+    Id(String),
+}
 
 // ---------------------------------------------------------------------------
 // RuntimeStandardQueryPaths
@@ -399,6 +418,7 @@ pub struct RuntimeLanguage {
     pub(crate) injection_regex: Option<String>,
     pub(crate) aliases: Vec<String>,
     pub(crate) file_types: Vec<String>,
+    pub(crate) filenames: Vec<String>,
     pub(crate) globs: Vec<String>,
     pub(crate) shebangs: Vec<String>,
     pub(crate) supported_query_kinds: BTreeSet<RuntimeQueryKind>,

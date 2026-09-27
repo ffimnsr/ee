@@ -141,7 +141,7 @@ Query overlays merge deterministically in bundled, then user, then workspace ord
 
 ## Language servers
 
-`ee` ships bundled LSP definitions for Rust, JSON, YAML, and TypeScript/JavaScript. Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`.
+`ee` ships bundled LSP definitions for 49 servers covering the Zed-documented language catalog (Rust, JSON, YAML, TypeScript/JavaScript, Go, Python, Ruby, Terraform, Astro, Dart, Clojure, Elm, Erlang, Julia, Lua/Luau, Nix, OCaml, SML, XML, and more). Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`. The bundled set is generated from the Zed language docs by `scripts/zed-catalog/sync.sh`; the full inventory lives in `references/zed-language-catalog.json`.
 
 Enabled servers require `language_name` and `command`. `extensions` stays supported as legacy extension fallback and server metadata, but preferred routing now lives under `[languages.<id>].lsp`. Optional fields are `args`, `extensions`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
 
@@ -349,9 +349,31 @@ Security limits: secret-like values are redacted from compaction requests and st
 
 Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 
+### Formatter config
+
+Formatter config mirrors LSP: shared definitions under `[formatters.<id>]`, attached to languages through `[languages.<id>].formatter`.
+
+```toml
+[formatters.shfmt]
+command = "shfmt"
+args = ["-"]
+timeout_ms = 5000
+max_output_bytes = 8388608
+
+[languages.shell]
+formatter = "shfmt"   # one formatter can serve many languages
+
+[languages.markdown]
+formatter = false     # disable formatting
+```
+
+External formatters read the buffer text on stdin and write formatted text to stdout. Missing binaries, timeouts, and oversized/non-UTF-8 output fail closed with a status item; the buffer is never touched on failure. Attaching an undefined formatter id warns and drops the attachment. With no attachment, `format` keeps using LSP `textDocument/formatting`.
+
 ### Runtime language config
 
 Runtime language configuration lives under `[languages.<id>]`, where `<id>` is the stable runtime language id. Enabled entries need `name`, `file_types`, and a nested `[languages.<id>.grammar]` table with `library`, `symbol`, and exactly one source definition.
+
+Bundled catalog languages may also declare `filenames` (exact basename match, e.g. `Makefile`, `Justfile`, `Dockerfile`) and `globs` (path patterns, e.g. `**/Dockerfile*`). Detection precedence is glob > exact basename > extension. User config layers can set `globs` and `file_types`; the `filenames` dimension is bundled-catalog-only for now.
 
 ```toml
 [languages.gleam]

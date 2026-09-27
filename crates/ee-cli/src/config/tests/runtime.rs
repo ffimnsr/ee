@@ -94,7 +94,9 @@ lsp = ["newlang"]
     let error = validate_config_file(&path).unwrap_err();
 
     assert!(error.contains("Config validation error"));
-    assert!(error.contains("runtime language `newlang` is missing non-empty file_types"));
+    assert!(error.contains(
+        "runtime language `newlang` is missing non-empty detection (file_types, filenames, or globs)"
+    ));
 }
 #[test]
 fn validate_config_file_allows_partial_builtin_runtime_override() {

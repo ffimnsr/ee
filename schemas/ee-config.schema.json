@@ -139,6 +139,13 @@
         }
       ]
     },
+    "formatters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/FormatterToml"
+      },
+      "default": {}
+    },
     "languages": {
       "type": "object",
       "additionalProperties": {
@@ -263,6 +270,44 @@
       },
       "additionalProperties": false
     },
+    "FormatterToml": {
+      "description": "Raw `[formatters.<id>]` table: shared formatter definition.\n\nOne definition can be attached to many languages via\n`[languages.<id>].formatter = \"<id>\"` (or `false` to disable formatting).\n`command`/`args` drive the external runner; `timeout_ms` and\n`max_output_bytes` are optional runner bounds.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_output_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "RuntimeLanguageConfig": {
       "type": "object",
       "properties": {
@@ -281,6 +326,18 @@
           "items": {
             "type": "string"
           },
+          "default": null
+        },
+        "formatter": {
+          "description": "Formatter attachment: the id of a `[formatters.<id>]` definition, or\n`false` to disable formatting for this language. Absent means the\nattached language server handles formatting (default). Mirrors the\n`lsp` attachment field: definitions live in the plugin config, this\nfield only wires language -> formatter.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormatterAttachment"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": null
         },
         "name": {
@@ -397,6 +454,19 @@
         }
       },
       "additionalProperties": false
+    },
+    "FormatterAttachment": {
+      "description": "Per-language formatter attachment inside `[languages.<id>]`.\n\nSerde-untagged so TOML accepts either a formatter id string (`\"shfmt\"`)\nor the literal `false` to disable formatting for the language.",
+      "anyOf": [
+        {
+          "description": "Disable formatting for the language (`formatter = false`).",
+          "type": "boolean"
+        },
+        {
+          "description": "Attach a `[formatters.<id>]` definition.",
+          "type": "string"
+        }
+      ]
     },
     "RuntimeQueryKind": {
       "type": "string",

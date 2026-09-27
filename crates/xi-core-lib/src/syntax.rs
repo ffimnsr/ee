@@ -37,6 +37,13 @@ pub struct LanguageId(#[schemars(with = "String")] Arc<str>);
 pub struct LanguageDefinition {
     pub name: LanguageId,
     pub extensions: Vec<String>,
+    /// Exact basename matches (e.g. `Makefile`), matched before extensions.
+    #[serde(default)]
+    pub filenames: Vec<String>,
+    /// Glob patterns matched against the full path (e.g. `**/Dockerfile*`),
+    /// matched before exact filenames.
+    #[serde(default)]
+    pub globs: Vec<String>,
     pub first_line_match: Option<String>,
     pub scope: String,
     #[serde(skip)]
@@ -50,26 +57,50 @@ pub struct Languages {
     // NOTE: BTreeMap is used for sorting the languages by name alphabetically
     named: BTreeMap<LanguageId, Arc<LanguageDefinition>>,
     extensions: HashMap<String, Arc<LanguageDefinition>>,
+    filenames: HashMap<String, Arc<LanguageDefinition>>,
+    globs: Vec<(String, Arc<LanguageDefinition>)>,
 }
 
 impl Languages {
     pub fn new(language_defs: &[LanguageDefinition]) -> Self {
         let mut named = BTreeMap::new();
         let mut extensions = HashMap::new();
+        let mut filenames = HashMap::new();
+        let mut globs = Vec::new();
         for lang in language_defs.iter() {
             let lang_arc = Arc::new(lang.clone());
             named.insert(lang.name.clone(), lang_arc.clone());
             for ext in &lang.extensions {
                 extensions.insert(ext.clone(), lang_arc.clone());
             }
+            for filename in &lang.filenames {
+                filenames.insert(filename.clone(), lang_arc.clone());
+            }
+            for pattern in &lang.globs {
+                globs.push((pattern.clone(), lang_arc.clone()));
+            }
         }
-        Languages { named, extensions }
+        Languages { named, extensions, filenames, globs }
     }
 
     pub fn language_for_path(&self, path: &Path) -> Option<Arc<LanguageDefinition>> {
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        // Precedence: glob > exact basename > extension.
+        if let Some(file_name) = file_name {
+            if let Some(lang) = self
+                .globs
+                .iter()
+                .find_map(|(pattern, lang)| glob_matches(pattern, path).then(|| lang.clone()))
+            {
+                return Some(lang);
+            }
+            if let Some(lang) = self.filenames.get(file_name) {
+                return Some(lang.clone());
+            }
+        }
         path.extension()
-            .or_else(|| path.file_name())
-            .and_then(|ext| self.extensions.get(ext.to_str().unwrap_or_default()))
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| self.extensions.get(ext))
             .map(Arc::clone)
     }
 
@@ -114,6 +145,52 @@ impl<'a> From<&'a str> for LanguageId {
     }
 }
 
+/// Match a glob pattern against a file path.
+///
+/// Supported syntax:
+/// - `*` matches any run of characters except `/`
+/// - `**` matches any run of characters including `/`
+/// - everything else matches literally
+///
+/// Patterns anchor at the path start, so `**/Dockerfile*` matches both
+/// `Dockerfile` (zero leading segments) and `ci/Dockerfile.dev`.
+pub(crate) fn glob_matches(pattern: &str, path: &Path) -> bool {
+    let pattern = pattern.replace('\\', "/");
+    let text = path.to_string_lossy().replace('\\', "/");
+    wildcard_match(pattern.as_bytes(), text.as_bytes())
+}
+
+fn wildcard_match(pattern: &[u8], text: &[u8]) -> bool {
+    let Some(first) = pattern.first() else {
+        return text.is_empty();
+    };
+    match first {
+        b'*' => {
+            let rest = &pattern[1..];
+            if rest.first() == Some(&b'*') {
+                let rest = &rest[1..];
+                if rest.first() == Some(&b'/') {
+                    // `**/`: zero or more leading directory segments.
+                    let after = &rest[1..];
+                    wildcard_match(after, text)
+                        || text
+                            .iter()
+                            .position(|byte| *byte == b'/')
+                            .is_some_and(|split| wildcard_match(pattern, &text[split + 1..]))
+                } else {
+                    // `**`: zero or more characters, `/` included.
+                    (0..=text.len()).any(|split| wildcard_match(rest, &text[split..]))
+                }
+            } else {
+                // `*`: zero or more characters, `/` excluded.
+                let max = text.iter().position(|byte| *byte == b'/').unwrap_or(text.len());
+                (0..=max).any(|split| wildcard_match(rest, &text[split..]))
+            }
+        }
+        byte => text.first() == Some(byte) && wildcard_match(&pattern[1..], &text[1..]),
+    }
+}
+
 // for testing
 #[cfg(test)]
 impl LanguageDefinition {
@@ -121,10 +198,49 @@ impl LanguageDefinition {
         LanguageDefinition {
             name: name.into(),
             extensions: exts.iter().map(|s| (*s).into()).collect(),
+            filenames: Vec::new(),
+            globs: Vec::new(),
             first_line_match: None,
             scope: scope.into(),
             default_config: config,
         }
+    }
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use std::path::Path;
+
+    use super::glob_matches;
+
+    fn matches(pattern: &str, path: &str) -> bool {
+        glob_matches(pattern, Path::new(path))
+    }
+
+    #[test]
+    fn star_does_not_cross_directories() {
+        assert!(matches("*.mk", "rules.mk"));
+        assert!(!matches("*.mk", "sub/rules.mk"));
+        assert!(matches("Makefile*", "Makefile"));
+        assert!(matches("Makefile*", "Makefile.am"));
+        assert!(!matches("Makefile*", "src/Makefile"));
+    }
+
+    #[test]
+    fn double_star_crosses_directories_and_matches_zero_segments() {
+        assert!(matches("**/Dockerfile*", "Dockerfile"));
+        assert!(matches("**/Dockerfile*", "Dockerfile.dev"));
+        assert!(matches("**/Dockerfile*", "ci/images/Dockerfile.dev"));
+        assert!(!matches("**/Dockerfile*", "ci/images/Containerfile"));
+        assert!(matches("**/*.mk", "sub/rules.mk"));
+        assert!(matches("**/*.mk", "rules.mk"));
+    }
+
+    #[test]
+    fn literal_and_exact_matches() {
+        assert!(matches("Justfile", "Justfile"));
+        assert!(!matches("Justfile", "build/Justfile"));
+        assert!(matches("Makefile", "Makefile"));
     }
 }
 
@@ -147,17 +263,21 @@ mod tests {
         let ld_rust = LanguageDefinition {
             name: LanguageId::from("rust"),
             extensions: vec![String::from("rs")],
+            filenames: Vec::new(),
+            globs: Vec::new(),
             scope: String::from("source.rust"),
             first_line_match: None,
             default_config: None,
         };
         let ld_commit_msg = LanguageDefinition {
             name: LanguageId::from("Git Commit"),
-            extensions: vec![
+            filenames: vec![
                 String::from("COMMIT_EDITMSG"),
                 String::from("MERGE_MSG"),
                 String::from("TAG_EDITMSG"),
             ],
+            extensions: Vec::new(),
+            globs: Vec::new(),
             scope: String::from("text.git.commit"),
             first_line_match: None,
             default_config: None,

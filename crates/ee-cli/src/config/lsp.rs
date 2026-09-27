@@ -10,16 +10,17 @@
 //!
 //! Later layers override earlier ones for any key that is explicitly set.
 
-use super::raw::{LspServerToml, LspToml};
+use super::raw::{FormatterToml, LspServerToml, LspToml};
 use super::runtime_languages::normalize_runtime_language_id;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
+use xi_core_lib::runtime_loader::FormatterAttachment as PluginFormatterAttachment;
 use xi_core_lib::runtime_loader::RuntimeLanguageConfig;
 use xi_lsp_lib::{
     Config as PluginLspConfig, DisabledLanguageConfig as PluginDisabledLanguageConfig,
-    LanguageConfig as PluginLanguageConfig,
+    FormatterConfig as PluginFormatterConfig, LanguageConfig as PluginLanguageConfig,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub(crate) struct LspSettings {
     pub servers: BTreeMap<String, LspServerSettings>,
     pub disabled_servers: BTreeMap<String, DisabledLspServerSettings>,
     pub language_servers: BTreeMap<String, Vec<String>>,
+    pub formatters: BTreeMap<String, FormatterSettings>,
+    pub language_formatters: BTreeMap<String, PluginFormatterAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +81,22 @@ impl LspSettings {
                 })
                 .collect(),
             language_servers: config.language_servers.into_iter().collect(),
+            formatters: config
+                .formatters
+                .into_iter()
+                .map(|(id, formatter)| {
+                    (
+                        id,
+                        FormatterSettings {
+                            command: formatter.command,
+                            args: formatter.args,
+                            timeout_ms: formatter.timeout_ms,
+                            max_output_bytes: formatter.max_output_bytes,
+                        },
+                    )
+                })
+                .collect(),
+            language_formatters: config.language_formatters.into_iter().collect(),
         }
     }
 
@@ -121,6 +140,26 @@ impl LspSettings {
                 .iter()
                 .map(|(language_id, server_ids)| (language_id.clone(), server_ids.clone()))
                 .collect(),
+            formatters: self
+                .formatters
+                .iter()
+                .map(|(id, formatter)| {
+                    (
+                        id.clone(),
+                        PluginFormatterConfig {
+                            command: formatter.command.clone(),
+                            args: formatter.args.clone(),
+                            timeout_ms: formatter.timeout_ms,
+                            max_output_bytes: formatter.max_output_bytes,
+                        },
+                    )
+                })
+                .collect(),
+            language_formatters: self
+                .language_formatters
+                .iter()
+                .map(|(language_id, attachment)| (language_id.clone(), attachment.clone()))
+                .collect(),
         }
     }
 
@@ -130,6 +169,14 @@ impl LspSettings {
             Ok(_) | Err(_) => XiConfigTable::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FormatterSettings {
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+    pub max_output_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,11 +192,21 @@ pub(crate) struct LspServerSettings {
     pub initialization_options: Option<Value>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct FormatterSettingsBuilder {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+    max_output_bytes: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct LspSettingsBuilder {
     servers: BTreeMap<String, LspServerSettingsBuilder>,
     language_servers: BTreeMap<String, Vec<String>>,
     disabled_languages: BTreeSet<String>,
+    formatters: BTreeMap<String, FormatterSettingsBuilder>,
+    language_formatters: BTreeMap<String, PluginFormatterAttachment>,
 }
 
 impl Default for LspSettingsBuilder {
@@ -184,6 +241,40 @@ impl LspSettingsBuilder {
                 .collect(),
             language_servers: settings.language_servers.clone(),
             disabled_languages: BTreeSet::new(),
+            formatters: settings
+                .formatters
+                .iter()
+                .map(|(id, formatter)| {
+                    (
+                        id.clone(),
+                        FormatterSettingsBuilder {
+                            command: Some(formatter.command.clone()),
+                            args: Some(formatter.args.clone()),
+                            timeout_ms: Some(formatter.timeout_ms),
+                            max_output_bytes: Some(formatter.max_output_bytes),
+                        },
+                    )
+                })
+                .collect(),
+            language_formatters: settings.language_formatters.clone(),
+        }
+    }
+
+    pub(super) fn merge_formatters_toml(&mut self, patch: &BTreeMap<String, FormatterToml>) {
+        for (language_id, formatter_patch) in patch {
+            let formatter = self.formatters.entry(language_id.clone()).or_default();
+            if let Some(command) = &formatter_patch.command {
+                formatter.command = Some(command.clone());
+            }
+            if let Some(args) = &formatter_patch.args {
+                formatter.args = Some(args.clone());
+            }
+            if let Some(timeout_ms) = formatter_patch.timeout_ms {
+                formatter.timeout_ms = Some(timeout_ms);
+            }
+            if let Some(max_output_bytes) = formatter_patch.max_output_bytes {
+                formatter.max_output_bytes = Some(max_output_bytes);
+            }
         }
     }
 
@@ -236,7 +327,10 @@ impl LspSettingsBuilder {
 
         if let Some(server_ids) = &patch.lsp {
             self.language_servers
-                .insert(normalized_id, normalize_lsp_server_ids(language_id, server_ids));
+                .insert(normalized_id.clone(), normalize_lsp_server_ids(language_id, server_ids));
+        }
+        if let Some(attachment) = &patch.formatter {
+            self.language_formatters.insert(normalized_id, attachment.clone());
         }
     }
 
@@ -326,22 +420,62 @@ impl LspSettingsBuilder {
             language_servers.insert(language_id, Vec::new());
         }
 
-        for (language_id, server_ids) in &mut language_servers {
-            server_ids.retain(|server_id| {
-                if servers.contains_key(server_id) || disabled_servers.contains_key(server_id) {
-                    true
-                } else {
-                    eprintln!(
-                        "ee: warning: language {} references unknown lsp server {}",
-                        language_id, server_id
-                    );
-                    false
-                }
-            });
+        let mut formatters = BTreeMap::new();
+        let mut defined_formatter_ids = BTreeSet::new();
+        for (formatter_id, formatter) in self.formatters {
+            let command = formatter.command.unwrap_or_default();
+            if command.trim().is_empty() {
+                eprintln!(
+                    "ee: warning: invalid formatter config for {formatter_id}: missing command"
+                );
+                continue;
+            }
+            defined_formatter_ids.insert(formatter_id.clone());
+            formatters.insert(
+                formatter_id,
+                FormatterSettings {
+                    command,
+                    args: formatter.args.unwrap_or_default(),
+                    timeout_ms: formatter.timeout_ms.unwrap_or(5_000),
+                    max_output_bytes: formatter.max_output_bytes.unwrap_or(8 * 1024 * 1024),
+                },
+            );
         }
 
-        LspSettings { servers, disabled_servers, language_servers }
+        let mut language_formatters = BTreeMap::new();
+        for (language_id, attachment) in self.language_formatters {
+            if let PluginFormatterAttachment::Id(formatter_id) = &attachment
+                && !defined_formatter_ids.contains(formatter_id)
+            {
+                eprintln!(
+                    "ee: warning: language {language_id} references unknown formatter {formatter_id}; add a [formatters.{formatter_id}] table"
+                );
+                continue;
+            }
+            language_formatters.insert(language_id, attachment);
+        }
+
+        LspSettings { servers, disabled_servers, language_servers, formatters, language_formatters }
     }
+}
+
+pub(super) fn formatters_to_toml(
+    formatters: &BTreeMap<String, FormatterSettings>,
+) -> BTreeMap<String, FormatterToml> {
+    formatters
+        .iter()
+        .map(|(formatter_id, formatter)| {
+            (
+                formatter_id.clone(),
+                FormatterToml {
+                    command: Some(formatter.command.clone()),
+                    args: Some(formatter.args.clone()),
+                    timeout_ms: Some(formatter.timeout_ms),
+                    max_output_bytes: Some(formatter.max_output_bytes),
+                },
+            )
+        })
+        .collect()
 }
 
 pub(super) fn normalize_lsp_server_ids(language_id: &str, server_ids: &[String]) -> Vec<String> {

@@ -29,10 +29,12 @@ pub(crate) use xi_rope::rope::RopeDelta;
 
 pub(crate) use crate::conversion_utils::*;
 pub(crate) use crate::document_symbols::DocumentSymbolContext;
+pub(crate) use crate::external_format::{full_document_edit, run_external_formatter};
 pub(crate) use crate::language_server_client::{LanguageServerClient, OpenDocumentState};
 pub(crate) use crate::result_queue::ResultQueue;
 pub(crate) use crate::types::{
-    Config, Error, LanguageResponseError, LspCodeAction, LspResponse, PendingCompletionItem,
+    Config, Error, FormatterConfig, LanguageResponseError, LspCodeAction, LspResponse,
+    PendingCompletionItem,
 };
 pub(crate) use crate::utils::*;
 pub(crate) use lsp_types::*;

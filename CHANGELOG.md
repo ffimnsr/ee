@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- add Zed language catalog parity: 36 git-pinned tree-sitter grammars and 18 bundled LSP servers generated from `zed-industries/zed` docs/src/languages
+- add `filenames` + `globs` detection dimensions to `LanguageDefinition` with glob > basename > extension precedence; makefile, docker, and just now detect by filename/glob
+- add external formatters: `[formatters.<id>]` with `external`/`language_server`/`none` modes; stdin/stdout runner with timeout + output cap (`docs/upgrades/external-formatters.md`)
+- add `scripts/zed-catalog/sync.sh` + `generate.py` pipeline emitting `references/zed-language-catalog.json` and checked-in Rust catalogs
+- add runtime catalog validation tests for git-pinned grammar sources and detection data
+
 ## 0.11.10 - 2026-09-22
 
 ### Features

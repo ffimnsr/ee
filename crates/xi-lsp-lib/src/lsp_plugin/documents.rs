@@ -124,6 +124,38 @@ impl LspPlugin {
 
     pub(super) fn request_document_formatting(&mut self, view: &mut View<ChunkCache>) {
         let view_id = view.get_id();
+        if let Some(language_id) = self.view_info.get(&view_id).map(|info| info.language_id.clone())
+            && let Some(attachment) = self.config.language_formatters.get(&language_id).cloned()
+        {
+            match attachment {
+                xi_core_lib::runtime_loader::FormatterAttachment::Disabled(_) => {
+                    let key = format!("format:{language_id}:status");
+                    self.add_status_item(
+                        view_id,
+                        &key,
+                        &format!("format:{language_id}: disabled by config"),
+                    );
+                    return;
+                }
+                xi_core_lib::runtime_loader::FormatterAttachment::Id(formatter_id) => {
+                    if let Some(formatter) = self.config.formatters.get(&formatter_id).cloned() {
+                        return self.request_external_formatting(
+                            view,
+                            &language_id,
+                            &formatter_id,
+                            &formatter,
+                        );
+                    }
+                    let key = format!("format:{language_id}:status");
+                    let message = format!(
+                        "format:{language_id}: formatter `{formatter_id}` is not defined; add a [formatters.{formatter_id}] table"
+                    );
+                    self.add_status_item(view_id, &key, &message);
+                    error!("{message}");
+                    return;
+                }
+            }
+        }
         let options = Some(xi_core_lib::plugin_rpc::FormattingOptions {
             tab_size: view.get_config().tab_size,
             insert_spaces: view.get_config().translate_tabs_to_spaces,
@@ -403,6 +435,42 @@ impl LspPlugin {
                 self.record_view_failure(view, format!("{title} rejected: {reason}"));
             }
             Err(err) => self.record_view_failure(view, format!("{title} failed: {err}")),
+        }
+    }
+
+    /// Run a configured external formatter synchronously and apply the
+    /// resulting edits through the same named-edit path LSP formatting uses.
+    pub(super) fn request_external_formatting(
+        &mut self,
+        view: &mut View<ChunkCache>,
+        language_id: &str,
+        _formatter_id: &str,
+        formatter: &FormatterConfig,
+    ) {
+        let view_id = view.get_id();
+        let status_key = format!("format:{language_id}:status");
+        let document = match view.get_document() {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("format:{language_id}: document fetch failed: {err:?}");
+                self.add_status_item(view_id, &status_key, &message);
+                error!("{message}");
+                return;
+            }
+        };
+        let cwd = view.get_path().and_then(Path::parent);
+        match run_external_formatter(formatter, &document, cwd) {
+            Ok(formatted) => {
+                self.remove_status_item(view_id, &status_key);
+                if let Some(edit) = full_document_edit(&document, &formatted) {
+                    self.apply_named_edits(view, "format", &[edit]);
+                }
+            }
+            Err(err) => {
+                let message = format!("format:{language_id}: {err}");
+                self.add_status_item(view_id, &status_key, &message);
+                error!("{message}");
+            }
         }
     }
 

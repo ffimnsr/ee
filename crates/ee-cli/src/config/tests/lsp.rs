@@ -1,6 +1,7 @@
 use super::super::*;
 
 use serde_json::Value;
+use xi_core_lib::runtime_loader::FormatterAttachment as PluginFormatterAttachment;
 // The process cwd is process-global; lock it while mutating.
 #[test]
 fn lsp_config_merges_system_user_and_project_layers() {
@@ -405,4 +406,139 @@ fn readme_documents_lsp_server_config() {
     assert!(readme.contains("lsp = [\"typescript\", \"eslint\"]"));
     assert!(readme.contains("Config precedence"));
     assert!(readme.contains("typescript"));
+}
+
+#[test]
+fn ee_toml_parses_shared_formatter_definitions_and_attachments() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".ee.toml"),
+        "[formatters.shfmt]\ncommand = \"shfmt\"\nargs = [\"-\"]\ntimeout_ms = 3000\nmax_output_bytes = 4194304\n\n[languages.shell]\nformatter = \"shfmt\"\n[languages.fish]\nformatter = \"shfmt\"\n[languages.markdown]\nformatter = false\n",
+    )
+    .unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+
+    // One shared definition...
+    let formatter = settings.lsp.formatters.get("shfmt").unwrap();
+    assert_eq!(formatter.command, "shfmt");
+    assert_eq!(formatter.args, vec!["-"]);
+    assert_eq!(formatter.timeout_ms, 3000);
+    assert_eq!(formatter.max_output_bytes, 4194304);
+
+    // ...attached to multiple languages through the languages table.
+    assert_eq!(
+        settings.lsp.language_formatters.get("shell"),
+        Some(&PluginFormatterAttachment::Id(String::from("shfmt")))
+    );
+    assert_eq!(
+        settings.lsp.language_formatters.get("fish"),
+        Some(&PluginFormatterAttachment::Id(String::from("shfmt")))
+    );
+    assert_eq!(
+        settings.lsp.language_formatters.get("markdown"),
+        Some(&PluginFormatterAttachment::Disabled(false))
+    );
+}
+
+#[test]
+fn formatter_definitions_and_attachments_reach_plugin_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".ee.toml"),
+        "[formatters.shfmt]\ncommand = \"shfmt\"\n\n[languages.shell]\nformatter = \"shfmt\"\n[languages.markdown]\nformatter = false\n",
+    )
+    .unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+    let table = settings.lsp.to_config_table();
+
+    let formatters = table.get("formatters").and_then(Value::as_object).unwrap();
+    let shfmt = formatters.get("shfmt").and_then(Value::as_object).unwrap();
+    assert_eq!(shfmt.get("command").and_then(Value::as_str), Some("shfmt"));
+
+    let attachments = table.get("language_formatters").and_then(Value::as_object).unwrap();
+    assert_eq!(attachments.get("shell").and_then(Value::as_str), Some("shfmt"));
+    assert_eq!(attachments.get("markdown").and_then(Value::as_bool), Some(false));
+}
+
+#[test]
+fn formatter_layers_override_scalar_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+    std::fs::write(
+        env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+        "[formatters.shfmt]\ncommand = \"shfmt\"\nargs = [\"-\"]\n",
+    )
+    .unwrap();
+    std::fs::write(project.join(".ee.toml"), "[formatters.shfmt]\nargs = [\"-i\", \"2\"]\n")
+        .unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+    let formatter = settings.lsp.formatters.get("shfmt").unwrap();
+    assert_eq!(formatter.command, "shfmt");
+    assert_eq!(formatter.args, vec!["-i", "2"]);
+}
+
+#[test]
+fn formatter_defaults_apply_when_fields_omitted() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".ee.toml"), "[formatters.black]\ncommand = \"black\"\n").unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.py")), &env);
+    let formatter = settings.lsp.formatters.get("black").unwrap();
+    assert_eq!(formatter.command, "black");
+    assert!(formatter.args.is_empty());
+    assert_eq!(formatter.timeout_ms, 5000);
+    assert_eq!(formatter.max_output_bytes, 8 * 1024 * 1024);
+}
+
+#[test]
+fn formatter_attachment_to_unknown_definition_is_dropped_with_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".ee.toml"), "[languages.shell]\nformatter = \"shfmt\"\n").unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+    assert!(settings.lsp.language_formatters.is_empty());
+}
+
+#[test]
+fn formatter_definition_without_command_is_dropped_with_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".ee.toml"), "[formatters.shfmt]\n").unwrap();
+
+    let settings = load_config_with_env(Some(&project.join("x.sh")), &env);
+    assert!(settings.lsp.formatters.is_empty());
+}
+
+#[test]
+fn formatters_roundtrip_through_merged_config_document() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    let project = env.cwd.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".ee.toml"), "[formatters.shfmt]\ncommand = \"shfmt\"\n").unwrap();
+
+    let file = project.join("x.sh");
+    let merged = merged_config_document(Some(&file)).unwrap();
+    assert!(merged.contains("[formatters.shfmt]"));
+    assert!(merged.contains("command = \"shfmt\""));
 }
