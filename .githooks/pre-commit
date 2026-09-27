@@ -5,6 +5,10 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 test_summary_script="./scripts/test-workspace-summary.sh"
 
+# One-shot hook builds: disable incremental so stale caches cannot rot into
+# rust-lld "undefined hidden symbol" link failures or unbounded target/ growth.
+export CARGO_INCREMENTAL=0
+
 package_scope=()
 scope_args=()
 needs_rust_checks=0

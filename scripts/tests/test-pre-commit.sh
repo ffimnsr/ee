@@ -61,4 +61,10 @@ mixed_output="$(capture_stable_clippy_calls ee-cli xi-core-lib)"
 mixed_scope_args="$(capture_scope_args ee-cli xi-core-lib)"
 [[ "$mixed_scope_args" == "-p ee-cli -p ee-xi-core-lib" ]]
 
+(
+    set -euo pipefail
+    source "$hook_path"
+    [[ "${CARGO_INCREMENTAL:-}" == "0" ]]
+)
+
 printf 'pre-commit hook test passed\n'
