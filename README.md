@@ -216,7 +216,7 @@ url = "https://example.com/mcp"
 timeout_ms = 5000
 ```
 
-Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new [agent_id]`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, `/new [agent_id]` starts and focuses a fresh chat thread; `/quit` closes pane while keeping sessions running. Without agent id, configured default or sole server is used; otherwise picker opens. Unknown ids are rejected without starting any agent.
+Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new [agent_id]`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, `/new [agent_id]` starts and focuses a fresh chat thread; `/quit` closes pane while keeping sessions running. Without agent id, configured default or sole server is used; otherwise picker opens. Unknown ids are rejected without starting any agent. `Ctrl-K` toggles between the editor and the agents pane from either side in any mode: from the editor it opens the pane (returning to the same mode), from the pane it returns to the editor, closing the full-screen pane or just dropping focus in split layouts (`:agents_layout right|bottom`).
 
 Distinct agent ids launch isolated connections/processes, including same ACP binary configured twice with different model args or env. Start exact ids with `:agents_new <agent_id>`; use no argument for default/sole server or picker. Active session may change only provider-advertised config through `:agents_config_set <config_id> <value>`.
 

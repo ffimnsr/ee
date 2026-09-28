@@ -371,6 +371,27 @@ fn ctrl_k_toggles_between_editor_and_agents_pane() {
 }
 
 #[test]
+fn ctrl_k_toggle_keeps_split_layout_visible() {
+    let script = base_script().wait_for("session/prompt");
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    run_ex(&mut app, "agents_layout right");
+    assert_eq!(app.agents.layout, AgentPaneLayout::Right);
+
+    // Pane → editor: focus drops, split layout stays visible.
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Right, "split pane stays visible");
+
+    // Editor → pane: focus returns, layout unchanged.
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Agent);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Right);
+    app.shutdown_agents();
+}
+
+#[test]
 fn new_thread_slash_command_starts_and_focuses_thread_locally() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

@@ -261,7 +261,10 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         let config = FormatterConfig::external(String::from("pwd"), Vec::new());
         let output = run_external_formatter(&config, "x", Some(&cwd)).unwrap();
-        assert_eq!(output.trim_end(), cwd.to_string_lossy());
+        // `pwd` prints the physical directory: on macOS `/var` is a symlink to
+        // `/private/var`, so the TempDir path and the child's view differ.
+        let expected = fs::canonicalize(&cwd).unwrap();
+        assert_eq!(output.trim_end(), expected.to_string_lossy());
     }
 
     #[test]
