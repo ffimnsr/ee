@@ -25,6 +25,12 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         bind!(mode, KeyCode::Char('c'), ctrl, None, EnterMode(Normal));
     }
 
+    // Ctrl-K toggles between the agents pane and the editor from every mode
+    // (agent pane included), so one key moves both directions.
+    for &mode in &[Normal, Insert, Mode::Replace, Visual, VisualLine, VisualBlock, Agent] {
+        bind!(mode, KeyCode::Char('k'), ctrl, None, ToggleAgentsPane);
+    }
+
     bind!(Picker, KeyCode::Esc, none, None, PickerClose);
     bind!(Picker, KeyCode::Enter, none, None, PickerConfirm);
     bind!(Picker, KeyCode::Up, none, None, PickerMoveUp);

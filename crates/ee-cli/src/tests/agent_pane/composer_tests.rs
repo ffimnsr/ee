@@ -171,3 +171,51 @@ fn editor_accepts_bracketed_paste_and_cancel_discards_it() {
     assert_eq!(draft(&app), "", "cancelling discards the pasted content");
     app.shutdown_agents();
 }
+
+#[test]
+fn delete_removes_char_at_caret_in_bar_and_editor() {
+    let (mut app, _temp) = composer_app();
+    type_text(&mut app, "abcd");
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(cursor(&app), 2);
+    press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "abd", "Delete removes the char at the caret");
+    assert_eq!(cursor(&app), 2, "Delete keeps the caret in place");
+
+    // Delete at the end is a no-op.
+    press(&mut app, KeyCode::End, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "abd");
+
+    // Works inside the floating editor too.
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Delete, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "bd");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "abd", "Esc restores the pre-open draft (forward delete undone)");
+    app.shutdown_agents();
+}
+
+#[test]
+fn legacy_control_bytes_stay_equivalent_under_kitty_encoding() {
+    let (mut app, _temp) = composer_app();
+    // Ctrl+H keeps its agent-pane meaning: word delete, the alias of
+    // Ctrl+Backspace that the composer already handled before kitty encoding.
+    type_text(&mut app, "abc def");
+    press(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+    assert_eq!(draft(&app), "abc ");
+
+    // Ctrl+[ is the legacy Esc byte (0x1B); it must still cancel the editor.
+    type_text(&mut app, "X");
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    type_text(&mut app, "Y");
+    press(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+    assert!(
+        app.agents.threads[0].prompt_editor_snapshot.is_none(),
+        "Ctrl+[ cancels the editor like Esc"
+    );
+    assert_eq!(draft(&app), "abc X", "cancel restores the pre-open draft");
+    app.shutdown_agents();
+}

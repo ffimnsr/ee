@@ -17,6 +17,9 @@ pub(crate) enum Action {
     AgentDraftExternalEdit,
     AgentToggleTranscriptDetails,
     AgentToggleTranscriptRaw,
+    /// Toggle between the agents pane and the editor from any mode (the
+    /// agents-pane equivalent of `:agents` / `:agents_close`).
+    ToggleAgentsPane,
     Quit,
     EnterMode(Mode),
     EnterCommandMode,

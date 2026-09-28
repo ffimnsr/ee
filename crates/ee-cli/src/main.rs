@@ -13,7 +13,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -187,6 +188,7 @@ fn install_panic_hook() {
             io::stderr(),
             DisableBracketedPaste,
             DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         );
         let _ = logs::append_editor_log_line(&format!("panic: {info}"));
@@ -422,7 +424,17 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     #[cfg(unix)]
     let _stderr_log = logs::redirect_tui_stderr();
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        // Ask for kitty-style CSI-u key encoding so modified keys (notably
+        // Ctrl+Enter in the prompt editor) arrive as distinct key events.
+        // Terminals without support silently ignore the request and keep
+        // legacy encoding, where Ctrl+Enter is indistinguishable from Enter.
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.clear()?;
 
@@ -438,6 +450,7 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
         terminal.backend_mut(),
         DisableBracketedPaste,
         DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
@@ -520,6 +533,7 @@ fn edit_agent_draft_externally(
             terminal.backend_mut(),
             DisableBracketedPaste,
             DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         )?;
         Ok(())
@@ -530,7 +544,8 @@ fn edit_agent_draft_externally(
             terminal.backend_mut(),
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
         let _ = enable_raw_mode();
         let _ = terminal.clear();
@@ -560,7 +575,8 @@ fn edit_agent_draft_externally(
             terminal.backend_mut(),
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         enable_raw_mode()?;
         terminal.clear()?;

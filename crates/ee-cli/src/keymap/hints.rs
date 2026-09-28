@@ -350,6 +350,7 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
         Action::AgentDraftExternalEdit => String::from("agent draft external edit"),
         Action::AgentToggleTranscriptDetails => String::from("agent transcript details"),
         Action::AgentToggleTranscriptRaw => String::from("agent transcript raw view"),
+        Action::ToggleAgentsPane => String::from("toggle agents pane"),
         Action::EnterMode(mode) => format!("enter {}", mode_hint_description(*mode)),
         Action::Edit(method) => edit_hint_description(method),
         Action::PrefillCommandLine(prefix) => {

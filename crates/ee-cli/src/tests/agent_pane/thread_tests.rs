@@ -30,6 +30,95 @@ fn agents_stop_cancels_running_turn_and_updates_status() {
 }
 
 #[test]
+fn stop_cancels_turn_and_clears_queued_follow_ups() {
+    let script = base_script().wait_for("session/prompt").wait_for("session/cancel");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "long task");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn running", |app| {
+        app.agents.threads[0].state == ThreadUiState::Running
+    });
+    wait_until(&mut app, "prompt dispatched", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+
+    // Follow-up while running lands in the queue, not the agent.
+    type_text(&mut app, "follow-up after stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 1);
+
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.agents.threads[0].queued_prompts.len(),
+        0,
+        "/stop must drop queued follow-ups so they never dispatch"
+    );
+    assert_eq!(app.backend.status_message.as_deref(), Some("cancelling turn…"));
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::Cancelling);
+
+    wait_until(&mut app, "turn cancellation completed", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    assert_eq!(
+        fake.agent().requests_by_method("session/prompt").len(),
+        1,
+        "the queued follow-up must never reach the agent"
+    );
+}
+
+#[test]
+fn stop_all_cancels_every_thread_and_clears_queues() {
+    let script = two_session_script().wait_for("session/prompt").wait_for("session/prompt");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    open_second_thread(&mut app);
+
+    app.focus_thread(0);
+    type_text(&mut app, "session A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session A prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    app.focus_thread(1);
+    type_text(&mut app, "session B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+
+    app.focus_thread(0);
+    type_text(&mut app, "extra A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    app.focus_thread(1);
+    type_text(&mut app, "extra B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 1);
+    assert_eq!(app.agents.threads[1].queued_prompts.len(), 1);
+
+    type_text(&mut app, "/stop all");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.pending_cancels.len(), 2, "both running turns cancel at once");
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::Cancelling);
+    assert_eq!(app.agents.threads[1].state, ThreadUiState::Cancelling);
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 0);
+    assert_eq!(app.agents.threads[1].queued_prompts.len(), 0);
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("cancelling 2 running turn(s)")
+    );
+
+    wait_until(&mut app, "both cancellations resolve", |app| app.agents.pending_cancels.is_empty());
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::Ready);
+    assert_eq!(app.agents.threads[1].state, ThreadUiState::Ready);
+}
+
+#[test]
 fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -248,6 +337,37 @@ fn quit_full_slash_command_exits_editor_locally() {
     assert_eq!(app.mode, Mode::Agent);
     assert!(app.agents.threads[0].draft.is_empty());
     assert!(fake.agent().requests_by_method("session/prompt").is_empty());
+}
+
+#[test]
+fn ctrl_k_toggles_between_editor_and_agents_pane() {
+    let script = base_script().wait_for("session/prompt");
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    assert_eq!(app.mode, Mode::Agent);
+
+    // From the pane, Ctrl-K returns to the editor; the full-screen pane closes.
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Closed);
+
+    // From insert mode, Ctrl-K opens the pane and returning restores insert.
+    press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+    assert_eq!(app.mode, Mode::Insert);
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Agent);
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Insert, "returns to the mode the editor was left in");
+
+    // While the floating prompt editor is open, Ctrl-K yields to it.
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::Agent);
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].prompt_editor_snapshot.is_some(), "editor stays open");
+    assert_eq!(app.mode, Mode::Agent);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    app.shutdown_agents();
 }
 
 #[test]

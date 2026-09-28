@@ -148,6 +148,12 @@ impl App {
             crate::keymap::Action::AgentToggleTranscriptRaw => {
                 self.agents_transcript_command("toggle")
             }
+            crate::keymap::Action::ToggleAgentsPane => {
+                if self.agents_modal_blocked() {
+                    return false;
+                }
+                self.agents_toggle_focus();
+            }
             _ => return false,
         }
         true
@@ -524,6 +530,7 @@ impl App {
                 self.agents_draft_delete_word();
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
+            KeyCode::Delete => self.agents_draft_delete_forward(),
             KeyCode::Up => self.agents_navigate_prompt_history(-1),
             KeyCode::Down => self.agents_navigate_prompt_history(1),
             KeyCode::Esc => {}
@@ -825,6 +832,15 @@ impl App {
         }
     }
 
+    fn agents_draft_delete_forward(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft_delete_forward_at_cursor();
+        }
+    }
+
     fn agents_draft_cursor_move(&mut self, delta: isize) {
         if let Some(active) = self.agents.active_thread_index() {
             let thread = &mut self.agents.threads[active];
@@ -920,6 +936,7 @@ impl App {
                 self.agents_draft_delete_word();
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
+            KeyCode::Delete => self.agents_draft_delete_forward(),
             KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.agents_draft_cursor_move_word(-1);
             }
@@ -938,9 +955,6 @@ impl App {
             KeyCode::End => self.agents_draft_cursor_line_end(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.agents_clear_draft();
-            }
-            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agents_draft_delete_word();
             }
             KeyCode::Char(c)
                 if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -983,7 +997,7 @@ impl App {
     }
 
     /// Returns focus to the previous editor mode without closing the pane.
-    fn return_to_editor(&mut self) {
+    pub(super) fn return_to_editor(&mut self) {
         if self.agents_focused() {
             self.mode = self.agents.previous_editor_mode.take().unwrap_or(Mode::Normal);
         }

@@ -574,6 +574,17 @@ impl AgentThreadUi {
         self.draft_cursor -= 1;
     }
 
+    /// Removes the char at the caret (forward delete); the caret stays put.
+    pub(crate) fn draft_delete_forward_at_cursor(&mut self) {
+        let count = draft_char_count(&self.draft);
+        if self.draft_cursor >= count {
+            return;
+        }
+        let start = draft_char_to_byte(&self.draft, self.draft_cursor);
+        let end = draft_char_to_byte(&self.draft, self.draft_cursor + 1);
+        self.draft.drain(start..end);
+    }
+
     /// Moves the caret one char; clamps at the draft edges.
     pub(crate) fn draft_cursor_move(&mut self, delta: isize) {
         let count = draft_char_count(&self.draft);

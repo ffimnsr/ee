@@ -156,12 +156,53 @@ impl App {
         self.backend.status_message = Some("agents pane closed (session kept running)".to_string());
     }
 
-    /// `:agents_stop` — cancel the running turn on the active thread.
+    /// Ctrl-K / `agents_toggle`: toggle between the agents pane and the
+    /// editor. From any editor mode it opens the pane (remembering the mode
+    /// to return to); from the pane it returns to the editor — closing the
+    /// full-screen pane, or just dropping focus for split layouts so the
+    /// transcript stays visible.
+    pub(crate) fn agents_toggle_focus(&mut self) {
+        if self.agents_focused() {
+            if self.agents.layout == AgentPaneLayout::Full {
+                self.close_agents_pane();
+            } else {
+                self.return_to_editor();
+            }
+        } else {
+            self.open_agents_pane();
+        }
+    }
+
+    /// Whether any agents modal owns keyboard input right now: permission,
+    /// elicitation, confirmations, pending approvals, or the floating prompt
+    /// editor. The pane toggle yields to these so it cannot yank focus away
+    /// mid-interaction.
+    pub(crate) fn agents_modal_blocked(&self) -> bool {
+        self.agents.permission().is_some()
+            || self.agents.elicitation().is_some()
+            || self.agents.mode_selection.is_some()
+            || self.agents.approval_mode_confirmation.is_some()
+            || self.agents.session_deletion_confirmation.is_some()
+            || self.agents.terminal_stop_confirmation.is_some()
+            || !self.agents.approvals.is_empty()
+            || self
+                .agents
+                .active_thread_index()
+                .and_then(|index| self.agents.threads.get(index))
+                .is_some_and(|thread| thread.prompt_editor_snapshot.is_some())
+    }
+
+    /// `:agents_stop` — full stop for the active thread: cancels the running
+    /// turn and drops queued follow-ups so nothing keeps firing afterwards.
     pub(super) fn agents_stop_turn(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session"));
             return;
         };
+        // Queued follow-ups would dispatch the moment the turn ends, defeating
+        // the cancellation; drop them as part of the full stop.
+        let cleared_queued = !self.agents.threads[active].queued_prompts.is_empty();
+        self.agents.threads[active].queued_prompts.clear();
         if self.agents.pending_external_critic.as_ref().is_some_and(|pending| {
             pending.root_session_id == self.agents.threads[active].session_id
         }) {
@@ -177,7 +218,11 @@ impl App {
         };
         let thread = self.agents.threads[active].host.clone();
         if !thread.is_turn_running() {
-            self.backend.status_message = Some(String::from("no running turn to stop"));
+            self.backend.status_message = Some(if cleared_queued {
+                String::from("no running turn to stop; queued follow-ups cleared")
+            } else {
+                String::from("no running turn to stop")
+            });
             return;
         }
         let session_id = self.agents.threads[active].session_id.clone();
@@ -189,6 +234,43 @@ impl App {
         self.agents.threads[active].state = ThreadUiState::Cancelling;
         self.agents.pending_cancels.insert(session_id, reply);
         self.backend.status_message = Some(String::from("cancelling turn…"));
+    }
+
+    /// `/stop all` — full stop across every thread: cancels all running
+    /// turns, drops all queued follow-ups, and cancels a pending external
+    /// critic. Terminal stopping stays scoped to the active owner.
+    pub(super) fn agents_stop_all(&mut self) {
+        if let Some(pending) = &self.agents.pending_external_critic {
+            let _ = pending.cancel.send(true);
+        }
+        let Some(host) = &self.agents.host else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let mut cancelled = 0usize;
+        let mut cleared = 0usize;
+        for index in 0..self.agents.threads.len() {
+            let thread = self.agents.threads[index].host.clone();
+            let session_id = self.agents.threads[index].session_id.clone();
+            if !self.agents.threads[index].queued_prompts.is_empty() {
+                self.agents.threads[index].queued_prompts.clear();
+                cleared += 1;
+            }
+            if !thread.is_turn_running() || self.agents.pending_cancels.contains_key(&session_id) {
+                continue;
+            }
+            let reply = host.cancel(thread);
+            self.agents.threads[index].state = ThreadUiState::Cancelling;
+            self.agents.pending_cancels.insert(session_id, reply);
+            cancelled += 1;
+        }
+        self.backend.status_message = Some(match (cancelled, cleared) {
+            (0, 0) => String::from("no running turns or queued prompts to stop"),
+            (0, _) => format!("cleared queued follow-ups on {cleared} thread(s)"),
+            _ => format!(
+                "cancelling {cancelled} running turn(s); cleared queued follow-ups on {cleared} thread(s)"
+            ),
+        });
     }
 
     fn active_terminal_owner(&self) -> Option<crate::app::agent_bridge::TerminalOwner> {
@@ -600,7 +682,7 @@ impl App {
 
     pub(super) fn agents_show_key_help(&mut self) {
         self.backend.status_message = Some(String::from(
-            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-←/→ response group · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
+            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-K toggle agents pane/editor · Ctrl-←/→ response group · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
         ));
     }
 
@@ -609,43 +691,53 @@ impl App {
             self.agents_stop_turn();
             return;
         }
-        let Some(owner) = self.active_terminal_owner() else {
-            self.backend.status_message = Some(String::from("no active agent session"));
-            return;
-        };
         if args == "all" {
-            let ids = self
-                .agents
-                .terminals
-                .list_owned(&owner, 0)
-                .into_iter()
-                .filter(|terminal| terminal.running)
-                .map(|terminal| terminal.terminal_id)
-                .take(AGENT_TERMINAL_STOP_ALL_MAX)
-                .collect::<Vec<_>>();
-            match ids.len() {
-                0 => {
-                    self.backend.status_message =
-                        Some(String::from("no owned running terminals to stop"))
-                }
-                1 => self.stop_owned_terminals(&owner, &ids),
-                _ => {
-                    self.agents.terminal_stop_confirmation = Some(TerminalStopConfirmation {
-                        agent_id: owner.agent_id,
-                        session_id: owner.session_id,
-                        terminal_ids: ids,
-                    });
-                    self.backend.status_message =
-                        Some(String::from("confirm stopping owned terminals"));
-                }
-            }
+            // Full stop: cancel every running turn and queued follow-up, then
+            // keep the previous `/stop all` behavior of stopping the active
+            // owner's terminals.
+            self.agents_stop_all();
+            self.request_stop_owned_terminals_all();
             return;
         }
         if args.contains(char::is_whitespace) {
             self.backend.status_message = Some(String::from("usage: /stop [terminal-id|all]"));
             return;
         }
+        let Some(owner) = self.active_terminal_owner() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
         self.stop_owned_terminals(&owner, &[args.to_string()]);
+    }
+
+    /// Requests stopping every running terminal owned by the active agent,
+    /// confirming first when more than one would be killed.
+    fn request_stop_owned_terminals_all(&mut self) {
+        let Some(owner) = self.active_terminal_owner() else {
+            return;
+        };
+        let ids = self
+            .agents
+            .terminals
+            .list_owned(&owner, 0)
+            .into_iter()
+            .filter(|terminal| terminal.running)
+            .map(|terminal| terminal.terminal_id)
+            .take(AGENT_TERMINAL_STOP_ALL_MAX)
+            .collect::<Vec<_>>();
+        match ids.len() {
+            0 => {}
+            1 => self.stop_owned_terminals(&owner, &ids),
+            _ => {
+                self.agents.terminal_stop_confirmation = Some(TerminalStopConfirmation {
+                    agent_id: owner.agent_id,
+                    session_id: owner.session_id,
+                    terminal_ids: ids,
+                });
+                self.backend.status_message =
+                    Some(String::from("confirm stopping owned terminals"));
+            }
+        }
     }
 
     pub(super) fn confirm_stop_owned_terminals(&mut self) {

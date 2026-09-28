@@ -33,6 +33,10 @@ impl App {
             | Action::AgentDraftExternalEdit
             | Action::AgentToggleTranscriptDetails
             | Action::AgentToggleTranscriptRaw => {}
+            #[cfg(feature = "agents")]
+            Action::ToggleAgentsPane => self.agents_toggle_focus(),
+            #[cfg(not(feature = "agents"))]
+            Action::ToggleAgentsPane => {}
             Action::Quit => self.should_quit = true,
             Action::EnterMode(mode) => {
                 // Entering a mode explicitly consumes a pending `Ctrl-o`

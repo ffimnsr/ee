@@ -45,6 +45,9 @@ pub(super) fn render_plan_modal(
 
 /// Renders the floating prompt editor over the agents pane. The draft is
 /// edited live; Esc cancels (restoring the snapshot) and Ctrl-Enter accepts.
+/// Lines are hard-wrapped to the modal width so long lines (including pasted
+/// content) stay inside the modal and the caret maps exactly onto the
+/// rendered columns.
 #[cfg(feature = "agents")]
 pub(super) fn render_prompt_editor(
     frame: &mut ratatui::Frame<'_>,
@@ -60,24 +63,41 @@ pub(super) fn render_prompt_editor(
         .style(Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME));
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
     let draft = &thread.draft;
-    let byte = thread.draft_byte_at_cursor().min(draft.len());
-    let prefix = &draft[..byte];
-    let caret_line = prefix.chars().filter(|c| *c == '\n').count().min(inner.height as usize - 1);
-    let caret_col = prefix.rsplit_once('\n').map_or_else(
-        || ratatui::text::Span::raw(prefix).width(),
-        |(_, rest)| ratatui::text::Span::raw(rest).width(),
-    );
-    let scroll = caret_line.saturating_sub(inner.height as usize - 2);
+    let width = inner.width as usize;
+    let visible = inner.height as usize;
 
-    let lines: Vec<Line<'static>> = draft
-        .split('\n')
-        .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(theme::FG_TEXT))))
-        .collect();
+    // Hard-wrap every logical line; ratatui truncates unwrapped lines at the
+    // modal edge, which pushed the caret and typed text outside the modal.
+    let wrapped: Vec<Vec<String>> =
+        draft.split('\n').map(|line| crate::app::wrap_text_hard(line, width)).collect();
+    let total_rows = wrapped.iter().map(|rows| rows.len()).sum::<usize>();
+
+    // Caret position in wrapped rows/columns (byte offset is always a char
+    // boundary: it comes from the draft caret).
+    let byte = thread.draft_byte_at_cursor().min(draft.len());
+    let (caret_line, caret_col) = crate::app::wrapped_caret_position(draft, byte, width);
+
+    // Scroll only once the caret leaves the modal, so the view stays put
+    // while the caret moves inside the wrapped window (paste lands the caret
+    // at the end of the inserted text and the view follows it).
+    let scroll = caret_line
+        .saturating_sub(visible.saturating_sub(1))
+        .min(total_rows.saturating_sub(visible));
+
+    let mut lines = Vec::with_capacity(total_rows);
+    for rows in wrapped {
+        for row in rows {
+            lines.push(Line::from(Span::styled(row, Style::default().fg(theme::FG_TEXT))));
+        }
+    }
     frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
     frame.set_cursor_position(ratatui::layout::Position {
-        x: inner.x.saturating_add(caret_col as u16),
+        x: inner.x.saturating_add(caret_col as u16).min(inner.right().saturating_sub(1)),
         y: inner.y.saturating_add((caret_line - scroll) as u16),
     });
 }

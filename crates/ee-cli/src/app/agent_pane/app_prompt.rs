@@ -383,7 +383,7 @@ impl App {
             return;
         };
         self.backend.status_message = Some(format!(
-            "follow-up queued ({queued_count}/{AGENT_PROMPT_QUEUE_MAX}); /stop cancels current turn, /queue edits pending prompts"
+            "follow-up queued ({queued_count}/{AGENT_PROMPT_QUEUE_MAX}); /stop cancels turn and queued follow-ups, /stop all stops every thread, /queue edits pending prompts"
         ));
     }
 

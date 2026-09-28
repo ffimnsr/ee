@@ -19,6 +19,54 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Display-width hard wrapping that preserves every character, including
+/// leading/trailing whitespace. Unlike [`wrap_text`] (which collapses
+/// whitespace and breaks at word boundaries), the wrapped segments are
+/// lossless, so rendered columns map exactly back onto the source text.
+/// Used by the floating prompt editor for caret positioning.
+pub(crate) fn wrap_text_hard(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    lines.push(current);
+    lines
+}
+
+/// Maps a byte offset in `text` to its `(wrapped_line, wrapped_col)` when the
+/// text is hard-wrapped at `width` display columns with [`wrap_text_hard`].
+/// The wrapped line index is 0-based; the column is the display width of the
+/// caret's wrapped row. Used by the floating prompt editor to keep the caret
+/// on the modal while the draft wraps.
+pub(crate) fn wrapped_caret_position(
+    text: &str,
+    byte_offset: usize,
+    width: usize,
+) -> (usize, usize) {
+    let prefix = &text[..byte_offset.min(text.len())];
+    let prefix_lines: Vec<&str> = prefix.split('\n').collect();
+    let last_line = prefix_lines.len() - 1;
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (index, part) in prefix_lines.iter().enumerate() {
+        let rows = wrap_text_hard(part, width);
+        line += if index == last_line { rows.len().saturating_sub(1) } else { rows.len() };
+        if index == last_line {
+            col = rows.last().map_or(0, |row| UnicodeWidthStr::width(row.as_str()));
+        }
+    }
+    (line, col)
+}
+
 fn wrap_text_paragraph(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
@@ -263,5 +311,46 @@ mod tests {
     fn wrap_text_preserves_explicit_newlines() {
         let lines = wrap_text("alpha beta\ngamma\n\ndelta", 20);
         assert_eq!(lines, vec!["alpha beta", "gamma", "", "delta"]);
+    }
+
+    #[test]
+    fn wrap_text_hard_preserves_characters_and_breaks_at_width() {
+        assert_eq!(wrap_text_hard("", 10), vec![""]);
+        assert_eq!(wrap_text_hard("ab cd", 10), vec!["ab cd"]);
+        assert_eq!(wrap_text_hard("abcdef", 4), vec!["abcd", "ef"]);
+        assert_eq!(wrap_text_hard("  foo", 10), vec!["  foo"], "leading spaces preserved");
+        assert_eq!(wrap_text_hard("foo  ", 10), vec!["foo  "], "trailing spaces preserved");
+        assert_eq!(wrap_text_hard("a b c", 3), vec!["a b", " c"], "whitespace survives the break");
+        // Joining the segments never loses or reorders characters.
+        assert_eq!(wrap_text_hard("ab cd ef gh", 5).join(""), "ab cd ef gh");
+    }
+
+    #[test]
+    fn wrap_text_hard_is_unicode_width_aware() {
+        // Wide chars count as two display columns.
+        assert_eq!(wrap_text_hard("界界界", 4), vec!["界界", "界"]);
+        // A single char wider than the width still gets its own line.
+        assert_eq!(wrap_text_hard("界x", 1), vec!["界", "x"]);
+        let lines = wrap_text_hard("界abc", 3);
+        assert!(lines.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 3));
+    }
+
+    #[test]
+    fn wrapped_caret_position_maps_onto_wrapped_rows() {
+        assert_eq!(wrapped_caret_position("", 0, 10), (0, 0));
+        assert_eq!(wrapped_caret_position("abc", 3, 10), (0, 3));
+        // Caret inside the first wrapped segment.
+        assert_eq!(wrapped_caret_position("abcdef", 4, 4), (0, 4));
+        // Caret on the second wrapped row of the first logical line.
+        assert_eq!(wrapped_caret_position("abcdef", 5, 4), (1, 1));
+        // Caret on the second logical line.
+        assert_eq!(wrapped_caret_position("ab\ncd", 5, 10), (1, 2));
+        // Wrapped first line, caret on the second logical line.
+        assert_eq!(wrapped_caret_position("abcdef\ngh", 10, 4), (2, 2));
+        // Caret offsets past the end clamp to the final position.
+        assert_eq!(wrapped_caret_position("abcdef", 99, 4), (1, 2));
+        // Wide chars count in the wrapped column (each 界 is 3 UTF-8 bytes).
+        assert_eq!(wrapped_caret_position("界界", 6, 4), (0, 4));
+        assert_eq!(wrapped_caret_position("界界界", 9, 4), (1, 2));
     }
 }

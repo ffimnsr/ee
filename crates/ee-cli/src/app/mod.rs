@@ -95,7 +95,7 @@ pub(crate) use agent_bridge::{
 };
 
 #[cfg(feature = "agents")]
-pub(crate) use crate::text::wrap_text;
+pub(crate) use crate::text::{wrap_text, wrap_text_hard, wrapped_caret_position};
 #[cfg(feature = "agents")]
 pub(crate) use agent_pane::{
     AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout,

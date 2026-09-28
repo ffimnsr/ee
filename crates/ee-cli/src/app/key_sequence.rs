@@ -35,12 +35,36 @@ impl App {
             return;
         };
 
+        // Normalize terminal newline encodings to Enter. Ctrl+Enter arrives as
+        // `KeyCode::Enter` + CONTROL (kitty CSI-u) and is preserved so the
+        // prompt editor can distinguish it; only the legacy control-byte
+        // aliases collapse here.
         if matches!(key.code, KeyCode::Char('\r' | '\n'))
             || (key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Char('m' | 'j')))
         {
             key.code = KeyCode::Enter;
             key.modifiers.remove(KeyModifiers::CONTROL);
+        }
+        // With kitty CSI-u encoding (pushed at startup) the legacy control
+        // bytes are reported distinctly: Ctrl+[ vs Esc, Ctrl+H vs Backspace,
+        // Ctrl+I vs Tab. Collapse them back so vim muscle memory behaves the
+        // same on every terminal (legacy terminals already send the byte).
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('[') => {
+                    key.code = KeyCode::Esc;
+                    key.modifiers.remove(KeyModifiers::CONTROL);
+                }
+                KeyCode::Char('h') => {
+                    key.code = KeyCode::Backspace;
+                }
+                KeyCode::Char('i') => {
+                    key.code = KeyCode::Tab;
+                    key.modifiers.remove(KeyModifiers::CONTROL);
+                }
+                _ => {}
+            }
         }
 
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
