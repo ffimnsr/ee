@@ -578,8 +578,9 @@ impl App {
             Some(groups[(index as isize + delta).rem_euclid(groups.len() as isize) as usize]);
     }
 
-    /// Toggles reasoning and tool visibility for the selected response group.
-    fn agents_toggle_selected_response_group(&mut self) {
+    /// Toggles reasoning and tool visibility for the selected response group
+    /// (Ctrl-R, or a mouse click on the group header row).
+    pub(crate) fn agents_toggle_selected_response_group(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             return;
         };
@@ -595,8 +596,9 @@ impl App {
         }
     }
 
-    /// Toggles tool input/output detail for the selected response group (Ctrl-E).
-    fn agents_toggle_selected_tool_details(&mut self) {
+    /// Toggles tool input/output detail for the selected response group
+    /// (Ctrl-E, or a mouse click on one of the group's tool-call rows).
+    pub(crate) fn agents_toggle_selected_tool_details(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             return;
         };
@@ -893,7 +895,7 @@ impl App {
             let thread = &mut self.agents.threads[active];
             thread.prompt_editor_snapshot = Some(thread.draft.clone());
             self.backend.status_message =
-                Some(String::from("prompt editor: Enter newline · Ctrl-Enter accept · Esc cancel"));
+                Some(String::from("prompt editor: Enter newline · Insert accept · Esc cancel"));
         }
     }
 
@@ -924,7 +926,8 @@ impl App {
             KeyCode::Esc => {
                 self.agents_close_prompt_editor(false);
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // INSERT toggles: the same key that opened the editor accepts it.
+            KeyCode::Insert => {
                 self.agents_close_prompt_editor(true);
             }
             KeyCode::Enter => {

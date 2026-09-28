@@ -86,12 +86,12 @@ impl App {
                 self.agents_archive_command(args);
                 true
             }
-            "fork" if args.is_empty() => {
-                self.agents_fork_session(false);
+            "fork" => {
+                self.agents_fork_session(false, args);
                 true
             }
-            "branch" if args.is_empty() => {
-                self.agents_fork_session(true);
+            "branch" => {
+                self.agents_fork_session(true, args);
                 true
             }
             "delete" if args.is_empty() => {

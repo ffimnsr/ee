@@ -44,9 +44,9 @@ pub(super) fn render_plan_modal(
 }
 
 /// Renders the floating prompt editor over the agents pane. The draft is
-/// edited live; Esc cancels (restoring the snapshot) and Ctrl-Enter accepts.
-/// Lines are hard-wrapped to the modal width so long lines (including pasted
-/// content) stay inside the modal and the caret maps exactly onto the
+/// edited live; Esc cancels (restoring the snapshot), Insert accepts.
+/// Lines are hard-wrapped to the modal width so long lines (including
+/// pasted content) stay inside the modal and the caret maps exactly onto the
 /// rendered columns.
 #[cfg(feature = "agents")]
 pub(super) fn render_prompt_editor(
@@ -58,7 +58,7 @@ pub(super) fn render_prompt_editor(
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" prompt editor — Enter: newline · Ctrl-Enter: accept · Esc: cancel ")
+        .title(" prompt editor — Enter: newline · Insert: accept · Esc: cancel ")
         .border_style(Style::default().fg(theme::FG_KEY))
         .style(Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME));
     let inner = block.inner(modal);

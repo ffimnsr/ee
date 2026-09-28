@@ -682,7 +682,7 @@ impl App {
 
     pub(super) fn agents_show_key_help(&mut self) {
         self.backend.status_message = Some(String::from(
-            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-K toggle agents pane/editor · Ctrl-←/→ response group · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
+            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-K toggle agents pane/editor · Insert prompt editor (Insert accept) · Ctrl-←/→ response group · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
         ));
     }
 

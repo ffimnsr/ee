@@ -103,6 +103,56 @@ impl App {
         };
         self.handle_mouse_event_in_area(m, Rect { x: 0, y: 0, width, height });
     }
+    /// Applies the mouse action for the transcript row the click lands on:
+    /// header rows toggle collapse (Ctrl-R), tool-call rows toggle tool
+    /// detail (Ctrl-E). Clicks on plain content rows and clicks outside the
+    /// transcript area are ignored.
+    #[cfg(feature = "agents")]
+    fn agents_mouse_click_transcript_row(&mut self, pane: Rect, row: u16) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let transcript_area = crate::ui::agents_pane::agents_pane_rows(self, pane)[0];
+        if row < transcript_area.y || row >= transcript_area.bottom() {
+            return;
+        }
+        let (lines, row_action_at) = crate::ui::agents_pane::agent_transcript_lines_with_actions(
+            self,
+            &self.agents.threads[active],
+            transcript_area.width.saturating_sub(1) as usize,
+        );
+        // Same window math as the renderer: scroll offset, bottom-aligned
+        // padding, then the clicked row maps to a transcript line index.
+        let visible_height = transcript_area.height as usize;
+        let max_scroll = lines.len().saturating_sub(visible_height);
+        let thread = &self.agents.threads[active];
+        let top = if thread.stick_to_bottom { max_scroll } else { thread.scroll.min(max_scroll) };
+        let padding = visible_height.saturating_sub(lines.len().saturating_sub(top));
+        let content_row = usize::from(row - transcript_area.y);
+        if content_row < padding {
+            return;
+        }
+        let line_index = content_row - padding + top;
+        let Some(action) = row_action_at.get(line_index).copied().flatten() else {
+            return;
+        };
+        match action {
+            crate::ui::agents_pane::TranscriptRowAction::ToggleCollapse(group) => {
+                self.agents.threads[active].selected_response_group = Some(group);
+                self.agents_toggle_selected_response_group();
+            }
+            crate::ui::agents_pane::TranscriptRowAction::ToggleToolDetail(group) => {
+                let thread = &self.agents.threads[active];
+                if thread.transcript_raw || thread.transcript_detail {
+                    // Detail is always shown in these modes; nothing to toggle.
+                    return;
+                }
+                self.agents.threads[active].selected_response_group = Some(group);
+                self.agents_toggle_selected_tool_details();
+            }
+        }
+    }
+
     pub(crate) fn handle_mouse_event_in_area(&mut self, m: MouseEvent, area: Rect) {
         #[cfg(feature = "agents")]
         if let Some(pane) = crate::ui::agents_pane_rect_for(area, self)
@@ -114,6 +164,9 @@ impl App {
                 }
                 MouseEventKind::ScrollDown => {
                     self.agents_scroll(1);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.agents_mouse_click_transcript_row(pane, m.row);
                 }
                 _ => {}
             }

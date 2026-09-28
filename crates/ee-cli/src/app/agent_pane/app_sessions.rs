@@ -282,7 +282,9 @@ impl App {
 
     /// Starts a fresh provider session seeded with redacted visible parent messages.
     /// This is deliberately not presented as an ACP/provider-side clone.
-    pub(super) fn agents_fork_session(&mut self, activate_child: bool) {
+    /// An explicit `requested_agent_id` forks under a different configured
+    /// agent; empty keeps the parent's agent (previous behavior).
+    pub(super) fn agents_fork_session(&mut self, activate_child: bool, requested_agent_id: &str) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session to fork"));
             return;
@@ -295,21 +297,49 @@ impl App {
             ));
             return;
         }
+        let requested_agent_id = requested_agent_id.trim();
+        if requested_agent_id.contains(char::is_whitespace) {
+            self.backend.status_message = Some(String::from("usage: /fork [agent_id]"));
+            return;
+        }
         let parent = &self.agents.threads[active];
         let parent_session_id = parent.session_id.clone();
-        let agent_id = parent.agent_id.clone();
         let seed = fork_seed(parent, &self.agents_secret_values());
+        let agent_id = if requested_agent_id.is_empty() {
+            parent.agent_id.clone()
+        } else if self.config.agents.servers.contains_key(requested_agent_id) {
+            requested_agent_id.to_owned()
+        } else {
+            self.backend.status_message = Some(self.unknown_agent_message(requested_agent_id));
+            return;
+        };
         self.ensure_agents_host();
         self.start_mcp_servers();
+        if !requested_agent_id.is_empty()
+            && let Some(host) = self.agents.host.as_ref()
+            && !host.manager.has_agent(&agent_id)
+        {
+            self.backend.status_message = Some(format!(
+                "agent `{agent_id}` unavailable after secure launch configuration resolution"
+            ));
+            return;
+        }
         self.start_session_with_fork(
-            agent_id,
+            agent_id.clone(),
             Some(PendingFork { parent_session_id, seed, activate_child }),
         );
-        self.backend.status_message = Some(String::from(if activate_child {
-            "starting seeded branch session…"
+        self.backend.status_message = Some(if requested_agent_id.is_empty() {
+            String::from(if activate_child {
+                "starting seeded branch session…"
+            } else {
+                "starting seeded fork session…"
+            })
         } else {
-            "starting seeded fork session…"
-        }));
+            format!(
+                "starting seeded {} with {agent_id}…",
+                if activate_child { "branch" } else { "fork" }
+            )
+        });
     }
 
     fn agents_archive_current_session(&mut self) {

@@ -144,7 +144,7 @@ fn insert_opens_editor_and_enter_adds_newline_without_submitting() {
 }
 
 #[test]
-fn editor_esc_cancels_and_ctrl_enter_accepts() {
+fn editor_esc_cancels_and_insert_accepts() {
     let (mut app, _temp) = composer_app();
     type_text(&mut app, "original");
     press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
@@ -153,11 +153,19 @@ fn editor_esc_cancels_and_ctrl_enter_accepts() {
     assert!(app.agents.threads[0].prompt_editor_snapshot.is_none(), "Esc closes the editor");
     assert_eq!(draft(&app), "original", "Esc restores the pre-open draft");
 
+    // INSERT toggles: opens the editor, then accepts the edited draft.
     press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
     type_text(&mut app, "+");
-    press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
     assert!(app.agents.threads[0].prompt_editor_snapshot.is_none());
-    assert_eq!(draft(&app), "original+", "Ctrl-Enter keeps the edited draft");
+    assert_eq!(draft(&app), "original+", "Insert keeps the edited draft");
+
+    // Ctrl+Enter is no longer distinct: it inserts a newline like Enter.
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].prompt_editor_snapshot.is_some(), "editor stays open");
+    assert_eq!(draft(&app), "original+\n");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     app.shutdown_agents();
 }
 

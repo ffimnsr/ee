@@ -159,7 +159,7 @@ pub(super) fn agents_composer_height(app: &App, area: Rect) -> u16 {
 }
 
 #[cfg(feature = "agents")]
-pub(super) fn agents_pane_rows(app: &App, area: Rect) -> std::rc::Rc<[Rect]> {
+pub(crate) fn agents_pane_rows(app: &App, area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -176,7 +176,30 @@ pub(crate) fn agent_transcript_lines(
     thread: &crate::app::AgentThreadUi,
     width: usize,
 ) -> Vec<Line<'static>> {
+    agent_transcript_lines_with_actions(app, thread, width).0
+}
+
+/// Mouse action a rendered transcript row maps to, if any.
+#[cfg(feature = "agents")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TranscriptRowAction {
+    /// Response-group header row: toggle reasoning and tool collapse (Ctrl-R).
+    ToggleCollapse(crate::app::ResponseGroupId),
+    /// Tool-call row: toggle tool input/output detail (Ctrl-E).
+    ToggleToolDetail(crate::app::ResponseGroupId),
+}
+
+/// Rendered transcript plus, for every line, the mouse action it maps to
+/// (plain content rows map to `None`). Emitted line-for-line identically to
+/// `agent_transcript_lines` so mouse hit-testing shares the same geometry.
+#[cfg(feature = "agents")]
+pub(crate) fn agent_transcript_lines_with_actions(
+    app: &App,
+    thread: &crate::app::AgentThreadUi,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<Option<TranscriptRowAction>>) {
     let mut lines = Vec::new();
+    let mut row_action_at = Vec::new();
     let mut rendered_response_groups = std::collections::BTreeSet::new();
     for item in &thread.transcript {
         if matches!(item, crate::app::TranscriptItem::Message { text, .. } if text.trim().is_empty())
@@ -222,17 +245,28 @@ pub(crate) fn agent_transcript_lines(
                     ));
                 }
                 lines.push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
+                row_action_at.push(Some(TranscriptRowAction::ToggleCollapse(group)));
             }
             if !thread.transcript_raw && thread.collapsed_response_groups.contains(&group) {
                 continue;
             }
         }
+        let span_start = lines.len();
         lines.extend(transcript_lines(item, width, show_tool_detail));
+        let span_end = lines.len();
+        row_action_at.resize(span_end, None);
+        if let crate::app::TranscriptItem::ToolCall { response_group, .. } = item {
+            // Detail continuation rows belong to the same clickable tool entry.
+            for slot in &mut row_action_at[span_start..span_end] {
+                *slot = Some(TranscriptRowAction::ToggleToolDetail(*response_group));
+            }
+        }
     }
     if let Some(line) = thinking_line(thread) {
         lines.push(line);
+        row_action_at.push(None);
     }
-    lines
+    (lines, row_action_at)
 }
 
 /// Spinner frames cycled while a turn runs (classic cli-spinners style).

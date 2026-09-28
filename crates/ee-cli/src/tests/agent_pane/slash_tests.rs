@@ -273,6 +273,53 @@ fn fork_and_branch_create_redacted_seeded_sessions_without_mutating_parent() {
 }
 
 #[test]
+fn fork_with_agent_id_starts_seeded_session_under_target_agent() {
+    let (mut app, _temp, _alpha, beta) = two_fake_agents_app();
+    run_ex(&mut app, "agents_new alpha");
+    wait_until(&mut app, "alpha session ready", |app| {
+        app.agents.threads.len() == 1
+            && app.agents.threads[0].session_id == "alpha-session"
+            && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    app.agents.threads[0].transcript.push(TranscriptItem::Message {
+        nick: String::from("you"),
+        text: String::from("parent context"),
+        kind: MessageRenderKind::User,
+        message_id: Some(String::from("parent-1")),
+        response_group: None,
+        at: SystemTime::now(),
+    });
+
+    // Fork under beta: the child binds to beta, not the parent's alpha.
+    type_text(&mut app, "/fork beta");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "fork under beta ready", |app| app.agents.threads.len() == 2);
+    assert_eq!(app.agents.active_thread, Some(0), "fork keeps parent active");
+    assert_eq!(app.agents.threads[1].agent_id, "beta");
+    assert_eq!(app.agents.threads[1].fork_parent_session_id.as_deref(), Some("alpha-session"));
+    assert!(app.backend.status_message.as_deref().unwrap_or("").contains("with beta"));
+    wait_until(&mut app, "beta receives seeded prompt", |_| {
+        beta.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let beta_prompts = beta.agent().requests_by_method("session/prompt");
+    let seed = beta_prompts[0]["params"]["prompt"][0]["text"].as_str().expect("fork seed text");
+    assert!(seed.contains("parent context"));
+    assert!(seed.contains("not provider-side session cloning"));
+
+    // Unknown agent ids fail closed without creating a thread.
+    app.focus_thread(0);
+    type_text(&mut app, "/fork nope");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.backend.status_message.as_deref().unwrap_or("").contains("unknown agent `nope`"),
+        "status: {:?}",
+        app.backend.status_message
+    );
+    assert_eq!(app.agents.threads.len(), 2, "failed fork must not create a thread");
+    app.shutdown_agents();
+}
+
+#[test]
 fn approval_slash_command_scopes_modes_to_active_session_and_confirms_bypass() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);

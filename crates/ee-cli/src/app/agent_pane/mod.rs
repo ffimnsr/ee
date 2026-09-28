@@ -63,4 +63,6 @@ pub(crate) use format::{format_duration, turn_metrics_label};
 #[allow(unused_imports)]
 pub(crate) use state::{AgentPaneLayout, AgentPaneState};
 #[allow(unused_imports)]
-pub(crate) use thread_ui::{AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem};
+pub(crate) use thread_ui::{
+    AgentThreadUi, MessageRenderKind, ResponseGroupId, ThreadUiState, TranscriptItem,
+};
