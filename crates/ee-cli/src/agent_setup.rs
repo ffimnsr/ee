@@ -207,6 +207,43 @@ enum RubberDuckBackendChoice {
     ExternalAgent,
 }
 
+/// Prompts for the ee-owned model registry slot to run as critic.
+///
+/// The registry registers the root under `DEFAULT_MODEL_ID` (`default`) and
+/// the critic under `RUBBER_DUCK_ROLE` (`rubber_duck`). The default agent
+/// hosts its critic under RUBBER_DUCK_ROLE; `default` is the root slot, which
+/// stays the active model and never acts as critic. Custom id stays available
+/// for agent servers that register other critic slots.
+fn select_internal_critic_model_id() -> Result<String, String> {
+    println!("Critic model registry id:");
+    println!("  1) rubber_duck (RUBBER_DUCK_ROLE critic slot; the default agent uses this)");
+    println!(
+        "  2) default (DEFAULT_MODEL_ID root slot; only a custom agent registers its critic here)"
+    );
+    println!("  3) custom id");
+    loop {
+        let selected = prompt_line("Select model slot [1-3]: ")?;
+        if let Some(slot) = internal_slot_choice(&selected) {
+            return Ok(String::from(slot));
+        }
+        if selected.trim() == "3" {
+            let custom = prompt_value("Custom critic model registry id", None, true)?
+                .expect("required prompt always returns a value");
+            return Ok(custom);
+        }
+        eprintln!("Enter 1, 2, or 3.");
+    }
+}
+
+/// Maps the wizard slot choice to a built-in registry id.
+fn internal_slot_choice(choice: &str) -> Option<&'static str> {
+    match choice.trim() {
+        "1" => Some("rubber_duck"),
+        "2" => Some("default"),
+        _ => None,
+    }
+}
+
 /// Post-setup wizard: optionally enable the rubber duck critic, choose its
 /// backend (internal model or a fully configured agent server), and write
 /// `[agents.rubber_duck]` to the same config layer as the agent server.
@@ -230,9 +267,7 @@ fn setup_rubber_duck(
     };
     let (internal_model_id, external_agent_id) = match backend {
         RubberDuckBackendChoice::InternalModel => {
-            let model_id =
-                prompt_value("Critic model id (e.g. openrouter/deepseek-v3)", None, true)?
-                    .expect("required prompt always returns a value");
+            let model_id = select_internal_critic_model_id()?;
             (Some(model_id), None)
         }
         RubberDuckBackendChoice::ExternalAgent => {
@@ -554,6 +589,16 @@ mod tests {
     use ee_agent_protocol::setup::{SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig};
 
     use super::*;
+
+    #[test]
+    fn internal_slot_choice_maps_builtin_slots_and_rejects_rest() {
+        assert_eq!(internal_slot_choice("1"), Some("rubber_duck"));
+        assert_eq!(internal_slot_choice(" 1 "), Some("rubber_duck"));
+        assert_eq!(internal_slot_choice("2"), Some("default"));
+        for invalid in ["", "3", "0", "rubber_duck", "1.5"] {
+            assert_eq!(internal_slot_choice(invalid), None, "{invalid:?} should be rejected");
+        }
+    }
 
     #[test]
     fn candidates_sort_local_first_then_by_name() {

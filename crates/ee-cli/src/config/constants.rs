@@ -134,7 +134,7 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # # Optional rubber duck. Select at most one backend.
 # # [agents.rubber_duck]
 # # mode = "manual" # "off", "manual", or "automatic"
-# # internal_model_id = "critic" # ee-owned agent model registry id
+# # internal_model_id = "rubber_duck" # ee-owned agent model registry id
 # # external_agent_id = "critic-agent" # configured [agents.servers] id
 # # max_calls = 2
 # # max_context_bytes = 65536
