@@ -303,24 +303,38 @@ fn response_with_reasoning(reasoning: &str, text: &str) -> Value {
 // Minimal server harness over the framework's memory transport.
 struct Harness {
     handle: ee_acp_agent_server::MemoryTransportHandle,
-    pending: Arc<Mutex<VecDeque<RawJsonRpcMessage>>>,
+    pending: Arc<Mutex<VecDeque<ee_acp_agent_server::JsonRpcFrame>>>,
 }
 
 impl Harness {
     fn send(&self, frame: RawJsonRpcMessage) -> bool {
-        self.handle.send(frame)
+        self.handle.send(ee_acp_agent_server::JsonRpcFrame::Single(frame))
     }
 
     async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
-            let ready = {
+            let frames = {
                 let mut pending = self.pending.lock().expect("harness pending poisoned");
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                if pending.len() >= count { Some(pending.drain(..count).collect()) } else { None }
+                let mut collected = Vec::with_capacity(count);
+                while collected.len() < count {
+                    match pending.pop_front() {
+                        Some(ee_acp_agent_server::JsonRpcFrame::Single(message)) => {
+                            collected.push(message)
+                        }
+                        Some(batch) => {
+                            panic!(
+                                "a batch response is queued; use a batch-aware harness instead: {batch:?}"
+                            )
+                        }
+                        None => break,
+                    }
+                }
+                collected
             };
-            if let Some(frames) = ready {
+            if !frames.is_empty() {
                 return frames;
             }
             tokio::task::yield_now().await;

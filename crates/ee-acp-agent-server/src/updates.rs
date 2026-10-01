@@ -203,6 +203,38 @@ impl UpdateSink {
         self.emit(SessionUpdate::Plan(Plan::new(entries)))
     }
 
+    /// Updates one v2 plan under a provider-chosen plan id (v2-only; v1
+    /// connections drop the update with a warning because v1 carries one
+    /// whole-session plan).  Providers that keep v1 semantics should use
+    /// [`Self::plan_replace`] instead.
+    pub fn plan_update_v2(
+        &self,
+        plan_id: &str,
+        entries: Vec<PlanEntry>,
+    ) -> Result<(), UpdateSinkError> {
+        let update = crate::v2::plan_update(plan_id, &entries);
+        self.emit_v2(update)
+    }
+
+    /// Streams one tool-call content item as a v2 `tool_call_content_chunk`
+    /// (v2-only; providers stream item-by-item instead of replacing whole
+    /// content arrays).  Returns `EmptyId` for blank tool-call ids and
+    /// `ChannelFull`-equivalent `Closed` when the outbound path is gone;
+    /// items without a v2 representation are dropped with a warning.
+    pub fn tool_call_content_chunk_v2(
+        &self,
+        tool_call_id: impl Into<String>,
+        content: ToolCallContent,
+    ) -> Result<(), UpdateSinkError> {
+        let tool_call_id = check_id(tool_call_id.into(), "tool_call_id")?;
+        let update = crate::v2::tool_call_content_chunk(&ToolCallId::new(tool_call_id), &content)
+            .ok_or_else(|| {
+            tracing::warn!("dropping v1 tool call content item with no v2 representation");
+            UpdateSinkError::EmptyId("tool_call_content")
+        })?;
+        self.emit_v2(update)
+    }
+
     /// Replaces the session's available commands.
     pub fn available_commands_replace(
         &self,
@@ -227,6 +259,18 @@ impl UpdateSink {
         }
         self.tx
             .send(OutboundEvent::Update {
+                session_id: self.session_id.clone(),
+                update: Box::new(update),
+            })
+            .map_err(|_| UpdateSinkError::Closed)
+    }
+
+    /// Queues a v2-only update; the server drops it with a warning when the
+    /// connection negotiated v1 (v2-only surfaces must never leak onto the
+    /// v1 wire).
+    fn emit_v2(&self, update: ee_agent_protocol::v2::SessionUpdate) -> Result<(), UpdateSinkError> {
+        self.tx
+            .send(OutboundEvent::UpdateV2 {
                 session_id: self.session_id.clone(),
                 update: Box::new(update),
             })

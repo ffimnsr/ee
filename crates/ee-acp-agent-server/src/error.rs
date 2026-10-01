@@ -19,6 +19,14 @@ pub(crate) const CODE_REQUEST_CANCELLED: i32 = -32800;
 /// JSON-RPC server-error code used for permission denials.
 pub(crate) const CODE_PERMISSION_DENIED: i32 = -32001;
 
+/// Per-entry error for an invalid member inside a JSON-RPC batch array
+/// (v2 stdio requires per-entry `-32600` responses instead of failing the
+/// whole frame).
+#[must_use]
+pub fn invalid_batch_member_error() -> RpcError {
+    RpcError::new(-32600, "invalid request")
+}
+
 /// Framework-level server error.
 #[derive(Debug)]
 pub enum AcpServerError {

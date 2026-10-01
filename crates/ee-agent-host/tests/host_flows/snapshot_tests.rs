@@ -23,6 +23,7 @@ async fn initialize_snapshot_fs_read_only() {
                 "writeTextFile": false,
             },
             "terminal": false,
+            "auth": { "terminal": false },
         })
     );
 }
@@ -42,6 +43,7 @@ async fn initialize_snapshot_fs_write_only() {
                 "writeTextFile": true,
             },
             "terminal": false,
+            "auth": { "terminal": false },
         })
     );
 }
@@ -62,6 +64,7 @@ async fn initialize_snapshot_fs_read_and_write() {
                 "writeTextFile": true,
             },
             "terminal": false,
+            "auth": { "terminal": false },
         })
     );
 }
@@ -81,6 +84,7 @@ async fn initialize_snapshot_terminal_support() {
                 "writeTextFile": false,
             },
             "terminal": true,
+            "auth": { "terminal": false },
         })
     );
 }
@@ -100,6 +104,7 @@ async fn initialize_snapshot_boolean_session_config_support() {
                 "writeTextFile": false,
             },
             "terminal": false,
+            "auth": { "terminal": false },
             "session": {
                 "configOptions": {
                     "boolean": {},
@@ -124,6 +129,7 @@ async fn initialize_snapshot_elicitation_form_support() {
                 "writeTextFile": false,
             },
             "terminal": false,
+            "auth": { "terminal": false },
             "elicitation": {
                 "form": {},
             }
@@ -146,6 +152,7 @@ async fn initialize_snapshot_elicitation_url_support() {
                 "writeTextFile": false,
             },
             "terminal": false,
+            "auth": { "terminal": false },
             "elicitation": {
                 "url": {},
             }
@@ -164,6 +171,7 @@ async fn initialize_snapshot_no_capabilities() {
                 "writeTextFile": false,
             },
             "terminal": false,
+            "auth": { "terminal": false },
         })
     );
 }

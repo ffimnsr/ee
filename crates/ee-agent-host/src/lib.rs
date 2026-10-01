@@ -27,6 +27,7 @@ pub mod redact;
 pub mod reducer;
 pub mod session;
 pub mod turn_evidence;
+pub mod v2_updates;
 pub mod web_context;
 mod workspace_memory;
 mod workspace_verified_facts;

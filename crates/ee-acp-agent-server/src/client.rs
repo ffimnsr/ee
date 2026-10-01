@@ -14,7 +14,7 @@
 //!   the transport closes (`PendingRequests::fail_all`) — a request never
 //!   outlives its prompt, a timeout, or the connection.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ee_agent_protocol::registry::{
@@ -23,13 +23,28 @@ use ee_agent_protocol::registry::{
     TERMINAL_CREATE_METHOD_NAME, TERMINAL_KILL_METHOD_NAME, TERMINAL_OUTPUT_METHOD_NAME,
     TERMINAL_RELEASE_METHOD_NAME, TERMINAL_WAIT_FOR_EXIT_METHOD_NAME,
 };
+
+/// Client-request methods removed in v2 (migration guide: the client file
+/// system and terminal execution APIs are gone; client-side tools surface
+/// through MCP servers instead).  On a v2 connection these fail closed before
+/// anything reaches the transport — the receiving v2 client has no such
+/// handlers.
+const V2_REMOVED_CLIENT_METHODS: &[&str] = &[
+    FS_READ_TEXT_FILE_METHOD_NAME,
+    FS_WRITE_TEXT_FILE_METHOD_NAME,
+    TERMINAL_CREATE_METHOD_NAME,
+    TERMINAL_OUTPUT_METHOD_NAME,
+    TERMINAL_RELEASE_METHOD_NAME,
+    TERMINAL_WAIT_FOR_EXIT_METHOD_NAME,
+    TERMINAL_KILL_METHOD_NAME,
+];
 use ee_agent_protocol::{
     ConnectMcpRequest, ConnectMcpResponse, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, DisconnectMcpRequest, DisconnectMcpResponse,
     Error as RpcError, KillTerminalRequest, KillTerminalResponse, MessageMcpNotification,
-    MessageMcpRequest, MessageMcpResponse, RawJsonRpcMessage, ReadTextFileRequest,
+    MessageMcpRequest, MessageMcpResponse, ProtocolVersion, RawJsonRpcMessage, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestId, Response,
-    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    SessionId, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use serde::Serialize;
@@ -43,6 +58,8 @@ use crate::server::OutboundEvent;
 
 /// One in-flight agent → client request.
 struct PendingRequest {
+    /// The session the request belongs to (v2 foreground-state reporting).
+    session_id: SessionId,
     /// The prompt that issued the request; entries are cleaned up when the
     /// owning prompt ends.
     owner: u64,
@@ -51,6 +68,12 @@ struct PendingRequest {
     sender: oneshot::Sender<Result<Value, ProviderError>>,
 }
 
+/// Invoked when a pending agent → client request starts (`true`) or stops
+/// (`false`) for a session.  The server uses it to report v2 `state_update`
+/// foreground transitions (`requires_action` while blocked, `running` when the
+/// client answers) on v2 connections.
+type PendingToggle = Arc<dyn Fn(&SessionId, bool) + Send + Sync>;
+
 /// Registry of in-flight agent → client requests, keyed by request id.
 ///
 /// Shared by the server run loop (which routes inbound responses here) and
@@ -58,11 +81,19 @@ struct PendingRequest {
 #[derive(Default)]
 pub(crate) struct PendingRequests {
     inner: Mutex<std::collections::HashMap<RequestId, PendingRequest>>,
+    toggle: Option<PendingToggle>,
 }
 
 impl PendingRequests {
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates the registry with a foreground-state toggle; the callback
+    /// fires for every pending request start/stop (see [`PendingToggle`]).
+    pub(crate) fn with_toggle(toggle: PendingToggle) -> Self {
+        Self { inner: Mutex::new(std::collections::HashMap::new()), toggle: Some(toggle) }
     }
 
     /// Registers a pending request before it is written to the transport.
@@ -70,12 +101,14 @@ impl PendingRequests {
         &self,
         id: RequestId,
         owner: u64,
+        session_id: SessionId,
         sender: oneshot::Sender<Result<Value, ProviderError>>,
     ) {
+        self.notify(&session_id, true);
         self.inner
             .lock()
             .expect("pending requests poisoned")
-            .insert(id, PendingRequest { owner, sender });
+            .insert(id, PendingRequest { session_id, owner, sender });
     }
 
     /// Routes one inbound JSON-RPC response envelope to its pending request.
@@ -92,7 +125,10 @@ impl PendingRequests {
 
     /// Removes the pending request with the given id, if present.
     pub(crate) fn remove(&self, id: &RequestId) {
-        self.inner.lock().expect("pending requests poisoned").remove(id);
+        let entry = self.inner.lock().expect("pending requests poisoned").remove(id);
+        if let Some(entry) = entry {
+            self.notify(&entry.session_id, false);
+        }
     }
 
     /// Number of pending requests (unit tests assert cleanup).
@@ -107,6 +143,7 @@ impl PendingRequests {
         let entries = std::mem::take(&mut *self.inner.lock().expect("pending requests poisoned"));
         tracing::debug!(count = entries.len(), "failing pending client requests on close");
         for (_, entry) in entries {
+            self.notify(&entry.session_id, false);
             let _ = entry.sender.send(Err(reason.clone()));
         }
     }
@@ -114,10 +151,15 @@ impl PendingRequests {
     /// Removes every pending request owned by one prompt (its bridge handle
     /// was dropped: prompt finished, was cancelled, or was aborted).
     pub(crate) fn remove_owner(&self, owner: u64) {
-        self.inner
-            .lock()
-            .expect("pending requests poisoned")
-            .retain(|_, entry| entry.owner != owner);
+        let mut entries = self.inner.lock().expect("pending requests poisoned");
+        let removed = entries
+            .extract_if(|_, entry| entry.owner == owner)
+            .map(|(_, entry)| entry.session_id)
+            .collect::<Vec<_>>();
+        drop(entries);
+        for session_id in removed {
+            self.notify(&session_id, false);
+        }
     }
 
     fn resolve(&self, id: RequestId, result: Result<Value, ProviderError>) {
@@ -125,7 +167,16 @@ impl PendingRequests {
             tracing::debug!(%id, "ignoring response for unknown request id");
             return;
         };
+        self.notify(&entry.session_id, false);
         let _ = entry.sender.send(result);
+    }
+
+    /// Reports a foreground-state transition (v2-only on the wire; the
+    /// callback decides what to emit).
+    fn notify(&self, session_id: &SessionId, pending: bool) {
+        if let Some(toggle) = &self.toggle {
+            toggle(session_id, pending);
+        }
     }
 }
 
@@ -159,6 +210,9 @@ struct ClientBridgeInner {
     pending: Arc<PendingRequests>,
     outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
     request_timeout: Duration,
+    /// The connection's negotiated protocol version (pinned after
+    /// `initialize`); fs/terminal client requests fail closed on v2.
+    negotiated: Arc<OnceLock<ProtocolVersion>>,
 }
 
 /// RAII cleanup: removes a prompt's pending requests when the bridge handle
@@ -183,6 +237,9 @@ impl Drop for OwnerCleanup {
 pub struct ClientBridge {
     inner: Arc<ClientBridgeInner>,
     owner: u64,
+    /// The session this prompt's requests belong to (v2 foreground-state
+    /// reporting).
+    session_id: SessionId,
     cleanup: Option<OwnerCleanup>,
 }
 
@@ -197,7 +254,12 @@ impl std::fmt::Debug for ClientBridge {
 
 impl Clone for ClientBridge {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), owner: self.owner, cleanup: None }
+        Self {
+            inner: self.inner.clone(),
+            owner: self.owner,
+            session_id: self.session_id.clone(),
+            cleanup: None,
+        }
     }
 }
 
@@ -218,8 +280,11 @@ impl ClientBridge {
                 pending: Arc::new(PendingRequests::new()),
                 outbound_tx,
                 request_timeout,
+                // Unset means the connection never negotiated: v1 behavior.
+                negotiated: Arc::new(OnceLock::new()),
             }),
             owner: 1,
+            session_id: SessionId::new("test-session"),
             cleanup: None,
         }
     }
@@ -241,9 +306,16 @@ impl ClientBridge {
     /// timeout, on write failure, or when the owning prompt ends via
     /// `OwnerCleanup`.
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, ProviderError> {
+        if V2_REMOVED_CLIENT_METHODS.contains(&method)
+            && self.inner.negotiated.get() == Some(&ProtocolVersion::V2)
+        {
+            return Err(ProviderError::InvalidRequest(format!(
+                "{method} was removed in ACP v2; expose client-side tools through MCP servers instead"
+            )));
+        }
         let id = self.inner.ids.lock().expect("request id generator poisoned").next_id();
         let (sender, receiver) = oneshot::channel();
-        self.inner.pending.insert(id.clone(), self.owner, sender);
+        self.inner.pending.insert(id.clone(), self.owner, self.session_id.clone(), sender);
 
         let frame = match RawJsonRpcMessage::request(method.to_string(), params, id.clone()) {
             Ok(frame) => frame,
@@ -453,22 +525,30 @@ impl ClientBridgeFactory {
         pending: Arc<PendingRequests>,
         outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
         request_timeout: Duration,
+        negotiated: Arc<OnceLock<ProtocolVersion>>,
     ) -> Self {
         Self {
-            inner: Arc::new(ClientBridgeInner { ids, pending, outbound_tx, request_timeout }),
+            inner: Arc::new(ClientBridgeInner {
+                ids,
+                pending,
+                outbound_tx,
+                request_timeout,
+                negotiated,
+            }),
             next_owner: Arc::new(Mutex::new(1)),
         }
     }
 
-    /// Creates the bridge for one prompt turn.  Every prompt gets a fresh
-    /// owner id so its requests die with it.
-    pub(crate) fn bridge(&self) -> ClientBridge {
+    /// Creates the bridge for one prompt turn serving `session_id`.  Every
+    /// prompt gets a fresh owner id so its requests die with it.
+    pub(crate) fn bridge_for(&self, session_id: &SessionId) -> ClientBridge {
         let mut next = self.next_owner.lock().expect("bridge owner counter poisoned");
         let owner = *next;
         *next += 1;
         ClientBridge {
             inner: self.inner.clone(),
             owner,
+            session_id: session_id.clone(),
             cleanup: Some(OwnerCleanup { pending: self.inner.pending.clone(), owner }),
         }
     }
@@ -501,8 +581,17 @@ mod tests {
             pending,
             outbound_tx,
             request_timeout,
+            negotiated: Arc::new(OnceLock::new()),
         });
-        (ClientBridge { inner, owner: 1, cleanup: None }, outbound_rx)
+        (
+            ClientBridge {
+                inner,
+                owner: 1,
+                session_id: SessionId::new("test-session"),
+                cleanup: None,
+            },
+            outbound_rx,
+        )
     }
 
     async fn wait_until(check: impl Fn() -> bool, what: &str) {
@@ -562,8 +651,9 @@ mod tests {
             pending.clone(),
             outbound_tx,
             Duration::from_secs(60),
+            Arc::new(OnceLock::new()),
         );
-        let prompt_bridge = factory.bridge();
+        let prompt_bridge = factory.bridge_for(&SessionId::new("session-a"));
         let task = tokio::spawn({
             let clone = prompt_bridge.clone();
             async move { clone.send_request("fs/read_text_file", json!({})).await }
@@ -623,6 +713,61 @@ mod tests {
             "{error:?}"
         );
         assert!(outbound_rx.try_recv().is_err(), "no request may be queued for a relative path");
+    }
+
+    /// Pins the negotiated version on a test bridge (the server does this via
+    /// `initialize`).
+    fn pin_negotiated(bridge: &ClientBridge, version: ProtocolVersion) {
+        let _ = bridge.inner.negotiated.set(version);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removed_client_methods_fail_closed_on_v2_before_sending() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        pin_negotiated(&bridge, ProtocolVersion::V2);
+
+        // The entire fs/terminal client surface is removed in v2 (guide).
+        for method in
+            ["fs/read_text_file", "fs/write_text_file", "terminal/create", "terminal/kill"]
+        {
+            let error = bridge.send_request(method, json!({ "sessionId": "s" })).await.unwrap_err();
+            assert!(
+                matches!(error, ProviderError::InvalidRequest(ref reason) if reason.contains("removed in ACP v2")),
+                "{method} must fail closed on v2: {error:?}"
+            );
+        }
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "no removed-surface request may reach the transport on v2"
+        );
+
+        // v2-native methods still flow.
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.send_request("mcp/connect", json!({ "connectionId": "c" })).await }
+        });
+        let _ = outbound_rx.recv().await.expect("v2-native method still sends");
+        drop(task);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removed_client_methods_still_flow_before_negotiation() {
+        // An unset negotiation is the v1 behavior: fs requests keep flowing
+        // (v1 clients that advertised the surface still serve them).
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.send_request("fs/read_text_file", json!({})).await }
+        });
+        let frame = outbound_rx.recv().await.expect("v1 fs request still sends");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Request(request) = frame else {
+            panic!("expected a request frame");
+        };
+        assert_eq!(request.method.as_ref(), "fs/read_text_file");
+        drop(task);
     }
 
     /// The JSON params of an outbound request/notification frame.

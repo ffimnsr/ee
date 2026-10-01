@@ -1,4 +1,4 @@
-//! ACP (Agent Client Protocol) v1 wire protocol facade for ee agents mode.
+//! ACP (Agent Client Protocol) wire protocol facade for ee agents mode.
 //!
 //! Per repository policy, protocol code prefers official SDK crates over
 //! handrolled wire code.  All ACP wire structs, method metadata, and routing
@@ -7,20 +7,27 @@
 //! duplicate protocol types.  This crate owns only the ee-specific
 //! boundaries the SDK does not cover:
 //!
-//! - [`version`] — strict v1-only version negotiation (fail closed).
+//! - [`version`] — strict v1+v2 version negotiation (fail closed).
 //! - [`validate`] — absolute-path and 1-based line invariants at the protocol
 //!   boundary; editor-relative coordinates are converted only inside editors.
 //! - [`ordering`] — session-update ordering checks (SDK gap: documented in
 //!   module docs and tests).
 //! - [`capabilities`] — unknown-capability capture for diagnostics that never
-//!   enables unsupported behavior.
+//!   enables unsupported behavior, plus v1→v2 capability conversion.
 //! - [`registry`] — typed JSON-RPC method registry whose constants are
 //!   derived from the SDK's `AGENT_METHOD_NAMES` / `CLIENT_METHOD_NAMES`;
 //!   per-method params validation stays local because the SDK's untagged
 //!   routing enums cannot validate params by method (documented in tests).
 //!
-//! Target protocol: ACP v1 only (the latest stable major version).  Draft v2
-//! and legacy v0 fail closed everywhere.
+//! Target protocol: ACP v1 (the legacy surface, still spoken by
+//! [`ee-agent-host`](https://crates.io/crates/ee-agent-host)) and the draft
+//! ACP v2 (agent-side, gated behind the SDK's `unstable_protocol_v2`
+//! feature).  Legacy v0 and unknown future versions fail closed everywhere.
+//!
+//! Both schema generations are re-exported: v1 types at the crate root (the
+//! long-standing `ee_agent_protocol::*` surface) and both generations as
+//! explicit modules ([`v1`], [`v2`]) for code that must name its wire
+//! generation.
 //!
 //! [`agent-client-protocol`]: https://docs.rs/agent-client-protocol
 
@@ -54,6 +61,10 @@ pub use mcp_over_acp::{EE_PROXY_SERVER_NAME, ee_proxy_acp_entry};
 /// content blocks, capabilities, and shared identifiers).
 pub use agent_client_protocol::schema::v1::*;
 
+/// The SDK schema modules, re-exported so consumers can name their wire
+/// generation explicitly (`ee_agent_protocol::v1`, `ee_agent_protocol::v2`).
+pub use agent_client_protocol::schema::{v1, v2};
+
 /// The ACP protocol version marker type (shared across v1/v2 schema).
 pub use agent_client_protocol::schema::ProtocolVersion;
 
@@ -82,8 +93,11 @@ pub use agent_client_protocol::{
 /// and [`Builder::on_receive_notification`].
 pub use agent_client_protocol::{on_receive_notification, on_receive_request};
 
-/// String form of the supported ACP version, used for user-facing status.
+/// String form of the legacy ACP version the host speaks, used for
+/// user-facing status.
 ///
 /// The wire representation is the numeric [`ProtocolVersion`]; this string
-/// form exists for messages like the `:agents` status line.
+/// form exists for messages like the `:agents` status line.  The agent-side
+/// server framework negotiates v1 *and* v2 (see [`version`]); the host still
+/// opens connections as v1 until its v2 client path lands.
 pub const SUPPORTED_ACP_VERSION: &str = "1";

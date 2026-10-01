@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{
-    AcpAgentServer, AcpAgentServerConfig, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, JsonRpcFrame, MemoryTransport, MemoryTransportHandle,
 };
 use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, OrchestratorProvider};
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
@@ -66,13 +66,13 @@ impl TestDirs {
 /// Minimal ACP client over the framework's memory transport.
 struct Harness {
     handle: MemoryTransportHandle,
-    pending: Arc<Mutex<VecDeque<RawJsonRpcMessage>>>,
+    pending: Arc<Mutex<VecDeque<JsonRpcFrame>>>,
     workspace: PathBuf,
 }
 
 impl Harness {
     fn send(&self, frame: RawJsonRpcMessage) -> bool {
-        self.handle.send(frame)
+        self.handle.send(JsonRpcFrame::Single(frame))
     }
 
     async fn next_frame(&self) -> RawJsonRpcMessage {
@@ -81,14 +81,26 @@ impl Harness {
 
     async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
-            let ready = {
+            let frames = {
                 let mut pending = self.pending.lock().expect("harness pending poisoned");
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                if pending.len() >= count { Some(pending.drain(..count).collect()) } else { None }
+                let mut collected = Vec::with_capacity(count);
+                while collected.len() < count {
+                    match pending.pop_front() {
+                        Some(JsonRpcFrame::Single(message)) => collected.push(message),
+                        Some(batch) => {
+                            panic!(
+                                "a batch response is queued; use a batch-aware harness instead: {batch:?}"
+                            )
+                        }
+                        None => break,
+                    }
+                }
+                collected
             };
-            if let Some(frames) = ready {
+            if !frames.is_empty() {
                 return frames;
             }
             tokio::task::yield_now().await;

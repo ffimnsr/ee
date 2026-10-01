@@ -1,7 +1,8 @@
 //! JSON-RPC request dispatch.
 //!
 //! Routes incoming requests to typed handlers, validates params *before*
-//! any provider call, negotiates ACP v1 only, and shapes typed SDK
+//! any provider call, negotiates ACP v1 or draft v2 (one version per
+//! connection, pinned at `initialize`), and shapes typed SDK
 //! responses.  Unknown requests get `method-not-found`; notifications are
 //! routed here too (`session/cancel`), everything else is ignored with
 //! tracing debug.
@@ -10,7 +11,7 @@
 //! to the server's FIFO outbound channel, so updates emitted during the
 //! prompt arrive before the prompt response.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ee_agent_protocol::registry::{
     INITIALIZE_METHOD_NAME, SESSION_CANCEL_NOTIFICATION, SESSION_CLOSE_METHOD_NAME,
@@ -23,7 +24,7 @@ use ee_agent_protocol::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId,
     ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionInfo, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse,
+    SetSessionModeRequest, SetSessionModeResponse, agent_capabilities_to_v2, v2,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -32,14 +33,21 @@ use tokio::sync::{mpsc, watch};
 use crate::client::ClientBridgeFactory;
 use crate::config::AcpAgentServerConfig;
 use crate::error::{AcpServerError, ProviderError};
+use crate::ids::MessageIdGenerator;
 use crate::provider::{
-    AgentProvider, LoadSessionContext, NewSessionContext, PromptContext, ProviderFuture,
-    SetModeContext,
+    AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,
+    ProviderFuture, SetModeContext,
 };
 use crate::server::{ActivePromptError, ActivePrompts, OutboundEvent};
 use crate::session::{ServerSession, SessionStore, SessionStoreError};
 use crate::updates::{UpdateSink, UpdateSinkError};
-use crate::validate::{validate_absolute_paths, validate_protocol_version_v1, validate_session_id};
+use crate::v2 as translate;
+use crate::validate::{validate_absolute_paths, validate_protocol_version, validate_session_id};
+
+/// v2 method names (the facade registry carries v1 names only; these mirror
+/// the SDK's v2 agent method registry).
+const V2_AUTH_LOGIN_METHOD_NAME: &str = "auth/login";
+const V2_AUTH_LOGOUT_METHOD_NAME: &str = "auth/logout";
 
 /// Outcome of dispatching one request.
 pub(crate) enum DispatchOutcome {
@@ -61,10 +69,17 @@ pub(crate) struct RequestDispatcher<P> {
     active_prompts: Arc<ActivePrompts>,
     outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
     client_factory: ClientBridgeFactory,
+    /// The protocol version pinned by `initialize` (one per connection).
+    negotiated: Arc<OnceLock<ProtocolVersion>>,
+    /// Agent-owned user message ids for v2 prompt acknowledgments.
+    message_ids: Arc<Mutex<MessageIdGenerator>>,
     request_id: RequestId,
 }
 
 impl<P: AgentProvider> RequestDispatcher<P> {
+    // Internal constructor wiring one connection's shared state (provider,
+    // store, negotiated version, message ids) into the per-request dispatcher.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         provider: Arc<P>,
         config: Arc<AcpAgentServerConfig>,
@@ -72,9 +87,21 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         active_prompts: Arc<ActivePrompts>,
         outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
         client_factory: ClientBridgeFactory,
+        negotiated: Arc<OnceLock<ProtocolVersion>>,
+        message_ids: Arc<Mutex<MessageIdGenerator>>,
         request_id: RequestId,
     ) -> Self {
-        Self { provider, config, sessions, active_prompts, outbound_tx, client_factory, request_id }
+        Self {
+            provider,
+            config,
+            sessions,
+            active_prompts,
+            outbound_tx,
+            client_factory,
+            negotiated,
+            message_ids,
+            request_id,
+        }
     }
 
     /// Routes one request to its typed handler.
@@ -86,9 +113,10 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 Ok(outcome) => outcome,
                 Err(error) => DispatchOutcome::Immediate(Err(error)),
             },
-            SESSION_RESUME_METHOD_NAME => {
-                DispatchOutcome::Immediate(self.session_resume(params).await)
-            }
+            SESSION_RESUME_METHOD_NAME => match self.session_resume(params).await {
+                Ok(outcome) => outcome,
+                Err(error) => DispatchOutcome::Immediate(Err(error)),
+            },
             SESSION_LIST_METHOD_NAME => DispatchOutcome::Immediate(self.session_list(params).await),
             SESSION_CLOSE_METHOD_NAME => {
                 DispatchOutcome::Immediate(self.session_close(params).await)
@@ -100,6 +128,10 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 Ok(outcome) => outcome,
                 Err(error) => DispatchOutcome::Immediate(Err(error)),
             },
+            V2_AUTH_LOGIN_METHOD_NAME => DispatchOutcome::Immediate(self.auth_login(params).await),
+            V2_AUTH_LOGOUT_METHOD_NAME => {
+                DispatchOutcome::Immediate(self.auth_logout(params).await)
+            }
             // `session/cancel` may arrive as a request (id present) or a
             // notification; both share the CancelNotification params shape.
             SESSION_CANCEL_NOTIFICATION => {
@@ -127,12 +159,34 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         }
     }
 
-    /// `initialize`: negotiates ACP v1 only and returns provider identity
-    /// and capabilities, plus framework identity metadata from config.
+    /// `initialize`: negotiates ACP v1 or draft v2 (pinned per connection),
+    /// then answers with the matching surface: v1 carries provider identity in
+    /// `agentInfo`/`agentCapabilities`, v2 in the role-agnostic `info` and
+    /// the session-nested `capabilities`.
     async fn initialize(&self, params: Value) -> Result<Value, RpcError> {
-        let request: InitializeRequest = parse_params(params)?;
-        validate_protocol_version_v1(request.protocol_version)
-            .map_err(|error| error.into_rpc_error())?;
+        let requested = raw_protocol_version(&params)?;
+        validate_protocol_version(requested).map_err(|error| error.into_rpc_error())?;
+        // One connection speaks exactly one version, chosen at initialize.
+        match self.negotiated.get_or_init(|| requested) {
+            &existing if existing == requested => {}
+            _ => {
+                return Err(RpcError::invalid_params().data(serde_json::json!({
+                    "reason": "protocol version already negotiated for this connection",
+                })));
+            }
+        }
+        match requested {
+            ProtocolVersion::V1 => self.initialize_v1(params).await,
+            ProtocolVersion::V2 => self.initialize_v2(params).await,
+            _ => unreachable!("validated above"),
+        }
+    }
+
+    /// v1 `initialize`: the legacy role-specific response shape.
+    async fn initialize_v1(&self, params: Value) -> Result<Value, RpcError> {
+        // Version was already validated and pinned; the typed parse both
+        // confirms the shape and is required by conformance.
+        let _request: InitializeRequest = parse_params(params)?;
 
         let mut response = InitializeResponse::new(ProtocolVersion::V1)
             .agent_info(self.provider.info())
@@ -144,6 +198,30 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         let mut meta = serde_json::Map::new();
         meta.insert("framework".to_string(), framework);
         response.meta = Some(meta);
+
+        to_value(response)
+    }
+
+    /// v2 `initialize`: role-agnostic `info` plus the session-nested
+    /// `capabilities`, translated from the provider's v1 capabilities.  No
+    /// `authMethods` are advertised, so v2 clients must not call `auth/*`.
+    async fn initialize_v2(&self, params: Value) -> Result<Value, RpcError> {
+        let _request: v2::InitializeRequest = parse_params(params)?;
+
+        let info = self.provider.info();
+        let framework = serde_json::to_value(&self.config.implementation)
+            .map_err(|_| RpcError::internal_error())?;
+        let mut meta = serde_json::Map::new();
+        meta.insert("framework".to_string(), framework);
+
+        let response = v2::InitializeResponse::new(
+            ProtocolVersion::V2,
+            v2::Implementation::new(info.name.clone(), info.version.clone())
+                .title(info.title.clone()),
+        )
+        .capabilities(agent_capabilities_to_v2(&self.provider.capabilities()))
+        .auth_methods(self.provider.auth_methods())
+        .meta(meta);
 
         to_value(response)
     }
@@ -177,11 +255,19 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         // Advertise the provider's initial commands after the session is
         // registered; the update travels the FIFO outbound path, so it
         // reaches the client right after the response.
-        self.emit_available_commands(&session_id, init.commands)?;
-        let response = NewSessionResponse::new(session_id)
-            .modes(init.modes)
-            .config_options(init.config_options);
-        to_value(response)
+        self.emit_available_commands(&session_id, init.commands.clone())?;
+        if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+            // v2 responses carry no `modes` (modes became config options).
+            let response = v2::NewSessionResponse::new(session_id.0.clone()).config_options(
+                translate::translate_config_options(&init.config_options.unwrap_or_default()),
+            );
+            to_value(response)
+        } else {
+            let response = NewSessionResponse::new(session_id)
+                .modes(init.modes)
+                .config_options(init.config_options);
+            to_value(response)
+        }
     }
 
     /// `session/load`: validates absolute paths, registers the session
@@ -190,8 +276,15 @@ impl<P: AgentProvider> RequestDispatcher<P> {
     /// streams the whole conversation as `session/update` notifications
     /// through its replay sink, then the queued `DeferredResponse` follows
     /// them in FIFO order (ACP v1 requires replay before the empty result).
-    /// A failed load removes the provisional session.
+    /// A failed load removes the provisional session.  v2 removed this
+    /// method (`session/resume` + `replayFrom` replaces it), so v2
+    /// connections fail closed with method-not-found.
     async fn session_load(&self, params: Value) -> Result<DispatchOutcome, RpcError> {
+        if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+            return Err(RpcError::method_not_found().data(serde_json::json!({
+                "reason": "session/load was removed in ACP v2; use session/resume",
+            })));
+        }
         let request: LoadSessionRequest = parse_params(params)?;
         validate_absolute_paths(&request.cwd, &request.additional_directories)
             .map_err(|error| error.into_rpc_error())?;
@@ -308,12 +401,22 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         Ok(DispatchOutcome::Deferred)
     }
 
-    /// `session/resume`: restores session context with NO conversation
-    /// replay (ACP v1).  The provider restores from its checkpoint store;
-    /// the interrupted turn is then continued by the next `session/prompt`
-    /// re-send via the provider's pending-checkpoint detection.  An already
-    /// registered session (same-process reconnect) is reused.
-    async fn session_resume(&self, params: Value) -> Result<Value, RpcError> {
+    /// `session/resume`: restores session context.  ACP v1 (and v2 without
+    /// `replayFrom`) resumes with NO conversation replay; v2 with an explicit
+    /// `replayFrom` cursor replays history as ordinary `session/update`
+    /// notifications before the (deferred) response — unknown cursors are
+    /// rejected rather than guessed.  The provider restores from its
+    /// checkpoint store; the interrupted turn is then continued by the next
+    /// `session/prompt` re-send via the provider's pending-checkpoint
+    /// detection.  An already registered session (same-process reconnect) is
+    /// reused.
+    async fn session_resume(&self, params: Value) -> Result<DispatchOutcome, RpcError> {
+        let is_v2 = self.negotiated.get() == Some(&ProtocolVersion::V2);
+        let wants_replay = params.get("replayFrom").is_some_and(|cursor| !cursor.is_null());
+        if is_v2 && wants_replay {
+            self.resume_with_replay_v2(params).await?;
+            return Ok(DispatchOutcome::Deferred);
+        }
         let request: ResumeSessionRequest = parse_params(params)?;
         validate_absolute_paths(&request.cwd, &request.additional_directories)
             .map_err(|error| error.into_rpc_error())?;
@@ -342,10 +445,125 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         }
         // Same command advertisement as `session/new`/`session/load`: the
         // resumed session re-advertises its available commands.
-        self.emit_available_commands(&init.session_id, init.commands)?;
-        let response =
-            ResumeSessionResponse::new().modes(init.modes).config_options(init.config_options);
-        to_value(response)
+        self.emit_available_commands(&init.session_id, init.commands.clone())?;
+        if is_v2 {
+            let response = v2::ResumeSessionResponse::new().config_options(
+                translate::translate_config_options(&init.config_options.unwrap_or_default()),
+            );
+            Ok(DispatchOutcome::Immediate(to_value(response)))
+        } else {
+            let response =
+                ResumeSessionResponse::new().modes(init.modes).config_options(init.config_options);
+            Ok(DispatchOutcome::Immediate(to_value(response)))
+        }
+    }
+
+    /// v2 `session/resume` with `replayFrom`: validates the cursor, reserves
+    /// the session for the bounded resume task, replays history through the
+    /// replay sink as ordinary v2 updates, then completes with a deferred
+    /// response (replay must arrive before the response, like v1
+    /// `session/load`).  An already registered session is reused; a failed
+    /// resume removes the provisional entry again.
+    async fn resume_with_replay_v2(&self, params: Value) -> Result<(), RpcError> {
+        let request: v2::ResumeSessionRequest = parse_params(params)?;
+        if !matches!(request.replay_from, Some(v2::ReplayFrom::Start(_))) {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "unsupported replayFrom cursor; only the start cursor is understood",
+            })));
+        }
+        let cwd = request.cwd.0.clone();
+        let additional_directories =
+            request.additional_directories.iter().map(|path| path.0.clone()).collect::<Vec<_>>();
+        // The v2 session id newtype converts to the framework's v1-shaped id.
+        let session_id = ee_agent_protocol::SessionId::new(request.session_id.0.to_string());
+        validate_absolute_paths(&cwd, &additional_directories)
+            .map_err(|error| error.into_rpc_error())?;
+
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let generation = self.active_prompts.start(&session_id, cancel_tx.clone()).map_err(
+            |error| match error {
+                ActivePromptError::AlreadyActive(session_id) => {
+                    concurrent_prompt_error(&session_id)
+                }
+            },
+        )?;
+        drop(cancel_tx);
+        // Provisional registration so replayed updates reach the client; a
+        // failed resume removes it again.  An already registered session
+        // (same-process reconnect) stays and is refreshed on success.
+        if !self.sessions.contains(&session_id) {
+            self.register_session(ServerSession {
+                session_id: session_id.clone(),
+                cwd: Some(cwd.clone()),
+                additional_directories: additional_directories.clone(),
+                mcp_servers: Vec::new(),
+                title: None,
+                modes: None,
+                metadata: Value::Null,
+            })?;
+        }
+        let ctx = LoadSessionContext {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            additional_directories: additional_directories.clone(),
+            mcp_servers: Vec::new(),
+            metadata: request.meta.clone(),
+            replay_sink: Some(UpdateSink::new(session_id.clone(), self.outbound_tx.clone())),
+        };
+        let provider = self.provider.clone();
+        let sessions = self.sessions.clone();
+        let active_prompts = self.active_prompts.clone();
+        let outbound_tx = self.outbound_tx.clone();
+        let request_id = self.request_id.clone();
+        let request_timeout = self.config.request_timeout;
+        let join_session_id = session_id.clone();
+        let attach_session_id = session_id.clone();
+        let join_request_id = request_id.clone();
+        let join = tokio::spawn(async move {
+            let result: Result<Value, RpcError> = async {
+                let init = match tokio::time::timeout(request_timeout, provider.resume_session(ctx))
+                    .await
+                {
+                    Ok(Ok(init)) => init,
+                    Ok(Err(provider_error)) => {
+                        sessions.remove(&session_id);
+                        return Err(AcpServerError::Provider(provider_error).into_rpc_error());
+                    }
+                    Err(_) => {
+                        sessions.remove(&session_id);
+                        return Err(AcpServerError::RequestTimeout { request_id: join_request_id }
+                            .into_rpc_error());
+                    }
+                };
+                if let Err(error) = reject_invalid_provider_session_id(&init.session_id) {
+                    sessions.remove(&session_id);
+                    return Err(error);
+                }
+                if let Some(mut resolved) = sessions.remove(&session_id) {
+                    resolved.title = init.title.clone();
+                    resolved.modes = init.modes.clone();
+                    resolved.metadata = Value::Null;
+                    let _ = sessions.insert_new(resolved);
+                }
+                if !init.commands.is_empty() {
+                    let update = SessionUpdate::AvailableCommandsUpdate(
+                        AvailableCommandsUpdate::new(init.commands),
+                    );
+                    let _ = outbound_tx.send(OutboundEvent::Update {
+                        session_id: session_id.clone(),
+                        update: Box::new(update),
+                    });
+                }
+                to_value(v2::ResumeSessionResponse::new().config_options(
+                    translate::translate_config_options(&init.config_options.unwrap_or_default()),
+                ))
+            }
+            .await;
+            let _ = outbound_tx.send(OutboundEvent::DeferredResponse { request_id, result });
+            active_prompts.remove(&join_session_id);
+        });
+        self.active_prompts.attach_join(&attach_session_id, generation, join);
+        Ok(())
     }
 
     /// `session/list`: returns live sessions in stable order.  Cursors are
@@ -371,8 +589,15 @@ impl<P: AgentProvider> RequestDispatcher<P> {
     }
 
     /// `session/set_mode`: validates advertised state, applies the provider's
-    /// mode behavior, then commits framework-owned session state.
+    /// mode behavior, then commits framework-owned session state.  v2
+    /// removed modes (`session/set_config_option` replaces them), so v2
+    /// connections fail closed with method-not-found.
     async fn session_set_mode(&self, params: Value) -> Result<Value, RpcError> {
+        if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+            return Err(RpcError::method_not_found().data(serde_json::json!({
+                "reason": "session/set_mode was removed in ACP v2; use session/set_config_option",
+            })));
+        }
         let request: SetSessionModeRequest = parse_params(params)?;
         let Some(session) = self.sessions.get(&request.session_id) else {
             return Err(AcpServerError::UnknownSession(request.session_id).into_rpc_error());
@@ -412,6 +637,9 @@ impl<P: AgentProvider> RequestDispatcher<P> {
     /// prompt result, so updates arrive before the response.
     async fn session_prompt(&self, params: Value) -> Result<DispatchOutcome, RpcError> {
         let request: PromptRequest = parse_params(params)?;
+        if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+            return self.prompt_v2(request).await;
+        }
 
         // Reject unknown sessions before registering or invoking anything.
         let sink = self.update_sink_for(&request.session_id).map_err(|error| match error {
@@ -447,16 +675,95 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         let session_id = request.session_id.clone();
         // One live bridge per prompt: agent → client requests flow through
         // the outbound path, and every request this prompt owns dies with it.
-        let client = self.client_factory.bridge();
+        let client = self.client_factory.bridge_for(&request.session_id);
         let join = tokio::spawn(async move {
             let result = provider.prompt(ctx, sink, client, cancel_rx).await;
-            let _ = outbound_tx.send(OutboundEvent::PromptCompleted { request_id, result });
+            let _ = outbound_tx.send(OutboundEvent::PromptCompleted {
+                session_id: session_id.clone(),
+                request_id,
+                result,
+            });
             // Always clean up active-prompt state: completion, provider
             // error, and cancellation all land here.
             active_prompts.remove(&session_id);
         });
         self.active_prompts.attach_join(&request.session_id, generation, join);
         Ok(DispatchOutcome::Deferred)
+    }
+
+    /// v2 `session/prompt`: accepts the prompt, acknowledges insertion with
+    /// the agent-owned `messageId`, and reports foreground progress through
+    /// `state_update` notifications instead of the response (the response no
+    /// longer ends the turn).
+    ///
+    /// The user_message acknowledgment and the running state are queued
+    /// before the ack; the spec allows updates to arrive before or after the
+    /// response, so no ordering constraint exists.  Turn completion is
+    /// reported by the run loop as an idle `state_update` once the provider
+    /// resolves.
+    async fn prompt_v2(&self, request: PromptRequest) -> Result<DispatchOutcome, RpcError> {
+        let session_id = request.session_id.clone();
+        let sink = self.update_sink_for(&session_id).map_err(|error| match error {
+            UpdateSinkError::UnknownSession(session_id) => {
+                AcpServerError::UnknownSession(session_id).into_rpc_error()
+            }
+            other => {
+                RpcError::internal_error().data(serde_json::json!({ "reason": other.to_string() }))
+            }
+        })?;
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let generation = self.active_prompts.start(&session_id, cancel_tx.clone()).map_err(
+            |error| match error {
+                ActivePromptError::AlreadyActive(session_id) => {
+                    concurrent_prompt_error(&session_id)
+                }
+            },
+        )?;
+        drop(cancel_tx);
+
+        // The agent owns message identity in v2: this id anchors the
+        // acknowledgment response, the user_message update, and every chunk
+        // the provider streams for this message.
+        let message_id =
+            self.message_ids.lock().expect("message id generator lock poisoned").next_id();
+
+        let ctx = PromptContext {
+            session_id: session_id.clone(),
+            prompt: request.prompt.clone(),
+            metadata: request.meta.clone(),
+        };
+        let provider = self.provider.clone();
+        let active_prompts = self.active_prompts.clone();
+        let outbound_tx = self.outbound_tx.clone();
+        let request_id = self.request_id.clone();
+        let client = self.client_factory.bridge_for(&session_id);
+
+        let _ = outbound_tx.send(OutboundEvent::UpdateV2 {
+            session_id: session_id.clone(),
+            update: Box::new(translate::user_message_update(&message_id, &ctx.prompt)),
+        });
+        let _ = outbound_tx.send(OutboundEvent::UpdateV2 {
+            session_id: session_id.clone(),
+            update: Box::new(translate::state_running()),
+        });
+
+        let join_session_id = session_id.clone();
+        let join = tokio::spawn(async move {
+            let result = provider.prompt(ctx, sink, client, cancel_rx).await;
+            let _ = outbound_tx.send(OutboundEvent::PromptCompleted {
+                session_id: join_session_id.clone(),
+                request_id,
+                result,
+            });
+            active_prompts.remove(&join_session_id);
+        });
+        self.active_prompts.attach_join(&session_id, generation, join);
+
+        // SDK >= 2.1 typed `v2::PromptResponse` carries the required,
+        // non-null `messageId`; the acknowledgment answers with the same
+        // agent-owned id the user_message update and streamed chunks use.
+        Ok(DispatchOutcome::Immediate(to_value(v2::PromptResponse::new(message_id.0.clone()))))
     }
 
     /// `session/cancel` (notification or request form): cancels the active
@@ -498,6 +805,45 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         self.with_provider_timeout(self.provider.close_session(request.session_id.clone())).await?;
         self.sessions.remove(&request.session_id);
         to_value(CloseSessionResponse::new())
+    }
+
+    /// v2 `auth/login`: the method id must have been advertised at
+    /// `initialize`; the provider handles the actual login.  v1 connections
+    /// fail closed with method-not-found (the v1 `authenticate` surface is a
+    /// separate method).
+    async fn auth_login(&self, params: Value) -> Result<Value, RpcError> {
+        if self.negotiated.get() != Some(&ProtocolVersion::V2) {
+            return Err(RpcError::method_not_found());
+        }
+        let request: v2::LoginAuthRequest = parse_params(params)?;
+        let advertised = self.provider.auth_methods();
+        if !advertised.iter().any(|method| method.method_id() == &request.method_id) {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "auth method was not advertised at initialize",
+            })));
+        }
+        self.with_provider_timeout(self.provider.login(LoginContext {
+            method_id: request.method_id.clone(),
+            metadata: request.meta.clone(),
+        }))
+        .await?;
+        to_value(v2::LoginAuthResponse::new())
+    }
+
+    /// v2 `auth/logout`: only reachable when the agent advertised auth
+    /// methods (clients must not call it with an empty `authMethods` list).
+    async fn auth_logout(&self, params: Value) -> Result<Value, RpcError> {
+        if self.negotiated.get() != Some(&ProtocolVersion::V2) {
+            return Err(RpcError::method_not_found());
+        }
+        let _request: v2::LogoutAuthRequest = parse_params(params)?;
+        if self.provider.auth_methods().is_empty() {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "no auth methods were advertised; auth/logout is not applicable",
+            })));
+        }
+        self.with_provider_timeout(self.provider.logout()).await?;
+        to_value(v2::LogoutAuthResponse::new())
     }
 
     /// Creates an update sink for a live session; rejects unknown sessions.
@@ -563,6 +909,24 @@ fn parse_params<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
     serde_json::from_value(params).map_err(|source| {
         RpcError::invalid_params().data(serde_json::json!({ "reason": source.to_string() }))
     })
+}
+
+/// Reads the `protocolVersion` the client requested from raw `initialize`
+/// params, before any version-specific typed parse (v1 and v2 initialize
+/// params have different shapes).
+fn raw_protocol_version(params: &Value) -> Result<ProtocolVersion, RpcError> {
+    params
+        .get("protocolVersion")
+        .cloned()
+        .map(|value| {
+            serde_json::from_value(value).map_err(|source| {
+                RpcError::invalid_params().data(serde_json::json!({ "reason": source.to_string() }))
+            })
+        })
+        .unwrap_or_else(|| {
+            Err(RpcError::invalid_params()
+                .data(serde_json::json!({ "reason": "missing protocolVersion" })))
+        })
 }
 
 /// Rejects provider-returned session ids that fail framework validation
@@ -653,6 +1017,7 @@ mod tests {
             Arc::new(crate::client::PendingRequests::new()),
             outbound_tx.clone(),
             config.request_timeout,
+            Arc::new(OnceLock::new()),
         );
         RequestDispatcher::new(
             Arc::new(StubProvider),
@@ -661,6 +1026,8 @@ mod tests {
             Arc::new(ActivePrompts::new()),
             outbound_tx,
             client_factory,
+            Arc::new(OnceLock::new()),
+            Arc::new(std::sync::Mutex::new(MessageIdGenerator::new("msg_user"))),
             RequestId::Number(1),
         )
     }

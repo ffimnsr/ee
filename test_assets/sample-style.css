@@ -1,0 +1,105 @@
+/* Sample CSS file for syntax highlighting, brace matching, and selector inspection */
+
+:root {
+  --color-primary: #3b82f6;
+  --color-primary-hover: #1d4ed8;
+  --color-surface: #1e1e2e;
+  --color-text: #cdd6f4;
+  --color-border: #313244;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --spacing-unit: 8px;
+  --border-radius-base: 6px;
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-mono);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  line-height: 1.6;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(var(--spacing-unit) * 2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.editor-grid-container {
+  display: grid;
+  grid-template-columns: 240px 1fr 320px;
+  grid-template-rows: 1fr auto;
+  gap: var(--spacing-unit);
+  flex: 1;
+  padding: var(--spacing-unit);
+}
+
+.pane {
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-base);
+  overflow: hidden;
+  position: relative;
+}
+
+.pane:hover,
+.pane:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+button.btn-primary {
+  appearance: none;
+  background-color: var(--color-primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--border-radius-base);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), transform var(--transition-fast);
+}
+
+button.btn-primary:hover {
+  background-color: var(--color-primary-hover);
+  transform: translateY(-1px);
+}
+
+button.btn-primary:active {
+  transform: translateY(0);
+}
+
+@keyframes pulse-highlight {
+  0% {
+    background-color: transparent;
+  }
+  50% {
+    background-color: rgba(59, 130, 246, 0.2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.line-highlight {
+  animation: pulse-highlight 1.2s ease-in-out infinite;
+}
+
+@media (max-width: 900px) {
+  .editor-grid-container {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+}

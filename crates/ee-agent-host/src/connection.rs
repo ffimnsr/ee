@@ -36,16 +36,18 @@ use ee_agent_protocol::{
     CreateElicitationRequest, CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse,
     DisconnectMcpRequest, ElicitationCapabilities, ElicitationFormCapabilities,
     ElicitationUrlCapabilities, Error as RpcError, FileSystemCapabilities, Implementation,
-    InitializeRequest, KillTerminalRequest, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer,
-    McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
-    ReleaseTerminalRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption,
-    SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionId, SessionNotification,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse,
+    McpServer, McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestId, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
-    WriteTextFileRequest, on_receive_notification, on_receive_request,
+    SetSessionModeResponse, StopReason, TerminalOutputRequest, WaitForTerminalExitRequest,
+    WriteTextFileRequest, agent_capabilities_from_v2, on_receive_notification, on_receive_request,
+    v2,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -75,6 +77,15 @@ pub struct AgentConnectionOptions {
     /// Timeout for `session/new`, `session/load`, `session/set_mode`,
     /// `authenticate`, and `logout` requests.
     pub request_timeout: Duration,
+    /// The ACP protocol version this connection attempts in `initialize`.
+    ///
+    /// `V2` is the draft v2 surface: the SDK pins one wire surface per
+    /// connection, so a v2-mode connection requires a v2-answering agent;
+    /// agents that answer v1 fail the handshake with a clear error (the
+    /// sdk's `ClientProtocolConnector` — a future migration phase — can fall
+    /// back to a fresh v1 connection instead).  Defaults to `V1`, which
+    /// matches every pre-existing agent.
+    pub protocol_version: ProtocolVersion,
     /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
     /// hosting for this connection; the agent still has to advertise
     /// `mcp_capabilities.acp` before anything is served).
@@ -91,6 +102,7 @@ impl Default for AgentConnectionOptions {
         Self {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            protocol_version: ProtocolVersion::V1,
             ee_proxy_enabled: false,
             max_concurrent_prompts: DEFAULT_MAX_CONCURRENT_PROMPTS,
             ee_proxy_tool_profile: EeProxyToolProfile::Full,
@@ -164,6 +176,13 @@ pub(crate) struct AgentConnectionInner {
     pub threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     /// ACP-native MCP-over-ACP hosting for the ee proxy.
     pub mcp: McpOverAcpRegistry,
+    /// The protocol version negotiated at `initialize` (set once the
+    /// handshake succeeds); v2 turns end through `v2_turn_ends`.
+    pub negotiated_protocol_version: Mutex<Option<ProtocolVersion>>,
+    /// Pending v2 turn-end waiters keyed by session: the driver registers a
+    /// oneshot after the prompt acknowledgment, and the idle `state_update`
+    /// resolves it with the agent's stop reason.
+    pub v2_turn_ends: Mutex<HashMap<SessionId, oneshot::Sender<StopReason>>>,
     active_url_elicitations: Mutex<HashMap<String, Option<SessionId>>>,
     completed_url_elicitations: Mutex<HashSet<String>>,
     pending_client_requests: Mutex<HashMap<String, watch::Sender<bool>>>,
@@ -450,37 +469,109 @@ impl AgentConnection {
             pending_client_requests: Mutex::new(HashMap::new()),
             shutdown: shutdown_tx,
             closed_once: AtomicBool::new(false),
+            negotiated_protocol_version: Mutex::new(None),
+            v2_turn_ends: Mutex::new(HashMap::new()),
         });
 
-        let client_builder = build_client_builder(inner.clone());
+        let is_v2 = match options.protocol_version {
+            ProtocolVersion::V1 => false,
+            ProtocolVersion::V2 => true,
+            other => {
+                return Err(AgentError::invalid_params(format!(
+                    "unsupported protocol version for a host connection: {}",
+                    other.as_u16()
+                )));
+            }
+        };
 
         // The main_fn closure runs the handshake, spawns the session driver,
         // and waits for shutdown/EOF.  It is a concrete async closure here so
         // the connection future stays `Send` for `tokio::spawn`.
         let main_inner = inner.clone();
         let main_fn = async move |connection: ConnectionTo<AgentRole>| -> Result<(), RpcError> {
-            let initialize = InitializeRequest::new(ProtocolVersion::V1)
-                .client_info(Implementation::new("ee", env!("CARGO_PKG_VERSION")).title("ee"))
-                .client_capabilities(client_capabilities(&main_inner.handler_capabilities));
-            let handshake = async { connection.send_request(initialize).block_task().await };
-            match tokio::time::timeout(options.handshake_timeout, handshake).await {
-                Ok(Ok(response)) => {
-                    if response.protocol_version != ProtocolVersion::V1 {
-                        let error = AgentError::UnsupportedProtocolVersion {
-                            agent_id: main_inner.agent_id.clone(),
-                            version: format!("{:?}", response.protocol_version),
-                        };
-                        main_inner.set_state(AgentConnectionState::Failed(error));
-                        main_inner.notify_connection_closed(ConnectionCloseReason::Transport(
-                            "unsupported protocol version".into(),
-                        ));
-                        return Ok(());
+            // The handshake serializes the typed response into a plain value
+            // so one closure serves both version surfaces; the version-specific
+            // parse happens after the timeout.
+            let handshake = async {
+                if is_v2 {
+                    let initialize = v2::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        v2::Implementation::new("ee", env!("CARGO_PKG_VERSION")).title("ee"),
+                    )
+                    .capabilities(v2::ClientCapabilities::new());
+                    match connection.send_request(initialize).block_task().await {
+                        Ok(response) => {
+                            serde_json::to_value(response).map_err(|_| RpcError::internal_error())
+                        }
+                        Err(error) => Err(error),
                     }
-                    main_inner.set_state(AgentConnectionState::Ready {
-                        agent_info: response.agent_info.map(Box::new),
-                        agent_capabilities: Box::new(response.agent_capabilities),
-                        auth_methods: response.auth_methods,
-                    });
+                } else {
+                    let initialize = InitializeRequest::new(ProtocolVersion::V1)
+                        .client_info(
+                            Implementation::new("ee", env!("CARGO_PKG_VERSION")).title("ee"),
+                        )
+                        .client_capabilities(client_capabilities(&main_inner.handler_capabilities));
+                    match connection.send_request(initialize).block_task().await {
+                        Ok(response) => {
+                            serde_json::to_value(response).map_err(|_| RpcError::internal_error())
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            match tokio::time::timeout(options.handshake_timeout, handshake).await {
+                Ok(Ok(response_value)) => {
+                    if is_v2 {
+                        let response: v2::InitializeResponse =
+                            serde_json::from_value(response_value).map_err(|error| {
+                                RpcError::internal_error()
+                                    .data(format!("v2 initialize response did not parse: {error}"))
+                            })?;
+                        // v2 response: role-agnostic info + session-nested
+                        // capabilities, converted to the v1-shaped state the
+                        // rest of the host consumes.  The SDK compat layer
+                        // already rejected a v1 answer before this point.
+                        let info = implementation_to_v1(&response.info);
+                        let capabilities = agent_capabilities_from_v2(&response.capabilities);
+                        let auth_methods = response
+                            .auth_methods
+                            .iter()
+                            .filter_map(|method| {
+                                serde_json::from_value(serde_json::to_value(method).ok()?).ok()
+                            })
+                            .collect();
+                        *main_inner
+                            .negotiated_protocol_version
+                            .lock()
+                            .expect("negotiated version poisoned") = Some(ProtocolVersion::V2);
+                        main_inner.set_state(AgentConnectionState::Ready {
+                            agent_info: Some(Box::new(info)),
+                            agent_capabilities: Box::new(capabilities),
+                            auth_methods,
+                        });
+                    } else {
+                        let response: InitializeResponse = serde_json::from_value(response_value)
+                            .map_err(|error| {
+                            RpcError::internal_error()
+                                .data(format!("v1 initialize response did not parse: {error}"))
+                        })?;
+                        if response.protocol_version != ProtocolVersion::V1 {
+                            let error = AgentError::UnsupportedProtocolVersion {
+                                agent_id: main_inner.agent_id.clone(),
+                                version: format!("{:?}", response.protocol_version),
+                            };
+                            main_inner.set_state(AgentConnectionState::Failed(error));
+                            main_inner.notify_connection_closed(ConnectionCloseReason::Transport(
+                                "unsupported protocol version".into(),
+                            ));
+                            return Ok(());
+                        }
+                        main_inner.set_state(AgentConnectionState::Ready {
+                            agent_info: response.agent_info.map(Box::new),
+                            agent_capabilities: Box::new(response.agent_capabilities),
+                            auth_methods: response.auth_methods,
+                        });
+                    }
                 }
                 Ok(Err(error)) => {
                     main_inner.set_state(AgentConnectionState::Failed(AgentError::Rpc(error)));
@@ -509,6 +600,7 @@ impl AgentConnection {
                 options.request_timeout,
                 options.max_concurrent_prompts.max(1),
                 main_inner.clone(),
+                is_v2,
             ));
 
             tokio::select! {
@@ -530,8 +622,17 @@ impl AgentConnection {
         };
 
         let task_inner = inner.clone();
+        let mut transport = Some(transport);
         tokio::spawn(async move {
-            let result = client_builder.connect_with(transport, main_fn).await;
+            // Each version surface builds its own typed handler chain; only
+            // one branch runs per connection.
+            let result = if is_v2 {
+                let transport = transport.take().expect("transport taken once");
+                build_client_builder_v2(task_inner.clone()).connect_with(transport, main_fn).await
+            } else {
+                let transport = transport.take().expect("transport taken once");
+                build_client_builder(task_inner.clone()).connect_with(transport, main_fn).await
+            };
             match result {
                 Ok(()) => {
                     // main_fn already moved the state to Failed/Closed.
@@ -604,9 +705,20 @@ impl AgentConnection {
         self.agent_capabilities().is_some_and(|capabilities| capabilities.load_session)
     }
 
-    /// Whether the agent advertises `session/list`.
+    /// The protocol version negotiated at `initialize`, once the handshake
+    /// succeeded.
+    #[must_use]
+    pub fn negotiated_protocol_version(&self) -> Option<ProtocolVersion> {
+        *self.inner.negotiated_protocol_version.lock().expect("negotiated version poisoned")
+    }
+
+    /// Whether the agent advertises `session/list` (v2 baseline: `session`
+    /// support commits the agent to list, resume, and close).
     #[must_use]
     pub fn supports_session_list(&self) -> bool {
+        if self.negotiated_protocol_version() == Some(ProtocolVersion::V2) {
+            return true;
+        }
         self.agent_capabilities()
             .is_some_and(|capabilities| capabilities.session_capabilities.list.is_some())
     }
@@ -618,16 +730,24 @@ impl AgentConnection {
             .is_some_and(|capabilities| capabilities.session_capabilities.delete.is_some())
     }
 
-    /// Whether the agent advertises `session/resume`.
+    /// Whether the agent advertises `session/resume` (v2 baseline: `session`
+    /// support commits the agent to list, resume, and close).
     #[must_use]
     pub fn supports_session_resume(&self) -> bool {
+        if self.negotiated_protocol_version() == Some(ProtocolVersion::V2) {
+            return true;
+        }
         self.agent_capabilities()
             .is_some_and(|capabilities| capabilities.session_capabilities.resume.is_some())
     }
 
-    /// Whether the agent advertises `session/close`.
+    /// Whether the agent advertises `session/close` (v2 baseline: `session`
+    /// support commits the agent to list, resume, and close).
     #[must_use]
     pub fn supports_session_close(&self) -> bool {
+        if self.negotiated_protocol_version() == Some(ProtocolVersion::V2) {
+            return true;
+        }
         self.agent_capabilities()
             .is_some_and(|capabilities| capabilities.session_capabilities.close.is_some())
     }
@@ -1160,6 +1280,8 @@ impl AgentConnection {
 
 /// Builds the SDK client with typed handlers for every agent-to-client
 /// request ACP v1 defines.
+/// Builds the SDK client with typed handlers for every agent-to-client
+/// request ACP v1 defines.
 fn build_client_builder(
     inner: Arc<AgentConnectionInner>,
 ) -> ee_agent_protocol::Builder<
@@ -1373,6 +1495,66 @@ fn build_client_builder(
         )
 }
 
+/// Builds the SDK client for a v2 connection.
+///
+/// v2 removes the client fs/terminal/elicitation request surface, so none of
+/// those handlers are registered (a conforming v2 agent never sends them; a
+/// non-conforming one gets a method-not-found response).  Only the v2-typed
+/// session surface is handled: updates (including the turn-ending idle
+/// `state_update`), permission requests, and `$/cancel_request`.
+fn build_client_builder_v2(
+    inner: Arc<AgentConnectionInner>,
+) -> ee_agent_protocol::Builder<
+    ClientRole,
+    impl ee_agent_protocol::HandleDispatchFrom<AgentRole>,
+    impl ee_agent_protocol::RunWithConnectionTo<AgentRole>,
+    impl ee_agent_protocol::HandleConnectionClose<AgentRole>,
+> {
+    // SDK >= 2.1: `Role::v2()` yields a `V2Builder` whose callbacks receive
+    // version-typed `V2ConnectionTo` contexts.  The host driver is written
+    // against the version-neutral [`ConnectionTo`]; `with_v2_protocol_guard`
+    // applies the same wire validation while retaining raw callback contexts.
+    ClientRole
+        .builder()
+        .with_v2_protocol_guard()
+        .name(format!("ee-agent-host:{}:v2", inner.agent_id))
+        .on_receive_notification(
+            {
+                let inner = inner.clone();
+                async move |notification: v2::UpdateSessionNotification, _cx| {
+                    handle_v2_session_notification(notification, &inner);
+                    Ok(())
+                }
+            },
+            on_receive_notification!(),
+        )
+        .on_receive_notification(
+            {
+                let inner = inner.clone();
+                async move |notification: v2::CancelRequestNotification, _cx| {
+                    let cancelled = inner.cancel_client_request(&notification.request_id);
+                    tracing::debug!(
+                        agent_id = %inner.agent_id,
+                        request_id = ?notification.request_id,
+                        cancelled,
+                        "received $/cancel_request for client request (v2)"
+                    );
+                    Ok(())
+                }
+            },
+            on_receive_notification!(),
+        )
+        .on_receive_request(
+            {
+                let inner = inner.clone();
+                async move |request: v2::RequestPermissionRequest, responder, cx| {
+                    handle_permission_request_v2(request, responder, &cx, &inner)
+                }
+            },
+            on_receive_request!(),
+        )
+}
+
 /// The client-side capabilities advertised during `initialize`, derived from
 /// the registered handler so nothing unsupported is ever advertised.
 fn client_capabilities(handler_capabilities: &HandlerCapabilities) -> ClientCapabilities {
@@ -1426,6 +1608,7 @@ struct PromptTaskCompletion {
 /// also polled concurrently; SDK request ids preserve response attribution.
 /// Connection-wide and mutating session controls remain FIFO. Shutdown closes
 /// intake, resolves bounded tasks, then rejects queued commands.
+#[allow(clippy::too_many_arguments)]
 async fn driver_loop(
     connection: ConnectionTo<AgentRole>,
     mut rx: mpsc::UnboundedReceiver<ConnectionCommand>,
@@ -1434,6 +1617,7 @@ async fn driver_loop(
     request_timeout: Duration,
     max_concurrent_prompts: usize,
     inner: Arc<AgentConnectionInner>,
+    is_v2: bool,
 ) {
     let agent_id = inner.agent_id.clone();
     let (prompt_shutdown_tx, prompt_shutdown_rx) = watch::channel(false);
@@ -1459,6 +1643,7 @@ async fn driver_loop(
                     &state_rx,
                     &agent_id,
                     &inner,
+                    is_v2,
                 );
             }
             Some(()) = lifecycle_tasks.next(), if !lifecycle_tasks.is_empty() => {}
@@ -1469,22 +1654,60 @@ async fn driver_loop(
                         let connection = connection.clone();
                         let shutdown = lifecycle_shutdown_rx.clone();
                         let agent_id = agent_id.clone();
+                        // v2 wire: mcpServers carry a `type` discriminator;
+                        // the v1-typed request is converted before sending and
+                        // the v2 response is rounded back to the v1 shape the
+                        // host API exposes.
+                        let v2_request = is_v2.then(|| v2_new_session_request(&request));
                         lifecycle_tasks.push(Box::pin(async move {
                             let result = tokio::select! {
                                 () = wait_for_true(shutdown) => {
                                     Err(AgentError::ConnectionClosed { agent_id })
                                 }
-                                result = request_with_timeout(
-                                    &connection,
-                                    request,
-                                    request_timeout,
-                                    "session/new",
-                                ) => result,
+                                result = async {
+                                    if let Some(v2_request) = &v2_request {
+                                        let response: v2::NewSessionResponse =
+                                            request_with_timeout(
+                                                &connection,
+                                                v2_request.clone(),
+                                                request_timeout,
+                                                "session/new",
+                                            )
+                                            .await?;
+                                        let mut converted = ee_agent_protocol::NewSessionResponse::new(
+                                            response.session_id.0,
+                                        );
+                                        let options =
+                                            crate::v2_updates::config_options_to_v1(
+                                                response.config_options,
+                                            );
+                                        if !options.is_empty() {
+                                            converted = converted.config_options(options);
+                                        }
+                                        Ok::<_, AgentError>(converted)
+                                    } else {
+                                        request_with_timeout(
+                                            &connection,
+                                            request,
+                                            request_timeout,
+                                            "session/new",
+                                        )
+                                        .await
+                                    }
+                                } => result,
                             };
                             let _ = tx.send(result);
                         }));
                     }
                     ConnectionCommand::LoadSession { request, tx } => {
+                        if is_v2 {
+                            // v2 removed `session/load`; `session/resume` with
+                            // optional `replayFrom` replaces it.
+                            let _ = tx.send(Err(AgentError::CapabilityUnsupported {
+                                method: "session/load".into(),
+                            }));
+                            continue;
+                        }
                         let connection = connection.clone();
                         let shutdown = lifecycle_shutdown_rx.clone();
                         let agent_id = agent_id.clone();
@@ -1515,17 +1738,44 @@ async fn driver_loop(
                         let connection = connection.clone();
                         let shutdown = lifecycle_shutdown_rx.clone();
                         let agent_id = agent_id.clone();
+                        // v2 wire: same conversion as session/new; `replayFrom`
+                        // stays unset (no replay), which equals the v1 resume
+                        // behavior.
+                        let v2_request = is_v2.then(|| v2_resume_session_request(&request));
                         lifecycle_tasks.push(Box::pin(async move {
                             let result = tokio::select! {
                                 () = wait_for_true(shutdown) => {
                                     Err(AgentError::ConnectionClosed { agent_id })
                                 }
-                                result = request_with_timeout(
-                                    &connection,
-                                    request,
-                                    request_timeout,
-                                    "session/resume",
-                                ) => result,
+                                result = async {
+                                    if let Some(v2_request) = &v2_request {
+                                        let response: v2::ResumeSessionResponse =
+                                            request_with_timeout(
+                                                &connection,
+                                                v2_request.clone(),
+                                                request_timeout,
+                                                "session/resume",
+                                            )
+                                            .await?;
+                                        let mut converted = ee_agent_protocol::ResumeSessionResponse::new();
+                                        let options =
+                                            crate::v2_updates::config_options_to_v1(
+                                                response.config_options,
+                                            );
+                                        if !options.is_empty() {
+                                            converted = converted.config_options(options);
+                                        }
+                                        Ok::<_, AgentError>(converted)
+                                    } else {
+                                        request_with_timeout(
+                                            &connection,
+                                            request,
+                                            request_timeout,
+                                            "session/resume",
+                                        )
+                                        .await
+                                    }
+                                } => result,
                             };
                             let _ = tx.send(result);
                         }));
@@ -1535,11 +1785,56 @@ async fn driver_loop(
                         let _ = tx.send(result);
                     }
                     ConnectionCommand::SetMode { request, tx } => {
+                        if is_v2 {
+                            // v2 removed `session/set_mode`; modes are config
+                            // options (see `AgentThread::set_mode`).
+                            let _ = tx.send(Err(AgentError::CapabilityUnsupported {
+                                method: "session/set_mode".into(),
+                            }));
+                            continue;
+                        }
                         let result = request_with_timeout(&connection, request, request_timeout, "session/set_mode").await;
                         let _ = tx.send(result);
                     }
                     ConnectionCommand::SetConfigOption { request, tx } => {
-                        let result = request_with_timeout(&connection, request, request_timeout, "session/set_config_option").await;
+                        let result = if is_v2 {
+                            // v2 keeps `session/set_config_option` (modes are
+                            // config options now); the v1-typed request and
+                            // response convert to the v2 types (identical wire
+                            // shapes).
+                            match v2_set_config_option_request(&request) {
+                                Err(error) => Err(error),
+                                Ok(v2_request) => {
+                                    match request_with_timeout(
+                                        &connection,
+                                        v2_request,
+                                        request_timeout,
+                                        "session/set_config_option",
+                                    )
+                                    .await
+                                    {
+                                        Err(error) => Err(error),
+                                        Ok(response) => serde_json::to_value(response)
+                                            .map_err(|error| {
+                                                AgentError::UnexpectedResponse(error.to_string())
+                                            })
+                                            .and_then(|value| {
+                                                serde_json::from_value(value).map_err(|error| {
+                                                    AgentError::UnexpectedResponse(error.to_string())
+                                                })
+                                            }),
+                                    }
+                                }
+                            }
+                        } else {
+                            request_with_timeout(
+                                &connection,
+                                request,
+                                request_timeout,
+                                "session/set_config_option",
+                            )
+                            .await
+                        };
                         let _ = tx.send(result);
                     }
                     ConnectionCommand::Authenticate { request, tx } => {
@@ -1575,6 +1870,8 @@ async fn driver_loop(
                             &prompt_shutdown_rx,
                             &state_rx,
                             &agent_id,
+                            is_v2,
+                            &inner,
                         );
                     }
                     ConnectionCommand::CancelSession { session_id } => {
@@ -1617,6 +1914,13 @@ async fn driver_loop(
     }
 }
 
+/*
+ * Prompt tasks.  v1: the prompt response ends the turn and carries the stop
+ * reason.  v2: the response is an insertion acknowledgment; the turn ends when
+ * the idle `state_update` arrives (registered through `inner.v2_turn_ends`),
+ * and the stop reason is taken from that update.
+ */
+
 #[allow(clippy::too_many_arguments)]
 fn start_prompt_task(
     connection: &ConnectionTo<AgentRole>,
@@ -1626,8 +1930,48 @@ fn start_prompt_task(
     prompt_shutdown: &watch::Receiver<bool>,
     state_rx: &watch::Receiver<AgentConnectionState>,
     agent_id: &str,
+    is_v2: bool,
+    inner: &Arc<AgentConnectionInner>,
 ) {
     let session_id = pending.request.session_id.clone();
+    if is_v2 {
+        let v2_request = v2_prompt_request(&pending.request);
+        // The turn-end oneshot is registered *before* the request goes out:
+        // the SDK may dispatch follow-up notifications (chunks, the idle
+        // `state_update`) before the prompt response itself is delivered to
+        // the blocked task, so waiting for the ack first would miss a fast
+        // idle and hang the turn.
+        let (end_tx, end_rx) = oneshot::channel();
+        let replace_session = session_id.clone();
+        if let Some(previous) = inner
+            .v2_turn_ends
+            .lock()
+            .expect("v2 turn ends poisoned")
+            .insert(replace_session, end_tx)
+        {
+            // One active prompt per session is enforced by the driver; a
+            // duplicate registration means a bug.
+            drop(previous);
+            tracing::warn!(%session_id, "duplicate v2 turn-end registration for one session");
+        }
+        let sent = connection.send_request(v2_request);
+        let request_id = sent.id().clone();
+        active_prompts.insert(session_id.clone(), request_id.clone());
+        prompt_tasks.push(Box::pin(run_prompt_task_v2(
+            sent,
+            session_id,
+            request_id,
+            pending.cancel,
+            prompt_shutdown.clone(),
+            state_rx.clone(),
+            agent_id.to_string(),
+            connection.clone(),
+            inner.clone(),
+            end_rx,
+            pending.tx,
+        )));
+        return;
+    }
     let sent = connection.send_request(pending.request);
     let request_id = sent.id().clone();
     active_prompts.insert(session_id.clone(), request_id.clone());
@@ -1655,7 +1999,8 @@ fn dispatch_queued_prompts(
     prompt_shutdown: &watch::Receiver<bool>,
     state_rx: &watch::Receiver<AgentConnectionState>,
     agent_id: &str,
-    inner: &AgentConnectionInner,
+    inner: &Arc<AgentConnectionInner>,
+    is_v2: bool,
 ) {
     while active_prompts.len() < max_concurrent_prompts {
         let Some(pending) = queued_prompts.pop_front() else {
@@ -1673,6 +2018,8 @@ fn dispatch_queued_prompts(
             prompt_shutdown,
             state_rx,
             agent_id,
+            is_v2,
+            inner,
         );
     }
 }
@@ -1715,6 +2062,239 @@ async fn run_prompt_task(
         }
     };
     PromptTaskCompletion { session_id, request_id, result, tx }
+}
+
+/// v2 prompt: the acknowledgment response is not the end of the turn.  Once
+/// the ack arrives, the turn stays open — and `active_prompts` stays
+/// occupied — until the idle `state_update` resolves `inner.v2_turn_ends`
+/// with the agent's stop reason.
+///
+/// The response and notifications share one transport and are processed in
+/// stream order, so the ack always resolves before the idle update that
+/// follows it in-band; a defensive debug log covers the impossible case where
+/// a stop reason raced ahead of registration.
+#[allow(clippy::too_many_arguments)]
+async fn run_prompt_task_v2(
+    sent: ee_agent_protocol::SentRequest<v2::PromptResponse>,
+    session_id: SessionId,
+    request_id: RequestId,
+    cancel: watch::Receiver<bool>,
+    prompt_shutdown: watch::Receiver<bool>,
+    state_rx: watch::Receiver<AgentConnectionState>,
+    agent_id: String,
+    connection: ConnectionTo<AgentRole>,
+    inner: Arc<AgentConnectionInner>,
+    // Resolves with the turn's stop reason when the idle `state_update`
+    // arrives; created in `start_prompt_task` before the request is sent /
+    // notifications can be dispatched.
+    end_rx: oneshot::Receiver<StopReason>,
+    tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+) -> PromptTaskCompletion {
+    let cancelled = wait_for_true(cancel.clone());
+    let shutdown = wait_for_true(prompt_shutdown.clone());
+    // Fresh futures for the post-ack wait: the outer select consumed its own
+    // copies above.
+    let stop_cancelled = wait_for_true(cancel);
+    let stop_shutdown = wait_for_true(prompt_shutdown);
+    let result = tokio::select! {
+        biased;
+        () = shutdown => {
+            inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id);
+            let _ = connection.send_cancel_request(request_id.clone());
+            Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+        }
+        () = cancelled => {
+            inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id);
+            let _ = connection.send_cancel_request(request_id.clone());
+            Err(AgentError::Cancelled)
+        }
+        response = sent.block_task() => {
+            match response {
+                Ok(_ack) => {
+                    // Turn accepted; the turn ends when the inbound idle
+                    // `state_update` fires the oneshot registered before the
+                    // request was sent.
+                    let stop = tokio::select! {
+                        () = stop_shutdown => {
+                            inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id);
+                            let _ = connection.send_cancel_request(request_id.clone());
+                            Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+                        }
+                        () = stop_cancelled => {
+                            inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id);
+                            Err(AgentError::Cancelled)
+                        }
+                        reason = end_rx => {
+                            match reason {
+                                Ok(stop_reason) => {
+                                    // v1 stop reasons and v2 stop reasons share
+                                    // their variant set; the host API stays on
+                                    // the v1-typed PromptResponse.
+                                    Ok(PromptResponse::new(stop_reason))
+                                }
+                                Err(_) => {
+                                    tracing::warn!(%session_id, "v2 idle state update never arrived");
+                                    Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+                                }
+                            }
+                        }
+                    };
+                    stop
+                }
+                Err(error) => {
+                    inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id);
+                    if matches!(*state_rx.borrow(), AgentConnectionState::Closed(_)) {
+                        Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+                    } else {
+                        tracing::warn!(agent_id, ?error, "v2 prompt block_task failed");
+                        Err(AgentError::Rpc(error))
+                    }
+                }
+            }
+        }
+    };
+    PromptTaskCompletion { session_id, request_id, result, tx }
+}
+
+/// v1 session/new request → v2 wire shape (mcp servers gain the `type`
+/// discriminator).
+fn v2_new_session_request(request: &NewSessionRequest) -> v2::NewSessionRequest {
+    let mut converted = v2::NewSessionRequest::new(v2::AbsolutePath::new(request.cwd.clone()))
+        .additional_directories(request.additional_directories.clone());
+    if !request.mcp_servers.is_empty() {
+        converted = converted.mcp_servers(mcp_servers_to_v2(&request.mcp_servers));
+    }
+    match &request.meta {
+        Some(meta) => converted.meta(meta.clone()),
+        None => converted,
+    }
+}
+
+/// v1 session/resume request → v2 wire shape (`replayFrom` stays unset:
+/// no replay, matching the v1 resume behavior).
+fn v2_resume_session_request(request: &ResumeSessionRequest) -> v2::ResumeSessionRequest {
+    let mut converted = v2::ResumeSessionRequest::new(
+        v2::SessionId::new(request.session_id.0.clone()),
+        v2::AbsolutePath::new(request.cwd.clone()),
+    )
+    .additional_directories(request.additional_directories.clone());
+    if !request.mcp_servers.is_empty() {
+        converted = converted.mcp_servers(mcp_servers_to_v2(&request.mcp_servers));
+    }
+    match &request.meta {
+        Some(meta) => converted.meta(meta.clone()),
+        None => converted,
+    }
+}
+
+/// v1 prompt request → v2 typed request (identical wire shape; the response
+/// type differs between versions, so the typed request must too).
+fn v2_prompt_request(request: &PromptRequest) -> v2::PromptRequest {
+    let prompt = request
+        .prompt
+        .iter()
+        .filter_map(|block| serde_json::from_value(serde_json::to_value(block).ok()?).ok())
+        .collect::<Vec<v2::ContentBlock>>();
+    if prompt.len() != request.prompt.len() {
+        tracing::warn!("dropped v1 prompt blocks with no v2 representation");
+    }
+    let converted =
+        v2::PromptRequest::new(v2::SessionId::new(request.session_id.0.clone()), prompt);
+    match &request.meta {
+        Some(meta) => converted.meta(meta.clone()),
+        None => converted,
+    }
+}
+
+/// v1 `session/set_config_option` request → v2 typed request (identical wire
+/// shape; the v1 `ValueId` maps to the v2 `Id` value).  Fails closed for v1
+/// values without a v2 representation.
+fn v2_set_config_option_request(
+    request: &SetSessionConfigOptionRequest,
+) -> Result<v2::SetSessionConfigOptionRequest, AgentError> {
+    let value = match &request.value {
+        ee_agent_protocol::SessionConfigOptionValue::ValueId { value } => {
+            v2::SessionConfigOptionValue::Id {
+                value: v2::SessionConfigValueId::new(value.0.clone()),
+            }
+        }
+        ee_agent_protocol::SessionConfigOptionValue::Boolean { value } => {
+            v2::SessionConfigOptionValue::Boolean { value: *value }
+        }
+        other => {
+            return Err(AgentError::invalid_params(format!(
+                "config option value has no v2 representation: {other:?}"
+            )));
+        }
+    };
+    Ok(v2::SetSessionConfigOptionRequest::new(
+        v2::SessionId::new(request.session_id.0.clone()),
+        request.config_id.0.clone(),
+        value,
+    ))
+}
+
+/// Maps the host's v1 MCP server configs onto the v2 wire (every server
+/// needs a transport `type`).  Configs that cannot be represented are
+/// dropped with a warning rather than failing the session request.
+fn mcp_servers_to_v2(servers: &[McpServer]) -> Vec<v2::McpServer> {
+    servers
+        .iter()
+        .filter_map(|server| match server {
+            McpServer::Stdio(stdio) => {
+                let env = stdio
+                    .env
+                    .iter()
+                    .filter_map(|variable| {
+                        serde_json::from_value(serde_json::to_value(variable).ok()?).ok()
+                    })
+                    .collect::<Vec<v2::EnvVariable>>();
+                let mut converted = v2::McpServerStdio::new(
+                    stdio.name.clone(),
+                    v2::AbsolutePath::new(stdio.command.clone()),
+                )
+                .args(stdio.args.clone())
+                .env(env);
+                if let Some(meta) = &stdio.meta {
+                    converted = converted.meta(meta.clone());
+                }
+                Some(v2::McpServer::Stdio(converted))
+            }
+            McpServer::Http(http) => Some(v2::McpServer::Http(
+                serde_json::from_value(serde_json::to_value(http).ok()?).ok()?,
+            )),
+            other => {
+                tracing::warn!(?other, "dropping MCP server config with no v2 representation");
+                None
+            }
+        })
+        .collect()
+}
+
+/// v2 `Implementation` → the v1-typed implementation the host stores.  The
+/// field set is identical across versions.
+fn implementation_to_v1(implementation: &v2::Implementation) -> Implementation {
+    let mut converted =
+        Implementation::new(implementation.name.clone(), implementation.version.clone());
+    if let Some(title) = &implementation.title {
+        converted = converted.title(title.clone());
+    }
+    converted
+}
+
+/// Maps the v2 stop reason onto the v1-typed value the host API uses.
+fn stop_reason_to_v1(reason: v2::StopReason) -> StopReason {
+    match reason {
+        v2::StopReason::EndTurn => StopReason::EndTurn,
+        v2::StopReason::MaxTokens => StopReason::MaxTokens,
+        v2::StopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        v2::StopReason::Refusal => StopReason::Refusal,
+        v2::StopReason::Cancelled => StopReason::Cancelled,
+        other => {
+            tracing::warn!(?other, "unknown v2 stop reason mapped to refusal");
+            StopReason::Refusal
+        }
+    }
 }
 
 async fn wait_for_true(mut signal: watch::Receiver<bool>) {
@@ -1861,6 +2441,95 @@ fn handle_permission_request(
         tracing::debug!(agent_id = %inner.agent_id, "permission request dropped: connection closing");
     }
     Ok(())
+}
+
+/// Routes a v2 `session/request_permission` (required `title`, optional
+/// `subject`) through the same permission broker the v1 surface uses.
+///
+/// The broker is v1-shaped (it holds a [`ToolCallUpdate`]); the v2 tool-call
+/// subject becomes that value, a command subject renders with the command
+/// text in the title and command/cwd in `rawInput`, and an absent or unknown
+/// subject becomes a title-only placeholder, so the UI has something
+/// deterministic to show.
+fn handle_permission_request_v2(
+    request: v2::RequestPermissionRequest,
+    responder: ee_agent_protocol::Responder<v2::RequestPermissionResponse>,
+    cx: &ConnectionTo<AgentRole>,
+    inner: &Arc<AgentConnectionInner>,
+) -> Result<(), RpcError> {
+    use crate::v2_updates::permission_subject_tool_call;
+    let session_id = ee_agent_protocol::SessionId::new(request.session_id.0.clone());
+    let tool_call = permission_subject_tool_call(
+        &request.title,
+        request.subject.as_ref(),
+        &format!("permission-{}", request.session_id.0),
+    );
+    let options = request
+        .options
+        .iter()
+        .filter_map(|option| serde_json::from_value(serde_json::to_value(option).ok()?).ok())
+        .collect();
+    let (request_id, info, rx) = inner.broker.request(session_id.clone(), tool_call, options);
+    let _ = inner.events.send(AgentEvent::PermissionRequested {
+        session_id: session_id.clone(),
+        request: Box::new(info),
+    });
+    let events = inner.events.clone();
+    let spawned = cx.spawn(async move {
+        let outcome = match rx.await {
+            Ok(outcome) => serde_json::from_value(serde_json::to_value(outcome).expect("outcome"))
+                .expect("permission outcome maps between versions"),
+            // Broker dropped the sender (cancel or connection close): answer
+            // cancelled so the agent never hangs on an unanswered approval.
+            Err(_) => ee_agent_protocol::RequestPermissionOutcome::Cancelled,
+        };
+        let _ = events.send(AgentEvent::PermissionResolved {
+            session_id: session_id.clone(),
+            request_id,
+            outcome: outcome.clone(),
+        });
+        // The v1-typed broker outcome must be serialized back onto the v2 wire.
+        let v2_outcome: v2::RequestPermissionOutcome =
+            serde_json::from_value(serde_json::to_value(outcome).expect("outcome"))
+                .expect("permission outcome maps between versions");
+        responder.respond(v2::RequestPermissionResponse::new(v2_outcome))
+    });
+    if spawned.is_err() {
+        tracing::debug!(agent_id = %inner.agent_id, "v2 permission request dropped: connection closing");
+    }
+    Ok(())
+}
+
+/// Routes one v2 `session/update` notification: the idle `state_update`
+/// resolves the pending turn's stop reason (see `run_prompt_task_v2`); every
+/// other representable update is translated to the v1-typed shape and
+/// reduced by the session thread.
+fn handle_v2_session_notification(
+    notification: v2::UpdateSessionNotification,
+    inner: &AgentConnectionInner,
+) {
+    let session_id = ee_agent_protocol::SessionId::new(notification.session_id.0.clone());
+    if let v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(idle)) = &notification.update {
+        if let Some(end_tx) =
+            inner.v2_turn_ends.lock().expect("v2 turn ends poisoned").remove(&session_id)
+        {
+            let stop_reason =
+                idle.stop_reason.clone().map(stop_reason_to_v1).unwrap_or(StopReason::EndTurn);
+            let _ = end_tx.send(stop_reason);
+        }
+        // Idle without a pending turn (background work, or a turn the host
+        // already resolved locally) is expected and ignored.
+        return;
+    }
+    let Some(thread) = inner.threads.lock().expect("threads poisoned").get(&session_id).cloned()
+    else {
+        tracing::debug!(
+            session_id = %session_id.0,
+            "v2 session/update for unknown session"
+        );
+        return;
+    };
+    crate::v2_updates::apply_v2_update(&thread, &notification.update);
 }
 
 fn dispatch_client_request(

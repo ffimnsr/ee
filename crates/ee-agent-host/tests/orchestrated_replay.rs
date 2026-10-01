@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ee_acp_agent_server::{
-    AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
+    MemoryTransportHandle,
 };
 use ee_agent_host::fake::FakeAgentTransport;
 use ee_agent_host::{
@@ -53,14 +54,14 @@ impl Bridge {
         let outgoing_sink = sink::unfold(handle.clone(), |handle, line: String| async move {
             match serde_json::from_str::<RawJsonRpcMessage>(&line) {
                 Ok(frame) => {
-                    let _ = handle.send(frame);
+                    let _ = handle.send(JsonRpcFrame::Single(frame));
                 }
                 Err(error) => {
                     let response = RawJsonRpcMessage::response(
                         RequestId::Null,
                         Err(RpcError::new(-32700, format!("parse error: {error}"))),
                     );
-                    let _ = handle.send(response);
+                    let _ = handle.send(JsonRpcFrame::Single(response));
                 }
             }
             Ok::<_, io::Error>(handle)
@@ -74,7 +75,11 @@ impl Bridge {
                         break;
                     }
                     for frame in handle.take_outbound() {
-                        if let Ok(line) = serde_json::to_string(&frame) {
+                        let line = match frame {
+                            JsonRpcFrame::Single(message) => serde_json::to_string(&message),
+                            JsonRpcFrame::Batch(entries) => serde_json::to_string(&entries),
+                        };
+                        if let Ok(line) = line {
                             let _ = to_host_tx.unbounded_send(Ok(line));
                         }
                     }

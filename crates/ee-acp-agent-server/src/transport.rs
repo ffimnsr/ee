@@ -15,15 +15,35 @@
 
 use std::future::Future;
 
-use ee_agent_protocol::RawJsonRpcMessage;
+use ee_agent_protocol::{RawJsonRpcMessage, RequestId};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::error::AcpServerError;
+use crate::error::{AcpServerError, invalid_batch_member_error};
 use crate::validate::validate_frame_len;
 
-/// One JSON-RPC wire frame exchanged over a transport: a request, a
-/// notification, or a response.  SDK-backed, never an ee-owned wire struct.
-pub type JsonRpcFrame = RawJsonRpcMessage;
+/// One JSON-RPC wire frame exchanged over a transport: a single request,
+/// notification, or response, or a JSON-RPC 2.0 batch array (v2 stdio
+/// explicitly follows batch behavior; per-entry `-32600` errors are carried as
+/// error-response entries).  SDK-backed, never an ee-owned wire struct.
+#[derive(Debug, Clone)]
+pub enum JsonRpcFrame {
+    /// One valid JSON-RPC message.
+    Single(RawJsonRpcMessage),
+    /// One batch array: messages plus per-entry error responses for invalid
+    /// members, kept in source order.
+    Batch(Vec<RawJsonRpcMessage>),
+}
+
+impl JsonRpcFrame {
+    /// Consumes a single-message frame; `None` for batch frames.
+    #[must_use]
+    pub fn into_single(self) -> Option<RawJsonRpcMessage> {
+        match self {
+            Self::Single(message) => Some(message),
+            Self::Batch(_) => None,
+        }
+    }
+}
 
 /// A transport that exchanges newline-delimited JSON-RPC frames.
 ///
@@ -110,16 +130,26 @@ where
                     raw: String::from_utf8_lossy(&buffer).into_owned(),
                     source,
                 })?;
-            let frame = serde_json::from_value(value).map_err(|source| {
+            let frame = parse_frame_value(value).map_err(|source| {
                 AcpServerError::Protocol(format!("not a valid JSON-RPC message: {source}"))
             })?;
+            // An empty batch has no members to answer and is an invalid
+            // request per JSON-RPC 2.0; reject the frame so the loop answers
+            // with a `-32600` null-id error.
+            if matches!(&frame, JsonRpcFrame::Batch(entries) if entries.is_empty()) {
+                return Err(AcpServerError::Protocol("empty JSON-RPC batch".into()));
+            }
             return Ok(Some(frame));
         }
     }
 
     /// Writes one frame as a single line, then flushes.
+    ///
+    /// Serializes the frame's inner value: a single message writes as one
+    /// JSON value, a batch writes as one JSON array (JSON-RPC 2.0 batch
+    /// response shape).
     async fn write_frame(&mut self, frame: &JsonRpcFrame) -> Result<(), AcpServerError> {
-        let line = serde_json::to_string(frame).map_err(|source| {
+        let line = serde_json::to_string(&frame_value(frame)).map_err(|source| {
             AcpServerError::Protocol(format!("failed to serialize JSON-RPC frame: {source}"))
         })?;
         if line.len() > self.max_frame_bytes {
@@ -128,6 +158,44 @@ where
         self.writer.write_all(line.as_bytes()).await.map_err(AcpServerError::Io)?;
         self.writer.write_all(b"\n").await.map_err(AcpServerError::Io)?;
         self.writer.flush().await.map_err(AcpServerError::Io)
+    }
+}
+
+/// Parses one decoded JSON value into a frame: arrays become batches with
+/// per-entry `-32600` error responses for invalid members (JSON-RPC 2.0 batch
+/// behavior, required by v2 stdio).  An empty array is not a valid frame and
+/// is rejected by the caller.
+fn parse_frame_value(value: serde_json::Value) -> Result<JsonRpcFrame, serde_json::Error> {
+    match value {
+        serde_json::Value::Array(members) => {
+            let mut entries = Vec::with_capacity(members.len());
+            for member in members {
+                match serde_json::from_value::<RawJsonRpcMessage>(member) {
+                    Ok(message) => entries.push(message),
+                    Err(error) => {
+                        tracing::warn!(%error, "invalid JSON-RPC batch member");
+                        entries.push(RawJsonRpcMessage::response(
+                            RequestId::Null,
+                            Err(invalid_batch_member_error()),
+                        ));
+                    }
+                }
+            }
+            Ok(JsonRpcFrame::Batch(entries))
+        }
+        other => serde_json::from_value(other).map(JsonRpcFrame::Single),
+    }
+}
+
+/// The wire JSON of one frame: a single message as-is, a batch as its array.
+fn frame_value(frame: &JsonRpcFrame) -> serde_json::Value {
+    match frame {
+        JsonRpcFrame::Single(message) => {
+            serde_json::to_value(message).unwrap_or_else(|_| serde_json::Value::Null)
+        }
+        JsonRpcFrame::Batch(entries) => serde_json::Value::Array(
+            entries.iter().filter_map(|entry| serde_json::to_value(entry).ok()).collect(),
+        ),
     }
 }
 
@@ -263,11 +331,12 @@ mod tests {
     use ee_agent_protocol::RequestId;
 
     fn parse_frame(json: &str) -> JsonRpcFrame {
-        serde_json::from_str(json).expect("test frame parses")
+        let value: serde_json::Value = serde_json::from_str(json).expect("test frame parses");
+        parse_frame_value(value).expect("test frame is a valid JSON-RPC frame")
     }
 
     fn frame_json(frame: &JsonRpcFrame) -> String {
-        serde_json::to_string(frame).expect("test frame serializes")
+        serde_json::to_string(&frame_value(frame)).expect("test frame serializes")
     }
 
     /// `RawJsonRpcMessage` carries no `PartialEq`, so compare frames by
@@ -298,7 +367,8 @@ mod tests {
     async fn valid_request_frame_parses() {
         let mut codec = codec(1024, INITIALIZE.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads");
-        let JsonRpcFrame::Request(request) = frame.expect("one frame") else {
+        let JsonRpcFrame::Single(RawJsonRpcMessage::Request(request)) = frame.expect("one frame")
+        else {
             panic!("expected request frame");
         };
         assert_eq!(request.id, RequestId::Number(1));
@@ -310,7 +380,7 @@ mod tests {
         let input = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads").expect("one frame");
-        assert!(matches!(frame, JsonRpcFrame::Response(_)));
+        assert!(matches!(frame, JsonRpcFrame::Single(RawJsonRpcMessage::Response(_))));
     }
 
     #[tokio::test]
@@ -318,7 +388,7 @@ mod tests {
         let input = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}"#;
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads").expect("one frame");
-        assert!(matches!(frame, JsonRpcFrame::Notification(_)));
+        assert!(matches!(frame, JsonRpcFrame::Single(RawJsonRpcMessage::Notification(_))));
     }
 
     #[tokio::test]
@@ -329,8 +399,8 @@ mod tests {
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
         let first = codec.read_frame().await.expect("first frame reads").expect("first frame");
         let second = codec.read_frame().await.expect("second frame reads").expect("second frame");
-        assert!(matches!(first, JsonRpcFrame::Request(_)));
-        assert!(matches!(second, JsonRpcFrame::Request(_)));
+        assert!(matches!(first, JsonRpcFrame::Single(RawJsonRpcMessage::Request(_))));
+        assert!(matches!(second, JsonRpcFrame::Single(RawJsonRpcMessage::Request(_))));
         assert!(codec.read_frame().await.expect("EOF is not an error").is_none());
     }
 
@@ -355,13 +425,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_frames_are_rejected() {
-        let input = format!("[{INITIALIZE}]\n");
+    async fn batch_frame_parses_members_in_order() {
+        let input = format!(
+            "[{INITIALIZE},{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/close\",\"params\":{{}}}}]\n"
+        );
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
+        let JsonRpcFrame::Batch(entries) =
+            codec.read_frame().await.expect("batch frame reads").expect("one frame")
+        else {
+            panic!("expected a batch frame");
+        };
+        assert_eq!(entries.len(), 2);
+        let RawJsonRpcMessage::Request(first) = &entries[0] else {
+            panic!("expected request member");
+        };
+        assert_eq!(first.method.as_ref(), "initialize");
+        let RawJsonRpcMessage::Request(second) = &entries[1] else {
+            panic!("expected request member");
+        };
+        assert_eq!(second.method.as_ref(), "session/close");
+    }
+
+    #[tokio::test]
+    async fn invalid_batch_members_get_per_entry_errors_in_order() {
+        let input = format!("[{{\"foo\":1}},{INITIALIZE},42]\n");
+        let mut codec = codec(1024, input.as_bytes(), Vec::new());
+        let JsonRpcFrame::Batch(entries) =
+            codec.read_frame().await.expect("batch frame reads").expect("one frame")
+        else {
+            panic!("expected a batch frame");
+        };
+        assert_eq!(entries.len(), 3, "invalid members keep their slot with error responses");
+        // First member was not a JSON-RPC object: per-entry -32600 null-id error.
+        let first: serde_json::Value = serde_json::to_value(&entries[0]).expect("serializes");
+        assert_eq!(first["id"], serde_json::Value::Null);
+        assert_eq!(first["error"]["code"].as_i64(), Some(-32600));
+        // Valid members are preserved in source order.
+        let RawJsonRpcMessage::Request(second) = &entries[1] else {
+            panic!("expected request member");
+        };
+        assert_eq!(second.method.as_ref(), "initialize");
+        let third: serde_json::Value = serde_json::to_value(&entries[2]).expect("serializes");
+        assert_eq!(third["id"], serde_json::Value::Null);
+        assert_eq!(third["error"]["code"].as_i64(), Some(-32600));
+    }
+
+    #[tokio::test]
+    async fn empty_batch_is_a_protocol_error() {
+        let mut codec = codec(1024, b"[]\n".as_slice(), Vec::new());
         match codec.read_frame().await {
-            Err(AcpServerError::Protocol(_)) => {}
+            Err(AcpServerError::Protocol(message)) => {
+                assert!(message.contains("empty JSON-RPC batch"), "{message}");
+            }
             other => panic!("expected Protocol, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn batch_write_serializes_as_one_array() {
+        let frame = parse_frame(&format!(
+            "[{INITIALIZE},{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/close\",\"params\":{{}}}}]"
+        ));
+        assert!(matches!(frame, JsonRpcFrame::Batch(_)), "expected a batch frame");
+        let mut codec = codec(1024, b"".as_slice(), Vec::new());
+        codec.write_frame(&frame).await.expect("frame writes");
+
+        let output = codec.writer;
+        assert!(output.ends_with(b"\n"), "must end with one newline");
+        let line = &output[..output.len() - 1];
+        assert_eq!(line.first(), Some(&b'['), "batch writes as one JSON array");
+        let value: serde_json::Value = serde_json::from_slice(line).expect("line parses back");
+        let serde_json::Value::Array(members) = value else {
+            panic!("expected an array");
+        };
+        assert_eq!(members.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn into_single_distinguishes_batches() {
+        let single = parse_frame(INITIALIZE);
+        assert!(single.clone().into_single().is_some());
+        let batch = parse_frame(&format!("[{INITIALIZE}]"));
+        assert!(batch.into_single().is_none());
     }
 
     #[tokio::test]
@@ -397,7 +542,7 @@ mod tests {
     async fn final_frame_without_newline_is_honored() {
         let mut codec = codec(1024, INITIALIZE.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads").expect("one frame");
-        assert!(matches!(frame, JsonRpcFrame::Request(_)));
+        assert!(matches!(frame, JsonRpcFrame::Single(_)));
         assert!(codec.read_frame().await.expect("clean EOF").is_none());
     }
 
@@ -406,7 +551,7 @@ mod tests {
         let input = format!("\n\n{INITIALIZE}\n\n");
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads").expect("one frame");
-        assert!(matches!(frame, JsonRpcFrame::Request(_)));
+        assert!(matches!(frame, JsonRpcFrame::Single(_)));
         assert!(codec.read_frame().await.expect("clean EOF").is_none());
     }
 
@@ -415,7 +560,7 @@ mod tests {
         let input = format!("{INITIALIZE}\r\n");
         let mut codec = codec(1024, input.as_bytes(), Vec::new());
         let frame = codec.read_frame().await.expect("frame reads").expect("one frame");
-        assert!(matches!(frame, JsonRpcFrame::Request(_)));
+        assert!(matches!(frame, JsonRpcFrame::Single(_)));
     }
 
     #[tokio::test]
@@ -428,11 +573,12 @@ mod tests {
         assert!(output.ends_with(b"\n"), "must end with one newline");
         let line = &output[..output.len() - 1];
         assert!(!line.contains(&b'\n'), "must be a single line, got {output:?}");
-        let roundtrip: JsonRpcFrame = serde_json::from_slice(line).expect("line parses back");
-        let JsonRpcFrame::Request(written) = roundtrip else {
+        let value: serde_json::Value = serde_json::from_slice(line).expect("line parses back");
+        let roundtrip = parse_frame_value(value).expect("line is a valid JSON-RPC frame");
+        let JsonRpcFrame::Single(RawJsonRpcMessage::Request(written)) = roundtrip else {
             panic!("expected request frame");
         };
-        let JsonRpcFrame::Request(expected) = frame else {
+        let JsonRpcFrame::Single(RawJsonRpcMessage::Request(expected)) = frame else {
             unreachable!();
         };
         assert_eq!(written.id, expected.id);

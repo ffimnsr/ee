@@ -5527,3 +5527,124 @@ Scope: extend runtime grammar catalog + bundled LSP defaults to match the upstre
 - [x] query dir verification + backfill for new languages (verification done; asciidoc corpus backfill deferred)
 ### Phase 5: Validation + docs
 - [x] fmt/clippy/tests pass, README/CHANGELOG updated, tick items
+
+## ACP v2 Migration Plan 2026-10-01
+
+Migrate the agents stack to the ACP v2 protocol (draft) while keeping ACP v1 working: the official guide's recommended path is side-by-side support with per-connection version negotiation, and v2 stays gated behind the SDK's `unstable_protocol_v2` feature until it stabilizes. The agent-side foundation (facade + server framework) is done; the host, providers, and the remaining v2 surfaces follow here.
+
+Guiding rules:
+
+- [x] Keep v1 and v2 surfaces fully separate per connection; one negotiated version per connection after `initialize`.
+- [x] Never regress v1: every existing v1 test stays green through the migration.
+- [ ] Gate v2 support behind config or feature flags until the SDK stabilizes `unstable_protocol_v2`.
+- [x] Keep using official `agent-client-protocol` v2 types; do not handroll wire structs.
+- [x] Keep fail-closed negotiation: V0 and unknown future versions still rejected.
+
+### Phase 1: Protocol facade and agent-side v2 surface
+
+The `ee-agent-protocol` facade and the `ee-acp-agent-server` framework negotiate v2 and serve a v2-capable client end to end (initialize, sessions, prompt lifecycle, cancel), translating provider v1 updates at the wire boundary.
+
+#### Work items
+
+- [x] Enable SDK `unstable_protocol_v2` feature in the workspace manifest.
+- [x] Re-export the v2 schema module (`ee_agent_protocol::v2`) alongside the v1 root surface.
+- [x] Accept ACP v1 and draft v2 in version negotiation (`LATEST_SUPPORTED_PROTOCOL_VERSION`); answer the requested version; keep V0/unknown fail-closed.
+- [x] Translate v1 agent capabilities to the v2 session-nested shape (`agent_capabilities_to_v2`): stdio baseline, http/acp carried, sse dropped, delete/additionalDirectories carried.
+- [x] Accept `protocolVersion: 2` in `initialize` and answer with v2 `info` + `capabilities` + empty `authMethods`.
+- [x] Pin one negotiated protocol version per connection.
+- [x] Implement the v2 prompt lifecycle: `{messageId}` acknowledgment, `user_message` update, `state_update` running, idle with stop reason at completion.
+- [x] Translate v1 session updates to v2 wire (message chunks with required ids, tool calls, plans, commands with `type: "text"` input, config options with `configId`/`groupId`).
+- [x] Report `session/load` and `session/set_mode` as method-not-found on v2 connections.
+- [x] Shape v2 `session/new` and `session/resume` responses without `modes`.
+- [x] Cancel turns on v2 with an idle `state_update` carrying `cancelled`.
+- [x] Compose the prompt acknowledgment from raw JSON because SDK 2.0.0's `v2::PromptResponse` lacks the documented `messageId` field (swap for the typed struct when the SDK catches up).
+- [x] Add v2 end-to-end flow tests (`tests/v2_flows.rs`): negotiation, removed-method gating, prompt lifecycle ordering, cancellation, v1 isolation.
+
+#### Exit criteria
+
+- [x] A v2-capable client can initialize, create/resume/list/close sessions, prompt, stream output, and cancel against ee agent binaries.
+- [x] All v1 behavior and tests unchanged; the host still negotiates v1.
+
+### Phase 2: Host v2 client path
+
+`ee-agent-host` still opens every connection as v1. Add a v2 client surface: send a v2-shaped `initialize` (role-agnostic `info`/`capabilities`), honor the agent's version answer (v2 or v1 downgrade), and drive session state from v2 notifications.
+
+#### Work items
+
+- [x] Add a v2 initialize path in `AgentConnection::start_connection` (v2-shaped request, parse v2 response).
+- [ ] Accept a v1 downgrade answer and continue on the v1 surface per connection (SDK pins one wire surface per connection; v2 mode with a v1-answering agent fails closed instead — see `v2_mode_with_v1_agent_fails_closed`; `ClientProtocolConnector` (SDK 2.2) exists but restructures `start_connection` negotiation and inverts the deliberate fail-closed contract + its tests, so the downgrade stays a later-phase candidate).
+- [x] Store v2 agent capabilities (session baseline instead of per-method markers).
+- [x] Drive turn completion from idle `state_update` `stopReason`, not the `session/prompt` response (turn-end oneshot registered before the request is sent; the SDK may dispatch the idle notification before the ack response).
+- [x] Track messages by mandatory `messageId` with upsert semantics (whole-message replace, chunk append) in the reducer/UI state (whole `agent_message`/`agent_thought` upserts replace or clear by `messageId` directly in the reducer — `null`/`[]` clears, concrete arrays replace, chunks always append; the appended blocks still stream as same-id chunk events, so the append-only v1 transcript pane may show stale text for the rare same-id correction case while the snapshot stays correct; the `user_message` echo is skipped to avoid duplicating the host's optimistic prompt).
+- [x] Replace `session/load` with `session/resume` on v2 connections (`replayFrom` replay lands in Phase 3).
+- [x] Drop `session/set_mode` usage on v2 connections; render mode-like state from `configOptions` with `category: "mode"` and mutate via `session/set_config_option` (v2 request/response conversion landed; `configOptions` translate back to v1 keys).
+- [x] Drop `clientCapabilities.fs`/`terminal` on v2 connections (removed surface); expose client-side tools through MCP servers instead.
+- [ ] Apply `tool_call_update` upsert semantics and `plan_update` keyed by `planId` (tool-call upsert landed and is fully covered; `planId` keying intentionally stays unimplemented on the host: the v1 event/state pipeline and the agent pane render a single plan list, and v1 `PlanUpdate` would pull in another unstable feature — providers that need concurrent plans already stream them via `UpdateSink::plan_update_v2` and the host renders the latest update in the legacy slot; a v2-native multi-plan pane is the prerequisite).
+- [x] Handle v2 `session/request_permission` shape (`title` + optional `subject`).
+- [x] Render agent-owned terminal state (`terminal_update`/`terminal_output_chunk`, base64 snapshots) or a sanitized transcript fallback (decoded `terminal_output_chunk` renders as sanitized same-id agent chunks under a per-terminal message id — printable text kept, ANSI/control noise stripped, 4KiB cap per chunk; `terminal_update` snapshots stay dropped as binary data is not transcript-safe).
+- [x] Accept JSON-RPC 2.0 batch arrays on stdio (required by the v2 migration guide — "Process Batches on stdio"; the framework dispatches every member, answers request members with one batch response array in source order, never answers notifications, and rejects the guide's lifecycle-sensitive methods per member with `-32600` because they change which later messages are valid and several complete through the deferred outbound path — `initialize`, `auth/login`, `session/new`, `session/resume`, `session/prompt`, `session/load`; invalid members get per-entry `-32600` error responses at the codec, and empty batches are answered `-32600` per JSON-RPC 2.0).
+- [x] Carry the tool-call programmatic `name` (`tool_call_update` → v1 patch translator + reducer state): concrete names map directly between versions; the v2 `name: null` clear has no v1 representation (v1 treats `None` as omission) and is dropped as omission.
+- [x] Close the remaining v2 client-checklist details: `command` permission subjects render with the command text in the title and command/cwd in `rawInput` (absent/unknown subjects keep the title-only placeholder); the v2 `cancelled` tool status maps to the v1 `failed` fallback (v1 has no cancelled status); cancel keeps answering pending permissions with the cancelled outcome.
+- [x] Add host-flow tests for v2 negotiation, v1 downgrade (fail-closed), and the v2 prompt lifecycle.
+
+#### Exit criteria
+
+- [x] The host can talk to v2-only agents and v1-only agents on the same connection options.
+- [x] Turn completion and stop reasons come from `state_update`.
+- [x] No v1-only request is sent on a v2 connection (new/resume/prompt/set_config_option v2-typed; load/set_mode fail locally; auth is v2-native since Phase 3).
+
+### Phase 3: Agent-side v2 completion
+
+Finish the remaining v2 surfaces on `ee-acp-agent-server` and the provider crates.
+
+#### Work items
+
+- [x] Implement `auth/login` + `auth/logout` when `authMethods` is non-empty (advertise nothing until then: v2 clients must not call either when empty — the methods fail closed with invalid-params when no methods are advertised, and v1 connections reject them as unknown).
+- [x] Implement `session/resume` `replayFrom` history replay as ordinary v2 updates (start cursor replays via the replay sink before the deferred response; unknown cursors rejected per spec).
+- [x] Report `requires_action` while a permission request is pending and `running` again when it resolves (pending-resolve toggle on the agent → client bridge, v2-only).
+- [x] Stream `tool_call_content_chunk` items instead of whole content arrays when providers stream (`UpdateSink::tool_call_content_chunk_v2`).
+- [x] Move off the session-stable `plan-1` translation if providers need multiple concurrent plans (`UpdateSink::plan_update_v2` with provider-chosen ids; v1-origin updates keep `plan-1`).
+- [x] Reconcile the v1 `unstable_mcp_over_acp` surface with v2 `session.mcp` capabilities and transport discriminators (stdio baseline, http/acp carried, sse dropped; `mcpServers`/`mcp/*` wire shapes verified version-identical).
+- [x] Emit v2 structured diff content (`changes` + synthesized `git_patch` from the v1 old/new texts).
+- [x] Emit the `type: "text"` discriminator on agent-emitted slash-command inputs (verified on the wire).
+- [x] Map the v1 tool-call `name` (`tool_call` create and `tool_call_update` patch) onto the v2 wire (concrete names map directly; v1 has no clear signal to express the v2 `name: null` clear).
+- [x] Fail the removed client fs/terminal request surface closed on v2 connections: provider calls to `client.read_text_file`/`write_text_file` and the `terminal/*` methods error before anything reaches the transport (the receiving v2 client registers no such handlers; client-side tools surface through MCP servers instead; v1 connections keep the full surface).
+
+#### Exit criteria
+
+- [x] Every v2 method and update the framework emits matches the stable v2 baseline schema (wire assertions for auth, resume replay, state updates, tool-call chunks, plans, commands).
+- [x] No v1-only update variant is emitted on v2 connections (v2-only sink updates are dropped with a warning on v1 connections; v1 updates translate or are dropped at the wire boundary).
+
+### Phase 4: SDK upgrade checkpoints
+
+The workspace pins `agent-client-protocol` 2.2.0 (bumped from 2.0.0 as part of this phase); newer releases change features and types.
+
+#### Work items
+
+- [x] Verify newer SDK releases add the `messageId` field to `v2::PromptResponse`; drop the raw-JSON ack shim when they do (2.1+/schema 1.9.1 made it a required non-null field; the server now answers the typed `v2::PromptResponse::new(message_id)`).
+- [x] SDK 2.1+/2.2 removed the `unstable_elicitation` feature the workspace currently enables; decide the elicitation fate before bumping (the elicitation types stabilized — zero cfg gates in schema 1.9.1 — the feature flag was dropped and the v1/v2 elicitation surface is unchanged and fully green).
+- [x] Track `unstable_protocol_v2` stabilization; remove or document the feature gating when the SDK marks v2 stable (still unstable at 2.2.0 — the feature flag stays; the v2 surface remains gated).
+- [x] Re-check `ee-agent-host` SDK-version guard tests after any bump (fail-closed negotiation tests green; the v1 `clientCapabilities` snapshots updated for the SDK's new always-serialized `auth: {terminal: false}` member; the v2 builder switched from `Role::v2()` to `builder().with_v2_protocol_guard()` — 2.1 made `v2()` yield `V2Builder` with version-typed `V2ConnectionTo` callbacks, and the guard keeps raw `ConnectionTo` contexts with identical wire validation).
+- [ ] Re-check whether newer SDK releases model `availableCommands` in `session/new`/`session/resume` responses (schema 1.9.1 does not, so the guide's MAY — initial commands in setup responses — cannot be read without handrolled wire structs, which the plan forbids; the host relies on `available_commands_update` notifications, and ee's own server emits those, so the gap only affects third-party agents that use the setup-response shortcut).
+
+#### Exit criteria
+
+- [x] SDK bumps are planned, not accidental; feature churn is captured in this plan before it bites CI (2.0.0 → 2.2.0 executed and validated across the workspace; the remaining feature churn — `unstable_protocol_v2` still unstable — is tracked here).
+
+### Phase 5: Validation
+
+#### Commands
+
+- [x] Run `cargo fmt --check`.
+- [x] Run `cargo clippy --workspace --all-targets` with no warnings on changed crates.
+- [x] Run `cargo test --quiet -p ee-agent-protocol --lib`.
+- [x] Run `cargo test --quiet -p ee-acp-agent-server`.
+- [x] Run `cargo test --quiet -p ee-agent-host`.
+- [x] Run `cargo test --quiet -p ee-agent-orchestrator`.
+- [x] Run `cargo test --quiet -p ee-cli`.
+
+#### Exit criteria
+
+- [x] Formatting passes.
+- [x] Clippy passes for the changed crates.
+- [x] v1 and v2 suites both green after every phase.

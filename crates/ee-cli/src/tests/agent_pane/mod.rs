@@ -14,7 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_acp_agent_server::{
-    AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
+    MemoryTransportHandle,
 };
 use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
 use ee_agent_host::{
@@ -194,7 +195,7 @@ fn memory_transport_bridge(
     let outgoing_sink = sink::unfold(handle.clone(), |handle, line: String| async move {
         let frame = serde_json::from_str::<RawJsonRpcMessage>(&line)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if !handle.send(frame) {
+        if !handle.send(JsonRpcFrame::Single(frame)) {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "ACP server closed"));
         }
         Ok::<_, io::Error>(handle)
@@ -205,7 +206,11 @@ fn memory_transport_bridge(
                 break;
             }
             for frame in handle.take_outbound() {
-                if let Ok(line) = serde_json::to_string(&frame) {
+                let line = match frame {
+                    JsonRpcFrame::Single(message) => serde_json::to_string(&message),
+                    JsonRpcFrame::Batch(entries) => serde_json::to_string(&entries),
+                };
+                if let Ok(line) = line {
                     let _ = to_host_tx.unbounded_send(Ok(line));
                 }
             }

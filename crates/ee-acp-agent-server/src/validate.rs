@@ -13,15 +13,18 @@ use ee_agent_protocol::{MessageId, ProtocolVersion, SessionId, ToolCallId};
 
 use crate::error::AcpServerError;
 
-/// Negotiates ACP v1 only; any other version fails closed with an
+/// Negotiates ACP v1 or draft v2; any other version fails closed with an
 /// [`AcpServerError::UnsupportedVersion`].
+///
+/// One connection speaks exactly one negotiated version; the dispatcher
+/// selects the v1 or v2 surface from the version this helper accepts.
 ///
 /// # Errors
 ///
 /// Returns [`AcpServerError::UnsupportedVersion`] when `version` is not ACP
-/// v1.
-pub fn validate_protocol_version_v1(version: ProtocolVersion) -> Result<(), AcpServerError> {
-    if version == ProtocolVersion::V1 {
+/// v1 or v2.
+pub fn validate_protocol_version(version: ProtocolVersion) -> Result<(), AcpServerError> {
+    if ee_agent_protocol::protocol_version_supported(version) {
         Ok(())
     } else {
         Err(AcpServerError::UnsupportedVersion { version: version.as_u16().to_string() })
@@ -129,15 +132,16 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn protocol_version_v1_is_accepted() {
-        validate_protocol_version_v1(ProtocolVersion::V1).expect("v1 negotiates");
+    fn protocol_versions_v1_and_v2_are_accepted() {
+        validate_protocol_version(ProtocolVersion::V1).expect("v1 negotiates");
+        validate_protocol_version(ProtocolVersion::V2).expect("v2 negotiates");
     }
 
     #[test]
     fn other_protocol_versions_fail_closed() {
-        let v2: ProtocolVersion = serde_json::from_value(serde_json::json!(2)).unwrap();
-        for version in [ProtocolVersion::V0, v2] {
-            match validate_protocol_version_v1(version) {
+        let v3: ProtocolVersion = serde_json::from_value(serde_json::json!(3)).unwrap();
+        for version in [ProtocolVersion::V0, v3] {
+            match validate_protocol_version(version) {
                 Err(AcpServerError::UnsupportedVersion { version: wire }) => {
                     assert_eq!(wire, version.as_u16().to_string());
                 }

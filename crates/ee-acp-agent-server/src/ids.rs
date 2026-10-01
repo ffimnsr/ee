@@ -1,10 +1,10 @@
-//! Monotonic ID generation for requests and sessions.
+//! Monotonic ID generation for requests, sessions, and v2 message ids.
 //!
 //! Each generator owns its counter as plain instance state — no global
 //! mutable state — so IDs are unique within one generator instance.  Keep
 //! one generator per server instance and hand it to the dispatch path.
 
-use ee_agent_protocol::{RequestId, SessionId};
+use ee_agent_protocol::{MessageId, RequestId, SessionId};
 
 /// Generates monotonically increasing JSON-RPC request ids.
 ///
@@ -71,6 +71,41 @@ impl SessionIdGenerator {
     }
 }
 
+/// Generates monotonically increasing user message ids for v2 prompt
+/// acknowledgments.
+///
+/// Ids take the form `{prefix}-{counter}` (for example `msg_user-1`,
+/// `msg_user-2`) and are unique within one generator instance, without any
+/// global mutable state.  v2 requires the *agent* to own message identity,
+/// so the server generates these ids on every accepted prompt.
+#[derive(Debug, Clone)]
+pub struct MessageIdGenerator {
+    prefix: String,
+    next: u64,
+}
+
+impl MessageIdGenerator {
+    /// Creates a generator for the given id prefix.
+    #[must_use]
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self { prefix: prefix.into(), next: 1 }
+    }
+
+    /// Returns the next message id.
+    #[must_use]
+    pub fn next_id(&mut self) -> MessageId {
+        let id = self.next;
+        self.next += 1;
+        MessageId::new(format!("{}-{id}", self.prefix))
+    }
+
+    /// The configured prefix.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +152,21 @@ mod tests {
     fn session_ids_use_custom_prefix() {
         let mut generator = SessionIdGenerator::new("provider-x");
         assert_eq!(generator.next_id(), SessionId::new("provider-x-1"));
+    }
+
+    #[test]
+    fn message_ids_use_configured_prefix_and_start_at_one() {
+        let mut generator = MessageIdGenerator::new("msg_user");
+        assert_eq!(generator.prefix(), "msg_user");
+        assert_eq!(generator.next_id(), MessageId::new("msg_user-1"));
+        assert_eq!(generator.next_id(), MessageId::new("msg_user-2"));
+    }
+
+    #[test]
+    fn message_id_generators_do_not_share_state() {
+        let mut a = MessageIdGenerator::new("msg_user");
+        let mut b = MessageIdGenerator::new("msg_user");
+        assert_eq!(a.next_id(), MessageId::new("msg_user-1"));
+        assert_eq!(b.next_id(), MessageId::new("msg_user-1"));
     }
 }

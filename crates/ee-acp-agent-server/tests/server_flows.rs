@@ -155,14 +155,39 @@ async fn initialize_with_protocol_v0_fails_closed() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn initialize_with_protocol_v2_fails_closed() {
+async fn initialize_with_protocol_v2_negotiates() {
     let (provider, _log) = FakeProvider::new(&[]);
     let (handle, task) = spawn_server(provider).await;
 
-    handle.send(request(1, "initialize", json!({ "protocolVersion": 2 })));
-    let error = request_error(handle.next_frame().await);
-    assert_eq!(i32::from(error.code), -32600);
-    assert!(error.message.contains("unsupported protocol version: 2"));
+    handle.send(request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": 2,
+            "info": { "name": "test-client", "title": "Test Client", "version": "1.0.0" },
+            "capabilities": {},
+        }),
+    ));
+    let result = request_result(handle.next_frame().await);
+
+    // v2 uses the role-agnostic shapes: `info` + session-nested
+    // `capabilities`, no v1 `agentInfo`/`agentCapabilities`.
+    assert_eq!(result["protocolVersion"], 2);
+    assert_eq!(result["info"]["name"], "fake-provider");
+    assert!(result.get("agentInfo").is_none(), "v1 field must not appear");
+    assert!(result.get("agentCapabilities").is_none(), "v1 field must not appear");
+    // No auth surface advertised: v2 treats an omitted/empty `authMethods`
+    // identically (clients must not call `auth/login`).
+    let auth = result.get("authMethods").cloned().unwrap_or_else(|| json!([]));
+    assert_eq!(auth, json!([]), "no auth surface advertised");
+    let session =
+        result["capabilities"]["session"].as_object().expect("session capabilities object");
+    assert!(
+        session.get("mcp").is_some() && session["mcp"]["stdio"].is_object(),
+        "stdio mcp baseline advertised"
+    );
+    let framework = result["_meta"]["framework"].clone();
+    assert_eq!(framework["name"], "ee-acp-agent-server");
 
     handle.shutdown(task).await;
 }

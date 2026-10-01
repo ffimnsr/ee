@@ -1,4 +1,5 @@
-//! Lightweight markdown rendering for assistant chat messages.
+//! Lightweight markdown rendering for assistant chat messages and agent
+//! reasoning (thought) blocks.
 //!
 //! Supports the common chat surface: `# headings`, `> quotes`, `-`/`*`/`+`
 //! bullets with `- [ ]`/`- [x]` checkboxes, numbered lists, `---` thematic

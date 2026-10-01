@@ -72,6 +72,10 @@ pub enum MessageKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCallState {
     pub tool_call_id: String,
+    /// Programmatic name of the tool being invoked, when the agent reported
+    /// one (v2 `name` patch; v1 carries `Option<String>` on both create and
+    /// update).
+    pub name: Option<String>,
     pub title: String,
     pub kind: ToolKind,
     pub status: ToolCallStatus,
@@ -85,6 +89,7 @@ impl From<&ToolCall> for ToolCallState {
     fn from(tool_call: &ToolCall) -> Self {
         Self {
             tool_call_id: tool_call.tool_call_id.0.to_string(),
+            name: tool_call.name.clone(),
             title: tool_call.title.clone(),
             kind: tool_call.kind,
             status: tool_call.status,
@@ -202,6 +207,40 @@ pub fn apply_update(
     Ok(())
 }
 
+/// Applies one whole-message upsert with v2 patch semantics (v2 migration
+/// guide): a whole `agent_message`/`agent_thought`/`user_message` replaces the
+/// content stored for its `messageId`, and `null`/`[]` content clears it.
+/// Chunks always append; whole messages always replace.  v1 has no
+/// whole-message or clear form, so the v2 inbound path calls this directly;
+/// it cannot violate v1 ordering rules, so it does not register with the
+/// [`SessionUpdateOrder`] tracker.
+pub fn apply_whole_message(
+    state: &mut SessionState,
+    kind: MessageKind,
+    message_id: &str,
+    blocks: Option<Vec<ContentBlock>>,
+) {
+    let index =
+        state.messages.iter().position(|message| message.message_id.as_deref() == Some(message_id));
+    // `null` and `[]` both clear the message content (guide).
+    let Some(blocks) = blocks.filter(|blocks| !blocks.is_empty()) else {
+        if let Some(index) = index {
+            state.messages.remove(index);
+        }
+        return;
+    };
+    if let Some(index) = index {
+        state.messages[index].kind = kind;
+        state.messages[index].blocks = blocks;
+    } else {
+        state.messages.push(ReducedMessage {
+            kind,
+            message_id: Some(message_id.to_string()),
+            blocks,
+        });
+    }
+}
+
 fn append_chunk(
     state: &mut SessionState,
     kind: MessageKind,
@@ -289,6 +328,7 @@ fn merge_tool_call_update(state: &mut SessionState, update: &ToolCallUpdate) {
     let fields: &ToolCallUpdateFields = &update.fields;
     let entry = state.tool_calls.entry(id).or_insert_with(|| ToolCallState {
         tool_call_id: update.tool_call_id.0.to_string(),
+        name: fields.name.clone(),
         title: fields.title.clone().unwrap_or_default(),
         kind: fields.kind.unwrap_or_default(),
         status: fields.status.unwrap_or_default(),
@@ -305,6 +345,9 @@ fn merge_tool_call_update(state: &mut SessionState, update: &ToolCallUpdate) {
     }
     if let Some(title) = &fields.title {
         entry.title = title.clone();
+    }
+    if let Some(name) = &fields.name {
+        entry.name = Some(name.clone());
     }
     if let Some(content) = &fields.content {
         entry.content = content.clone();
@@ -355,6 +398,55 @@ mod tests {
 
     fn apply(state: &mut SessionState, order: &mut SessionUpdateOrder, update: SessionUpdate) {
         apply_update(state, order, &update).unwrap();
+    }
+
+    #[test]
+    fn whole_messages_replace_by_id_and_null_clears() {
+        let mut state = SessionState::default();
+        let mut order = SessionUpdateOrder::new();
+
+        // Chunks accumulate for m-1 first.
+        apply(&mut state, &mut order, chunk(MessageKind::Assistant, "hel", Some("m-1")));
+        apply(&mut state, &mut order, chunk(MessageKind::Assistant, "lo", Some("m-1")));
+        assert_eq!(state.messages[0].blocks.len(), 2);
+
+        // A whole message for the same id REPLACES the accumulated content
+        // (v2 upsert semantics), it never appends.
+        apply_whole_message(
+            &mut state,
+            MessageKind::Assistant,
+            "m-1",
+            Some(vec![ContentBlock::Text(TextContent::new("replacement"))]),
+        );
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].blocks.len(), 1);
+        let ContentBlock::Text(text) = &state.messages[0].blocks[0] else {
+            panic!("expected text block");
+        };
+        assert_eq!(text.text, "replacement");
+
+        // `null`/`[]` content clears the message.
+        apply_whole_message(&mut state, MessageKind::Assistant, "m-1", None);
+        assert!(state.messages.is_empty(), "null content clears the message");
+        apply_whole_message(
+            &mut state,
+            MessageKind::Thought,
+            "m-2",
+            Some(vec![ContentBlock::Text(TextContent::new("idea"))]),
+        );
+        apply_whole_message(&mut state, MessageKind::Thought, "m-2", Some(Vec::new()));
+        assert!(state.messages.is_empty(), "empty content clears the message");
+
+        // A whole message for a new id creates the message.
+        apply_whole_message(
+            &mut state,
+            MessageKind::Assistant,
+            "m-3",
+            Some(vec![ContentBlock::Text(TextContent::new("fresh"))]),
+        );
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].message_id.as_deref(), Some("m-3"));
+        assert_eq!(state.messages[0].kind, MessageKind::Assistant);
     }
 
     #[test]

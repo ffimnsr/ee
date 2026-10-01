@@ -16,12 +16,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ee_agent_protocol::registry::SESSION_UPDATE_NOTIFICATION;
 use ee_agent_protocol::{
-    Error as RpcError, PromptResponse, RawJsonRpcMessage, RawJsonRpcParams, RequestId, SessionId,
-    SessionNotification, SessionUpdate, StopReason,
+    Error as RpcError, PromptResponse, ProtocolVersion, RawJsonRpcMessage, RawJsonRpcParams,
+    RequestId, SessionId, SessionNotification, SessionUpdate, StopReason, v2,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -30,10 +30,24 @@ use crate::client::{ClientBridgeFactory, PendingRequests};
 use crate::config::AcpAgentServerConfig;
 use crate::dispatch::{DispatchOutcome, RequestDispatcher};
 use crate::error::{AcpServerError, ProviderError};
-use crate::ids::RequestIdGenerator;
+use crate::ids::{MessageIdGenerator, RequestIdGenerator};
 use crate::provider::AgentProvider;
 use crate::session::SessionStore;
 use crate::transport::{AcpTransport, JsonRpcFrame, StdioTransport};
+use crate::v2 as translate;
+
+/// Methods that must never run inside a JSON-RPC batch (v2 migration guide):
+/// they change which later messages are valid, and several complete through
+/// the deferred outbound path.  Batches of the remaining (immediate) methods
+/// are fully supported.
+const BATCH_REJECTED_METHODS: &[&str] = &[
+    "initialize",
+    "auth/login",
+    "session/new",
+    "session/resume",
+    "session/prompt",
+    "session/load",
+];
 
 /// One item on the server's FIFO outbound channel, produced by prompt tasks
 /// and drained by the run loop.
@@ -51,8 +65,18 @@ pub enum OutboundEvent {
         /// The SDK update payload.
         update: Box<SessionUpdate>,
     },
-    /// A prompt finished; the loop writes its response.
+    /// One v2 `session/update` notification (already in v2 wire shape).
+    UpdateV2 {
+        /// The session the update pertains to.
+        session_id: SessionId,
+        /// The v2 SDK update payload.
+        update: Box<v2::SessionUpdate>,
+    },
+    /// A prompt finished; the loop writes its response (v1) or emits the
+    /// idle `state_update` (v2, where the response was already sent).
     PromptCompleted {
+        /// The session the prompt ran in.
+        session_id: SessionId,
         /// The id of the `session/prompt` request this answers.
         request_id: RequestId,
         /// The provider's outcome; a provider cancellation is mapped to a
@@ -213,6 +237,11 @@ pub struct AcpAgentServer<P> {
     /// Builds per-prompt [`ClientBridge`](crate::client::ClientBridge)
     /// handles sharing this server's id space and pending registry.
     client_factory: ClientBridgeFactory,
+    /// Generates agent-owned user message ids for v2 prompt acknowledgments.
+    message_ids: Arc<Mutex<MessageIdGenerator>>,
+    /// The protocol version negotiated by `initialize`, pinned for the life
+    /// of the connection (one version per connection).
+    negotiated: Arc<OnceLock<ProtocolVersion>>,
 }
 
 impl<P: AgentProvider> AcpAgentServer<P> {
@@ -220,12 +249,34 @@ impl<P: AgentProvider> AcpAgentServer<P> {
     #[must_use]
     pub fn new(provider: P, config: AcpAgentServerConfig) -> Self {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let pending = std::sync::Arc::new(PendingRequests::new());
+        let negotiated: Arc<OnceLock<ProtocolVersion>> = Arc::new(OnceLock::new());
+        // v2 foreground-state reporting: while an agent → client request is
+        // pending the turn is blocked on the user (`requires_action`); once it
+        // resolves, foreground work runs again.  v1 connections emit nothing.
+        let notify_tx = outbound_tx.clone();
+        let notify_negotiated = negotiated.clone();
+        #[allow(clippy::type_complexity)]
+        let toggle: Arc<dyn Fn(&SessionId, bool) + Send + Sync> =
+            Arc::new(move |session_id, pending| {
+                if notify_negotiated.get() == Some(&ProtocolVersion::V2) {
+                    let update = if pending {
+                        crate::v2::state_requires_action()
+                    } else {
+                        crate::v2::state_running()
+                    };
+                    let _ = notify_tx.send(OutboundEvent::UpdateV2 {
+                        session_id: session_id.clone(),
+                        update: Box::new(update),
+                    });
+                }
+            });
+        let pending = std::sync::Arc::new(PendingRequests::with_toggle(toggle));
         let client_factory = ClientBridgeFactory::new(
             Mutex::new(RequestIdGenerator::new()),
             pending.clone(),
             outbound_tx.clone(),
             config.request_timeout,
+            negotiated.clone(),
         );
         Self {
             provider: std::sync::Arc::new(provider),
@@ -236,6 +287,8 @@ impl<P: AgentProvider> AcpAgentServer<P> {
             outbound_rx: Some(outbound_rx),
             pending,
             client_factory,
+            message_ids: Arc::new(Mutex::new(MessageIdGenerator::new("msg_user"))),
+            negotiated,
         }
     }
 
@@ -309,7 +362,7 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                             },
                         };
                         match frame {
-                            JsonRpcFrame::Request(request) => {
+                            JsonRpcFrame::Single(RawJsonRpcMessage::Request(request)) => {
                                 let id = request.id.clone();
                                 let method = request.method.to_string();
                                 let params = raw_params_to_value(request.params);
@@ -323,16 +376,19 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                                     }
                                 }
                             }
-                            JsonRpcFrame::Notification(notification) => {
+                            JsonRpcFrame::Single(RawJsonRpcMessage::Notification(notification)) => {
                                 let method = notification.method.to_string();
                                 let params = raw_params_to_value(notification.params);
                                 let dispatcher = self.dispatcher(RequestId::Null);
                                 dispatcher.dispatch_notification(&method, params).await;
                             }
-                            JsonRpcFrame::Response(response) => {
+                            JsonRpcFrame::Single(RawJsonRpcMessage::Response(response)) => {
                                 // The client answered one of our agent →
                                 // client requests; resolve its pending entry.
                                 self.pending.handle_response(response);
+                            }
+                            JsonRpcFrame::Batch(entries) => {
+                                self.handle_batch(&mut transport, entries).await?;
                             }
                         }
                     }
@@ -343,6 +399,16 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                                 // longer knows (closed mid-prompt).
                                 if !self.sessions.contains(&session_id) {
                                     tracing::warn!(%session_id, "dropping update for unknown session");
+                                    continue;
+                                }
+                                if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+                                    // v2 wire: translate each v1 update into v2
+                                    // notifications; a single v1 update can
+                                    // produce zero or more v2 updates.
+                                    for translated in translate::translate_update(&update) {
+                                        self.write_v2_update(&mut transport, &session_id, translated)
+                                            .await?;
+                                    }
                                     continue;
                                 }
                                 let params = serde_json::to_value(SessionNotification::new(
@@ -358,9 +424,58 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                                 ).map_err(|_| AcpServerError::Protocol(
                                     "failed to build session update notification".into(),
                                 ))?;
-                                transport.write_message(frame).await?;
+                                transport.write_message(JsonRpcFrame::Single(frame)).await?;
                             }
-                            Some(OutboundEvent::PromptCompleted { request_id, result }) => {
+                            Some(OutboundEvent::UpdateV2 { session_id, update }) => {
+                                // v2-only updates must never leak onto a v1
+                                // connection (guards provider misuse of the
+                                // v2-only sink helpers).
+                                if self.negotiated.get() != Some(&ProtocolVersion::V2) {
+                                    tracing::warn!(
+                                        %session_id,
+                                        "dropping v2-only update on a non-v2 connection"
+                                    );
+                                    continue;
+                                }
+                                if !self.sessions.contains(&session_id) {
+                                    tracing::warn!(%session_id, "dropping update for unknown session");
+                                    continue;
+                                }
+                                self.write_v2_update(&mut transport, &session_id, *update).await?;
+                            }
+                            Some(OutboundEvent::PromptCompleted { session_id, request_id, result }) => {
+                                if self.negotiated.get() == Some(&ProtocolVersion::V2) {
+                                    // v2: the prompt response (the insertion
+                                    // acknowledgment) was already sent; report
+                                    // turn completion through an idle
+                                    // `state_update` carrying the stop reason.
+                                    let stop_reason = match result {
+                                        Ok(response) => {
+                                            translate::stop_reason_v2(response.stop_reason)
+                                        }
+                                        Err(ProviderError::Cancellation) => {
+                                            v2::StopReason::Cancelled
+                                        }
+                                        Err(provider_error) => {
+                                            // The acknowledgment is already out;
+                                            // no error response is possible.  The
+                                            // closest spec stop reason for an
+                                            // aborted turn is `refusal`.
+                                            tracing::warn!(
+                                                %provider_error,
+                                                "v2 prompt failed after acceptance; reporting idle refusal"
+                                            );
+                                            v2::StopReason::Refusal
+                                        }
+                                    };
+                                    self.write_v2_update(
+                                        &mut transport,
+                                        &session_id,
+                                        translate::state_idle(Some(stop_reason)),
+                                    )
+                                    .await?;
+                                    continue;
+                                }
                                 let response = match result {
                                     Ok(prompt_response) => RawJsonRpcMessage::response(
                                         request_id,
@@ -386,10 +501,10 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                                             .into_rpc_error()),
                                     ),
                                 };
-                                transport.write_message(response).await?;
+                                transport.write_message(JsonRpcFrame::Single(response)).await?;
                             }
                             Some(OutboundEvent::ClientRequest { frame }) => {
-                                transport.write_message(frame).await?;
+                                transport.write_message(JsonRpcFrame::Single(frame)).await?;
                             }
                             Some(OutboundEvent::DeferredResponse { request_id, result }) => {
                                 let response = match result {
@@ -398,7 +513,7 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                                         RawJsonRpcMessage::response(request_id, Err(error))
                                     }
                                 };
-                                transport.write_message(response).await?;
+                                transport.write_message(JsonRpcFrame::Single(response)).await?;
                             }
                             None => {
                                 // Unreachable while the server holds its own
@@ -439,8 +554,99 @@ impl<P: AgentProvider> AcpAgentServer<P> {
             self.active_prompts.clone(),
             self.outbound_tx.as_ref().expect("server is running").clone(),
             self.client_factory.clone(),
+            self.negotiated.clone(),
+            self.message_ids.clone(),
             request_id,
         )
+    }
+
+    /// JSON-RPC 2.0 batch handling (required by v2 stdio): dispatches every
+    /// member, never replies to notifications, keeps per-entry `-32600` error
+    /// responses for invalid members (already materialized by the codec), and
+    /// answers all request members with one batch response array.  Methods
+    /// that change which later messages are valid — and everything that
+    /// completes through the deferred outbound path — are rejected per member
+    /// with `-32600`, so a batch response never waits on deferred work.
+    async fn handle_batch<T: AcpTransport>(
+        &self,
+        transport: &mut T,
+        entries: Vec<RawJsonRpcMessage>,
+    ) -> Result<(), AcpServerError> {
+        let mut responses: Vec<RawJsonRpcMessage> = Vec::new();
+        for entry in entries {
+            match entry {
+                RawJsonRpcMessage::Request(request) => {
+                    let id = request.id.clone();
+                    let method = request.method.to_string();
+                    if BATCH_REJECTED_METHODS.contains(&method.as_str()) {
+                        responses.push(RawJsonRpcMessage::response(
+                            id,
+                            Err(RpcError::new(
+                                -32600,
+                                format!("{method} must not be sent inside a batch"),
+                            )),
+                        ));
+                        continue;
+                    }
+                    let params = raw_params_to_value(request.params);
+                    let dispatcher = self.dispatcher(id.clone());
+                    match dispatcher.dispatch(&method, params).await {
+                        DispatchOutcome::Immediate(result) => {
+                            responses.push(RawJsonRpcMessage::response(id, result));
+                        }
+                        // Unreachable: batch-allowed methods all complete
+                        // immediately; fail closed regardless.
+                        DispatchOutcome::Deferred => {
+                            responses.push(RawJsonRpcMessage::response(
+                                id,
+                                Err(RpcError::new(
+                                    -32600,
+                                    "deferred methods cannot run inside a batch",
+                                )),
+                            ));
+                        }
+                    }
+                }
+                RawJsonRpcMessage::Notification(notification) => {
+                    let method = notification.method.to_string();
+                    let params = raw_params_to_value(notification.params);
+                    self.dispatcher(RequestId::Null).dispatch_notification(&method, params).await;
+                }
+                // The client answered one of our agent → client requests.
+                RawJsonRpcMessage::Response(response) => self.pending.handle_response(response),
+            }
+        }
+        // Batches of pure notifications produce no response at all.
+        if !responses.is_empty() {
+            transport.write_message(JsonRpcFrame::Batch(responses)).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes one v2 `session/update` notification over the transport.
+    async fn write_v2_update<T: AcpTransport>(
+        &self,
+        transport: &mut T,
+        session_id: &SessionId,
+        update: v2::SessionUpdate,
+    ) -> Result<(), AcpServerError> {
+        let notification =
+            v2::UpdateSessionNotification::new(v2::SessionId::new(session_id.0.clone()), update);
+        debug_assert!(
+            self.negotiated.get() == Some(&ProtocolVersion::V2),
+            "v2 updates must only flow on v2 connections"
+        );
+        let params = serde_json::to_value(notification).map_err(|_| {
+            AcpServerError::Protocol("failed to serialize v2 session update".into())
+        })?;
+        let frame =
+            RawJsonRpcMessage::notification(SESSION_UPDATE_NOTIFICATION.to_string(), params)
+                .map_err(|_| {
+                    AcpServerError::Protocol(
+                        "failed to build v2 session update notification".into(),
+                    )
+                })?;
+        transport.write_message(JsonRpcFrame::Single(frame)).await
     }
 
     async fn write_result<T: AcpTransport>(
@@ -453,7 +659,7 @@ impl<P: AgentProvider> AcpAgentServer<P> {
             Ok(value) => RawJsonRpcMessage::response(id, Ok(value)),
             Err(rpc_error) => RawJsonRpcMessage::response(id, Err(rpc_error)),
         };
-        transport.write_message(frame).await
+        transport.write_message(JsonRpcFrame::Single(frame)).await
     }
 }
 

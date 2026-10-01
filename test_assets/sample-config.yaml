@@ -1,0 +1,74 @@
+# Sample YAML configuration file for testing tree-sitter YAML parsing,
+# syntax highlighting, indentation, anchors, and folded strings.
+
+version: "2.4"
+name: &app_name "editor-orchestrator"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  tls:
+    enabled: true
+    cert_path: "/etc/ssl/certs/server.crt"
+    key_path: "/etc/ssl/private/server.key"
+  timeouts:
+    read_seconds: 30
+    write_seconds: 45
+    idle_seconds: 120
+
+# Anchors and alias references
+defaults: &base_policy
+  max_retries: 5
+  backoff_factor: 1.5
+  timeout_ms: 5000
+
+policies:
+  llm_inference:
+    <<: *base_policy
+    max_retries: 3
+    priority: "critical"
+  indexing:
+    <<: *base_policy
+    timeout_ms: 15000
+    priority: "background"
+
+providers:
+  - name: "openrouter"
+    endpoint: "https://openrouter.ai/api/v1"
+    models:
+      - id: "anthropic/claude-3.7-sonnet"
+        context_window: 200000
+        supports_tools: true
+      - id: "openai/gpt-4o"
+        context_window: 128000
+        supports_tools: true
+    rate_limits:
+      requests_per_minute: 60
+      tokens_per_minute: 100000
+
+  - name: "local-mcp"
+    command: "ee-mcp-server"
+    args:
+      - "--stdio"
+      - "--log-level=debug"
+    env:
+      RUST_LOG: "debug"
+      EDITOR_INSTANCE: *app_name
+
+# Multi-line strings (literal block and folded block)
+descriptions:
+  literal_prompt: |
+    You are an expert software engineer assistant.
+    Always format output in structured Markdown.
+    Preserve line breaks exactly as written.
+
+  folded_guideline: >
+    This is a long configuration instruction that will be folded
+    into a single continuous line when parsed by the YAML reader,
+    simplifying formatting across narrow terminal displays.
+
+feature_flags:
+  tree_sitter_highlighting: true
+  vlf_streaming: true
+  legacy_rpc_bridge: false
+  telemetry: null

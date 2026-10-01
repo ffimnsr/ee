@@ -187,10 +187,21 @@ async fn unsupported_protocol_version_fails_closed() {
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
 
     let error = host.connection.wait_ready().await.unwrap_err();
-    assert!(matches!(
-        error,
-        AgentError::UnsupportedProtocolVersion { ref agent_id, .. } if agent_id == "fake"
-    ));
+    // With the SDK's dual-version schema enabled, a v1-typed response
+    // answering protocolVersion 2 is rejected at the SDK boundary before the
+    // host can compare versions: the handshake still fails closed, never
+    // becoming ready with a mismatched wire surface.
+    let AgentError::Rpc(rpc_error) = &error else {
+        panic!("expected handshake rejection, got {error:?}");
+    };
+    assert!(
+        rpc_error
+            .data
+            .as_ref()
+            .and_then(|data| data.as_str())
+            .is_some_and(|data| data.contains("negotiated 2"),),
+        "SDK version guard must reject the mismatched response: {rpc_error:?}"
+    );
     fake.join(TEST_TIMEOUT).await;
 }
 

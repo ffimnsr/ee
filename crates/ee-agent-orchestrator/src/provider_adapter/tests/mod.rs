@@ -3,7 +3,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{
-    AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
+    MemoryTransportHandle,
 };
 use ee_agent_protocol::{
     Error as RpcError, RawJsonRpcMessage, RawJsonRpcParams, RequestId, Response,
@@ -136,7 +137,7 @@ async fn next_response_with_updates(handle: &Harness) -> (RawJsonRpcMessage, Vec
 /// inbound frames, read outbound frames in order.
 struct Harness {
     handle: MemoryTransportHandle,
-    pending: Arc<Mutex<VecDeque<RawJsonRpcMessage>>>,
+    pending: Arc<Mutex<VecDeque<JsonRpcFrame>>>,
 }
 
 impl Harness {
@@ -145,7 +146,7 @@ impl Harness {
     }
 
     fn send(&self, frame: RawJsonRpcMessage) -> bool {
-        self.handle.send(frame)
+        self.handle.send(JsonRpcFrame::Single(frame))
     }
 
     async fn next_frame(&self) -> RawJsonRpcMessage {
@@ -162,7 +163,15 @@ impl Harness {
                 if pending.is_empty() {
                     pending.extend(self.handle.take_outbound());
                 }
-                pending.pop_front()
+                match pending.pop_front() {
+                    Some(JsonRpcFrame::Single(message)) => Some(message),
+                    Some(batch) => {
+                        panic!(
+                            "a batch response is queued; the orchestrator harness only reads singles: {batch:?}"
+                        )
+                    }
+                    None => None,
+                }
             };
             if let Some(frame) = ready {
                 return frame;
@@ -179,14 +188,26 @@ impl Harness {
     /// (under paused time the tick advances instantly).
     async fn next_frames(&self, count: usize) -> Vec<RawJsonRpcMessage> {
         for _ in 0..5_000 {
-            let ready = {
+            let frames = {
                 let mut pending = self.pending.lock().expect("harness pending poisoned");
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                if pending.len() >= count { Some(pending.drain(..count).collect()) } else { None }
+                let mut collected = Vec::with_capacity(count);
+                while collected.len() < count {
+                    match pending.pop_front() {
+                        Some(JsonRpcFrame::Single(message)) => collected.push(message),
+                        Some(batch) => {
+                            panic!(
+                                "a batch response is queued; the orchestrator harness only reads singles: {batch:?}"
+                            )
+                        }
+                        None => break,
+                    }
+                }
+                collected
             };
-            if let Some(frames) = ready {
+            if !frames.is_empty() {
                 return frames;
             }
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -201,7 +222,7 @@ impl Harness {
 
     /// Snapshot of outbound frames not yet consumed by the harness.
     fn outbound(&self) -> Vec<RawJsonRpcMessage> {
-        self.handle.outbound()
+        self.handle.outbound().into_iter().filter_map(JsonRpcFrame::into_single).collect()
     }
 }
 fn spawn_server(

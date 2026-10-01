@@ -1,6 +1,6 @@
-//! Reusable ACP v1 **agent-side** server framework.
+//! Reusable ACP agent-side server framework (v1 and draft v2).
 //!
-//! Provider binaries embed this crate to serve ACP v1 over stdio or
+//! Provider binaries embed this crate to serve ACP over stdio or
 //! in-memory transports instead of handrolling JSON-RPC loops.  This crate
 //! is the counterpart of `ee-agent-host`, which stays the editor/client-side
 //! host only; this crate never depends on `ee-agent-host`.
@@ -173,6 +173,7 @@ pub mod server;
 pub mod session;
 pub mod transport;
 pub mod updates;
+pub mod v2;
 pub mod validate;
 
 // ── Primary public types ────────────────────────────────────────────────
@@ -183,8 +184,8 @@ pub use dotenv::{env_or_dotenv, load_dotenv, parse_dotenv};
 pub use error::{AcpServerError, ProviderError};
 pub use ids::{RequestIdGenerator, SessionIdGenerator};
 pub use provider::{
-    AgentProvider, LoadSessionContext, NewSessionContext, PromptContext, PromptResult,
-    ProviderFuture, SessionInit, SetModeContext,
+    AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,
+    PromptResult, ProviderFuture, SessionInit, SetModeContext,
 };
 pub use server::AcpAgentServer;
 pub use session::{ServerSession, SessionStore, SessionStoreError};
@@ -244,11 +245,16 @@ mod compile_checks {
     }
 
     #[test]
-    fn framework_supports_exactly_the_protocol_crates_version() {
-        // The dispatcher negotiates ACP v1; the protocol facade's supported
-        // version must stay in lockstep.
+    fn framework_supports_the_protocol_crates_versions() {
+        // The dispatcher negotiates ACP v1 and draft v2; the protocol
+        // facade's supported versions must stay in lockstep.
         assert_eq!(ProtocolVersion::V1, ACP_PROTOCOL_VERSION);
         assert!(ee_agent_protocol::protocol_version_supported(ProtocolVersion::V1));
+        assert!(ee_agent_protocol::protocol_version_supported(ProtocolVersion::V2));
+        assert_eq!(
+            ProtocolVersion::V2,
+            ee_agent_protocol::version::LATEST_SUPPORTED_PROTOCOL_VERSION
+        );
     }
 
     #[test]

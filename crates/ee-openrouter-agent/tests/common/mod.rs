@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 pub use ee_acp_agent_server::{
-    AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
+    MemoryTransportHandle,
 };
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
 use ee_openrouter_agent::provider::OpenRouterProvider;
@@ -146,7 +147,7 @@ fn handle_connection(
 /// are never lost between `next_frames` calls.
 pub struct Harness {
     handle: MemoryTransportHandle,
-    pending: Arc<Mutex<VecDeque<RawJsonRpcMessage>>>,
+    pending: Arc<Mutex<VecDeque<JsonRpcFrame>>>,
 }
 
 impl Harness {
@@ -163,7 +164,7 @@ impl Harness {
 
     /// Queues one inbound frame for the server.
     pub fn send(&self, frame: RawJsonRpcMessage) -> bool {
-        self.handle.send(frame)
+        self.handle.send(JsonRpcFrame::Single(frame))
     }
 
     /// Waits (without sleeping) for the next outbound frame.
@@ -185,7 +186,19 @@ impl Harness {
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                if pending.len() >= count { pending.drain(..count).collect() } else { Vec::new() }
+                let mut collected = Vec::with_capacity(count);
+                while collected.len() < count {
+                    match pending.pop_front() {
+                        Some(JsonRpcFrame::Single(message)) => collected.push(message),
+                        Some(batch) => {
+                            panic!(
+                                "a batch response is queued; use a batch-aware harness instead: {batch:?}"
+                            )
+                        }
+                        None => break,
+                    }
+                }
+                collected
             };
             if !frames.is_empty() {
                 return frames;

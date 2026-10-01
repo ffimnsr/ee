@@ -51,9 +51,10 @@ impl AcpTransport for ScriptedTransport {
     }
 }
 
-fn unwrap_error_response(frame: RawJsonRpcMessage) -> (RequestId, i32) {
+fn unwrap_error_response(frame: JsonRpcFrame) -> (RequestId, i32) {
+    let frame = frame.into_single().expect("expected a single frame");
     let RawJsonRpcMessage::Response(Response::Error { id, error }) = frame else {
-        panic!("expected an error response frame, got {frame:?}");
+        panic!("expected an error response frame");
     };
     (id, i32::from(error.code))
 }
@@ -73,7 +74,7 @@ async fn parse_error_gets_32700_response_and_server_continues() {
     let server = AcpAgentServer::new(provider, Default::default());
     let (transport, outbound) = ScriptedTransport::new(vec![
         Err(parse_error()),
-        Ok(Some(request(1, "initialize", json!({ "protocolVersion": 1 })))),
+        Ok(Some(JsonRpcFrame::Single(request(1, "initialize", json!({ "protocolVersion": 1 }))))),
         Ok(None),
     ]);
 
@@ -89,7 +90,7 @@ async fn parse_error_gets_32700_response_and_server_continues() {
     assert_eq!(code, -32700);
 
     // Then: the server kept serving the rest of the stream.
-    let result = request_result(frames[1].clone());
+    let result = request_result(frames[1].clone().into_single().expect("single frame"));
     assert_eq!(result["protocolVersion"], 1);
 }
 
@@ -103,7 +104,7 @@ async fn protocol_error_gets_32600_response_and_server_continues() {
         AcpServerError::Protocol("frame of 99999 bytes exceeds the 1024 byte cap".to_string());
     let (transport, outbound) = ScriptedTransport::new(vec![
         Err(oversized),
-        Ok(Some(request(1, "session/list", json!({})))),
+        Ok(Some(JsonRpcFrame::Single(request(1, "session/list", json!({}))))),
         Ok(None),
     ]);
 
@@ -117,7 +118,7 @@ async fn protocol_error_gets_32600_response_and_server_continues() {
     assert_eq!(id, RequestId::Null, "invalid requests are answered with a null id");
     assert_eq!(code, -32600);
 
-    let result = request_result(frames[1].clone());
+    let result = request_result(frames[1].clone().into_single().expect("single frame"));
     let response: ListSessionsResponse =
         serde_json::from_value(result).expect("parses as ListSessionsResponse");
     assert!(response.sessions.is_empty());
@@ -260,11 +261,11 @@ async fn harness_accumulates_frames_across_poll_batches() {
     // arrive in three separate batches.
     let writer = tokio::spawn(async move {
         let mut transport = transport;
-        transport.write_message(frame(1)).await.expect("writes A");
+        transport.write_message(JsonRpcFrame::Single(frame(1))).await.expect("writes A");
         let _ = signal_rx.await;
-        transport.write_message(frame(2)).await.expect("writes B");
+        transport.write_message(JsonRpcFrame::Single(frame(2))).await.expect("writes B");
         tokio::task::yield_now().await;
-        transport.write_message(frame(3)).await.expect("writes C");
+        transport.write_message(JsonRpcFrame::Single(frame(3))).await.expect("writes C");
     });
 
     // First batch consumed alone.

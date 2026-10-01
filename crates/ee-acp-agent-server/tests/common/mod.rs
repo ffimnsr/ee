@@ -8,14 +8,17 @@ use std::time::Duration;
 
 pub use ee_acp_agent_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
-    LoadSessionContext, MemoryTransport, MemoryTransportHandle, NewSessionContext, PromptContext,
-    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
+    JsonRpcFrame, LoadSessionContext, LoginContext, MemoryTransport, MemoryTransportHandle,
+    NewSessionContext, PromptContext, PromptResult, ProviderError, ProviderFuture, SessionInit,
+    SetModeContext, UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, ContentChunk, CreateTerminalRequest,
-    Error as RpcError, Implementation, MessageId, RawJsonRpcMessage, RawJsonRpcParams,
-    ReadTextFileRequest, RequestId, Response, SessionCapabilities, SessionCloseCapabilities,
-    SessionId, SessionListCapabilities, SessionModeState, SessionUpdate, StopReason, TextContent,
+    Error as RpcError, Implementation, McpCapabilities, MessageId, MessageMcpRequest, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, RawJsonRpcMessage, RawJsonRpcParams, ReadTextFileRequest,
+    RequestId, Response, SessionCapabilities, SessionCloseCapabilities, SessionId,
+    SessionListCapabilities, SessionModeState, SessionUpdate, StopReason, TextContent,
+    ToolCallContent, ToolKind,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -46,11 +49,20 @@ pub enum PromptBehavior {
     ReadTextFile { path: String },
     /// Calls `client.read_text_file` with the given path; records the
     /// outcome, and always returns `EndTurn` (used to prove invalid input
-    /// never reaches the transport).
+    /// never reaches the transport and to exercise v2 foreground-state
+    /// transitions while a client request is pending).
     ReadTextFileAndContinue { path: String },
+    /// Emits one `tool_call_content_chunk` under an announced tool call and
+    /// one provider-keyed `plan_update` (both v2-only sink helpers), then
+    /// returns `EndTurn`.
+    EmitV2ChunkAndPlanThenReturn,
     /// Calls `client.create_terminal` with a relative `cwd`; records the
     /// outcome, and always returns `EndTurn`.
     CreateTerminalRelativeCwd,
+    /// Calls `client.mcp_message` once (`mcp/message` is the v2-native
+    /// pending agent → client request); records the outcome as
+    /// `client:mcp_message:ok`/`err:<error>`, and always returns `EndTurn`.
+    McpMessageAndContinue { connection_id: String },
 }
 
 /// Ordered call record for the fake provider.
@@ -94,6 +106,12 @@ pub struct FakeProvider {
     /// When set, `session/load`/`session/resume` fail with this message
     /// (simulates "no persisted state").
     load_error: Arc<Mutex<Option<String>>>,
+    /// v2 authentication methods advertised at `initialize` (empty by
+    /// default).
+    auth_methods: Arc<Mutex<Vec<ee_agent_protocol::v2::AuthMethod>>>,
+    /// v1 MCP capability flags advertised in `capabilities()`.
+    mcp_http: Arc<std::sync::atomic::AtomicBool>,
+    mcp_acp: Arc<std::sync::atomic::AtomicBool>,
     pub behaviors: Arc<Mutex<HashMap<String, PromptBehavior>>>,
 }
 
@@ -108,6 +126,9 @@ impl FakeProvider {
             set_mode_error: Arc::new(Mutex::new(None)),
             replay: Arc::new(Mutex::new(Vec::new())),
             load_error: Arc::new(Mutex::new(None)),
+            auth_methods: Arc::new(Mutex::new(Vec::new())),
+            mcp_http: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_acp: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             behaviors: Arc::new(Mutex::new(HashMap::new())),
         };
         (provider, log)
@@ -149,6 +170,24 @@ impl FakeProvider {
         self
     }
 
+    /// Advertises the given v2 authentication methods at `initialize`.
+    pub fn with_auth_methods(self, methods: Vec<ee_agent_protocol::v2::AuthMethod>) -> Self {
+        *self.auth_methods.lock().expect("fake provider auth methods poisoned") = methods;
+        self
+    }
+
+    /// Advertises the v1 `mcp_capabilities.http` flag.
+    pub fn with_mcp_http(self) -> Self {
+        self.mcp_http.store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Advertises the v1 `mcp_capabilities.acp` flag (MCP-over-ACP).
+    pub fn with_mcp_acp(self) -> Self {
+        self.mcp_acp.store(true, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
     pub fn next_id(&self) -> String {
         self.ids
             .lock()
@@ -171,11 +210,38 @@ impl AgentProvider for FakeProvider {
     }
 
     fn capabilities(&self) -> AgentCapabilities {
-        AgentCapabilities::default().load_session(true).session_capabilities(
-            SessionCapabilities::new()
-                .list(SessionListCapabilities::new())
-                .close(SessionCloseCapabilities::new()),
-        )
+        AgentCapabilities::default()
+            .load_session(true)
+            .session_capabilities(
+                SessionCapabilities::new()
+                    .list(SessionListCapabilities::new())
+                    .close(SessionCloseCapabilities::new()),
+            )
+            .mcp_capabilities(
+                McpCapabilities::new()
+                    .http(self.mcp_http.load(std::sync::atomic::Ordering::Relaxed))
+                    .acp(self.mcp_acp.load(std::sync::atomic::Ordering::Relaxed)),
+            )
+    }
+
+    fn auth_methods(&self) -> Vec<ee_agent_protocol::v2::AuthMethod> {
+        self.auth_methods.lock().expect("fake provider auth methods poisoned").clone()
+    }
+
+    fn login(&self, ctx: LoginContext) -> ProviderFuture<Result<(), ProviderError>> {
+        let log = self.log.clone();
+        Box::pin(async move {
+            log.record(format!("login:{}", ctx.method_id.0));
+            Ok(())
+        })
+    }
+
+    fn logout(&self) -> ProviderFuture<Result<(), ProviderError>> {
+        let log = self.log.clone();
+        Box::pin(async move {
+            log.record("logout");
+            Ok(())
+        })
     }
 
     fn new_session(
@@ -278,6 +344,25 @@ impl AgentProvider for FakeProvider {
                     sink.agent_message_chunk("m-1", "hello from provider").expect("sink emits");
                     Ok(PromptResult::new(StopReason::EndTurn))
                 }
+                PromptBehavior::EmitV2ChunkAndPlanThenReturn => {
+                    sink.tool_call_pending("tc-1", "Run tests", ToolKind::Execute)
+                        .expect("tool call announced");
+                    sink.tool_call_content_chunk_v2(
+                        "tc-1",
+                        ToolCallContent::from(ContentBlock::Text(TextContent::new("streamed"))),
+                    )
+                    .expect("tool call content chunk streams");
+                    sink.plan_update_v2(
+                        "plan-42",
+                        vec![PlanEntry::new(
+                            "pipeline",
+                            PlanEntryPriority::High,
+                            PlanEntryStatus::InProgress,
+                        )],
+                    )
+                    .expect("plan update streams");
+                    Ok(PromptResult::new(StopReason::EndTurn))
+                }
                 PromptBehavior::AwaitCancelThenCancelled => {
                     let _ = cancel.changed().await;
                     log.record(format!("prompt:{session_id}:cancelled"));
@@ -324,6 +409,15 @@ impl AgentProvider for FakeProvider {
                     log.record(format!("client:create_terminal:{outcome}"));
                     Ok(PromptResult::new(StopReason::EndTurn))
                 }
+                PromptBehavior::McpMessageAndContinue { connection_id } => {
+                    let request = MessageMcpRequest::new(connection_id, "tools/list");
+                    let outcome = match client.mcp_message(request).await {
+                        Ok(_) => "ok".to_string(),
+                        Err(error) => format!("err:{error}"),
+                    };
+                    log.record(format!("client:mcp_message:{outcome}"));
+                    Ok(PromptResult::new(StopReason::EndTurn))
+                }
             }
         })
     }
@@ -354,7 +448,7 @@ impl AgentProvider for FakeProvider {
 /// finishes) are never lost between [`Harness::next_frames`] calls.
 pub struct Harness {
     handle: MemoryTransportHandle,
-    pending: Arc<Mutex<VecDeque<RawJsonRpcMessage>>>,
+    pending: Arc<Mutex<VecDeque<JsonRpcFrame>>>,
 }
 
 impl Harness {
@@ -365,12 +459,41 @@ impl Harness {
 
     /// Queues one inbound frame for the server.
     pub fn send(&self, frame: RawJsonRpcMessage) -> bool {
-        self.handle.send(frame)
+        self.handle.send(JsonRpcFrame::Single(frame))
+    }
+
+    /// Queues one inbound JSON-RPC batch for the server.
+    pub fn send_batch(&self, entries: Vec<RawJsonRpcMessage>) -> bool {
+        self.handle.send(JsonRpcFrame::Batch(entries))
     }
 
     /// Waits (without sleeping) for the next outbound frame.
     pub async fn next_frame(&self) -> RawJsonRpcMessage {
         self.next_frames(1).await.remove(0)
+    }
+
+    /// Waits for one outbound batch response and returns its entries.
+    pub async fn next_batch(&self) -> Vec<RawJsonRpcMessage> {
+        for _ in 0..5_000 {
+            let batch = {
+                let mut pending = self.pending.lock().expect("harness pending poisoned");
+                if pending.is_empty() {
+                    pending.extend(self.handle.take_outbound());
+                }
+                match pending.pop_front() {
+                    Some(JsonRpcFrame::Batch(entries)) => Some(entries),
+                    Some(other) => {
+                        panic!("expected a batch response, got {other:?}")
+                    }
+                    None => None,
+                }
+            };
+            if let Some(batch) = batch {
+                return batch;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("no outbound batch within budget");
     }
 
     /// Waits for exactly `count` outbound frames, in order, keeping any
@@ -387,7 +510,17 @@ impl Harness {
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                if pending.len() >= count { pending.drain(..count).collect() } else { Vec::new() }
+                let mut collected = Vec::with_capacity(count);
+                while collected.len() < count {
+                    match pending.pop_front() {
+                        Some(JsonRpcFrame::Single(message)) => collected.push(message),
+                        Some(batch) => {
+                            panic!("a batch response is queued; use next_batch instead: {batch:?}")
+                        }
+                        None => break,
+                    }
+                }
+                collected
             };
             if !frames.is_empty() {
                 return frames;
@@ -402,7 +535,7 @@ impl Harness {
     }
 
     /// Snapshot of frames not yet consumed by the harness.
-    pub fn outbound(&self) -> Vec<RawJsonRpcMessage> {
+    pub fn outbound(&self) -> Vec<JsonRpcFrame> {
         self.handle.outbound()
     }
 

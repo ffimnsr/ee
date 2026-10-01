@@ -155,6 +155,24 @@ impl SetModeContext {
     }
 }
 
+/// Validated input for [`AgentProvider::login`] (v2 `auth/login`).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct LoginContext {
+    /// The advertised authentication method the client selected.
+    pub method_id: ee_agent_protocol::v2::AuthMethodId,
+    /// Raw `_meta` from the `auth/login` request, if present.
+    pub metadata: Option<Meta>,
+}
+
+impl LoginContext {
+    /// Creates a context for the selected authentication method.
+    #[must_use]
+    pub fn new(method_id: impl Into<ee_agent_protocol::v2::AuthMethodId>) -> Self {
+        Self { method_id: method_id.into(), metadata: None }
+    }
+}
+
 /// Result of creating or loading a session.
 ///
 /// The server converts this into the SDK `NewSessionResponse` /
@@ -285,6 +303,34 @@ pub trait AgentProvider: Send + Sync + 'static {
         Box::pin(async {
             Err(ProviderError::InvalidRequest(
                 "session/set_mode is not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Authentication methods advertised in the v2 `initialize` response.
+    /// Empty (the default) means the agent advertises no auth surface and v2
+    /// clients must not call `auth/login` / `auth/logout`.
+    fn auth_methods(&self) -> Vec<ee_agent_protocol::v2::AuthMethod> {
+        Vec::new()
+    }
+
+    /// Handles v2 `auth/login` for one advertised method.  Providers that
+    /// advertise [`Self::auth_methods`] must implement this; the default
+    /// rejects the login.
+    fn login(&self, _ctx: LoginContext) -> ProviderFuture<Result<(), ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::InvalidRequest(
+                "auth/login is not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Handles v2 `auth/logout`.  Providers that advertise
+    /// [`Self::auth_methods`] must implement this; the default rejects logout.
+    fn logout(&self) -> ProviderFuture<Result<(), ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::InvalidRequest(
+                "auth/logout is not supported by this provider".to_string(),
             ))
         })
     }

@@ -70,21 +70,58 @@ impl ThreadShared {
         let mut order = self.order.lock().expect("session order poisoned");
         let result = apply_update(&mut state, &mut order, &update);
         drop(state);
-        let event = match result {
-            Ok(()) => AgentEvent::SessionUpdate {
-                session_id: self.session_id.clone(),
-                update: Box::new(update),
-            },
+        match result {
+            Ok(()) => self.emit_update(update),
             Err(error) => {
                 tracing::warn!(
                     session_id = %self.session_id.0,
                     ?error,
                     "invalid session update ignored"
                 );
-                return;
             }
+        }
+    }
+
+    /// Applies one v2 whole-message upsert (replace/clear by `messageId`):
+    /// the reducer state is authoritative, and the blocks also stream as
+    /// same-id chunk events so v1 transcript consumers keep rendering.  The
+    /// append-only v1 pipeline cannot express a replace, so the pane may show
+    /// stale text for the rare same-id correction case; the snapshot is
+    /// always correct.  The chunk events are emit-only — re-reducing them
+    /// would double the blocks the state just replaced.
+    pub fn apply_whole_message(
+        &self,
+        kind: MessageKind,
+        message_id: &str,
+        blocks: Option<Vec<ContentBlock>>,
+    ) {
+        {
+            let mut state = self.state.lock().expect("session state poisoned");
+            crate::reducer::apply_whole_message(&mut state, kind, message_id, blocks.clone());
+        }
+        let Some(blocks) = blocks else { return };
+        let make = match kind {
+            MessageKind::Assistant => SessionUpdate::AgentMessageChunk,
+            MessageKind::Thought => SessionUpdate::AgentThoughtChunk,
+            // The host renders its submitted prompt optimistically and skips
+            // the v2 `user_message` echo entirely.
+            MessageKind::User => return,
         };
-        let _ = self.events.send(event);
+        for block in blocks {
+            self.emit_update(make(
+                ee_agent_protocol::ContentChunk::new(block)
+                    .message_id(ee_agent_protocol::MessageId::new(message_id)),
+            ));
+        }
+    }
+
+    /// Emits one deterministic `session/update` event without re-reducing it
+    /// (used when the state already reflects the update).
+    fn emit_update(&self, update: SessionUpdate) {
+        let _ = self.events.send(AgentEvent::SessionUpdate {
+            session_id: self.session_id.clone(),
+            update: Box::new(update),
+        });
     }
 
     /// Reserves this thread for a prompt and reduces its optimistic user

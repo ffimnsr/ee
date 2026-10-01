@@ -26,9 +26,11 @@ pub(super) fn transcript_lines(
             let nick_display = pad_or_trim(nick, nick_col);
             let wrapped = crate::app::wrap_text(text, text_width);
             match kind {
-                MessageRenderKind::Assistant => {
-                    // Assistant replies are markdown: render styled, wrapped
-                    // lines with the same first-line prefix layout.
+                MessageRenderKind::Assistant | MessageRenderKind::Thought => {
+                    // Assistant replies and agent reasoning are markdown: render
+                    // styled, wrapped lines with the same first-line prefix
+                    // layout. The accumulated text is re-parsed every frame, so
+                    // streaming chunks restyle as soon as their markers close.
                     for (index, line) in
                         crate::ui::markdown::markdown_message_lines(text, text_width, style)
                             .into_iter()
@@ -47,7 +49,7 @@ pub(super) fn transcript_lines(
                         lines.push(Line::from(spans));
                     }
                 }
-                MessageRenderKind::User | MessageRenderKind::Thought => {
+                MessageRenderKind::User => {
                     for (index, segment) in
                         wrapped.iter().filter(|segment| !segment.trim().is_empty()).enumerate()
                     {
@@ -304,4 +306,51 @@ pub(crate) fn agents_transcript_scroll_max(app: &App, area: Rect) -> usize {
     )
     .len();
     line_count.saturating_sub(transcript_area.height as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{MessageRenderKind, TranscriptItem};
+    use std::time::SystemTime;
+
+    fn thought_item(text: &str) -> TranscriptItem {
+        TranscriptItem::Message {
+            nick: String::from("think"),
+            text: String::from(text),
+            kind: MessageRenderKind::Thought,
+            message_id: Some(String::from("th-1")),
+            response_group: Some(1),
+            at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn thoughts_render_markdown_styled_like_assistant_replies() {
+        let lines = transcript_lines(&thought_item("**bold** plan\n- step one\n`code`"), 80, false);
+        let rendered: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        let joined = rendered.join("\n");
+        assert!(!joined.contains("**"), "markers must be stripped: {joined}");
+        assert!(joined.contains("bold"), "bold content survives: {joined}");
+        assert!(joined.contains("•"), "bullets render: {joined}");
+        assert!(joined.contains("code"), "code content survives: {joined}");
+
+        let bold =
+            lines[0].spans.iter().find(|span| span.content.contains("bold")).expect("bold span");
+        assert!(
+            bold.style.add_modifier.contains(Modifier::ITALIC | Modifier::BOLD),
+            "thought text keeps italic+bold styling: {:?}",
+            bold.style
+        );
+    }
+
+    #[test]
+    fn unclosed_thought_markers_stay_literal_while_streaming() {
+        // Mid-stream chunks leave markers unclosed; they must pass through
+        // literally until the closing marker arrives instead of vanishing.
+        let lines = transcript_lines(&thought_item("**bo"), 80, false);
+        let joined: String =
+            lines.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("**bo"), "unclosed marker stays literal: {joined}");
+    }
 }
