@@ -194,6 +194,27 @@ impl App {
                 self.history_idx = None;
                 self.mode = Mode::CommandLine;
             }
+            crate::picker::PickerKind::UndoList => {
+                // Seek the buffer to the selected undo entry: undo or redo in
+                // whole groups until the current state matches the target.
+                let snapshot = match self.backend.undo_list() {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("undolist failed: {err}"));
+                        return;
+                    }
+                };
+                let Some(target) = item.choice_index else { return };
+                if target < snapshot.current {
+                    for _ in target..snapshot.current {
+                        let _ = self.backend.send_edit("undo", json!([]));
+                    }
+                } else if target > snapshot.current {
+                    for _ in snapshot.current..target {
+                        let _ = self.backend.send_edit("redo", json!([]));
+                    }
+                }
+            }
             #[cfg(feature = "agents")]
             crate::picker::PickerKind::AgentThreads => {
                 let Some(index) = item.choice_index else { return };

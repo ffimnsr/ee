@@ -73,6 +73,7 @@ pub(super) fn picker_kind_badge(kind: PickerKind) -> &'static str {
         PickerKind::Symbols => " SYMBOLS ",
         PickerKind::Locations => " LOCATIONS ",
         PickerKind::CommandHistory => " HISTORY ",
+        PickerKind::UndoList => " UNDO ",
         #[cfg(feature = "agents")]
         PickerKind::AgentThreads => " AGENTS ",
         #[cfg(feature = "agents")]

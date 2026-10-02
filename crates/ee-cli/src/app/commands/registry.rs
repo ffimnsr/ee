@@ -140,6 +140,7 @@ impl App {
             | "global_search"
             | "grep"
             | "jumplist_picker"
+            | "undolist"
             | "last_picker" => "buffers",
             "goto"
             | "goto_column"

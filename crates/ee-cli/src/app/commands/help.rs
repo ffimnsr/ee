@@ -120,24 +120,120 @@ impl App {
             Self::ordered_aliases_for(canonical_id).into_iter().next().unwrap_or(canonical_id);
         format!(":{alias}")
     }
-    pub(super) fn keymap_help_items() -> Vec<String> {
-        vec![
-            "K request hover".to_owned(),
-            "gb show git blame for current line".to_owned(),
-            "gD open git diff scratch view".to_owned(),
-            "Ctrl-A increase number under cursor".to_owned(),
-            "Ctrl-X decrease number under cursor".to_owned(),
-            "Ctrl-Up add selection above".to_owned(),
-            "Ctrl-Down add selection below".to_owned(),
-            "gd duplicate current line or selection".to_owned(),
-            "* / # selection-for-find forward/backward".to_owned(),
-            "gt / gT next and previous tab".to_owned(),
-            "]h / [h git hunk next and previous".to_owned(),
-            "]q / [q quickfix next and previous".to_owned(),
-            "]Q / [Q location list next and previous".to_owned(),
-            "z a o c R M fold toggle/open/close/open-all/close-all".to_owned(),
-            "Ctrl-O / Tab jump list older/newer".to_owned(),
-            "g; / g, change list older/newer".to_owned(),
-        ]
+    /// Rows for `:keymap`: every bound key and sequence from the merged
+    /// default+config map, tagged `[config]` when the row comes from (or is
+    /// unbound by) the user keymap config.
+    pub(super) fn keymap_help_items(&self) -> Vec<String> {
+        use crate::keymap::{BindingKey, KeyPress, format_binding_mode, format_key_press};
+
+        let mut config_keys = std::collections::HashSet::new();
+        for operation in &self.config.keymap.operations {
+            match operation {
+                crate::keymap::KeymapOperation::Bind { binding, .. } => {
+                    config_keys.insert(*binding);
+                }
+                crate::keymap::KeymapOperation::Unbind(binding) => {
+                    config_keys.insert(*binding);
+                }
+            }
+        }
+
+        let mode_rank = |mode: Mode| -> usize {
+            match mode {
+                Mode::Normal => 0,
+                Mode::Insert => 1,
+                Mode::Replace => 2,
+                Mode::Visual => 3,
+                Mode::VisualLine => 4,
+                Mode::VisualBlock => 5,
+                Mode::OperatorPending => 6,
+                Mode::CommandLine => 7,
+                Mode::Search => 8,
+                Mode::Picker => 9,
+                Mode::Quickfix => 10,
+                Mode::LocationList => 11,
+                Mode::SubstituteConfirm => 12,
+                Mode::Agent => 13,
+                Mode::PrivilegeConfirm => 14,
+            }
+        };
+
+        fn key_label(binding: &BindingKey) -> String {
+            let key = format_key_press(KeyPress { key: binding.key, modifiers: binding.modifiers });
+            match binding.prefix {
+                Some(prefix) => format!("{prefix}{key}"),
+                None => key,
+            }
+        }
+
+        let mut rows: Vec<(usize, String)> = Vec::new();
+
+        // Merged single-key bindings (defaults + config overrides).
+        for (binding, action) in &self.key_bindings {
+            let tag = if config_keys.contains(binding) { "  [config]" } else { "" };
+            rows.push((
+                mode_rank(binding.mode),
+                format!(
+                    "{:<9} {:<9} {:<34} {}{}",
+                    format_binding_mode(binding.mode),
+                    key_label(binding),
+                    crate::keymap::format_action_spec(action),
+                    crate::keymap::action_hint_description(action),
+                    tag,
+                ),
+            ));
+        }
+
+        // User-config unbinds: show the key with its fate so the dump reflects
+        // the config even for rows absent from the merged map.
+        for operation in &self.config.keymap.operations {
+            if let crate::keymap::KeymapOperation::Unbind(binding) = operation {
+                rows.push((
+                    mode_rank(binding.mode),
+                    format!(
+                        "{:<9} {:<9} {:<34} (unbound by config)",
+                        format_binding_mode(binding.mode),
+                        key_label(binding),
+                        "unbind",
+                    ),
+                ));
+            }
+        }
+
+        // Sequence bindings: defaults, then config overrides (later wins).
+        type SequenceMapKey = (usize, Mode, Vec<KeyPress>);
+        type SequenceMapRow = (crate::keymap::Action, String, bool);
+        let mut sequences: std::collections::HashMap<SequenceMapKey, SequenceMapRow> =
+            std::collections::HashMap::new();
+        for binding in crate::keymap::default_sequence_bindings() {
+            sequences.insert(
+                (mode_rank(binding.mode), binding.mode, binding.sequence.clone()),
+                (binding.action.clone(), binding.description.clone(), false),
+            );
+        }
+        for binding in &self.config.keymap.sequence_bindings {
+            sequences.insert(
+                (mode_rank(binding.mode), binding.mode, binding.sequence.clone()),
+                (binding.action.clone(), binding.description.clone(), true),
+            );
+        }
+        for ((_, mode, keys), (action, description, from_config)) in sequences {
+            let key = keys.iter().map(|key| format_key_press(*key)).collect::<Vec<_>>().join(" ");
+            let tag = if from_config { "  [config]" } else { "" };
+            rows.push((
+                mode_rank(mode),
+                format!(
+                    "{:<9} {:<9} {:<34} {}{}",
+                    format_binding_mode(mode),
+                    key,
+                    crate::keymap::format_action_spec(&action),
+                    description,
+                    tag,
+                ),
+            ));
+        }
+
+        rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 }

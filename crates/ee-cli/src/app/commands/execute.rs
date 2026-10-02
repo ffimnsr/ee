@@ -450,7 +450,7 @@ impl App {
                 return;
             }
             "keymap" => {
-                self.open_help_picker("Keymap", Self::keymap_help_items());
+                self.open_help_picker("Keymap", self.keymap_help_items());
                 return;
             }
             "selection_for_find" => {
@@ -1355,6 +1355,12 @@ impl App {
             "swap_view_right" => {
                 self.swap_view(crate::window::ViewDirection::Right);
             }
+            "undo" => {
+                let _ = self.backend.send_edit("undo", json!([]));
+            }
+            "redo" => {
+                let _ = self.backend.send_edit("redo", json!([]));
+            }
             "commit_undo_checkpoint" => {
                 let _ = self.backend.send_edit("commit_undo_checkpoint", json!([]));
             }
@@ -1415,6 +1421,11 @@ impl App {
             }
             "changed_file_picker" => {
                 self.open_changed_file_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "undolist" => {
+                self.open_undo_list_picker();
                 self.enter_normal_mode();
                 return;
             }

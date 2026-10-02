@@ -1,6 +1,15 @@
 //! `impl BufferManager` methods: edits.
 use super::*;
 
+/// Snapshot of a buffer's undo history, as reported by the core.
+pub(crate) struct UndoListSnapshot {
+    /// Undo group ids in chronological order (oldest first).
+    pub(crate) groups: Vec<usize>,
+    /// Index of the current state within `groups`; groups at or after this
+    /// index are undone and can be redone.
+    pub(crate) current: usize,
+}
+
 impl BufferManager {
     pub(crate) fn send_edit(&self, method: &str, params: Value) -> io::Result<()> {
         let view_id = &self.bufs[self.current].view_id;
@@ -32,6 +41,28 @@ impl BufferManager {
             .recv_timeout(timeout)
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("{method} timed out")))?;
         parse_response(response)
+    }
+
+    pub(crate) fn undo_list(&mut self) -> io::Result<UndoListSnapshot> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request("undo_list", json!({ "view_id": view_id }))?;
+        let groups = response
+            .get("groups")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items.iter().filter_map(Value::as_u64).map(|id| id as usize).collect::<Vec<_>>()
+            })
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "undo_list missing groups")
+            })?;
+        let current = response
+            .get("current")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+            .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "undo_list missing current")
+        })?;
+        Ok(UndoListSnapshot { groups, current })
     }
 
     pub(crate) fn save(&mut self) -> io::Result<()> {

@@ -262,6 +262,12 @@ pub enum CoreRequest {
     BufferPristine {
         view_id: ViewId,
     },
+    /// Returns the undo history for a view: `{ "groups": [...], "current": n }`
+    /// where `groups` are undo group ids oldest-first and `current` is the
+    /// index of the current state (groups at or after it are undone).
+    UndoList {
+        view_id: ViewId,
+    },
     SaveStatus {
         view_id: ViewId,
     },
@@ -913,6 +919,13 @@ mod tests {
             serde_json::from_str(r#"{"method":"buffer_pristine","params":{"view_id":"1"}}"#)
                 .unwrap();
         assert_eq!(request, CoreRequest::BufferPristine { view_id: ViewId(1) });
+    }
+
+    #[test]
+    fn deserialize_undo_list_request() {
+        let request: CoreRequest =
+            serde_json::from_str(r#"{"method":"undo_list","params":{"view_id":"1"}}"#).unwrap();
+        assert_eq!(request, CoreRequest::UndoList { view_id: ViewId(1) });
     }
 
     #[test]

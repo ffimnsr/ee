@@ -1034,3 +1034,77 @@ fn resolve_startup_launch_for_directory_path_opens_picker_from_that_directory() 
             .any(|item| item == "inside.rs")
     );
 }
+
+#[test]
+fn keymap_command_lists_all_default_bindings() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "keymap");
+
+    let picker = app.picker.as_ref().expect("keymap should open picker");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Keymap");
+    let lines = picker.visible_items_range(0, picker.visible_count());
+    // Default single-key binding: normal-mode `u` → undo.
+    assert!(
+        lines.iter().any(|line| line.contains("normal") && line.contains("undo")),
+        "default u undo row missing: {lines:?}"
+    );
+    // Vim single-key rows and space-prefixed sequence rows are both listed.
+    assert!(
+        lines.iter().any(|line| line.contains("hjkl") || line.contains("move_left")),
+        "normal-mode h/j/k/l rows missing"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("SPC")),
+        "space-prefixed sequence rows missing: {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("[config]")),
+        "pure-default dump must not carry config tags"
+    );
+    assert!(lines.len() > 100, "expected a full keymap dump, got {} rows", lines.len());
+}
+
+#[test]
+fn keymap_command_shows_config_rows_and_unbinds() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.unbind]]
+mode = "normal"
+key = "K"
+
+[[keymap.bindings]]
+mode = "normal"
+key = "H"
+action = "request_hover"
+"#,
+    )
+    .unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "keymap");
+
+    let picker = app.picker.as_ref().expect("keymap should open picker");
+    let lines = picker.visible_items_range(0, picker.visible_count());
+    assert!(
+        lines.iter().any(|line| line.contains("[config]") && line.contains("request_hover")),
+        "config-bound H → request_hover must be tagged [config]: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("unbound by config") && line.contains("K")),
+        "config-unbound K should be visible: {lines:?}"
+    );
+}

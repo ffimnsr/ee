@@ -197,18 +197,27 @@ fn visual_mode_bindings_follow_vim() {
     let vl = |k: KeyCode, p: Option<char>| key(Mode::VisualLine, k, KeyModifiers::NONE, p);
     let vb = |k: KeyCode, p: Option<char>| key(Mode::VisualBlock, k, KeyModifiers::NONE, p);
 
-    // Charwise: `v` exits (vim same-key rule), `V`/`Ctrl-v` switch to line/block.
+    // Charwise: `v` exits (vim same-key rule), `V`/`Ctrl-v`/`Ctrl-q` switch
+    // to line/block (Ctrl-q is vim's Ctrl-v fallback for blocked terminals).
     assert_eq!(bindings.get(&v(KeyCode::Char('v'), None)), Some(&Action::CollapseAndEnterNormal));
     assert_eq!(bindings.get(&v(KeyCode::Char('V'), None)), Some(&Action::EnterVisualLine));
     assert_eq!(
         bindings.get(&key(Mode::Visual, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
         Some(&Action::EnterVisualBlock)
     );
-    // Linewise: `v` switches to charwise, `V` exits, Ctrl-v to block.
+    assert_eq!(
+        bindings.get(&key(Mode::Visual, KeyCode::Char('q'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
+    );
+    // Linewise: `v` switches to charwise, `V` exits, Ctrl-v/Ctrl-q to block.
     assert_eq!(bindings.get(&vl(KeyCode::Char('v'), None)), Some(&Action::EnterMode(Mode::Visual)));
     assert_eq!(bindings.get(&vl(KeyCode::Char('V'), None)), Some(&Action::CollapseAndEnterNormal));
     assert_eq!(
         bindings.get(&key(Mode::VisualLine, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
+    );
+    assert_eq!(
+        bindings.get(&key(Mode::VisualLine, KeyCode::Char('q'), KeyModifiers::CONTROL, None)),
         Some(&Action::EnterVisualBlock)
     );
     assert_eq!(bindings.get(&v(KeyCode::Char('^'), None)), Some(&Action::GotoFirstNonWhitespace));
@@ -222,7 +231,7 @@ fn visual_mode_bindings_follow_vim() {
     assert_eq!(bindings.get(&vl(KeyCode::Char('%'), None)), Some(&Action::MatchingPair));
     assert_eq!(bindings.get(&vl(KeyCode::Char('p'), None)), Some(&Action::PasteOverSelection));
     // Block: `r` replace, `o`/`O` handled by the block char handler, mode
-    // switches to charwise/linewise on `v`/`V`, Ctrl-v exits.
+    // switches to charwise/linewise on `v`/`V`, Ctrl-v/Ctrl-q exit.
     assert_eq!(bindings.get(&vb(KeyCode::Char('r'), None)), Some(&Action::Replace));
     assert_eq!(bindings.get(&vb(KeyCode::Char('o'), None)), None);
     assert_eq!(bindings.get(&vb(KeyCode::Char('v'), None)), Some(&Action::EnterMode(Mode::Visual)));
@@ -230,6 +239,19 @@ fn visual_mode_bindings_follow_vim() {
     assert_eq!(
         bindings.get(&key(Mode::VisualBlock, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
         Some(&Action::CollapseAndEnterNormal)
+    );
+    assert_eq!(
+        bindings.get(&key(Mode::VisualBlock, KeyCode::Char('q'), KeyModifiers::CONTROL, None)),
+        Some(&Action::CollapseAndEnterNormal)
+    );
+    // Normal: Ctrl-v/Ctrl-q open blockwise visual.
+    assert_eq!(
+        bindings.get(&key(Mode::Normal, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
+    );
+    assert_eq!(
+        bindings.get(&key(Mode::Normal, KeyCode::Char('q'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
     );
 }
 

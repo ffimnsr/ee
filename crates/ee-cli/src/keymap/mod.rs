@@ -484,13 +484,14 @@ pub(crate) enum KeymapOperation {
     Bind { binding: BindingKey, action: Action },
 }
 
+pub(crate) use defaults::default_sequence_bindings;
 #[allow(unused_imports)] // tests use `bindings`; the bin build does not
 pub(crate) use hints::{
-    bindings, bindings_for, format_key_press, format_key_sequence, key_press_from_event,
-    macro_record_hint_entries, macro_replay_hint_entries, mark_jump_hint_entries,
-    mark_set_hint_entries, parse_key_sequence_spec, prefix_hint_entries, register_hint_entries,
-    replace_char_hint_entries, sequence_bindings_for, window_command_hint_entries,
-    with_cancel_hint,
+    action_hint_description, bindings, bindings_for, format_key_press, format_key_sequence,
+    key_press_from_event, macro_record_hint_entries, macro_replay_hint_entries,
+    mark_jump_hint_entries, mark_set_hint_entries, parse_key_sequence_spec, prefix_hint_entries,
+    register_hint_entries, replace_char_hint_entries, sequence_bindings_for,
+    window_command_hint_entries, with_cancel_hint,
 };
 pub(crate) use spec::{
     format_action_spec, format_binding_mode, parse_action_spec, parse_binding_mode,

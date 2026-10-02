@@ -160,6 +160,9 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         PendingCharFind { forward: false, inclusive: false },
     );
     bind!(Normal, KeyCode::Char('%'), none, None, MatchingPair);
+    // vim `u`: undo (redo is Ctrl-r below). `gu`/`gU`/`g~` remain the
+    // g-prefixed case operators.
+    bind!(Normal, KeyCode::Char('u'), none, None, Undo);
 
     // Operator-pending mode: operators
     bind!(Normal, KeyCode::Char('d'), none, None, SetOperator(Operator::Delete));
@@ -251,6 +254,9 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Visual, KeyCode::Char('v'), none, None, CollapseAndEnterNormal);
     bind!(Visual, KeyCode::Char('V'), none, None, EnterVisualLine);
     bind!(Visual, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
+    // vim: Ctrl-q is the Ctrl-v fallback for blockwise visual on terminals
+    // where Ctrl-v is paste.
+    bind!(Visual, KeyCode::Char('q'), ctrl, None, EnterVisualBlock);
     bind!(Visual, KeyCode::Char(':'), none, None, EnterCommandMode);
     bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
     bind!(Visual, KeyCode::Char('r'), none, None, Action::Replace);
@@ -328,6 +334,7 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(VisualLine, KeyCode::Char('V'), none, None, CollapseAndEnterNormal);
     bind!(VisualLine, KeyCode::Char('v'), none, None, EnterMode(Visual));
     bind!(VisualLine, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
+    bind!(VisualLine, KeyCode::Char('q'), ctrl, None, EnterVisualBlock);
     bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
     bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
     bind!(VisualLine, KeyCode::Char('r'), none, None, Action::Replace);
@@ -349,8 +356,10 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
 
     // Visual block mode: unprefixed bindings.
     bind!(Normal, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
+    bind!(Normal, KeyCode::Char('q'), ctrl, None, EnterVisualBlock);
     bind!(VisualBlock, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(VisualBlock, KeyCode::Char('v'), ctrl, None, CollapseAndEnterNormal);
+    bind!(VisualBlock, KeyCode::Char('q'), ctrl, None, CollapseAndEnterNormal);
     // vim: `v` switches blockwise to charwise, `V` to linewise.
     bind!(VisualBlock, KeyCode::Char('v'), none, None, EnterMode(Visual));
     bind!(VisualBlock, KeyCode::Char('V'), none, None, EnterVisualLine);

@@ -96,6 +96,7 @@ impl CoreState {
             }
             SelectionsPreview { view_id } => self.do_selections_preview(view_id),
             BufferPristine { view_id } => self.do_buffer_pristine(view_id),
+            UndoList { view_id } => self.do_undo_list(view_id),
             SaveStatus { view_id } => self.do_save_status(view_id),
             PrepareElevatedSaveDraft { view_id } => self.do_prepare_elevated_save_draft(view_id),
             FinalizeElevatedSave { view_id, file_path, saved_rev_id } => {
@@ -220,6 +221,23 @@ impl CoreState {
             .map(|editor| editor.borrow().is_pristine())
             .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
         Ok(json!(pristine))
+    }
+
+    pub(super) fn do_undo_list(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        let editor = self
+            .editors
+            .get(&buffer_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
+        let editor = editor.borrow();
+        Ok(json!({
+            "groups": editor.undo_groups_snapshot(),
+            "current": editor.undo_current_index(),
+        }))
     }
 
     pub(super) fn do_save_status(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {

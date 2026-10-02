@@ -124,6 +124,50 @@ impl App {
             .collect();
         self.open_location_picker("Jumplist", "no jumplist entries", items);
     }
+    pub(crate) fn open_undo_list_picker(&mut self) {
+        let snapshot = match self.backend.undo_list() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.backend.status_message = Some(format!("undolist failed: {err}"));
+                return;
+            }
+        };
+        if snapshot.groups.is_empty() {
+            self.backend.status_message = Some("no undo history".to_owned());
+            return;
+        }
+        let items: Vec<crate::picker::PickerItem> = snapshot
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group_id)| {
+                let marker = if index == snapshot.current {
+                    "*"
+                } else if index > snapshot.current {
+                    "u"
+                } else {
+                    " "
+                };
+                let detail = if index == snapshot.groups.len() - 1 {
+                    Some("head".to_owned())
+                } else if index >= snapshot.current {
+                    Some("undone".to_owned())
+                } else {
+                    None
+                };
+                crate::picker::PickerItem {
+                    label: format!("{index:>4} {marker} group {group_id}"),
+                    detail,
+                    path: None,
+                    buf_id: None,
+                    line: None,
+                    col: None,
+                    choice_index: Some(index),
+                }
+            })
+            .collect();
+        self.open_picker(PickerState::new_undo_list(items, snapshot.current));
+    }
     pub(crate) fn open_changed_file_picker(&mut self) {
         let repo_root = self
             .backend

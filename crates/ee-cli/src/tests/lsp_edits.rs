@@ -401,6 +401,23 @@ fn commit_undo_checkpoint_command_uses_backend_edit() {
 }
 
 #[test]
+fn undo_redo_commands_use_backend_edit() {
+    for (command, expected) in [("undo", "undo"), ("redo", "redo")] {
+        let (tx, rx) = mpsc::channel();
+        let (_backend_tx, backend_rx) = mpsc::channel();
+        let mut app = App::from_path(None).unwrap();
+        app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+        run_ex(&mut app, command);
+
+        let message = rx.recv().expect("message should be sent");
+        let value: Value = serde_json::from_str(&message).expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], expected);
+    }
+}
+
+#[test]
 fn goto_lsp_commands_use_backend_edit() {
     let commands = [
         ("goto_declaration", "request_declaration"),

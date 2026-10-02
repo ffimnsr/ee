@@ -30,6 +30,7 @@ pub(crate) enum PickerKind {
     Symbols,
     Locations,
     CommandHistory,
+    UndoList,
     #[cfg(feature = "agents")]
     AgentThreads,
     #[cfg(feature = "agents")]
@@ -159,6 +160,23 @@ impl PickerState {
             items,
             filtered,
             selected: 0,
+        }
+    }
+
+    /// Open the undo-history picker from the given entries, oldest first.
+    /// `current` is the index of the current state within `items` (the row
+    /// preselected when the picker opens).
+    pub(crate) fn new_undo_list(items: Vec<PickerItem>, current: usize) -> Self {
+        let filtered = (0..items.len()).collect();
+        let selected = current.min(items.len().saturating_sub(1));
+        Self {
+            kind: PickerKind::UndoList,
+            title: "Undo List".to_owned(),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected,
         }
     }
 

@@ -305,6 +305,38 @@ fn ctrl_v_enters_visual_block_mode() {
 }
 
 #[test]
+fn ctrl_q_enters_visual_block_mode() {
+    let mut app = App::from_path(None).unwrap();
+    // vim parity: Ctrl-q is the Ctrl-v fallback for blockwise visual.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::VisualBlock);
+}
+
+#[test]
+fn ctrl_q_switches_visual_and_visual_line_to_block() {
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Visual);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::VisualBlock);
+
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::VisualLine);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::VisualBlock);
+}
+
+#[test]
+fn ctrl_q_from_visual_block_collapses_to_normal() {
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::VisualBlock);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
 fn esc_from_visual_line_returns_to_normal() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
@@ -334,6 +366,16 @@ fn visual_anchor_set_on_visual_enter() {
 #[test]
 fn u_dispatches_undo() {
     let mut app = App::from_path(None).unwrap();
+    assert_eq!(
+        app.key_bindings.get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('u'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        }),
+        Some(&Action::Undo),
+        "normal-mode `u` must be default-bound to undo"
+    );
     // Drive `u` — should send undo edit without crashing.
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
@@ -342,6 +384,16 @@ fn u_dispatches_undo() {
 #[test]
 fn ctrl_r_dispatches_redo() {
     let mut app = App::from_path(None).unwrap();
+    assert_eq!(
+        app.key_bindings.get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        }),
+        Some(&Action::Redo),
+        "normal-mode Ctrl-r must be default-bound to redo"
+    );
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
     assert_eq!(app.mode, Mode::Normal);
 }

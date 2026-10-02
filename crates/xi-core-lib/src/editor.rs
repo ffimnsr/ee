@@ -228,6 +228,17 @@ impl Editor {
         *self.live_undos.last().unwrap_or(&0)
     }
 
+    /// Undo group ids in chronological order (oldest first).
+    pub(crate) fn undo_groups_snapshot(&self) -> Vec<usize> {
+        self.live_undos.clone()
+    }
+
+    /// Index of the current state within [`Self::undo_groups_snapshot`];
+    /// groups at or after this index are undone and can be redone.
+    pub(crate) fn undo_current_index(&self) -> usize {
+        self.cur_undo
+    }
+
     #[allow(dead_code)]
     pub(crate) fn enable_vlf_editing(&mut self) -> bool {
         let Some(store) = self.vlf_store.as_ref() else {
