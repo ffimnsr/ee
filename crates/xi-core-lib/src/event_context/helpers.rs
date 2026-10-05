@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthChar;
 
 use xi_rope::{DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 
+use crate::edit_ops::next_char_boundary;
 use crate::selection::{SelRegion, Selection};
 use xi_rpc::{RemoteError, ResultExt};
 
@@ -91,6 +92,7 @@ pub(crate) fn previous_char_boundary_in_text(text: &str, col: usize) -> usize {
 }
 
 /// Extract block text (rectangular selection) from a rope buffer.
+/// Both column edges are inclusive, matching vim block selection.
 pub(crate) fn block_text(
     text: &Rope,
     start_line: usize,
@@ -111,8 +113,8 @@ pub(crate) fn block_text(
     let mut out = String::new();
     for line in top..=bottom {
         let line = line_text(text, line);
-        let start = left.min(line.len());
-        let end = right.min(line.len());
+        let start = previous_char_boundary_in_text(&line, left.min(line.len()));
+        let end = next_char_boundary(&line, right.min(line.len()));
         out.push_str(&line[start..end]);
         out.push('\n');
     }

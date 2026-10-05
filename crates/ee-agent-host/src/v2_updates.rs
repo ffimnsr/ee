@@ -1,7 +1,7 @@
 //! Host-side v2 → internal update translation.
 //!
 //! The reducer, session threads, and UI all consume v1-typed
-//! [`SessionUpdate`] values.  On a v2 connection the inbound
+//! [`SessionUpdate`](ee_agent_protocol::SessionUpdate) values.  On a v2 connection the inbound
 //! `session/update` notifications carry the v2 surface; this module maps the
 //! shared variants back to the v1-typed shape so the entire host state
 //! machinery stays version-agnostic.
@@ -11,7 +11,7 @@
 //! - message chunks carry over unchanged (both wire shapes use the same
 //!   fields); whole-message upserts (`user_message`, `agent_message`,
 //!   `agent_thought`) replace or clear by `messageId` directly through
-//!   [`apply_v2_update`] — the v1 wire has no whole-message or clear form;
+//!   `apply_v2_update` — the v1 wire has no whole-message or clear form;
 //! - `tool_call_update` maps field-for-field (v2 `name`); structured v2
 //!   diffs have no mechanical v1 oldText/newText mapping and are dropped per
 //!   item; v2 terminal references map to the v1 reference (display state is
@@ -39,7 +39,7 @@ use ee_agent_protocol::{
 /// updates and others have no v1 representation at all (empty result — the
 /// caller decides whether that is expected).
 ///
-/// Whole-message upserts are handled by [`apply_v2_update`] (replace/clear
+/// Whole-message upserts are handled by `apply_v2_update` (replace/clear
 /// semantics), never here: flattening them to chunks would append where v2
 /// mandates replacement.
 #[must_use]

@@ -1,6 +1,7 @@
 //! ACP v2 wire translation for v2 connections.
 //!
-//! Providers keep speaking the v1 update surface ([`SessionUpdate`]); on a
+//! Providers keep speaking the v1 update surface
+//! ([`SessionUpdate`](ee_agent_protocol::SessionUpdate)); on a
 //! negotiated v2 connection the server translates those updates into v2
 //! `session/update` notifications at the wire boundary.  Translation rules:
 //!

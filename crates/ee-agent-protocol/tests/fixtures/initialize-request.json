@@ -9,7 +9,10 @@
         "readTextFile": true,
         "writeTextFile": true
       },
-      "terminal": true
+      "terminal": true,
+      "auth": {
+        "terminal": false
+      }
     },
     "clientInfo": {
       "name": "ee",

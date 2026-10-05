@@ -41,7 +41,8 @@ pub use align::{
 };
 pub use change::{capitalize_text, change_number};
 pub(crate) use delete::{
-    delete_block, delete_by_movement, delete_line_range, paste_register, replay_block_insert,
+    delete_block, delete_by_movement, delete_line_range, next_char_boundary, paste_register,
+    replay_block_insert,
 };
 pub use insert::{delete_backward, duplicate_line, insert, insert_preserving_case, surround};
 pub(crate) use newline::insert_newline_with_context;

@@ -685,7 +685,8 @@ fn block_text_preview_uses_backend_authoritative_text() {
     let block =
         app.backend.block_text_preview(0, 2, 1, 3).expect("block text preview should succeed");
 
-    assert_eq!(block, "bc\nfg\njk\n");
+    // Both column edges are inclusive: cols 1..=3 of "abcd" are "bcd".
+    assert_eq!(block, "bcd\nfgh\njk\n");
 }
 
 #[test]

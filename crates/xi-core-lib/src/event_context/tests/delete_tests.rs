@@ -547,3 +547,80 @@ fn delete_variation_selector_with_combining_mark_uses_grapheme_boundary() {
     ctx.do_edit(EditNotification::DeleteBackward);
     assert_eq!(harness.debug_render(), "|");
 }
+
+#[test]
+fn delete_block_includes_both_column_edges() {
+    use crate::rpc::EditNotification;
+
+    let harness = ContextHarness::new("abc\ndef");
+    let mut ctx = harness.make_context();
+
+    // Columns 0..=1 across both lines; the right edge (col 1) is inclusive.
+    ctx.do_edit(EditNotification::DeleteBlock {
+        start_line: 0,
+        end_line: 1,
+        left_col: 0,
+        right_col: 1,
+    });
+
+    let text: String = harness.editor.borrow().get_buffer().into();
+    assert_eq!(text, "c\nf");
+}
+
+#[test]
+fn delete_block_deletes_single_column() {
+    use crate::rpc::EditNotification;
+
+    let harness = ContextHarness::new("abc\ndef");
+    let mut ctx = harness.make_context();
+
+    // A block where both corners share a column still deletes that column.
+    ctx.do_edit(EditNotification::DeleteBlock {
+        start_line: 0,
+        end_line: 1,
+        left_col: 1,
+        right_col: 1,
+    });
+
+    let text: String = harness.editor.borrow().get_buffer().into();
+    assert_eq!(text, "ac\ndf");
+}
+
+#[test]
+fn delete_block_never_splits_multibyte_char_at_right_edge() {
+    use crate::rpc::EditNotification;
+
+    // "aé": 'é' spans bytes 1..3. A right edge inside it must delete the
+    // whole char, not a partial byte range.
+    let harness = ContextHarness::new("aé\nbé");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::DeleteBlock {
+        start_line: 0,
+        end_line: 1,
+        left_col: 1,
+        right_col: 2,
+    });
+
+    let text: String = harness.editor.borrow().get_buffer().into();
+    assert_eq!(text, "a\nb");
+}
+
+#[test]
+fn delete_block_clamps_right_edge_at_line_end() {
+    use crate::rpc::EditNotification;
+
+    // Right edge past the short line must clamp; the long line deletes to EOL.
+    let harness = ContextHarness::new("ab\ncdef");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::DeleteBlock {
+        start_line: 0,
+        end_line: 1,
+        left_col: 2,
+        right_col: 10,
+    });
+
+    let text: String = harness.editor.borrow().get_buffer().into();
+    assert_eq!(text, "ab\ncd");
+}

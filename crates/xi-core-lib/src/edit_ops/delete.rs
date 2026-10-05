@@ -103,6 +103,9 @@ pub(crate) fn delete_line_range(base: &Rope, start_line: usize, end_line: usize)
     builder.build()
 }
 
+/// Delete the rectangular region spanning `start_line..=end_line` and
+/// `left_col..=right_col`. Both column edges are inclusive, matching vim
+/// block selection and the frontend highlight renderer.
 pub(crate) fn delete_block(
     base: &Rope,
     start_line: usize,
@@ -124,7 +127,7 @@ pub(crate) fn delete_block(
     for line in start_line..=end_line {
         let (line_start, content) = logical_line_contents(base, line);
         let start = previous_char_boundary(&content, left_col.min(content.len()));
-        let end = previous_char_boundary(&content, right_col.min(content.len()));
+        let end = next_char_boundary(&content, right_col.min(content.len()));
         if start < end {
             builder.delete(Interval::new(line_start + start, line_start + end));
         }

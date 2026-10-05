@@ -326,17 +326,14 @@ impl App {
     }
 
     /// vim block `r<char>`: replace the block columns with the char (per line,
-    /// clamped to existing text — no padding).
+    /// clamped to existing text — no padding).  Column edges are inclusive,
+    /// matching the block highlight.
     pub(super) fn block_replace_char(&mut self, ch: char) {
         let (al, ac) =
             self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
         let (cl, cc) = (self.backend.cursor_line, self.backend.cursor_col);
         let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
         let (left, right) = if ac <= cc { (ac, cc) } else { (cc, ac) };
-        if right <= left {
-            self.enter_normal_mode();
-            return;
-        }
         let mut replacements = Vec::new();
         for line in top..=bottom {
             let Some(text) = self.backend.get_line(line).map(str::to_owned) else {
@@ -344,16 +341,18 @@ impl App {
             };
             let start = left.min(text.len());
             let end = right.min(text.len());
-            if start < end {
-                let mut chars: Vec<char> = text.chars().collect();
-                for idx in byte_cols_to_char_indices(&text, start..end) {
-                    chars[idx] = ch;
-                }
-                replacements.push(xi_core_lib::rpc::LineReplacement {
-                    line,
-                    text: chars.into_iter().collect(),
-                });
+            let indices = byte_cols_to_char_indices(&text, start..=end);
+            if indices.is_empty() {
+                continue;
             }
+            let mut chars: Vec<char> = text.chars().collect();
+            for idx in indices {
+                chars[idx] = ch;
+            }
+            replacements.push(xi_core_lib::rpc::LineReplacement {
+                line,
+                text: chars.into_iter().collect(),
+            });
         }
         if !replacements.is_empty() {
             let _ = self.backend.apply_line_replacements(&replacements);
@@ -363,6 +362,7 @@ impl App {
     }
 
     /// vim block `~`: toggle ASCII case of every char in the block columns.
+    /// Column edges are inclusive, matching the block highlight.
     pub(super) fn block_toggle_case(&mut self) {
         let (al, ac) =
             self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
@@ -376,23 +376,25 @@ impl App {
             };
             let start = left.min(text.len());
             let end = right.min(text.len());
-            if start < end {
-                let mut chars: Vec<char> = text.chars().collect();
-                for idx in byte_cols_to_char_indices(&text, start..end) {
-                    let c = chars[idx];
-                    chars[idx] = if c.is_ascii_lowercase() {
-                        c.to_ascii_uppercase()
-                    } else if c.is_ascii_uppercase() {
-                        c.to_ascii_lowercase()
-                    } else {
-                        c
-                    };
-                }
-                replacements.push(xi_core_lib::rpc::LineReplacement {
-                    line,
-                    text: chars.into_iter().collect(),
-                });
+            let indices = byte_cols_to_char_indices(&text, start..=end);
+            if indices.is_empty() {
+                continue;
             }
+            let mut chars: Vec<char> = text.chars().collect();
+            for idx in indices {
+                let c = chars[idx];
+                chars[idx] = if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c
+                };
+            }
+            replacements.push(xi_core_lib::rpc::LineReplacement {
+                line,
+                text: chars.into_iter().collect(),
+            });
         }
         if !replacements.is_empty() {
             let _ = self.backend.apply_line_replacements(&replacements);
@@ -500,13 +502,18 @@ impl App {
 }
 
 /// Map a byte range to the indices of the chars intersecting it (used for
-/// block-column replacements so multibyte chars are never split).
-fn byte_cols_to_char_indices(text: &str, byte_range: std::ops::Range<usize>) -> Vec<usize> {
+/// block-column replacements so multibyte chars are never split).  Both
+/// range edges are inclusive.
+fn byte_cols_to_char_indices(
+    text: &str,
+    byte_range: std::ops::RangeInclusive<usize>,
+) -> Vec<usize> {
+    let (start, end) = (*byte_range.start(), *byte_range.end());
     text.char_indices()
         .enumerate()
         .filter(|(_, (byte, ch))| {
             let byte_end = byte + ch.len_utf8();
-            byte_range.start < byte_end && byte_range.end > *byte
+            *byte <= end && byte_end > start
         })
         .map(|(idx, _)| idx)
         .collect()

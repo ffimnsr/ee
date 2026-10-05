@@ -369,7 +369,7 @@ fn visual_block_tilde_toggles_case_in_block() {
         &mut app.backend,
         "block cased",
         std::time::Duration::from_secs(15),
-        |backend| backend.get_line(0) == Some("Ab") && backend.get_line(1) == Some("Cd"),
+        |backend| backend.get_line(0) == Some("AB") && backend.get_line(1) == Some("CD"),
     );
 }
 
@@ -391,7 +391,27 @@ fn visual_block_r_replaces_block_columns() {
         &mut app.backend,
         "block replaced",
         std::time::Duration::from_secs(15),
-        |backend| backend.get_line(0) == Some("xb") && backend.get_line(1) == Some("xd"),
+        |backend| backend.get_line(0) == Some("xx") && backend.get_line(1) == Some("xx"),
+    );
+}
+
+#[test]
+fn visual_block_r_replaces_single_column() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block mode with caret-sized block",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 0 && backend.cursor_col == 0,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "single column replaced",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("xb") && backend.get_line(1) == Some("cd"),
     );
 }
 
@@ -480,6 +500,28 @@ fn visual_block_d_deletes_block_columns() {
         &mut app.backend,
         "block columns deleted",
         std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("") && backend.get_line(1) == Some(""),
+    );
+}
+
+#[test]
+fn visual_block_d_deletes_single_column() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    // Extend down only: both corners share column 0, so only that column deletes.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended down one line",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 0,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "single column deleted",
+        std::time::Duration::from_secs(15),
         |backend| backend.get_line(0) == Some("b") && backend.get_line(1) == Some("d"),
     );
 }
@@ -502,7 +544,7 @@ fn visual_block_c_changes_block_columns() {
         &mut app.backend,
         "block columns changed",
         std::time::Duration::from_secs(15),
-        |backend| backend.get_line(0) == Some("b") && backend.get_line(1) == Some("d"),
+        |backend| backend.get_line(0) == Some("") && backend.get_line(1) == Some(""),
     );
 }
 
@@ -520,8 +562,9 @@ fn visual_block_y_yanks_block_columns() {
     );
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
-    // Block preview includes each line's trailing newline.
-    assert_eq!(app.registers.get(&crate::registers::RegisterName::Unnamed), "a\nc\n");
+    // Block preview includes each line's trailing newline; both corners are
+    // inclusive, so the full two-column block is yanked.
+    assert_eq!(app.registers.get(&crate::registers::RegisterName::Unnamed), "ab\ncd\n");
 }
 
 #[test]

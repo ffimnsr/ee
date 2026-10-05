@@ -319,7 +319,18 @@ fn preview_block_text_respects_requested_rectangle() {
     let harness = ContextHarness::new("abcd\nefgh\nijk");
     let mut ctx = harness.make_context();
 
-    assert_eq!(ctx.preview_block_text(0, 2, 1, 3), "bc\nfg\njk\n");
+    // Both column edges are inclusive: cols 1..=3 of "abcd" are "bcd".
+    assert_eq!(ctx.preview_block_text(0, 2, 1, 3), "bcd\nfgh\njk\n");
+}
+
+#[test]
+fn preview_block_text_never_splits_multibyte_char_at_right_edge() {
+    let harness = ContextHarness::new("aé\nbé");
+    let mut ctx = harness.make_context();
+
+    // Col 1 is the first byte of 'é' (bytes 1..3); inclusive right edge keeps
+    // the whole char in the preview.
+    assert_eq!(ctx.preview_block_text(0, 1, 1, 1), "é\né\n");
 }
 
 #[test]
