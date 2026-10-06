@@ -145,6 +145,7 @@ fn decide(op: &TrustOperation, rules: &[TrustRule], workspace_enabled: bool) -> 
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,

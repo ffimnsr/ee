@@ -84,6 +84,7 @@ fn decide(
         now,
         usage,
         workspace_enabled: true,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,

@@ -197,6 +197,7 @@ fn decide(
         now: at(now),
         usage,
         workspace_enabled,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,

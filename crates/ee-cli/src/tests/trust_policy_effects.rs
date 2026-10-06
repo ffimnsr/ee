@@ -71,6 +71,7 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
+        safe_read_enabled: false,
         built_in_deny: built_in_deny.then_some(SafeguardMatch {
             rule_id: "builtin.v1.test",
             category: SafeguardCategory::CatastrophicDeletion,

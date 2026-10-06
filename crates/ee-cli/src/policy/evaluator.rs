@@ -14,7 +14,7 @@ use super::rules::TrustRule;
 use super::session::SessionPolicy;
 use super::{
     DecisionReason, FallbackEffect, OperationIdentity, SafeguardMatch, TrustCategory,
-    TrustDecision, TrustEffect, TrustOperation, UsageSnapshot,
+    TrustDecision, TrustEffect, TrustOperation, UsageSnapshot, is_safe_read_profile,
 };
 
 /// Immutable inputs for one policy evaluation.
@@ -38,6 +38,10 @@ pub(crate) struct PolicyInput<'a> {
     /// Host-local workspace gate; required for read and curated-profile
     /// operations, and never sufficient by itself.
     pub(crate) workspace_enabled: bool,
+    /// Injected host-local workspace trust decision (`ee do trust`): enables
+    /// the built-in read-only safe allowlist for `safe_read` profile
+    /// operations. The evaluator never reads the decision itself.
+    pub(crate) safe_read_enabled: bool,
     /// Application-owned, non-overridable safeguard match, if any.
     pub(crate) built_in_deny: Option<SafeguardMatch>,
     /// Effective exact-tool fallback, if configured.
@@ -68,11 +72,12 @@ pub(crate) struct EvaluationResult {
     pub(crate) trace: Vec<PrecedenceTraceStep>,
 }
 
-const TRACE_LAYERS: [&str; 10] = [
+const TRACE_LAYERS: [&str; 11] = [
     "built_in_deny",
     "persistent_deny",
     "session_deny",
     "mandatory_confirm",
+    "built_in_allow",
     "workspace_gate",
     "session_allow",
     "bounded_persistent_allow",
@@ -139,6 +144,7 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
     no_match!("session_deny");
     if input.operation.is_unknown() {
         no_match!("mandatory_confirm");
+        no_match!("built_in_allow");
         no_match!("workspace_gate");
         no_match!("session_allow");
         no_match!("bounded_persistent_allow");
@@ -162,6 +168,17 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
         );
     }
     no_match!("mandatory_confirm");
+    // Built-in workspace-trusted read-only allowlist. Runs after every deny,
+    // session deny, and mandatory-confirm layer, so it can never override an
+    // explicit user deny or safeguard; the app injects `safe_read_enabled`
+    // only for a `trusted` host-local workspace decision.
+    if input.safe_read_enabled
+        && let OperationIdentity::Profile { profile } = &input.operation.identity
+        && is_safe_read_profile(profile)
+    {
+        finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
+    }
+    no_match!("built_in_allow");
     if gate_required(input.operation) && !input.workspace_enabled {
         finish!(
             "workspace_gate",

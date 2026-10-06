@@ -45,11 +45,13 @@ mod gate {
         app: &mut App,
         workspace: &Path,
     ) -> tokio::sync::oneshot::Receiver<ee_agent_host::ClientRequestResult> {
+        // `git stash` is eligible structured command text but never matches
+        // the built-in safe_read allowlist, so the prompt path is exercised.
         app.queue_terminal_approval_for_test(
             SESSION,
             None,
-            "printf",
-            &["%s", "ok"],
+            "git",
+            &["stash"],
             &[],
             Some(workspace.to_path_buf()),
         )
@@ -129,8 +131,8 @@ mod gate {
         let rules = stored_rules(&state_dir, temp.path());
         assert_eq!(rules.len(), 1, "exactly one persisted always-allow rule");
         let TrustRule::Command(rule) = &rules[0] else { panic!("command rule expected") };
-        assert_eq!(rule.executable, "printf");
-        assert_eq!(rule.argv, vec![String::from("%s"), String::from("ok")]);
+        assert_eq!(rule.executable, "git");
+        assert_eq!(rule.argv, vec![String::from("stash")]);
         assert_eq!(rule.scope.agent, None, "workspace-wide, not agent-scoped");
         assert_eq!(rule.scope.expires_at, None, "always-allow rules never expire");
         assert_eq!(rule.scope.max_uses, None, "always-allow rules carry no use budget");

@@ -10,11 +10,11 @@ use crate::policy::{
     BrowserActionClass, CATASTROPHIC_DELETE_RULE_ID, CommandInvocation, DecisionReason,
     FilesystemOperationKind, NetworkMethodClass, NetworkScheme, OperationIdentity, PolicyInput,
     SafeguardCategory, SafeguardMatch, TERMINAL_READONLY_PROFILE, TransportKind, TrustCategory,
-    TrustDecision, TrustOperation, TrustOutcome, TrustRule, TrustStore, TrustStoreDocument,
-    TrustStoreError, WorkspaceIdentity, evaluate, inspect_path_escape,
+    TrustDecision, TrustEffect, TrustOperation, TrustOutcome, TrustRule, TrustStore,
+    TrustStoreDocument, TrustStoreError, WorkspaceIdentity, evaluate, inspect_path_escape,
     inspect_protected_state_path, inspect_special_file, inspect_terminal_command,
-    is_protected_relative_path, match_profile_entry, resolve_command_cwd, validate_argv_tokens,
-    validate_command_tokens,
+    is_protected_relative_path, is_safe_read_profile, match_profile_candidates,
+    resolve_command_cwd, validate_argv_tokens, validate_command_tokens,
 };
 
 use super::app_search::paths_equivalent;
@@ -507,6 +507,7 @@ impl App {
             now,
             usage: &usage,
             workspace_enabled: effective.workspace_enabled,
+            safe_read_enabled: self.workspace_trusted(),
             built_in_deny,
             tool_default,
             category_default,
@@ -567,8 +568,14 @@ impl App {
     }
 
     /// Curated profile covering a terminal request. Profiles require the
-    /// primary workspace-root cwd. Fixed commands use exact argv; `cat` uses
-    /// one validated workspace-relative regular-file operand.
+    /// primary workspace-root cwd. Fixed commands use their registry argument
+    /// policy; entries with path operands are accepted only when every
+    /// operand resolves inside the canonical workspace and outside protected
+    /// and secret-store paths. A persisted `ProfileRule` for a matched
+    /// profile keeps precedence over the built-in read-only allowlist; when
+    /// no grant exists, the built-in `safe_read` candidate wins; otherwise
+    /// the first registry match (grant-required) is returned. `cat` uses one
+    /// validated workspace-relative regular-file operand.
     pub(super) fn profile_id_for_request(
         &self,
         request: &CreateTerminalRequest,
@@ -580,10 +587,97 @@ impl App {
         if canonical_cwd != primary {
             return None;
         }
-        if let Some((id, _)) = match_profile_entry(&request.command, &request.args) {
-            return Some(id);
+        let candidates: Vec<_> = match_profile_candidates(&request.command, &request.args)
+            .into_iter()
+            .filter(|matched| {
+                matched
+                    .path_operands
+                    .iter()
+                    .all(|operand| self.validate_profile_operand(&primary, operand))
+            })
+            .collect();
+        let special_cat = self.terminal_readonly_cat_profile(&primary, request);
+        if candidates.is_empty() && special_cat.is_none() {
+            return None;
         }
-        self.terminal_readonly_cat_profile(&primary, request)
+        let granted = self.effective_trust_document(self.primary_workspace_identity());
+        let has_grant = |profile: &str| {
+            granted.rules.iter().any(|rule| {
+                rule.effect() == TrustEffect::Allow
+                    && matches!(rule.untemplated(), TrustRule::Profile(rule) if rule.profile == profile)
+            })
+        };
+        if let Some(matched) = candidates.iter().find(|matched| has_grant(matched.profile)) {
+            return Some(matched.profile);
+        }
+        if special_cat.is_some() && has_grant(TERMINAL_READONLY_PROFILE) {
+            return Some(TERMINAL_READONLY_PROFILE);
+        }
+        if let Some(safe) = candidates.iter().find(|matched| is_safe_read_profile(matched.profile))
+        {
+            return Some(safe.profile);
+        }
+        if let Some(first) = candidates.first() {
+            return Some(first.profile);
+        }
+        special_cat
+    }
+
+    /// Whether one registry path operand stays inside the canonical
+    /// workspace and outside protected and secret-store paths. Existing
+    /// targets are canonicalized (symlink escapes fail); nonexistent targets
+    /// (including glob tokens) fall back to lexical containment with
+    /// traversal and protected-path rejection.
+    fn validate_profile_operand(&self, primary: &Path, operand: &str) -> bool {
+        if operand.is_empty() || operand.starts_with('-') {
+            return false;
+        }
+        if operand.chars().any(|c| c.is_control() || c == '\u{0}') {
+            return false;
+        }
+        let path = Path::new(operand);
+        if path.is_absolute() {
+            return false;
+        }
+        // `rev:path`-style operands are never valid workspace paths; rejecting
+        // them also blocks reading historical protected-file content through
+        // `git show HEAD:.env`.
+        if operand.contains(':') {
+            return false;
+        }
+        let mut relative_parts = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(segment) => {
+                    relative_parts.push(segment.to_string_lossy().to_string())
+                }
+                // `.` and `./src` are accepted; `..`, roots, and prefixes are not.
+                std::path::Component::CurDir => {}
+                _ => return false,
+            }
+        }
+        let relative = relative_parts.join("/");
+        if is_protected_relative_path(&relative) {
+            return false;
+        }
+        let candidate = primary.join(path);
+        if let Ok(canonical) = std::fs::canonicalize(&candidate) {
+            if self.is_secret_store_path(&canonical) {
+                return false;
+            }
+            if canonical == primary {
+                // The workspace root itself is a valid operand (`rg x .`).
+                return true;
+            }
+            match self.workspace_relative_segments(&canonical) {
+                Some(relative) => !is_protected_relative_path(&relative),
+                None => false,
+            }
+        } else {
+            // Nonexistent or glob token: lexical containment already holds
+            // (no absolute, no parent/traversal components).
+            true
+        }
     }
 
     /// Matches `cat <one-relative-regular-workspace-file>` for the built-in

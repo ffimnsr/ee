@@ -80,6 +80,7 @@ fn decide(
         now: now(),
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default,
         category_default,

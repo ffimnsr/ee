@@ -236,6 +236,9 @@ impl App {
             now: self.trust_clock.now(),
             usage: &usage,
             workspace_enabled: effective.workspace_enabled,
+            // The structured tester models persisted policy only; the
+            // workspace-trusted built-in safe list is not replayable here.
+            safe_read_enabled: false,
             built_in_deny: None,
             tool_default: effective
                 .tool_defaults

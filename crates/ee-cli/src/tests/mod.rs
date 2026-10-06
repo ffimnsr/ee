@@ -36,6 +36,7 @@ pub(crate) mod permission_policy_matrix;
 #[cfg(feature = "agents")]
 pub(crate) mod persistent_deny;
 pub(crate) mod render;
+pub(crate) mod safe_read_profile;
 pub(crate) mod secrets_command;
 pub(crate) mod secrets_e2e;
 #[cfg(feature = "agents")]

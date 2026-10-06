@@ -262,8 +262,8 @@ fn always_rule_extraction_ui_requires_preview_then_explicit_confirmation() {
     let first = app.queue_terminal_approval_for_test(
         "always-preview",
         Some("codex"),
-        "printf",
-        &["%s", "ok"],
+        "git",
+        &["stash"],
         &[],
         Some(temp.path().to_path_buf()),
     );
@@ -272,8 +272,8 @@ fn always_rule_extraction_ui_requires_preview_then_explicit_confirmation() {
     let second = app.queue_terminal_approval_for_test(
         "always-reuse",
         Some("codex"),
-        "printf",
-        &["%s", "ok"],
+        "git",
+        &["stash"],
         &[],
         Some(temp.path().to_path_buf()),
     );

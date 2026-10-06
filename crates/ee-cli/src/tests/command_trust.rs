@@ -89,6 +89,7 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage,
         workspace_enabled: true,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -531,7 +532,9 @@ mod e2e {
             .expect("trusted decision");
 
         let mut stream = connect_proxy(&app);
-        proxy_send(&mut stream, 1, terminal_frame("git", json!(["status"])));
+        // `git stash` is eligible structured command text but never matches the
+        // built-in safe_read allowlist, so the always-allow flow is exercised.
+        proxy_send(&mut stream, 1, terminal_frame("git", json!(["stash"])));
         wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
@@ -564,7 +567,7 @@ mod e2e {
         };
         assert!(rule.id.starts_with("cmd_"));
         assert_eq!(rule.executable, "git");
-        assert_eq!(rule.argv, vec!["status".to_string()]);
+        assert_eq!(rule.argv, vec!["stash".to_string()]);
         assert_eq!(rule.match_mode, MatchMode::ArgvExact);
         assert_eq!(rule.scope.expires_at, None, "always-allow rules never expire");
         assert_eq!(rule.scope.max_uses, None, "always-allow rules carry no use budget");
@@ -573,7 +576,7 @@ mod e2e {
 
         // The persisted rule activates immediately: identical request
         // auto-allows with no prompt.
-        proxy_send(&mut stream, 2, terminal_frame("git", json!(["status"])));
+        proxy_send(&mut stream, 2, terminal_frame("git", json!(["stash"])));
         wait_until(&mut app, "second trusted terminal spawned", |app| {
             app.agents.terminals.tracked_count() == 2 && app.agents.approvals.is_empty()
         });
@@ -669,7 +672,9 @@ mod e2e {
         seed_rule(&state_dir, temp.path(), "git", &["diff"], 20);
 
         let mut stream = connect_proxy(&app);
-        proxy_send(&mut stream, 1, terminal_frame("git", json!(["status"])));
+        // `git stash` never matches the built-in safe_read allowlist, so the
+        // persistence-failure path is exercised instead of a silent allow.
+        proxy_send(&mut stream, 1, terminal_frame("git", json!(["stash"])));
         wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
         assert_eq!(
             app.agents.usage_ledger.used(

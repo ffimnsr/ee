@@ -556,7 +556,21 @@ impl App {
                 }
                 return;
             }
-            TrustDecision { outcome: TrustOutcome::Allow, .. } => {
+            TrustDecision { outcome: TrustOutcome::Allow, reason, .. } => {
+                if *reason == DecisionReason::BuiltInAllow {
+                    // Workspace-trusted read-only allowlist: dispatch silently,
+                    // never record a session decision, and keep the audit
+                    // trail entry for the automatic allow.
+                    let summary = String::from("trusted built-in read-only command");
+                    if let Some(thread_index) = thread_index
+                        && let Some(thread) = self.agents.threads.get_mut(thread_index)
+                    {
+                        thread.push_system(summary.clone());
+                    }
+                    self.backend.status_message = Some(summary);
+                    self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
+                    return;
+                }
                 // Session allow: resolve silently, no UI.
                 self.resolve_approval(prompt, ApprovalChoice::AllowSession);
                 return;

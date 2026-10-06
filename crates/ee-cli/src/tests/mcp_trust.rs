@@ -92,6 +92,7 @@ fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecis
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -584,11 +585,13 @@ mod e2e {
 
         // Terminal creation uses command trust only: the always-allow options
         // are command-scoped, and the persisted rule is a command rule —
-        // generic MCP trust never applies to terminal-create.
+        // generic MCP trust never applies to terminal-create. `git stash`
+        // keeps the prompt path (the built-in safe_read allowlist would
+        // silently allow read-only git inspection).
         proxy_send(
             &mut stream,
             2,
-            json!({ "method": "terminal_create", "command": "git", "args": ["status"] }),
+            json!({ "method": "terminal_create", "command": "git", "args": ["stash"] }),
         );
         wait_until(&mut app, "terminal approval queued", |app| !app.agents.approvals.is_empty());
         {

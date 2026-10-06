@@ -3593,6 +3593,89 @@ Exit criteria:
 - [x] Stored always-allow rules survive reload, stay workspace-bound, and are
       revoked by an untrusted workspace decision.
 
+## Built-In Safe Read-Only Allowlist [2026-10-06]
+
+Goal: stop prompting for ordinary read-only workspace inspection on a trusted
+workspace, matching the default-mode behavior of other editors, without
+widening authority for mutation, package, network, or interpreter commands.
+
+Overview: a new application-owned `safe_read` registry profile is evaluated
+as a built-in allow (`built_in_allow` precedence layer) after every deny,
+session-deny, and mandatory-confirm layer. It applies only while the
+host-local workspace trust decision is `trusted`; untrusted or undecided
+workspaces keep prompting. No persistent rule, use budget, or UI prompt is
+involved, and no session decision is recorded.
+
+Argument policy:
+
+- Entries declare a structured argv prefix, a long/short flag allowlist,
+  optional value flags (which consume one opaque value token), at most one
+  optional opaque pattern token, and optional workspace-relative path
+  operands. Pattern-only entries (`echo`, `printf`, `which`, `ps`) accept
+  every remaining non-flag token as free text.
+- Combined short flags (`-rn`, `-sh`, `-la`) are accepted only when every
+  letter is individually allowlisted; long flags require an exact entry;
+  long `--flag=value` tokens are accepted when the flag part is allowlisted.
+- Path operands must be relative (a bare `.` is the workspace root),
+  traversal-free, colon-free (`rev:path` operands are rejected), non-protected,
+  outside the secret store, and canonicalize inside the workspace (symlink
+  escapes fail).
+- Mutating flags (`git diff --output/--ext-diff/--no-index`, `find -exec`,
+  `-delete`, `-fprint`, `sed -i`, …) are absent by construction and rejected
+  as unknown tokens.
+- Traversal widening is excluded: recursive `grep`/`egrep`/`fgrep` (no ignore
+  rules), `rg --hidden/--no-ignore*/-uu`, `fd -H/-I/-L`, checksum `--check`
+  files, `git cat-file` (blob oracle), and `find -newer` (outside-file mtime
+  oracle) are absent, so bulk reach stays at or below validated explicit-path
+  inspection.
+
+Scope decisions:
+
+- Terminal commands only; native writes, MCP invocations, and network
+  approvals are unchanged.
+- `cargo check`/`clippy`/`test` and other repo-code-executing commands stay
+  behind the explicit `rust_validate` profile grant.
+- Network commands (`npm outdated`/`view`, `git ls-remote`, `curl`, …) stay
+  out of the allowlist and keep per-request approval.
+- A persisted `ProfileRule` for a matched profile keeps precedence over the
+  built-in allow (grants stay meaningful and budgeted); the built-in allow
+  fills the gap when no grant exists.
+- `/permissions` tester does not replay the built-in allow (it models
+  persisted policy only); the audit log records `built_in_allow` decisions.
+
+Work items:
+
+- [x] Extend `ProfileEntry` with `ProfileArgPolicy` (prefix, flags, value
+      flags, pattern, paths) and add `match_profile_candidates`.
+- [x] Register the `safe_read` allowlist (file, text, git, package-
+      inventory, and system-info commands) in the profile registry.
+- [x] Add the `built_in_allow` evaluator layer, gated on an injected
+      workspace-trust input; bump the registry version to 3.
+- [x] Validate path operands in the approval layer against the canonical
+      workspace and protected/secret-store classification.
+- [x] Keep grant precedence and dispatch built-in allows without recording a
+      session decision.
+- [x] Harden traversal: recursive grep, rg/fd hidden-ignore-follow flags,
+      checksum `--check`, and `git cat-file` excluded; colon operands rejected.
+
+Tests:
+
+- [x] `cargo test --quiet -p ee-cli safe_read_profile` passes.
+- [x] Registry tests prove read-only families match, and mutation, network,
+      interpreter, secret-dump, unknown-flag, traversal-widening, and
+      colon-operand shapes never match.
+- [x] Approval tests prove auto-allow on a trusted workspace, prompting on an
+      undecided workspace, rejection of path escapes and unknown flags, and
+      persistent deny precedence over the built-in allow.
+- [x] Existing profile-grant e2e tests keep passing (grant precedence).
+
+Exit criteria:
+
+- [x] Trusted workspaces auto-allow the curated read-only list in default
+      mode without prompts or persistent state.
+- [x] No mutating, package-install, publish, network, or interpreter command
+      is reachable through the allowlist.
+
 ## Unified Host-Local Workspace Trust Policy
 
 Goal: reduce repetitive approval prompts with one bounded trust engine while preventing repository content, unknown tools, external paths, sensitive data, destructive operations, and malformed rules from granting authority.
@@ -3607,8 +3690,8 @@ Rules:
 - Project configuration has no trust or capability-request fields in version one; host-local trust store alone controls authority.
 - Every operation begins with validated normalized identity. Missing identity, unknown category, malformed config, invalid path, expired rule, exhausted rule, or tool metadata mismatch returns prompt.
 - Session deny takes precedence over every persistent or session allow.
-- Phases 1-7 establish allow-only persistent grants. Phases 8-14 extend the same host-local engine with typed persistent deny, mandatory-confirm rules, non-overridable safeguards, and confirm/deny defaults. Bounded-only allow was superseded on 2026-10-06 by workspace-trusted always-allow grants (see "Always-Allow Persistent Approvals" above).
-- Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools are never auto-allowed; they resolve to mandatory confirm or deny.
+- Phases 1-7 establish allow-only persistent grants. Phases 8-14 extend the same host-local engine with typed persistent deny, mandatory-confirm rules, non-overridable safeguards, and confirm/deny defaults. Bounded-only allow was superseded on 2026-10-06 by workspace-trusted always-allow grants (see "Always-Allow Persistent Approvals" above), and the curated profile registry gained the built-in workspace-trusted `safe_read` allowlist (see "Built-In Safe Read-Only Allowlist" above).
+- Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools are never auto-allowed; they resolve to mandatory confirm or deny. The built-in `safe_read` allowlist covers only read-only inspection families and never these classes.
 - Rule evaluator is pure. It does not write files, dispatch tools, consume budgets, mutate UI, or access system clock.
 
 ### Phase 1: Establish shared policy contracts and host-local trust store

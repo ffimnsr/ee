@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::policy::profiles::{
-    PROFILE_REGISTRY_VERSION, PROFILES, TERMINAL_READONLY_PROFILE, is_known_profile,
-    match_profile_entry,
+    PROFILE_REGISTRY_VERSION, PROFILES, SAFE_READ_PROFILE, TERMINAL_READONLY_PROFILE,
+    is_known_profile, is_safe_read_profile, match_profile_entry,
 };
 use crate::policy::rules::TrustRule;
 use crate::policy::session::SessionPolicy;
@@ -75,6 +75,7 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled,
+        safe_read_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -86,12 +87,18 @@ fn decide(
 
 #[test]
 fn profile_registry_is_versioned_and_application_owned() {
-    assert_eq!(PROFILE_REGISTRY_VERSION, 2);
+    assert_eq!(PROFILE_REGISTRY_VERSION, 3);
     let ids: Vec<&str> = PROFILES.iter().map(|profile| profile.id).collect();
-    assert_eq!(ids, vec!["git_readonly", TERMINAL_READONLY_PROFILE, "rust_validate"]);
+    assert_eq!(
+        ids,
+        vec![SAFE_READ_PROFILE, "git_readonly", TERMINAL_READONLY_PROFILE, "rust_validate"]
+    );
     assert!(is_known_profile("git_readonly"));
     assert!(is_known_profile(TERMINAL_READONLY_PROFILE));
     assert!(is_known_profile("rust_validate"));
+    assert!(is_known_profile(SAFE_READ_PROFILE));
+    assert!(is_safe_read_profile(SAFE_READ_PROFILE));
+    assert!(!is_safe_read_profile("git_readonly"));
     assert!(!is_known_profile("mystery_profile"));
     assert!(!is_known_profile(""));
 }
@@ -151,10 +158,11 @@ fn profile_entries_exclude_mutation_install_publish_and_shell() {
         ("git", &["branch"][..]),
         // terminal_readonly accepts only exact pwd/ls here; cat operands are
         // validated against the live workspace by App::profile_id_for_request.
+        // The safe_read allowlist covers these shapes separately with its own
+        // flag/path policy (see tests/safe_read_profile.rs).
         ("pwd", &["unexpected"][..]),
         ("ls", &["-R"][..]),
         ("ls", &["src"][..]),
-        ("cat", &[][..]),
         ("cat", &["-n", "src/main.rs"][..]),
     ] {
         assert!(

@@ -69,8 +69,9 @@ pub(crate) use paths::is_protected_relative_path;
 #[allow(unused_imports)]
 pub(crate) use profiles::{
     CuratedProfile, EE_MCP_SAFE_READ_PROFILE, EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
-    PROFILE_REGISTRY_VERSION, PROFILES, ProfileEntry, TERMINAL_READONLY_PROFILE,
-    is_known_mcp_read_profile, is_known_profile, match_profile_entry, mcp_read_profile_matches,
+    PROFILE_REGISTRY_VERSION, PROFILES, ProfileArgPolicy, ProfileEntry, ProfileMatch,
+    SAFE_READ_PROFILE, TERMINAL_READONLY_PROFILE, is_known_mcp_read_profile, is_known_profile,
+    is_safe_read_profile, match_profile_candidates, match_profile_entry, mcp_read_profile_matches,
 };
 #[allow(unused_imports)]
 pub(crate) use rules::{
@@ -460,6 +461,9 @@ pub(crate) enum DecisionReason {
     SessionDeny,
     /// A persistent mandatory-confirm rule matched the operation.
     MandatoryConfirm,
+    /// The built-in workspace-trusted read-only allowlist matched the
+    /// operation (no prompt, no persistent rule, no use budget).
+    BuiltInAllow,
     /// A recorded session allow matched the operation.
     SessionAllow,
     /// A validated persistent rule matched the operation.
@@ -491,6 +495,7 @@ impl DecisionReason {
             DecisionReason::PersistentDeny => "persistent_deny",
             DecisionReason::SessionDeny => "session_deny",
             DecisionReason::MandatoryConfirm => "mandatory_confirm",
+            DecisionReason::BuiltInAllow => "built_in_allow",
             DecisionReason::SessionAllow => "session_allow",
             DecisionReason::PersistentAllow => "persistent_allow",
             DecisionReason::UnknownOperation => "unknown_operation",
