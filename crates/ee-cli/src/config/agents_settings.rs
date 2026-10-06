@@ -15,6 +15,7 @@ use super::discovery::ConfigLayerKind;
 use super::discovery::{ConfigEnvironment, ConfigScope};
 use super::raw::{AgentServerToml, AgentsToml, RubberDuckToml, WorkspaceMemoryToml};
 use super::rubber_duck::{RubberDuckModeSetting, RubberDuckSettings};
+use super::secret_value::ConfigSecretValue;
 #[cfg(feature = "agents")]
 use super::value::{ensure_named_table, mutate_config_at_scope};
 #[cfg(any(feature = "agents", test))]
@@ -66,18 +67,11 @@ impl Default for AgentsSettings {
 
 /// One agent environment value with its config-layer provenance (phase 5).
 ///
-/// An exact `secret://<name>` value is kept as raw text through parsing,
-/// merging, schema generation, and display; it is resolved from the
-/// host-bound secrets store only at agent launch, and only when the source
-/// layer is user-owned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentEnvValue {
-    /// The config layer this value came from.
-    pub layer: ConfigLayerKind,
-    /// Raw text exactly as written in config: a literal or an exact
-    /// `secret://<name>` reference. Never resolved at merge time.
-    pub raw: String,
-}
+/// Shared with MCP env/header values through [`ConfigSecretValue`]: an exact
+/// `secret://<name>` value stays raw text through parsing, merging, schema
+/// generation, and display, and resolves only at use time under the layer
+/// rules documented on that type.
+pub(crate) type AgentEnvValue = ConfigSecretValue;
 
 /// Resolved ACP agent subprocess definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,11 +95,9 @@ pub(super) fn validate_agent_server(id: &str, server: &AgentServerToml) -> Resul
         return Err(String::from("agent server label must not be empty"));
     }
     for (key, value) in &server.env {
-        if crate::secrets::is_secret_reference_text(value) {
-            crate::secrets::SecretReference::parse(value).map_err(|err| {
-                format!("invalid secret reference in agents.servers.{id}.env.{key}: {err}")
-            })?;
-        }
+        crate::secrets::resolve::validate_secret_value(value, false).map_err(|err| {
+            format!("invalid secret reference in agents.servers.{id}.env.{key}: {err}")
+        })?;
     }
     Ok(())
 }
@@ -132,11 +124,9 @@ pub(super) fn merge_agent_server(
         .unwrap_or_default();
     let mut env = existing.map(|server| server.env.clone()).unwrap_or_default();
     for (key, value) in &server.env {
-        if crate::secrets::is_secret_reference_text(value)
-            && !matches!(kind, ConfigLayerKind::UserXdg | ConfigLayerKind::UserLegacy)
-        {
+        if crate::secrets::is_secret_reference_text(value) && kind == ConfigLayerKind::System {
             return Err(format!(
-                "secret references are only allowed in user config layers, \
+                "secret references are not allowed in system config layers, \
                  but agents.servers.{id}.env.{key} comes from {} config",
                 kind.label()
             ));
@@ -263,10 +253,8 @@ pub(super) fn configure_global_agent_server_with_env(
 
 #[cfg(feature = "agents")]
 /// Writes one complete agent-server definition to the workspace config layer.
-///
-/// Secret `secret://` references must NOT be written here: the merge layer
-/// validation only accepts them in user-owned layers. Callers split env values
-/// and route references through [`configure_agent_server_user_env`].
+/// Secret `secret://` references are written as-is; they resolve only when
+/// the workspace trust decision recorded for this repository allows it.
 pub(crate) fn configure_local_agent_server(
     agent_id: &str,
     command: &Path,
@@ -294,16 +282,6 @@ pub(super) fn configure_agent_server_with_env(
 ) -> Result<PathBuf, String> {
     let command =
         command.to_str().ok_or_else(|| String::from("agent executable path is not valid UTF-8"))?;
-    if scope == ConfigScope::Local {
-        for (name, value) in env_values {
-            if crate::secrets::is_secret_reference_text(value) {
-                return Err(format!(
-                    "secret reference cannot be written to workspace config; \
-                     route agents.servers.{agent_id}.env.{name} through the user config layer"
-                ));
-            }
-        }
-    }
     mutate_config_at_scope(scope, env, |root| {
         let agents = ensure_named_table(root, "agents", "agents")?;
         agents.insert(String::from("enabled"), toml::Value::Boolean(true));
@@ -325,40 +303,6 @@ pub(super) fn configure_agent_server_with_env(
             ),
         );
         servers.insert(agent_id.to_owned(), toml::Value::Table(server));
-        Ok(())
-    })
-}
-
-#[cfg(feature = "agents")]
-/// Writes only `secret://` env references for an agent server into the user
-/// config layer. The server definition itself stays in the workspace layer;
-/// split-layer merging completes the server at load time.
-pub(crate) fn configure_agent_server_user_env(
-    agent_id: &str,
-    env_values: &BTreeMap<String, String>,
-) -> Result<PathBuf, String> {
-    configure_agent_server_user_env_with_env(
-        agent_id,
-        env_values,
-        &ConfigEnvironment::from_process(),
-    )
-}
-
-#[cfg(feature = "agents")]
-pub(super) fn configure_agent_server_user_env_with_env(
-    agent_id: &str,
-    env_values: &BTreeMap<String, String>,
-    env: &ConfigEnvironment,
-) -> Result<PathBuf, String> {
-    mutate_config_at_scope(ConfigScope::Global, env, |root| {
-        let agents = ensure_named_table(root, "agents", "agents")?;
-        let servers = ensure_named_table(agents, "servers", "agents.servers")?;
-        let server = ensure_named_table(servers, agent_id, &format!("agents.servers.{agent_id}"))?;
-        let env_table =
-            ensure_named_table(server, "env", &format!("agents.servers.{agent_id}.env"))?;
-        for (name, value) in env_values {
-            env_table.insert(name.clone(), toml::Value::String(value.clone()));
-        }
         Ok(())
     })
 }

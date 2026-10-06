@@ -35,20 +35,8 @@ pub(crate) fn validate_no_control(field: &str, value: &str) -> Result<(), String
     Ok(())
 }
 
-pub(crate) fn parse_required_expiry(raw: Option<String>) -> Result<SystemTime, String> {
-    raw.ok_or_else(|| "expires_at is required".to_string()).and_then(|text| parse_expiry(&text))
-}
-
 pub(crate) fn parse_optional_expiry(raw: Option<String>) -> Result<Option<SystemTime>, String> {
     raw.as_deref().map(parse_expiry).transpose()
-}
-
-pub(crate) fn parse_required_uses(raw: Option<u64>) -> Result<u64, String> {
-    let uses = raw.ok_or_else(|| "max_uses is required".to_string())?;
-    if uses == 0 {
-        return Err("max_uses must be at least 1".to_string());
-    }
-    Ok(uses)
 }
 
 pub(crate) fn parse_optional_uses(raw: Option<u64>) -> Result<Option<u64>, String> {
@@ -59,16 +47,15 @@ pub(crate) fn parse_optional_uses(raw: Option<u64>) -> Result<Option<u64>, Strin
     }
 }
 
+/// Scope parsing for persisted rules. Allow rules may be finite (expiry and
+/// use budget) or always-allow (both absent); deny and confirm rules may
+/// expire but never consume a use budget.
 pub(crate) fn parse_effect_scope(
     effect: TrustEffect,
     expires_at: Option<String>,
     max_uses: Option<u64>,
-    bounded_allow: bool,
 ) -> Result<(Option<SystemTime>, Option<u64>), String> {
     match effect {
-        TrustEffect::Allow if bounded_allow => {
-            Ok((Some(parse_required_expiry(expires_at)?), Some(parse_required_uses(max_uses)?)))
-        }
         TrustEffect::Allow => {
             Ok((parse_optional_expiry(expires_at)?, parse_optional_uses(max_uses)?))
         }

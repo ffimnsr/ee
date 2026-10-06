@@ -194,6 +194,12 @@ impl App {
                 .into_iter()
                 .map(|line| ee_agent_host::redact::redact_secret_values(&line, &secrets)),
         );
+        for (id, message) in &self.agents.launch_failures {
+            lines.push(format!(
+                "agent launch: `{id}` skipped: {}",
+                ee_agent_host::redact::redact_secret_values(message, &secrets)
+            ));
+        }
         let report = lines.join("\n");
         if let Some(active) = self.agents.active_thread_index() {
             self.agents.threads[active].push_system(report.clone());

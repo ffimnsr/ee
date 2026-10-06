@@ -267,13 +267,14 @@ fn canonical_arguments_sort_keys_and_keep_array_order() {
 mod e2e {
     use super::*;
     use crate::app::App;
+    use crate::app::ApprovalChoice;
     use crate::app::agents_mcp::CachedProxyCodeAction;
-    use crate::app::{ApprovalChoice, PERSISTENT_TERMINAL_MAX_USES};
     use crate::tests::agent_mcp::{
         acp_connect_script, base_agent_script, connect_proxy, fake_response, mcp_app, mcp_app_in,
         open_pane_and_wait_ready, press, proxy_recv, proxy_send, wait_until,
     };
-    use crate::tests::helpers::run_ex;
+    use crate::tests::helpers::{CurrentDirGuard, run_ex};
+    use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
     use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::{Value, json};
 
@@ -368,12 +369,21 @@ mod e2e {
     fn stdio_grant_persists_exact_invocation_and_auto_allows_identical_call() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
+        // Always-allow eligibility and persistence resolve the workspace from
+        // the process cwd; pin it and record a trusted host-local decision.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
         let target = temp.path().join("code-action.txt");
         fs::write(&target, "alpha\nbeta\n").unwrap();
         let target_text = target.display().to_string();
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
 
         let mut stream = connect_proxy(&app);
@@ -390,10 +400,14 @@ mod e2e {
             );
             assert!(prompt.detail.contains("class: write"), "detail: {}", prompt.detail);
             assert!(prompt.detail.contains("args:"), "detail: {}", prompt.detail);
-            assert_eq!(prompt.options.len(), 7, "default/short allow and deny offered");
-            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowPersistent);
+            assert_eq!(
+                prompt.options.len(),
+                6,
+                "base choices, exact always-allow, and workspace deny offered"
+            );
+            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
         }
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
+        open_pane_and_select(&mut app, 4); // Allow always (preview then confirm)
 
         wait_until(&mut app, "rule persisted and write applied", |_app| {
             fs::read_to_string(&target).map(|t| t.contains("alpha-edited")).unwrap_or(false)
@@ -416,19 +430,10 @@ mod e2e {
             rule.arguments_json,
             format!(r#"{{"action_id":"act_1","path":"{target_text}"}}"#)
         );
-        assert_eq!(rule.scope.max_uses, Some(PERSISTENT_TERMINAL_MAX_USES));
-        let expiry = rule.scope.expires_at.expect("expiry");
-        let now = app.trust_clock.now();
-        assert!(expiry > now + Duration::from_secs(59 * 60), "expiry ~1h ahead");
-        assert!(expiry < now + Duration::from_secs(61 * 60), "expiry ~1h ahead");
-        assert_eq!(
-            app.agents.usage_ledger.used(
-                ledger_workspace(&state_dir, temp.path()),
-                "proxy",
-                &rule.id
-            ),
-            1
-        );
+        // Always-allow rules are workspace-wide and carry no expiry or budget.
+        assert_eq!(rule.scope.agent, None);
+        assert_eq!(rule.scope.expires_at, None);
+        assert_eq!(rule.scope.max_uses, None);
 
         // Identical invocation (same path + action id) auto-allows; the
         // cached action is re-seeded so the planned edit still applies.
@@ -438,14 +443,6 @@ mod e2e {
             fs::read_to_string(&target).map(|t| t.contains("beta-edited")).unwrap_or(false)
         });
         assert!(app.agents.approvals.is_empty(), "no approval for the identical invocation");
-        assert_eq!(
-            app.agents.usage_ledger.used(
-                ledger_workspace(&state_dir, temp.path()),
-                "proxy",
-                &rule.id
-            ),
-            2
-        );
         let _ = proxy_recv(&mut stream);
 
         // A different argument set never matches the exact rule.
@@ -537,15 +534,26 @@ mod e2e {
     }
 
     #[test]
-    fn content_bearing_and_terminal_tools_never_offer_persistent() {
+    fn content_bearing_writes_never_offer_always_and_terminal_trust_is_command_only() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
-        app.agents.test_trust_store_base = Some(temp.path().join("state"));
+        // Trust the workspace so always-allow eligibility is decided by the
+        // operation shape instead of the trust gate.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        app.agents.test_trust_store_base = Some(state_dir.clone());
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
 
         let mut stream = connect_proxy(&app);
         let target = temp.path().join("write.txt");
         fs::write(&target, "v0").unwrap();
-        // ee_write_text_file carries file contents: never persistable.
+        // ee_write_text_file carries file contents: no exact always-allow rule.
         proxy_send(
             &mut stream,
             1,
@@ -558,15 +566,25 @@ mod e2e {
         wait_until(&mut app, "write approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 5, "content-bearing write offers deny only");
-            assert!(prompt.options.iter().all(|(label, _)| !label.contains("1 hour")));
+            assert_eq!(
+                prompt.options.len(),
+                5,
+                "content-bearing write offers the base choices and workspace deny"
+            );
+            assert!(
+                prompt.options.iter().all(|(_, choice)| !matches!(
+                    choice,
+                    ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
+                )),
+                "content-bearing write never offers an always-allow rule"
+            );
         }
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
         let _ = proxy_recv(&mut stream);
 
-        // Terminal creation uses command trust only: the persistent option
-        // is the phase 2 command grant, and the persisted rule is a command
-        // rule — generic MCP trust never applies to terminal-create.
+        // Terminal creation uses command trust only: the always-allow options
+        // are command-scoped, and the persisted rule is a command rule —
+        // generic MCP trust never applies to terminal-create.
         proxy_send(
             &mut stream,
             2,
@@ -577,14 +595,13 @@ mod e2e {
             let prompt = app.agents.approvals.front().unwrap();
             assert_eq!(
                 prompt.options.len(),
-                9,
-                "command trust offers default/short exact, prefix, and deny persistence"
+                7,
+                "base choices, exact and prefix always-allow, and workspace deny offered"
             );
+            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
+            assert_eq!(prompt.options[5].1, ApprovalChoice::AllowAlwaysPrefix(1));
         }
-        let state_dir = temp.path().join("state");
-        fs::create_dir_all(&state_dir).unwrap();
-        app.agents.test_trust_store_base = Some(state_dir.clone());
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses (command trust)
+        open_pane_and_select(&mut app, 4); // Allow always (command exact)
         wait_until(&mut app, "terminal granted", |_app| {
             TrustStore::at(&state_dir, temp.path())
                 .map(|store| store.load().map(|doc| !doc.rules.is_empty()).unwrap_or(false))
@@ -593,10 +610,12 @@ mod e2e {
         let store = TrustStore::at(&state_dir, temp.path()).unwrap();
         let document = store.load().unwrap();
         assert_eq!(document.rules.len(), 1);
-        assert!(
-            matches!(document.rules[0], TrustRule::Command(_)),
-            "terminal-create persists a command rule, never an MCP rule"
-        );
+        let TrustRule::Command(rule) = &document.rules[0] else {
+            panic!("terminal-create persists a command rule, never an MCP rule");
+        };
+        assert_eq!(rule.scope.agent, None);
+        assert_eq!(rule.scope.expires_at, None);
+        assert_eq!(rule.scope.max_uses, None);
         let _ = proxy_recv(&mut stream);
     }
 
@@ -610,6 +629,15 @@ mod e2e {
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        // Always-allow eligibility resolves the workspace from the process cwd;
+        // pin it and record a trusted host-local decision.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
         // Create the store (and its 0700 trust directory) first.
         seed_mcp_rule(
@@ -634,7 +662,7 @@ mod e2e {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&trust_dir, fs::Permissions::from_mode(0o500)).unwrap();
         }
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
+        open_pane_and_select(&mut app, 4); // Allow always
         wait_until(&mut app, "denied reply", |app| app.agents.approvals.is_empty());
         #[cfg(unix)]
         {
@@ -649,7 +677,7 @@ mod e2e {
             "denied flag: {reply}"
         );
         assert!(!fs::read_to_string(&target).unwrap().contains("alpha-edited"), "no dispatch");
-        assert!(app.agents.usage_ledger.is_empty(), "usage budget unchanged");
+        assert!(app.agents.usage_ledger.is_empty(), "no usage recorded for the failed grant");
         let store = TrustStore::at(&state_dir, temp.path()).unwrap();
         assert_eq!(store.load().unwrap().rules.len(), 1, "only the seeded rule persists");
     }

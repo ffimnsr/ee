@@ -64,8 +64,8 @@ impl App {
         let path = PathBuf::from(path);
         match self.prepare_replace_text(&path, old_text, new_text) {
             Ok((content, expectation)) => {
-                let persistent_label =
-                    self.native_write_persistent_label(&path, &content, &expectation);
+                let always_allowed =
+                    self.native_write_always_allowed(&path, &content, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_replace_text"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), content.len()),
@@ -81,7 +81,7 @@ impl App {
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
                     None,
-                    persistent_label,
+                    always_allowed,
                     reply,
                 ))
             }
@@ -108,8 +108,8 @@ impl App {
                     edit_count,
                     if edit_count == 1 { "" } else { "s" }
                 );
-                let persistent_label =
-                    self.native_write_persistent_label(&path, &content, &expectation);
+                let always_allowed =
+                    self.native_write_always_allowed(&path, &content, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_apply_patch"),
                     detail,
@@ -125,7 +125,7 @@ impl App {
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
                     None,
-                    persistent_label,
+                    always_allowed,
                     reply,
                 ))
             }
@@ -219,7 +219,7 @@ impl App {
             }
             Ok(None) => {
                 let created = content.to_string();
-                let persistent_label = self.native_write_persistent_label(
+                let always_allowed = self.native_write_always_allowed(
                     &path,
                     &created,
                     &WriteExpectation::MustNotExist,
@@ -239,7 +239,7 @@ impl App {
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
                     None,
-                    persistent_label,
+                    always_allowed,
                     reply,
                 ))
             }
@@ -264,8 +264,8 @@ impl App {
             Ok(Some(revision)) => {
                 let updated = content.to_string();
                 let expectation = WriteExpectation::ExpectRevision(revision);
-                let persistent_label =
-                    self.native_write_persistent_label(&path, &updated, &expectation);
+                let always_allowed =
+                    self.native_write_always_allowed(&path, &updated, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_overwrite_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), updated.len()),
@@ -281,7 +281,7 @@ impl App {
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
                     None,
-                    persistent_label,
+                    always_allowed,
                     reply,
                 ))
             }

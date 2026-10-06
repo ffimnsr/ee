@@ -135,10 +135,12 @@ mod runtime_cmd;
 mod schema_cmd;
 mod secrets_cmd;
 mod trust_cmd;
+mod workspace_trust;
 
 use args::{
     AgentCommands, AgentTrustCommands, Cli, Commands, ConfigCommands, ConfigSetupCommands,
     DoCommands, FileCommands, LanguageCommands, PluginCommands, RuntimeCommands, SchemaCommands,
+    WorkspaceTrustCommands,
 };
 use config_cmd::{
     cmd_config_get, cmd_config_init, cmd_config_set, cmd_config_setup_agent, cmd_config_setup_mcp,
@@ -299,6 +301,11 @@ fn main() -> io::Result<()> {
                 DoCommands::Agent { command: AgentCommands::Setup { user } } => {
                     cmd_config_setup_agent(user)
                 }
+                DoCommands::Trust { command } => match command {
+                    WorkspaceTrustCommands::Grant => workspace_trust::cmd_trust_grant()?,
+                    WorkspaceTrustCommands::Revoke => workspace_trust::cmd_trust_revoke()?,
+                    WorkspaceTrustCommands::Status => workspace_trust::cmd_trust_status()?,
+                },
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
                 },
@@ -412,6 +419,15 @@ fn main() -> io::Result<()> {
     // Open any additional files as extra buffers.
     for path in additional_paths {
         let _ = app.backend.open_buffer(Some(path));
+    }
+
+    // VS Code-style workspace trust: workspaces whose config carries
+    // `secret://` references ask once whether they are trusted. Fail closed
+    // when no decision is recorded (prompt skipped non-interactively).
+    if let Err(err) =
+        workspace_trust::ensure_workspace_secret_trust(&app.config, &app.current_workspace_root())
+    {
+        eprintln!("ee: warning: {err}");
     }
 
     run(&mut app, shutdown)

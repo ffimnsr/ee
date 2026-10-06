@@ -82,16 +82,12 @@ pub(crate) use state::{
 // module tree without those modules, so the lint fires there.
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
-pub(crate) use crate::policy::{
-    EXECUTE_GRANT_MAX_USES as PERSISTENT_TERMINAL_MAX_USES,
-    WRITE_GRANT_MAX_USES as PERSISTENT_WRITE_MAX_USES,
-};
+pub(crate) use crate::policy::AlwaysRulePreview;
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
 pub(crate) use agent_bridge::{
-    ActionLogEntry, AgentTerminals, ApprovalChoice, OwnedTerminalStop,
-    PERSISTENT_TERMINAL_OPTION_LABEL, PreparedWrite, TerminalOwner, ToolApprovalMode,
-    WriteExpectation, WriteReplyKind,
+    ALWAYS_ALLOW_LABEL, ActionLogEntry, AgentTerminals, ApprovalChoice, OwnedTerminalStop,
+    PreparedWrite, TerminalOwner, ToolApprovalMode, WriteExpectation, WriteReplyKind,
 };
 
 #[cfg(feature = "agents")]

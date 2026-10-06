@@ -179,22 +179,29 @@ impl App {
             .map(|(id, server)| (id.clone(), server.clone()))
             .collect();
         let mut config = AgentManagerConfig::default();
-        let mut secret_store: Option<crate::secrets::SecretStore> = None;
+        // Host-local workspace trust: workspace-layer `secret://` references
+        // resolve only for an explicitly trusted workspace (fail closed for
+        // undecided, unreadable, or revoked decisions).
+        let workspace_ref_policy = self.workspace_secret_ref_policy();
+        self.agents.launch_failures.clear();
         for (id, server) in servers {
             let env = if crate::secrets::resolve::agent_env_has_references(&server.env) {
-                if secret_store.is_none() {
-                    secret_store = self.build_agents_secret_store();
-                }
-                let Some(store) = &secret_store else {
-                    eprintln!(
-                        "ee: warning: agent `{id}` launch aborted: secrets store unavailable"
-                    );
-                    continue;
+                let resolved = {
+                    match self.agents.secret_store() {
+                        None => Err(String::from("secrets store unavailable")),
+                        Some(store) => crate::secrets::resolve::resolve_agent_env(
+                            store,
+                            &server,
+                            workspace_ref_policy,
+                        )
+                        .map_err(|err| err.to_string()),
+                    }
                 };
-                match crate::secrets::resolve::resolve_agent_env(store, &server) {
+                match resolved {
                     Ok(env) => env,
-                    Err(err) => {
-                        eprintln!("ee: warning: agent `{id}` launch aborted: {err}");
+                    Err(message) => {
+                        eprintln!("ee: warning: agent `{id}` launch aborted: {message}");
+                        self.agents.launch_failures.insert(id.clone(), message);
                         continue;
                     }
                 }
@@ -287,36 +294,22 @@ impl App {
         self.agents.host = Some(AgentHostBridge::new(manager, events_rx));
     }
 
-    /// Builds the secrets store used by lazy agent-launch and web-search reference resolution.
-    /// Tests inject a fake store; production uses the real default.
-    pub(crate) fn build_agents_secret_store(&mut self) -> Option<crate::secrets::SecretStore> {
-        #[cfg(test)]
-        {
-            self.agents.test_secret_store.take()
-        }
-        #[cfg(not(test))]
-        {
-            match crate::secrets::SecretStore::default() {
-                Ok(store) => Some(store),
-                Err(err) => {
-                    eprintln!("ee: warning: secrets store unavailable: {err}");
-                    None
-                }
-            }
-        }
-    }
-
+    /// Shuts the agents host down and clears cached secret material.
     /// Requests a new session for `agent_id` (async; reply pumped later).
     pub(super) fn start_session(&mut self, agent_id: String) {
         self.start_session_with_fork(agent_id, None);
     }
 
     pub(super) fn start_session_with_fork(&mut self, agent_id: String, fork: Option<PendingFork>) {
+        if self.agents.host.is_none() {
+            return;
+        }
+        let roots = self.agents_workspace_roots();
+        // Resolve MCP entries (and redaction values) before borrowing the host.
+        let mcp_servers = self.mcp_forward_entries();
         let Some(host) = &self.agents.host else {
             return;
         };
-        let roots = self.agents_workspace_roots();
-        let mcp_servers = crate::app::agents_mcp::mcp_forward_entries(&self.config.mcp);
         let ee_proxy_stdio_fallback =
             self.agents.mcp.proxy.as_ref().map(crate::app::agents_mcp::proxy_stdio_fallback_entry);
         let reply =

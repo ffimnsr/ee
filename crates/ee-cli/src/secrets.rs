@@ -19,6 +19,12 @@
 //!   `Zeroizing` buffers.
 //! - References are exact `secret://<name>` strings: no interpolation,
 //!   concatenation, environment expansion, percent-decoding, or recursion.
+//! - Workspace-layer references resolve only when the host-local workspace
+//!   trust decision for that repository is `trusted` (`ee do trust`); a
+//!   missing or denied decision fails the consumer before any value is read.
+//! - Consumers: agent environment, MCP stdio `env` (exact references), and
+//!   MCP HTTP `headers` (exact references or one embedded token such as
+//!   `Bearer secret://<name>`).
 //! - Parsing, rendering, and store construction never touch a real keychain,
 //!   host-identity source, or filesystem; tests run on test doubles only.
 //!
@@ -51,8 +57,10 @@ pub const SECRET_REFERENCE_PREFIX: &str = "secret://";
 
 /// Whether a config value is an exact `secret://` reference candidate.
 ///
-/// Only values that *start* with the prefix are candidates; strings merely
-/// containing `secret://` stay literals.
+/// Only values that *start* with the prefix are candidates. Values merely
+/// containing the prefix are never resolved: env contexts reject them at
+/// validation, and MCP headers treat them as templates that must embed
+/// exactly one valid reference.
 pub(crate) fn is_secret_reference_text(value: &str) -> bool {
     value.starts_with(SECRET_REFERENCE_PREFIX)
 }
@@ -114,6 +122,11 @@ pub enum SecretReferenceError {
     Fragment,
     /// Percent-encoding (`%`) is present; references are never decoded.
     PercentEncoding,
+    /// A template value embeds more than one `secret://` reference token.
+    MultipleReferences,
+    /// A value in an exact-reference context (agent env, MCP stdio env)
+    /// contains the prefix without being a reference itself.
+    EmbeddedNotAllowed,
     /// The remaining path is not a valid canonical secret name.
     InvalidName(SecretNameError),
 }
@@ -135,6 +148,14 @@ impl fmt::Display for SecretReferenceError {
             Self::PercentEncoding => write!(
                 f,
                 "secret reference must not contain percent-encoding (`%`); references are never decoded"
+            ),
+            Self::MultipleReferences => {
+                write!(f, "value must embed at most one `{SECRET_REFERENCE_PREFIX}` reference")
+            }
+            Self::EmbeddedNotAllowed => write!(
+                f,
+                "value must be an exact `{SECRET_REFERENCE_PREFIX}<name>` reference; \
+                 embedding one inside another value is only allowed in MCP headers"
             ),
             Self::InvalidName(e) => write!(f, "invalid secret name in reference: {e}"),
         }
@@ -167,6 +188,9 @@ pub enum SecretStoreError {
     HostBindingMismatch { version: u32 },
     /// The vault format version is not supported.
     UnsupportedVersion { version: u32 },
+    /// A workspace-layer `secret://` reference was denied because the
+    /// workspace trust decision is missing or untrusted.
+    WorkspaceUntrusted,
     /// The user data directory cannot be resolved.
     DataDirUnavailable,
     /// Vault content is malformed or failed authentication.
@@ -195,6 +219,11 @@ impl fmt::Display for SecretStoreError {
             Self::UnsupportedVersion { version } => {
                 write!(f, "vault format version {version} is not supported (supported: 1)")
             }
+            Self::WorkspaceUntrusted => write!(
+                f,
+                "workspace is not trusted; workspace secret references are blocked \
+                 (trust this workspace with `ee do trust grant`)"
+            ),
             Self::DataDirUnavailable => write!(f, "user data directory is unavailable"),
             Self::VaultCorruption => write!(f, "vault content is corrupt or failed authentication"),
             Self::Io(e) => write!(f, "secrets store I/O failure: {e}"),
@@ -232,6 +261,7 @@ impl PartialEq for SecretStoreError {
             (Self::UnsupportedVersion { version: a }, Self::UnsupportedVersion { version: b }) => {
                 a == b
             }
+            (Self::WorkspaceUntrusted, Self::WorkspaceUntrusted) => true,
             (Self::DataDirUnavailable, Self::DataDirUnavailable) => true,
             (Self::VaultCorruption, Self::VaultCorruption) => true,
             (Self::Io(a), Self::Io(b)) => a.kind() == b.kind(),

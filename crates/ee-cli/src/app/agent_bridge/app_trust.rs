@@ -362,6 +362,46 @@ impl App {
         TrustStore::default_for(&self.working_dir).ok()
     }
 
+    /// Host-local policy for workspace-layer `secret://` references in the
+    /// primary workspace. Fail closed: only an explicit `trusted` decision
+    /// resolves. Tests inject `test_trust_store_base` so app tests stay
+    /// isolated from real user state.
+    pub(crate) fn workspace_secret_ref_policy(
+        &self,
+    ) -> crate::secrets::resolve::WorkspaceRefPolicy {
+        let root = self.current_workspace_root();
+        #[cfg(test)]
+        if let Some(base) = self.agents.test_trust_store_base.as_deref() {
+            return crate::workspace_trust::WorkspaceTrustStore::at(base, &root)
+                .map(|store| crate::workspace_trust::store_policy(&store))
+                .unwrap_or(crate::secrets::resolve::WorkspaceRefPolicy::Deny);
+        }
+        crate::workspace_trust::workspace_secret_policy(&root)
+    }
+
+    /// Whether the primary workspace carries an explicit host-local `trusted`
+    /// decision. Always-allow candidate generation, persistence, and rule
+    /// matching all require it; undecided, untrusted, unreadable, or
+    /// wrong-identity decisions fail closed.
+    pub(super) fn workspace_trusted(&self) -> bool {
+        self.workspace_secret_ref_policy() == crate::secrets::resolve::WorkspaceRefPolicy::Resolve
+    }
+
+    /// Drops always-allow rules (no expiry, no use budget) when the workspace
+    /// trust decision is not `trusted`, so revocation fails closed for
+    /// existing rules as well as new candidates.
+    fn gated_trust_document(&self, mut document: TrustStoreDocument) -> TrustStoreDocument {
+        if self.workspace_trusted() {
+            return document;
+        }
+        document.rules.retain(|rule| {
+            !(rule.effect() == crate::policy::TrustEffect::Allow
+                && rule.scope().expires_at.is_none()
+                && rule.scope().max_uses.is_none())
+        });
+        document
+    }
+
     fn empty_trust_document(&self, workspace: WorkspaceIdentity) -> TrustStoreDocument {
         TrustStoreDocument {
             workspace,
@@ -380,7 +420,7 @@ impl App {
         if self.agents.trust_policy.borrow().is_none() {
             let document = self
                 .workspace_trust_store()
-                .map(|store| store.effective_at(self.trust_clock.now()))
+                .map(|store| self.gated_trust_document(store.effective_at(self.trust_clock.now())))
                 .unwrap_or_else(|| self.empty_trust_document(workspace));
             self.agents.trust_policy.replace(Some(document));
         }
@@ -393,7 +433,7 @@ impl App {
 
     pub(crate) fn reload_workspace_trust_store(&self) -> Result<(), TrustStoreError> {
         let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
-        let document = store.load_at(self.trust_clock.now())?;
+        let document = self.gated_trust_document(store.load_at(self.trust_clock.now())?);
         self.agents.trust_policy.replace(Some(document));
         Ok(())
     }

@@ -66,8 +66,14 @@ impl App {
             return;
         };
         if !host.manager.has_agent(&agent_id) {
+            let reason = self
+                .agents
+                .launch_failures
+                .get(&agent_id)
+                .map(|message| format!(": {message}"))
+                .unwrap_or_default();
             self.backend.status_message = Some(format!(
-                "agent `{agent_id}` unavailable after secure launch configuration resolution"
+                "agent `{agent_id}` unavailable after secure launch configuration resolution{reason}"
             ));
             return;
         }

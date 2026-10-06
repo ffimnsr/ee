@@ -105,16 +105,20 @@ impl App {
             return;
         }
         self.ensure_agents_host();
-        let Some(host) = &self.agents.host else {
+        if self.agents.host.is_none() {
             return;
-        };
+        }
         // `session/load` replays the conversation while the reply is still
         // in flight; those updates are buffered until the thread exists.
         self.agents.pending_replay.insert(record.session_id.clone(), Vec::new());
         let roots = self.agents_workspace_roots();
         let cwd = roots.first().cloned().unwrap_or_else(|| self.working_dir.clone());
         let additional_directories = roots.iter().skip(1).cloned().collect();
-        let mcp_servers = crate::app::agents_mcp::mcp_forward_entries(&self.config.mcp);
+        // Resolve MCP entries (and redaction values) before borrowing the host.
+        let mcp_servers = self.mcp_forward_entries();
+        let Some(host) = &self.agents.host else {
+            return;
+        };
         let reply = host.request_reconnect(
             record.agent_id.clone(),
             record.session_id.clone(),

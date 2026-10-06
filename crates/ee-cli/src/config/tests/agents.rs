@@ -98,16 +98,20 @@ fn agent_env_secret_reference_from_system_layer_is_rejected() {
     );
 }
 #[test]
-fn agent_env_secret_reference_from_ancestor_layer_is_rejected() {
+fn agent_env_secret_reference_from_ancestor_layer_is_preserved() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(env.cwd.as_path()).unwrap();
     write_config_layer(&env, ConfigLayerKind::Ancestor, AGENT_REF_TOML);
 
     let settings = load_for(&env);
-    assert!(
-        !settings.agents.servers.contains_key("gh"),
-        "ancestor-layer secret reference must not merge"
+    let server = settings.agents.servers.get("gh").expect("server merged");
+    let key = server.env.get("OPENROUTER_API_KEY").expect("env value");
+    assert_eq!(key.raw, "secret://openrouter-api-key", "workspace reference merges");
+    assert_eq!(
+        key.layer,
+        ConfigLayerKind::Ancestor,
+        "provenance drives the workspace trust gate at resolve time"
     );
 }
 #[test]
@@ -147,7 +151,7 @@ env = { OPENROUTER_API_KEY = "project-literal" }
     assert_eq!(key.layer, ConfigLayerKind::Ancestor);
 }
 #[test]
-fn rejected_ancestor_reference_keeps_lower_layer_server() {
+fn ancestor_reference_overlays_lower_layer_literal() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(env.cwd.as_path()).unwrap();
@@ -160,7 +164,8 @@ command = "agent-bin"
 env = { OPENROUTER_API_KEY = "global-literal" }
 "#,
     );
-    // The ancestor cannot override with, or cause launch of, a reference.
+    // The higher-priority workspace layer replaces the literal with a
+    // reference; resolution still requires the workspace trust decision.
     write_config_layer(&env, ConfigLayerKind::Ancestor, AGENT_REF_TOML);
 
     let settings = load_for(&env);
@@ -168,11 +173,12 @@ env = { OPENROUTER_API_KEY = "global-literal" }
         .agents
         .servers
         .get("gh")
-        .expect("lower-layer server survives")
+        .expect("server merged")
         .env
         .get("OPENROUTER_API_KEY")
         .expect("env value");
-    assert_eq!(key.raw, "global-literal");
+    assert_eq!(key.raw, "secret://openrouter-api-key");
+    assert_eq!(key.layer, ConfigLayerKind::Ancestor);
 }
 #[test]
 fn env_only_global_server_drops_silently_without_command() {
@@ -248,28 +254,46 @@ fn validate_agent_server_rejects_malformed_secret_reference_with_field_path() {
     assert!(!err.contains("bad name"), "no raw value echo: {err}");
 }
 #[test]
-fn agent_env_secret_reference_substring_stays_literal() {
+fn agent_env_embedded_secret_reference_is_rejected_in_every_layer() {
+    // Env values are exact-reference-only: a value that merely embeds the
+    // prefix is a mistaken template, not a literal, so it fails validation
+    // instead of reaching the agent process unexpanded.
+    for raw in ["https://api.example.com/secret://openrouter-api-key", "see secret://docs"] {
+        let server = AgentServerToml {
+            label: None,
+            command: Some(String::from("agent-bin")),
+            args: None,
+            env: BTreeMap::from([(String::from("ENDPOINT"), String::from(raw))]),
+            cwd: None,
+        };
+        let err = validate_agent_server("gh", &server).expect_err("embedded token rejected");
+        assert!(err.contains("agents.servers.gh.env.ENDPOINT"), "field path: {err}");
+        assert!(
+            err.contains("exact `secret://<name>` reference"),
+            "failure names the exact-reference rule: {err}"
+        );
+        assert!(
+            merge_agent_server("gh", &server, None, ConfigLayerKind::Ancestor).is_err(),
+            "merge revalidates"
+        );
+    }
+}
+#[test]
+fn agent_env_literals_without_the_prefix_stay_literal() {
     let server = AgentServerToml {
         label: None,
         command: Some(String::from("agent-bin")),
         args: None,
         env: BTreeMap::from([
-            (
-                String::from("ENDPOINT"),
-                String::from("https://api.example.com/secret://openrouter-api-key"),
-            ),
-            (String::from("NOTE"), String::from("see secret://docs")),
+            (String::from("ENDPOINT"), String::from("https://api.example.com/v1")),
+            (String::from("NOTE"), String::from("secretive but not a reference")),
         ]),
         cwd: None,
     };
     let resolved =
         merge_agent_server("gh", &server, None, ConfigLayerKind::Ancestor).expect("literals");
-    assert_eq!(
-        resolved.env.get("ENDPOINT").expect("literal").raw,
-        "https://api.example.com/secret://openrouter-api-key"
-    );
-    assert_eq!(resolved.env.get("NOTE").expect("literal").raw, "see secret://docs");
-    // Even from an ancestor layer, substrings are never treated as refs.
+    assert_eq!(resolved.env.get("ENDPOINT").expect("literal").raw, "https://api.example.com/v1");
+    assert_eq!(resolved.env.get("NOTE").expect("literal").raw, "secretive but not a reference");
     assert_eq!(resolved.env.get("ENDPOINT").expect("literal").layer, ConfigLayerKind::Ancestor);
 }
 #[test]
@@ -441,7 +465,7 @@ fn agent_setup_writes_complete_server_to_global_config_only() {
     );
 }
 #[test]
-fn agent_setup_local_scope_writes_server_to_workspace_and_secret_refs_to_user_config() {
+fn agent_setup_local_scope_writes_secret_references_into_workspace_config() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(env.cwd.as_path()).unwrap();
@@ -452,19 +476,16 @@ fn agent_setup_local_scope_writes_server_to_workspace_and_secret_refs_to_user_co
         "openrouter",
         Path::new("/home/example/.local/bin/ee-openrouter-agent"),
         &[String::from("--stdio")],
-        &BTreeMap::from([(String::from("OPENROUTER_MODEL"), String::from("example/model"))]),
+        &BTreeMap::from([
+            (String::from("OPENROUTER_MODEL"), String::from("example/model")),
+            (
+                String::from("OPENROUTER_API_KEY"),
+                String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
+            ),
+        ]),
         &env,
     )
     .expect("configure workspace agent");
-    let user_path = configure_agent_server_user_env_with_env(
-        "openrouter",
-        &BTreeMap::from([(
-            String::from("OPENROUTER_API_KEY"),
-            String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
-        )]),
-        &env,
-    )
-    .expect("configure user env refs");
 
     assert_eq!(path, env.cwd.join(".ee.toml"));
     let workspace: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -478,61 +499,31 @@ fn agent_setup_local_scope_writes_server_to_workspace_and_secret_refs_to_user_co
         workspace["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_MODEL"].as_str(),
         Some("example/model")
     );
-    assert!(
-        workspace["agents"]["servers"]["openrouter"]["env"].get("OPENROUTER_API_KEY").is_none(),
-        "secret reference stays out of workspace config"
-    );
-
-    assert_eq!(user_path, env.config_dir.as_ref().unwrap().join("ee").join("config.toml"));
-    let user: toml::Value = toml::from_str(&std::fs::read_to_string(&user_path).unwrap()).unwrap();
     assert_eq!(
-        user["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_API_KEY"].as_str(),
-        Some("secret://agent.openrouter.OPENROUTER_API_KEY")
+        workspace["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_API_KEY"].as_str(),
+        Some("secret://agent.openrouter.OPENROUTER_API_KEY"),
+        "workspace config carries the reference; the value stays in the vault"
     );
-    assert!(user["agents"].get("enabled").is_none(), "user layer only carries env refs");
+    assert!(
+        !env.config_dir.as_ref().unwrap().join("ee").join("config.toml").exists(),
+        "workspace-scope setup no longer needs a user-layer patch"
+    );
 
-    // Merged settings complete the server from the workspace command.
+    // Merged settings keep the reference with workspace provenance so the
+    // workspace trust gate applies at resolve time.
     let settings = load_for(&env);
     let server = settings.agents.servers.get("openrouter").expect("merged server");
     assert_eq!(server.command, "/home/example/.local/bin/ee-openrouter-agent");
-    assert_eq!(
-        server.env.get("OPENROUTER_API_KEY").map(|value| value.raw.as_str()),
-        Some("secret://agent.openrouter.OPENROUTER_API_KEY")
-    );
-    assert_eq!(
-        server.env.get("OPENROUTER_API_KEY").map(|value| value.layer),
-        Some(ConfigLayerKind::UserXdg)
-    );
+    let api_key = server.env.get("OPENROUTER_API_KEY").expect("env value");
+    assert_eq!(api_key.raw, "secret://agent.openrouter.OPENROUTER_API_KEY");
+    assert_eq!(api_key.layer, ConfigLayerKind::Ancestor);
     assert_eq!(
         server.env.get("OPENROUTER_MODEL").map(|value| value.raw.as_str()),
         Some("example/model")
     );
 }
 #[test]
-fn agent_setup_local_scope_rejects_secret_reference_in_workspace_layer() {
-    let temp = tempfile::tempdir().unwrap();
-    let env = test_config_environment(temp.path());
-    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
-    let values = BTreeMap::from([(
-        String::from("OPENROUTER_API_KEY"),
-        String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
-    )]);
-
-    let error = configure_agent_server_with_env(
-        ConfigScope::Local,
-        "openrouter",
-        Path::new("/home/example/.local/bin/ee-openrouter-agent"),
-        &[],
-        &values,
-        &env,
-    )
-    .expect_err("workspace secret reference rejected");
-
-    assert!(error.contains("user config layer"), "error: {error}");
-    assert!(!env.cwd.join(".ee.toml").exists(), "no partial workspace write");
-}
-#[test]
-fn agent_setup_local_scope_without_secrets_writes_no_user_layer() {
+fn agent_setup_local_scope_without_secrets_writes_only_workspace_config() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(env.cwd.as_path()).unwrap();

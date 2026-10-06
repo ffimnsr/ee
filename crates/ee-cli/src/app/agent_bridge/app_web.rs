@@ -71,7 +71,7 @@ impl App {
                             "invalid agents.web_context.provider_secret_reference",
                         ))
                     })?;
-                let store = self.build_agents_secret_store().ok_or_else(|| {
+                let store = self.agents.secret_store().ok_or_else(|| {
                     AgentError::HandlerError(String::from(
                         "web search authorization unavailable: secrets store unavailable",
                     ))
@@ -93,7 +93,7 @@ impl App {
                             "invalid agents.web_context.browser_run_api_token_reference",
                         ))
                     })?;
-                let store = self.build_agents_secret_store().ok_or_else(|| {
+                let store = self.agents.secret_store().ok_or_else(|| {
                     AgentError::HandlerError(String::from(
                         "Browser Run authorization unavailable: secrets store unavailable",
                     ))

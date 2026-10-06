@@ -48,3 +48,5 @@ mod ui;
 pub mod vlf_bench_support;
 #[allow(dead_code)]
 mod window;
+#[allow(dead_code)]
+mod workspace_trust;

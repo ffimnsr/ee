@@ -1396,7 +1396,7 @@ workspace_enabled = false
 }
 
 #[test]
-fn missing_optional_read_scope_is_preserved_and_mandatory_scope_is_enforced() {
+fn missing_optional_allow_scope_is_preserved_and_zero_budget_is_rejected() {
     let (_base, _workspace_dir, store) = store_setup();
     let ws = *store.workspace();
     let text = format!(
@@ -1440,8 +1440,42 @@ expires_at = "2026-08-08T12:00:00Z"
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
+    // Allow scope is optional: finite expiry and/or finite use budget may be
+    // absent (always-allow rules carry neither).
+    let document = store.load().expect("optional allow scope is valid");
+    assert_eq!(document.rules.len(), 4);
+    let no_expiry = document.rules.iter().find(|rule| rule.id() == "cmd_no_expiry").unwrap();
+    assert_eq!(no_expiry.scope().expires_at, None);
+    assert_eq!(no_expiry.scope().max_uses, Some(20));
+    let no_uses = document.rules.iter().find(|rule| rule.id() == "cmd_no_uses").unwrap();
+    assert!(no_uses.scope().expires_at.is_some());
+    assert_eq!(no_uses.scope().max_uses, None);
+    let unlimited = document.rules.iter().find(|rule| rule.id() == "read_unlimited").unwrap();
+    assert_eq!(unlimited.scope().expires_at, None);
+    assert_eq!(unlimited.scope().max_uses, None);
+
+    // A zero use budget stays invalid and fails closed.
+    let zero_budget = format!(
+        r#"
+        schema_version = 1
+
+        [workspace]
+        identity = "{identity}"
+
+        [policy]
+        workspace_enabled = false
+
+        [[command_allow]]
+        id = "cmd_zero"
+        executable = "git"
+        match = "argv_exact"
+        argv = ["status"]
+        max_uses = 0
+        "#,
+        identity = ws.as_string()
+    );
+    write_store_text(store.path(), &zero_budget);
     assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
-    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 // ── Store: file behavior and atomicity ───────────────────────────────────────

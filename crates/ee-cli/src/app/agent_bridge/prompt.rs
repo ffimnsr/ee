@@ -11,13 +11,13 @@ use tokio_util::sync::CancellationToken;
 use crate::app::agents_mcp::ProxyRoute;
 use crate::app::write_leases::{WriteLeaseId, WriteLeaseOwner};
 
-use crate::policy::{BoundedRuleCandidate, BoundedRulePreview, McpInvocation};
+use crate::policy::{AlwaysRuleCandidate, AlwaysRulePreview, McpInvocation};
 
 use super::approval::{
-    ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation,
-    PERSISTENT_TERMINAL_OPTION_LABEL, PersistentDenyCandidate, PreparedWrite, ProxyWriteSpec,
-    WebApprovalCall, WorkspaceMemoryApprovalOperation, WorkspaceMemoryApprovalTarget,
-    WriteExpectation, WriteReplyKind,
+    ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation,
+    PersistentDenyCandidate, PreparedWrite, ProxyWriteSpec, WebApprovalCall,
+    WorkspaceMemoryApprovalOperation, WorkspaceMemoryApprovalTarget, WriteExpectation,
+    WriteReplyKind,
 };
 use super::terminal::redact_env_display;
 
@@ -39,9 +39,9 @@ pub(crate) struct ApprovalPrompt {
     pub(super) kind: ApprovalKind,
     /// Phase 3: validated generic MCP invocation behind this prompt, when
     /// the request is an eligible proxy tool call.  Presence gates the
-    /// persistent `Allow for 1 hour / 20 uses` option.
+    /// persistent `Allow always` option.
     pub(super) mcp: Option<McpInvocation>,
-    pub(super) allow_candidates: Vec<(ApprovalChoice, BoundedRuleCandidate)>,
+    pub(super) allow_candidates: Vec<(ApprovalChoice, AlwaysRuleCandidate)>,
     pub(super) confirming_allow: Option<ApprovalChoice>,
     pub(super) deny_candidate: Option<PersistentDenyCandidate>,
     pub(super) confirming_deny: bool,
@@ -54,7 +54,7 @@ impl ApprovalPrompt {
         thread_index: Option<usize>,
         session_id: &SessionId,
         request: &WriteTextFileRequest,
-        persistent_label: Option<&'static str>,
+        always_allowed: bool,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self::write_with(
@@ -71,7 +71,7 @@ impl ApprovalPrompt {
                 proxy_edit_count: 0,
             },
             None,
-            persistent_label,
+            always_allowed,
             reply,
         )
     }
@@ -153,7 +153,7 @@ impl ApprovalPrompt {
             write_lease_owner: None,
             title: operation.tool_name().to_string(),
             detail: operation.detail(),
-            options: approval_options(None),
+            options: approval_options(false),
             selected: 0,
             kind: ApprovalKind::Filesystem { operation },
             mcp: None,
@@ -169,7 +169,7 @@ impl ApprovalPrompt {
     pub(super) fn proxy_write(
         spec: ProxyWriteSpec,
         mcp: Option<McpInvocation>,
-        persistent_label: Option<&'static str>,
+        always_allowed: bool,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self::write_with(
@@ -179,7 +179,7 @@ impl ApprovalPrompt {
             mcp.as_ref().map(mcp_approval_detail).unwrap_or(spec.detail),
             spec.prepared,
             mcp,
-            persistent_label,
+            always_allowed,
             reply,
         )
     }
@@ -194,7 +194,7 @@ impl ApprovalPrompt {
         detail: String,
         prepared: PreparedWrite,
         mcp: Option<McpInvocation>,
-        persistent_label: Option<&'static str>,
+        always_allowed: bool,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self {
@@ -205,7 +205,7 @@ impl ApprovalPrompt {
             write_lease_owner: None,
             title,
             detail,
-            options: approval_options(persistent_label),
+            options: approval_options(always_allowed),
             selected: 0,
             kind: ApprovalKind::Write {
                 path: prepared.path,
@@ -231,7 +231,7 @@ impl ApprovalPrompt {
         writes: Vec<PreparedWrite>,
         total_edit_count: u32,
         mcp: Option<McpInvocation>,
-        persistent_label: Option<&'static str>,
+        always_allowed: bool,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self {
@@ -242,7 +242,7 @@ impl ApprovalPrompt {
             write_lease_owner: None,
             title,
             detail: mcp.as_ref().map(mcp_approval_detail).unwrap_or(detail),
-            options: approval_options(persistent_label),
+            options: approval_options(always_allowed),
             selected: 0,
             kind: ApprovalKind::WriteBatch { writes, total_edit_count },
             mcp,
@@ -292,7 +292,7 @@ impl ApprovalPrompt {
                 Some(provider) => format!("provider: {provider} · host: {current_host}"),
                 None => format!("host: {current_host}"),
             },
-            options: approval_options(None),
+            options: approval_options(false),
             selected: 0,
             kind: ApprovalKind::Network {
                 route,
@@ -318,7 +318,7 @@ impl ApprovalPrompt {
         session_id: &SessionId,
         request: &CreateTerminalRequest,
         reply: oneshot::Sender<ClientRequestResult>,
-        persistent_allowed: bool,
+        always_allowed: bool,
     ) -> Self {
         let command = if request.args.is_empty() {
             request.command.clone()
@@ -344,9 +344,7 @@ impl ApprovalPrompt {
             write_lease_owner: None,
             title: String::from("terminal/create"),
             detail: format!("{command} · cwd: {cwd} · env: {env_text}"),
-            options: approval_options(
-                persistent_allowed.then_some(PERSISTENT_TERMINAL_OPTION_LABEL),
-            ),
+            options: approval_options(always_allowed),
             selected: 0,
             kind: ApprovalKind::TerminalCreate { request: request.clone() },
             mcp: None,
@@ -359,7 +357,7 @@ impl ApprovalPrompt {
         }
     }
 
-    pub(crate) fn allow_confirmation_preview(&self) -> Option<&BoundedRulePreview> {
+    pub(crate) fn allow_confirmation_preview(&self) -> Option<&AlwaysRulePreview> {
         let choice = self.confirming_allow?;
         self.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
             (*candidate_choice == choice).then_some(&candidate.preview)
@@ -385,11 +383,11 @@ impl ApprovalPrompt {
     }
 }
 
-/// The approval option list.  Allow-always (unlimited persistence) is
-/// intentionally absent; the bounded persistent option exists only for
-/// eligible terminal requests (Phase 2 command trust), eligible generic MCP
-/// invocations (Phase 3), and eligible bounded native writes (Phase 5).
-fn approval_options(persistent_label: Option<&'static str>) -> Vec<(String, ApprovalChoice)> {
+/// The approval option list.  `always_allowed` adds the workspace-wide
+/// always-allow option (persisted to the host-local trust store).  Callers
+/// pass it only for eligible operations while the workspace trust decision is
+/// `trusted`; deny/session options never depend on it.
+fn approval_options(always_allowed: bool) -> Vec<(String, ApprovalChoice)> {
     let mut options = [
         ApprovalChoice::AllowOnce,
         ApprovalChoice::AllowSession,
@@ -399,8 +397,8 @@ fn approval_options(persistent_label: Option<&'static str>) -> Vec<(String, Appr
     .into_iter()
     .map(|choice| (choice.label().to_string(), choice))
     .collect::<Vec<_>>();
-    if let Some(label) = persistent_label {
-        options.push((label.to_string(), ApprovalChoice::AllowPersistent));
+    if always_allowed {
+        options.push((ALWAYS_ALLOW_LABEL.to_string(), ApprovalChoice::AllowAlways));
     }
     options
 }
@@ -445,8 +443,6 @@ pub(super) fn format_expiry_utc(time: SystemTime) -> String {
 #[cfg(test)]
 use super::approval::ApprovalPolicy;
 #[cfg(test)]
-use super::approval::PERSISTENT_WRITE_OPTION_LABEL;
-#[cfg(test)]
 use super::approval::SessionChoice;
 #[cfg(test)]
 use super::approval::approval_fingerprint;
@@ -487,9 +483,7 @@ mod tests {
         assert!(!rendered.contains(url));
         assert!(!rendered.contains("super-secret"));
         assert_eq!(prompt.options.len(), 4);
-        assert!(
-            prompt.options.iter().all(|(_, choice)| *choice != ApprovalChoice::AllowPersistent)
-        );
+        assert!(prompt.options.iter().all(|(_, choice)| *choice != ApprovalChoice::AllowAlways));
     }
 
     #[test]
@@ -618,10 +612,8 @@ mod tests {
         assert!(!prompt.options.iter().any(|(_, choice)| matches!(
             choice,
             ApprovalChoice::AllowSession
-                | ApprovalChoice::AllowPersistent
-                | ApprovalChoice::AllowPersistentShort
-                | ApprovalChoice::AllowPersistentPrefix(_)
-                | ApprovalChoice::AllowPersistentPrefixShort(_)
+                | ApprovalChoice::AllowAlways
+                | ApprovalChoice::AllowAlwaysPrefix(_)
         )));
         assert!(BridgeUiHandler::editor_capabilities().workspace_memory_mutation_approval);
     }
@@ -717,32 +709,21 @@ mod tests {
     }
 
     #[test]
-    fn approval_options_offer_persistent_only_when_eligible() {
-        // Ineligible prompts never get a persistent option; the option list
-        // stays at four choices with no unlimited allow.
-        let base = approval_options(None);
+    fn approval_options_offer_always_only_when_eligible() {
+        // Ineligible prompts never get the always-allow option; the option
+        // list stays at four choices.
+        let base = approval_options(false);
         assert_eq!(base.len(), 4);
         for (label, _) in &base {
-            assert!(!label.contains("Always"), "allow-always must stay disabled: {label}");
-            assert!(!label.contains("1 hour"));
+            assert!(!label.contains("Always"), "always option requires eligibility: {label}");
         }
-        // Eligible terminal prompts append the bounded persistent option.
-        let persistent = approval_options(Some(PERSISTENT_TERMINAL_OPTION_LABEL));
-        assert_eq!(persistent.len(), 5);
-        assert_eq!(
-            persistent.last().unwrap().0,
-            PERSISTENT_TERMINAL_OPTION_LABEL,
-            "persistent option label"
-        );
-        assert_eq!(persistent.last().unwrap().1, ApprovalChoice::AllowPersistent);
-        assert!(ApprovalChoice::AllowPersistent.allows());
-        // Persistent grants are host-local rules, never session decisions.
-        assert_eq!(session_decision(ApprovalChoice::AllowPersistent), None);
-        // Eligible bounded writes carry the write option label (phase 5).
-        let writes = approval_options(Some(PERSISTENT_WRITE_OPTION_LABEL));
-        assert_eq!(writes.len(), 5);
-        assert_eq!(writes.last().unwrap().0, PERSISTENT_WRITE_OPTION_LABEL);
-        assert_eq!(writes.last().unwrap().1, ApprovalChoice::AllowPersistent);
-        assert_ne!(PERSISTENT_WRITE_OPTION_LABEL, PERSISTENT_TERMINAL_OPTION_LABEL);
+        // Eligible prompts append the always-allow option.
+        let always = approval_options(true);
+        assert_eq!(always.len(), 5);
+        assert_eq!(always.last().unwrap().0, ALWAYS_ALLOW_LABEL);
+        assert_eq!(always.last().unwrap().1, ApprovalChoice::AllowAlways);
+        assert!(ApprovalChoice::AllowAlways.allows());
+        // Always-allow grants are host-local rules, never session decisions.
+        assert_eq!(session_decision(ApprovalChoice::AllowAlways), None);
     }
 }

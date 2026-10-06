@@ -768,6 +768,8 @@ fn permission_policy_matrix_ui_audit_preview_revoke_tester_and_reset_are_redacte
     use crate::policy::PolicyClock;
     use crate::tests::agent_bridge::{agents_app_in, base_script};
     use crate::tests::agent_mcp::open_pane_and_wait_ready;
+    use crate::tests::helpers::CurrentDirGuard;
+    use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
 
     let temp = tempfile::tempdir().expect("workspace");
     let (mut app, _fake) = agents_app_in(&temp, base_script());
@@ -775,6 +777,16 @@ fn permission_policy_matrix_ui_audit_preview_revoke_tester_and_reset_are_redacte
     let state = temp.path().join("state");
     fs::create_dir_all(&state).expect("state directory");
     app.agents.test_trust_store_base = Some(state.clone());
+    // The always-allow option requires the host-local workspace decision to be
+    // `trusted`, and the trust gate resolves the workspace from the process
+    // cwd; hold the workspace steady for the whole test.
+    let _cwd_lock = crate::config::test_cwd_lock().lock().expect("cwd lock");
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).expect("workspace cwd");
+    WorkspaceTrustStore::at(&state, temp.path())
+        .expect("workspace trust store")
+        .set_decision(WorkspaceTrustDecision::Trusted)
+        .expect("trust decision");
     open_pane_and_wait_ready(&mut app);
 
     let store = TrustStore::at(&state, temp.path()).expect("store");
@@ -859,15 +871,17 @@ fn permission_policy_matrix_ui_audit_preview_revoke_tester_and_reset_are_redacte
         &[],
         Some(temp.path().to_path_buf()),
     );
-    app.confirm_bridge_approval_for_test(ApprovalChoice::AllowPersistent);
+    app.confirm_bridge_approval_for_test(ApprovalChoice::AllowAlways);
     let preview = app
         .agents
         .approvals
         .front()
         .and_then(|prompt| prompt.allow_confirmation_preview())
-        .expect("bounded preview");
-    assert!(preview.expires_at > now());
-    assert_eq!(preview.max_uses, 20);
+        .expect("always-allow preview");
+    assert_eq!(preview.workspace, store.workspace().as_string());
+    let authority = preview.authority_fields();
+    assert!(authority.iter().any(|(label, value)| label == "effect" && value == "allow always"));
+    assert!(!authority.iter().any(|(label, _)| label == "expires" || label == "maximum uses"));
     assert!(store.load().expect("preview store").rules.is_empty());
     app.cancel_rule_confirmation_for_test();
     app.confirm_bridge_approval_for_test(ApprovalChoice::DenyOnce);
@@ -924,4 +938,72 @@ fn permission_policy_matrix_builtin_deny_beats_every_allow_source() {
     assert_eq!(result.trace[0].status, TraceStatus::Matched);
     assert!(result.trace[1..].iter().all(|step| step.status == TraceStatus::NotReached));
     assert_redacted(&result.decision);
+}
+
+#[test]
+fn permission_policy_matrix_deny_confirm_reject_budgets_and_finite_allow_caps_hold() {
+    use crate::policy::rules::RawCommandRule;
+
+    let fixture = &fixtures(TransportKind::Acp)[0];
+    let OperationIdentity::Command { executable, argv } = &fixture.operation.identity else {
+        panic!("command fixture")
+    };
+    let raw =
+        |effect: TrustEffect, expires_at: Option<String>, max_uses: Option<u64>| RawCommandRule {
+            id: "phase14_finite_command".into(),
+            effect,
+            agent: None,
+            executable: executable.clone(),
+            match_mode: MatchMode::ArgvExact,
+            argv: argv.clone(),
+            expires_at,
+            max_uses,
+        };
+    let load = |effect: TrustEffect, expires_at: Option<String>, max_uses: Option<u64>| {
+        CommandRule::from_raw(raw(effect, expires_at, max_uses), workspace())
+    };
+    // Deny and confirm rules may expire but never carry a use budget.
+    assert!(load(TrustEffect::Deny, None, Some(5)).is_err());
+    assert!(load(TrustEffect::Confirm, None, Some(5)).is_err());
+    // Always-allow (no expiry, no use budget) is now the UI-created shape and
+    // loads by design.
+    assert!(load(TrustEffect::Allow, None, None).is_ok());
+
+    let session = SessionPolicy::default();
+    let usage = UsageSnapshot::default();
+    let expired_at: chrono::DateTime<chrono::Utc> = (now() - Duration::from_secs(60)).into();
+    let expired = load(
+        TrustEffect::Allow,
+        Some(expired_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        None,
+    )
+    .expect("expired allow still loads");
+    let decision = evaluate_with_trace(&policy_input(
+        &fixture.operation,
+        std::slice::from_ref(&TrustRule::Command(expired)),
+        &session,
+        &usage,
+    ));
+    assert_eq!(
+        decision.decision.reason,
+        DecisionReason::GlobalDefaultConfirm,
+        "expired allow rule must not match"
+    );
+
+    let finite = load(TrustEffect::Allow, None, Some(2)).expect("finite allow");
+    let rules = vec![TrustRule::Command(finite)];
+    let decision = evaluate_with_trace(&policy_input(&fixture.operation, &rules, &session, &usage));
+    assert_eq!(decision.decision.reason, DecisionReason::PersistentAllow);
+
+    let mut ledger = UsageLedger::default();
+    ledger.record_use(workspace(), SESSION, "phase14_finite_command");
+    ledger.record_use(workspace(), SESSION, "phase14_finite_command");
+    let exhausted = ledger.snapshot(workspace(), SESSION);
+    let decision =
+        evaluate_with_trace(&policy_input(&fixture.operation, &rules, &session, &exhausted));
+    assert_eq!(
+        decision.decision.reason,
+        DecisionReason::GlobalDefaultConfirm,
+        "exhausted allow rule must not match"
+    );
 }

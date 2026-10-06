@@ -6,18 +6,69 @@ impl App {
         !self.config.mcp.servers.is_empty() || self.config.mcp.proxy.enabled
     }
 
+    /// Resolves configured MCP servers, failing closed per server when
+    /// references cannot resolve (missing store, denied workspace trust,
+    /// malformed reference, or missing/foreign secret). Failed servers are
+    /// recorded in the pane state and skipped. Resolved bare secret values
+    /// feed stderr/diagnostic redaction. Literal-only servers never touch
+    /// the store.
+    pub(crate) fn resolve_mcp_servers(&mut self) -> Vec<ResolvedMcpServer> {
+        let workspace_refs = self.workspace_secret_ref_policy();
+        let servers: Vec<(String, crate::config::McpServerSettings)> = self
+            .config
+            .mcp
+            .servers
+            .iter()
+            .map(|(id, settings)| (id.clone(), settings.clone()))
+            .collect();
+        let needs_store = servers
+            .iter()
+            .any(|(_, settings)| crate::secrets::resolve::mcp_server_has_references(settings));
+        let mut secrets = Vec::new();
+        let mut failures = Vec::new();
+        let resolved = {
+            let store = if needs_store { self.agents.secret_store() } else { None };
+            servers
+                .into_iter()
+                .filter_map(|(id, settings)| {
+                    match resolve_mcp_values(&id, &settings, store, workspace_refs) {
+                        Ok(server) => {
+                            secrets.extend(server.secrets.iter().cloned());
+                            Some(server)
+                        }
+                        Err(error) => {
+                            failures.push((id, error));
+                            None
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for (id, error) in failures {
+            eprintln!("ee: warning: mcp server `{id}` disabled: {error}");
+            let entry = self.agents.mcp.servers.entry(id).or_default();
+            entry.state = McpServerState::Failed;
+            entry.error = Some(error);
+        }
+        self.agents.resolved_secret_values.extend(secrets);
+        resolved
+    }
+
+    /// Resolved `session/new` MCP entries for the current config.
+    pub(crate) fn mcp_forward_entries(&mut self) -> Vec<McpServer> {
+        self.resolve_mcp_servers().iter().map(forward_entry).collect()
+    }
+
     /// Creates the MCP host bridge on first use (lazy; starts no process
     /// until the worker's `StartAll` runs).
     pub(super) fn ensure_mcp_host(&mut self) {
         if self.agents.mcp.host.is_some() {
             return;
         }
-        let raw: BTreeMap<String, ee_mcp::RawMcpServerSettings> = self
-            .config
-            .mcp
-            .servers
+        let resolved = self.resolve_mcp_servers();
+        let raw: BTreeMap<String, ee_mcp::RawMcpServerSettings> = resolved
             .iter()
-            .map(|(id, settings)| (id.clone(), raw_server_settings(settings)))
+            .map(|server| (server.id.clone(), raw_server_settings(server)))
             .collect();
         let configs = match ee_mcp::config::resolve_server_configs(raw) {
             Ok(configs) => configs,

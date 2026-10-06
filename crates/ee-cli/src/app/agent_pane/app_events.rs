@@ -398,47 +398,6 @@ impl App {
         }
     }
 
-    /// Secret-like configured values (agent + MCP env/header values whose
-    /// keys look secret-like).  Used to redact stderr and diagnostics.
-    ///
-    /// Agent values are the raw config literals plus the values resolved from
-    /// `secret://` references at launch; references themselves are never
-    /// collected (their resolved values are, once the launch config exists).
-    pub(crate) fn agents_secret_values(&self) -> Vec<String> {
-        let mut secrets = Vec::new();
-        for server in self.config.agents.servers.values() {
-            for (name, value) in &server.env {
-                if ee_agent_host::redact::is_secret_key(name)
-                    && !crate::secrets::is_secret_reference_text(&value.raw)
-                {
-                    secrets.push(value.raw.clone());
-                }
-            }
-        }
-        for server in self.config.mcp.servers.values() {
-            match server {
-                crate::config::McpServerSettings::Stdio { env, .. } => {
-                    for (name, value) in env {
-                        if ee_agent_host::redact::is_secret_key(name) {
-                            secrets.push(value.clone());
-                        }
-                    }
-                }
-                crate::config::McpServerSettings::StreamableHttp { headers, .. } => {
-                    for (name, value) in headers {
-                        if ee_agent_host::redact::is_secret_key(name) {
-                            secrets.push(value.clone());
-                        }
-                    }
-                }
-            }
-        }
-        secrets.extend(self.agents.resolved_secret_values.iter().cloned());
-        secrets.sort();
-        secrets.dedup();
-        secrets
-    }
-
     /// Reduces one `session/update` into the thread transcript.
     pub(super) fn apply_session_update(&mut self, thread_index: usize, update: &SessionUpdate) {
         let nick = self.agents.threads[thread_index].nick.clone();

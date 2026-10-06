@@ -355,6 +355,16 @@ fn app_with_store() -> (App, TempDir, PathBuf) {
 #[test]
 fn mandatory_confirm_prompt_hides_reusable_allows_and_bypass_cannot_skip_it() {
     let (mut app, temp, state) = app_with_store();
+    // Trust the workspace so mandatory-confirm stripping is exercised against
+    // an operation that would otherwise receive always-allow candidates. The
+    // gate resolves the workspace from the process cwd; pin it to the fixture.
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = crate::tests::helpers::CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    crate::workspace_trust::WorkspaceTrustStore::at(&state, temp.path())
+        .expect("workspace trust store")
+        .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
+        .expect("trusted decision");
     let store = TrustStore::at(&state, temp.path()).expect("store");
     let rule = TrustRule::with_template(
         templates::VCS_PUSH.into(),
@@ -384,12 +394,23 @@ fn mandatory_confirm_prompt_hides_reusable_allows_and_bypass_cannot_skip_it() {
             matches!(
                 choice,
                 ApprovalChoice::AllowSession
-                    | ApprovalChoice::AllowPersistent
-                    | ApprovalChoice::AllowPersistentShort
-                    | ApprovalChoice::AllowPersistentPrefix(_)
-                    | ApprovalChoice::AllowPersistentPrefixShort(_)
+                    | ApprovalChoice::AllowAlways
+                    | ApprovalChoice::AllowAlwaysPrefix(_)
             )
         }));
+        // Mandatory confirmation strips previews too: forcing the always-allow
+        // confirmation path must not find a candidate to preview.
+        app.confirm_bridge_approval_for_test(ApprovalChoice::AllowAlways);
+        assert!(
+            app.agents
+                .approvals
+                .front()
+                .expect("mandatory prompt")
+                .allow_confirmation_preview()
+                .is_none(),
+            "mandatory confirmation strips always-allow previews"
+        );
+        app.cancel_rule_confirmation_for_test();
         assert!(reply.try_recv().is_err(), "bypass must not resolve mandatory prompt");
 
         app.agents.layout = AgentPaneLayout::Right;

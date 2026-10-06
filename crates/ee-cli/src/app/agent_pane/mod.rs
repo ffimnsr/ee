@@ -47,6 +47,7 @@ mod elicitation;
 mod format;
 mod host;
 mod pump;
+mod secret_values;
 mod state;
 mod thread_ui;
 

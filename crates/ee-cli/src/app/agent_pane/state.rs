@@ -279,9 +279,17 @@ pub(crate) struct AgentPaneState {
     pub(crate) trust_policy: std::cell::RefCell<Option<crate::policy::TrustStoreDocument>>,
     /// Phase 6 MCP state: health registry, browsing, and the proxy listener.
     pub(crate) mcp: crate::app::agents_mcp::McpPaneState,
+    /// Lazily built host-bound secrets store shared by agent launch and MCP
+    /// resolution; never cloned, never `Debug`.
+    pub(crate) secret_store: Option<crate::secrets::SecretStore>,
     /// Secret-like resolved agent env values collected when the host config
     /// was built (phase 5); feeds stderr/diagnostics redaction.
     pub(crate) resolved_secret_values: Vec<String>,
+    /// Agent servers skipped at launch-time resolution (trust gate, missing
+    /// store, missing/foreign secret), keyed by server id. Mirrors the MCP
+    /// pane's `Failed` entries so the reason stays visible after the stderr
+    /// warning scrolls away.
+    pub(crate) launch_failures: BTreeMap<String, String>,
     /// Test-only: agent id → fake transport factory (see `tests/agent_pane.rs`).
     #[cfg(test)]
     pub(crate) test_fake_transports: BTreeMap<String, Arc<dyn ee_agent_host::FakeTransportFactory>>,
@@ -349,7 +357,9 @@ impl Default for AgentPaneState {
             usage_ledger: crate::policy::UsageLedger::default(),
             trust_policy: std::cell::RefCell::new(None),
             mcp: crate::app::agents_mcp::McpPaneState::default(),
+            secret_store: None,
             resolved_secret_values: Vec::new(),
+            launch_failures: BTreeMap::new(),
             #[cfg(test)]
             test_fake_transports: BTreeMap::new(),
             #[cfg(test)]
@@ -376,6 +386,26 @@ impl std::fmt::Debug for AgentPaneState {
 
 impl AgentPaneState {
     pub(super) const CONNECTION_SCOPED_INTERACTION_KEY: &'static str = "";
+
+    /// Lazily built host-bound secrets store shared by agent launch and MCP
+    /// resolution. Tests inject `test_secret_store` once; production builds
+    /// the real keychain-backed default on first use.
+    pub(crate) fn secret_store(&mut self) -> Option<&crate::secrets::SecretStore> {
+        #[cfg(test)]
+        if self.secret_store.is_none() {
+            self.secret_store = self.test_secret_store.take();
+        }
+        if self.secret_store.is_none() {
+            self.secret_store = match crate::secrets::SecretStore::default() {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    eprintln!("ee: warning: secrets store unavailable: {err}");
+                    None
+                }
+            };
+        }
+        self.secret_store.as_ref()
+    }
 
     pub(super) fn next_lifecycle_key(
         &mut self,

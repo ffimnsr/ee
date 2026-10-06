@@ -11,12 +11,14 @@
 //! Later layers override earlier ones for any key that is explicitly set.
 
 use super::agents_settings::validate_agent_server;
+use super::discovery::ConfigLayerKind;
 #[cfg(feature = "agents")]
 use super::discovery::{ConfigEnvironment, ConfigScope, config_path_for_scope_with_env};
 #[cfg(feature = "agents")]
 use super::raw::parse_config_document;
 use super::raw::{EeToml, McpProxyToml, McpServerToml, McpToml, McpTransportToml};
 use super::rubber_duck::validate_rubber_duck_toml;
+use super::secret_value::ConfigSecretValue;
 #[cfg(feature = "agents")]
 use super::value::{ensure_named_table, mutate_config_at_scope};
 use super::web_context::validate_agent_web_context_config;
@@ -37,11 +39,12 @@ pub(crate) struct McpSettings {
     pub proxy: McpProxySettings,
     /// Whether the user explicitly configured `[mcp.proxy]` in any layer.
     pub proxy_explicit: bool,
-    /// Split-layer partial entries: the setup wizard writes secret env/headers
-    /// into the user config layer while the server definition lives in the
-    /// workspace layer. Unresolved entries stay inert and never reach
-    /// effective config.
-    pub(crate) partial: BTreeMap<String, McpServerToml>,
+    /// Split-layer partial entries: a lower layer may supply only part of a
+    /// server (for example env in user config and the transport in the
+    /// workspace layer). Field provenance is retained so workspace trust
+    /// applies to exactly the values a workspace layer supplied. Unresolved
+    /// entries stay inert and never reach effective config.
+    pub(crate) partial: BTreeMap<String, McpPartialServer>,
 }
 
 /// Resolved ee MCP proxy runtime settings.
@@ -58,50 +61,158 @@ pub(crate) struct McpProxySettings {
 
 /// Resolved MCP server transport.  Only stdio and Streamable HTTP are
 /// supported; HTTP+SSE and other transports are not implemented.
+///
+/// Env/header values carry their config-layer provenance so workspace trust
+/// gates exactly the `secret://` references a workspace layer supplies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum McpServerSettings {
     Stdio {
         command: String,
         args: Vec<String>,
-        env: BTreeMap<String, String>,
+        env: BTreeMap<String, ConfigSecretValue>,
         cwd: Option<PathBuf>,
     },
     StreamableHttp {
         url: String,
-        headers: BTreeMap<String, String>,
+        headers: BTreeMap<String, ConfigSecretValue>,
         timeout_ms: u64,
     },
 }
 
-pub(super) fn resolve_mcp_server(
-    id: &str,
-    server: &McpServerToml,
-) -> Result<McpServerSettings, String> {
-    if id.trim().is_empty() {
-        return Err(String::from("mcp server id must not be empty"));
+/// Accumulated split-layer MCP entry with per-field layer provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpPartialServer {
+    transport: McpTransportToml,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: BTreeMap<String, ConfigSecretValue>,
+    cwd: Option<PathBuf>,
+    url: Option<String>,
+    headers: BTreeMap<String, ConfigSecretValue>,
+    timeout_ms: Option<u64>,
+}
+
+impl McpPartialServer {
+    pub(super) fn new(transport: McpTransportToml) -> Self {
+        Self {
+            transport,
+            command: None,
+            args: None,
+            env: BTreeMap::new(),
+            cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            timeout_ms: None,
+        }
     }
-    match server.transport {
-        McpTransportToml::Stdio => {
-            let command = server.command.as_deref().unwrap_or_default().trim();
-            if command.is_empty() {
-                return Err(String::from("mcp stdio server command must not be empty"));
+
+    /// Overlays a higher-priority layer's raw entry: patch wins per field,
+    /// env/headers union with the patch's provenance.
+    pub(super) fn overlay(
+        &mut self,
+        id: &str,
+        patch: &McpServerToml,
+        kind: ConfigLayerKind,
+    ) -> Result<(), String> {
+        self.transport = patch.transport;
+        if patch.command.is_some() {
+            self.command = patch.command.clone();
+        }
+        if patch.args.is_some() {
+            self.args = patch.args.clone();
+        }
+        if patch.cwd.is_some() {
+            self.cwd = patch.cwd.clone();
+        }
+        if patch.url.is_some() {
+            self.url = patch.url.clone();
+        }
+        if patch.timeout_ms.is_some() {
+            self.timeout_ms = patch.timeout_ms;
+        }
+        self.env.extend(tag_values(id, "env", patch.env.iter(), kind)?);
+        self.headers.extend(tag_values(id, "headers", patch.headers.iter(), kind)?);
+        Ok(())
+    }
+
+    /// True once the transport-required field is present.
+    pub(super) fn is_complete(&self) -> bool {
+        match self.transport {
+            McpTransportToml::Stdio => {
+                self.command.as_deref().is_some_and(|command| !command.trim().is_empty())
             }
-            Ok(McpServerSettings::Stdio {
-                command: command.to_owned(),
-                args: server.args.clone().unwrap_or_default(),
-                env: server.env.clone(),
-                cwd: server.cwd.clone(),
-            })
-        }
-        McpTransportToml::StreamableHttp => {
-            let url = validate_mcp_url(server.url.as_deref().unwrap_or_default())?;
-            Ok(McpServerSettings::StreamableHttp {
-                url,
-                headers: server.headers.clone(),
-                timeout_ms: server.timeout_ms.unwrap_or(DEFAULT_MCP_HTTP_TIMEOUT_MS),
-            })
+            McpTransportToml::StreamableHttp => {
+                self.url.as_deref().is_some_and(|url| !url.trim().is_empty())
+            }
         }
     }
+
+    /// Resolves the accumulated entry into effective settings. Reference
+    /// grammar is revalidated here so a programmatically built entry can
+    /// never bypass config-file validation.
+    pub(super) fn resolve(self, id: &str) -> Result<McpServerSettings, String> {
+        match self.transport {
+            McpTransportToml::Stdio => {
+                let command = self.command.as_deref().unwrap_or_default().trim();
+                if command.is_empty() {
+                    return Err(String::from("mcp stdio server command must not be empty"));
+                }
+                validate_reference_values(id, "env", &self.env, false)?;
+                Ok(McpServerSettings::Stdio {
+                    command: command.to_owned(),
+                    args: self.args.unwrap_or_default(),
+                    env: self.env,
+                    cwd: self.cwd,
+                })
+            }
+            McpTransportToml::StreamableHttp => {
+                let url = validate_mcp_url(self.url.as_deref().unwrap_or_default())?;
+                validate_reference_values(id, "headers", &self.headers, true)?;
+                Ok(McpServerSettings::StreamableHttp {
+                    url,
+                    headers: self.headers,
+                    timeout_ms: self.timeout_ms.unwrap_or(DEFAULT_MCP_HTTP_TIMEOUT_MS),
+                })
+            }
+        }
+    }
+}
+
+/// Tags one layer's raw env/header values with provenance. System layers can
+/// never reference secrets.
+fn tag_values<'a>(
+    id: &str,
+    table: &str,
+    values: impl Iterator<Item = (&'a String, &'a String)>,
+    kind: ConfigLayerKind,
+) -> Result<BTreeMap<String, ConfigSecretValue>, String> {
+    let mut tagged = BTreeMap::new();
+    for (key, raw) in values {
+        if kind == ConfigLayerKind::System && crate::secrets::is_secret_reference_text(raw) {
+            return Err(format!(
+                "secret references are not allowed in system config layers, \
+                 but mcp.servers.{id}.{table}.{key} comes from {} config",
+                kind.label()
+            ));
+        }
+        tagged.insert(key.clone(), ConfigSecretValue::new(kind, raw.clone()));
+    }
+    Ok(tagged)
+}
+
+/// Validates reference grammar for one resolved env/header table.
+fn validate_reference_values(
+    id: &str,
+    table: &str,
+    values: &BTreeMap<String, ConfigSecretValue>,
+    allow_embedded: bool,
+) -> Result<(), String> {
+    for (key, value) in values {
+        crate::secrets::resolve::validate_secret_value(&value.raw, allow_embedded).map_err(
+            |error| format!("invalid secret reference in mcp.servers.{id}.{table}.{key}: {error}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// Parses and validates an `http(s)` MCP endpoint URL.
@@ -116,8 +227,9 @@ pub(super) fn validate_mcp_url(raw_url: &str) -> Result<String, String> {
 
 /// Shape-only validation for one raw `[mcp.servers.<id>]` entry at file
 /// validation time. Required transport fields are NOT enforced here: a layer
-/// may carry only a patch (for example the user-layer secret env/headers
-/// written by the setup wizard) that a higher-priority layer completes.
+/// may carry only a patch that a higher-priority layer completes.
+/// `secret://` grammar IS validated for env values (exact references) and
+/// header values (exact references or templates embedding one token).
 pub(super) fn validate_mcp_server_shape(id: &str, server: &McpServerToml) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err(String::from("mcp server id must not be empty"));
@@ -127,14 +239,26 @@ pub(super) fn validate_mcp_server_shape(id: &str, server: &McpServerToml) -> Res
     {
         validate_mcp_url(raw_url)?;
     }
+    for (key, value) in &server.env {
+        crate::secrets::resolve::validate_secret_value(value, false).map_err(|error| {
+            format!("invalid secret reference in mcp.servers.{id}.env.{key}: {error}")
+        })?;
+    }
+    for (key, value) in &server.headers {
+        crate::secrets::resolve::validate_secret_value(value, true).map_err(|error| {
+            format!("invalid secret reference in mcp.servers.{id}.headers.{key}: {error}")
+        })?;
+    }
     Ok(())
 }
 
 /// Field-level merge of a higher-priority raw patch onto an already-resolved
 /// lower-layer server. Used when both layers carry the same transport.
 pub(super) fn merge_mcp_server_onto(
+    id: &str,
     existing: McpServerSettings,
     patch: &McpServerToml,
+    kind: ConfigLayerKind,
 ) -> Result<McpServerSettings, String> {
     match existing {
         McpServerSettings::Stdio { command, args, env, cwd } => {
@@ -147,11 +271,12 @@ pub(super) fn merge_mcp_server_onto(
                 .unwrap_or(command);
             let args = patch.args.clone().unwrap_or(args);
             let mut env = env;
-            env.extend(patch.env.iter().map(|(key, value)| (key.clone(), value.clone())));
+            env.extend(tag_values(id, "env", patch.env.iter(), kind)?);
             let cwd = patch.cwd.clone().or(cwd);
             if command.trim().is_empty() {
                 Err(String::from("mcp stdio server command must not be empty"))
             } else {
+                validate_reference_values(id, "env", &env, false)?;
                 Ok(McpServerSettings::Stdio { command, args, env, cwd })
             }
         }
@@ -161,41 +286,10 @@ pub(super) fn merge_mcp_server_onto(
                 _ => url,
             };
             let mut headers = headers;
-            headers.extend(patch.headers.iter().map(|(key, value)| (key.clone(), value.clone())));
+            headers.extend(tag_values(id, "headers", patch.headers.iter(), kind)?);
             let timeout_ms = patch.timeout_ms.unwrap_or(timeout_ms);
+            validate_reference_values(id, "headers", &headers, true)?;
             Ok(McpServerSettings::StreamableHttp { url, headers, timeout_ms })
-        }
-    }
-}
-
-/// Raw-level merge of two partial entries from different layers (patch wins
-/// per field, env/headers union).
-pub(super) fn merge_mcp_server_toml(base: &McpServerToml, patch: &McpServerToml) -> McpServerToml {
-    let mut env = base.env.clone();
-    env.extend(patch.env.clone());
-    let mut headers = base.headers.clone();
-    headers.extend(patch.headers.clone());
-    McpServerToml {
-        transport: patch.transport,
-        command: patch.command.clone().or_else(|| base.command.clone()),
-        args: patch.args.clone().or_else(|| base.args.clone()),
-        env,
-        cwd: patch.cwd.clone().or_else(|| base.cwd.clone()),
-        url: patch.url.clone().or_else(|| base.url.clone()),
-        headers,
-        timeout_ms: patch.timeout_ms.or(base.timeout_ms),
-    }
-}
-
-/// True when the entry is a split-layer patch missing the transport-required
-/// field; such entries park in `McpSettings::partial` instead of warning.
-pub(super) fn is_partial_patch(server: &McpServerToml) -> bool {
-    match server.transport {
-        McpTransportToml::Stdio => {
-            server.command.as_deref().map(str::trim).is_none_or(str::is_empty)
-        }
-        McpTransportToml::StreamableHttp => {
-            server.url.as_deref().map(str::trim).is_none_or(str::is_empty)
         }
     }
 }
@@ -216,7 +310,10 @@ pub(super) fn mcp_settings_to_toml(mcp: &McpSettings) -> Option<McpToml> {
                         transport: McpTransportToml::Stdio,
                         command: Some(command.clone()),
                         args: Some(args.clone()),
-                        env: env.clone(),
+                        env: env
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.raw.clone()))
+                            .collect(),
                         cwd: cwd.clone(),
                         url: None,
                         headers: BTreeMap::new(),
@@ -230,7 +327,10 @@ pub(super) fn mcp_settings_to_toml(mcp: &McpSettings) -> Option<McpToml> {
                             env: BTreeMap::new(),
                             cwd: None,
                             url: Some(url.clone()),
-                            headers: headers.clone(),
+                            headers: headers
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.raw.clone()))
+                                .collect(),
                             timeout_ms: Some(*timeout_ms),
                         }
                     }
@@ -344,74 +444,6 @@ pub(super) fn write_mcp_server_with_env(
         let value = toml::Value::try_from(server)
             .map_err(|error| format!("cannot serialize mcp server `{id}`: {error}"))?;
         servers.insert(id.to_owned(), value);
-        Ok(())
-    })
-}
-
-#[cfg(feature = "agents")]
-/// Writes only secret env/headers for a server into the user config layer as
-/// a split-layer patch (transport plus the secret tables). The higher-priority
-/// workspace layer supplies the operational fields; merge completes the entry.
-pub(crate) fn write_mcp_server_user_partial(
-    id: &str,
-    transport: McpTransportToml,
-    env: &BTreeMap<String, String>,
-    headers: &BTreeMap<String, String>,
-) -> Result<PathBuf, String> {
-    write_mcp_server_user_partial_with_env(
-        id,
-        transport,
-        env,
-        headers,
-        &ConfigEnvironment::from_process(),
-    )
-}
-
-#[cfg(feature = "agents")]
-pub(super) fn write_mcp_server_user_partial_with_env(
-    id: &str,
-    transport: McpTransportToml,
-    env: &BTreeMap<String, String>,
-    headers: &BTreeMap<String, String>,
-    env_ctx: &ConfigEnvironment,
-) -> Result<PathBuf, String> {
-    mutate_config_at_scope(ConfigScope::Global, env_ctx, |root| {
-        let mcp = ensure_named_table(root, "mcp", "mcp")?;
-        let servers = ensure_named_table(mcp, "servers", "mcp.servers")?;
-        let existing = servers
-            .entry(id.to_owned())
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let table = match existing {
-            toml::Value::Table(table) => table,
-            _ => {
-                return Err(format!(
-                    "config key `mcp.servers.{id}` already exists and is not table"
-                ));
-            }
-        };
-        table.insert(
-            String::from("transport"),
-            toml::Value::String(
-                match transport {
-                    McpTransportToml::Stdio => "stdio",
-                    McpTransportToml::StreamableHttp => "streamable_http",
-                }
-                .to_owned(),
-            ),
-        );
-        if !env.is_empty() {
-            let env_table = ensure_named_table(table, "env", &format!("mcp.servers.{id}.env"))?;
-            for (name, value) in env {
-                env_table.insert(name.clone(), toml::Value::String(value.clone()));
-            }
-        }
-        if !headers.is_empty() {
-            let headers_table =
-                ensure_named_table(table, "headers", &format!("mcp.servers.{id}.headers"))?;
-            for (name, value) in headers {
-                headers_table.insert(name.clone(), toml::Value::String(value.clone()));
-            }
-        }
         Ok(())
     })
 }

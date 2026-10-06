@@ -12,18 +12,16 @@ use super::super::*;
 use crate::app::agents_mcp::ProxyRoute;
 
 use crate::policy::{
-    BoundedRuleCandidate, CommandRule, DecisionReason, FilesystemRule, HostMatchMode, MatchMode,
-    McpDenyRule, NetworkRule, OperationIdentity, PathPrefix, ToolRule, ToolRuleIdentity,
-    TrustCategory, TrustDecision, TrustEffect, TrustOperation, TrustOutcome, TrustRule,
-    TrustRuleScope, WriteOperationKind, WriteRule, generate_command_rule_id,
-    generate_filesystem_rule_id, generate_mcp_rule_id, generate_network_rule_id,
-    generate_tool_rule_id, generate_write_rule_id,
+    CommandRule, DecisionReason, FilesystemRule, HostMatchMode, MatchMode, McpDenyRule,
+    NetworkRule, OperationIdentity, PathPrefix, ToolRule, ToolRuleIdentity, TrustCategory,
+    TrustDecision, TrustEffect, TrustOperation, TrustOutcome, TrustRule, TrustRuleScope,
+    WriteOperationKind, WriteRule, generate_command_rule_id, generate_filesystem_rule_id,
+    generate_mcp_rule_id, generate_network_rule_id, generate_tool_rule_id, generate_write_rule_id,
 };
 
 use super::app_web::{NEXT_WEB_LIFECYCLE_ID, web_context_agent_error};
 use super::approval::{
-    ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation,
-    PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_OPTION_LABEL, PersistentDenyCandidate,
+    ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation, PersistentDenyCandidate,
     WebApprovalCall, WorkspaceMemoryApprovalOperation, WorkspaceMemoryApprovalTarget,
     approval_fingerprint,
 };
@@ -98,237 +96,6 @@ impl App {
                 cancellation,
                 reply,
             ));
-        }
-    }
-
-    fn attach_bounded_allows(&self, prompt: &mut ApprovalPrompt, operation: &TrustOperation) {
-        prompt.options.retain(|(_, choice)| {
-            !matches!(
-                choice,
-                ApprovalChoice::AllowPersistent
-                    | ApprovalChoice::AllowPersistentShort
-                    | ApprovalChoice::AllowPersistentPrefix(_)
-                    | ApprovalChoice::AllowPersistentPrefixShort(_)
-            )
-        });
-        prompt.allow_candidates.clear();
-        let now = self.trust_clock.now();
-        let agent = prompt.agent_id.as_deref();
-        let mut candidates = Vec::new();
-        match &prompt.kind {
-            ApprovalKind::TerminalCreate { request } => {
-                let Ok(invocation) = self.command_invocation_for_request(request) else {
-                    return;
-                };
-                if let Ok(candidate) = BoundedRuleCandidate::command_exact(&invocation, agent, now)
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistent,
-                        PERSISTENT_TERMINAL_OPTION_LABEL.to_string(),
-                        candidate,
-                    ));
-                }
-                if let Ok(candidate) =
-                    BoundedRuleCandidate::command_exact_short(&invocation, agent, now)
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistentShort,
-                        "Allow for 10 minutes / 5 uses".to_string(),
-                        candidate,
-                    ));
-                }
-                // Offer two deliberate token boundaries at most: first argument
-                // and full argv. This keeps scope selection explicit without
-                // allowing long requests to hide approval controls.
-                if !invocation.argv.is_empty() {
-                    for argument_count in [1, invocation.argv.len()] {
-                        if argument_count == invocation.argv.len()
-                            && argument_count == 1
-                            && candidates.iter().any(|(choice, _, _)| {
-                                *choice == ApprovalChoice::AllowPersistentPrefix(1)
-                            })
-                        {
-                            continue;
-                        }
-                        if let Ok(candidate) = BoundedRuleCandidate::command_prefix(
-                            &invocation,
-                            agent,
-                            argument_count,
-                            now,
-                        ) {
-                            candidates.push((
-                                ApprovalChoice::AllowPersistentPrefix(argument_count),
-                                format!(
-                                    "Allow prefix through argument {argument_count} for 1 hour / 20 uses"
-                                ),
-                                candidate,
-                            ));
-                        }
-                        if let Ok(candidate) = BoundedRuleCandidate::command_prefix_short(
-                            &invocation,
-                            agent,
-                            argument_count,
-                            now,
-                        ) {
-                            candidates.push((
-                                ApprovalChoice::AllowPersistentPrefixShort(argument_count),
-                                format!(
-                                    "Allow prefix through argument {argument_count} for 10 minutes / 5 uses"
-                                ),
-                                candidate,
-                            ));
-                        }
-                    }
-                }
-            }
-            ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. }
-                if prompt.mcp.is_some() =>
-            {
-                if let Some(invocation) = prompt.mcp.as_ref()
-                    && let Ok(candidate) = BoundedRuleCandidate::mcp_exact(invocation, agent, now)
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistent,
-                        PERSISTENT_TERMINAL_OPTION_LABEL.to_string(),
-                        candidate,
-                    ));
-                }
-                if let Some(invocation) = prompt.mcp.as_ref()
-                    && let Ok(candidate) =
-                        BoundedRuleCandidate::mcp_exact_short(invocation, agent, now)
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistentShort,
-                        "Allow for 10 minutes / 5 uses".to_string(),
-                        candidate,
-                    ));
-                }
-            }
-            ApprovalKind::Write { path, content, expectation, .. } => {
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_single_write_rule_shape(path, content, expectation)
-                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix(
-                        operation.workspace,
-                        agent,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistent,
-                        PERSISTENT_WRITE_OPTION_LABEL.to_string(),
-                        candidate,
-                    ));
-                }
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_single_write_rule_shape(path, content, expectation)
-                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix_short(
-                        operation.workspace,
-                        agent,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistentShort,
-                        "Allow for 10 minutes / 1 use".to_string(),
-                        candidate,
-                    ));
-                }
-            }
-            ApprovalKind::WriteBatch { writes, .. } => {
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_batch_write_rule_shape(writes)
-                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix(
-                        operation.workspace,
-                        agent,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistent,
-                        PERSISTENT_WRITE_OPTION_LABEL.to_string(),
-                        candidate,
-                    ));
-                }
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_batch_write_rule_shape(writes)
-                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix_short(
-                        operation.workspace,
-                        agent,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistentShort,
-                        "Allow for 10 minutes / 1 use".to_string(),
-                        candidate,
-                    ));
-                }
-            }
-            ApprovalKind::Network { .. } => {
-                if let OperationIdentity::Network { scheme, host, port, method, browser_action } =
-                    &operation.identity
-                    && let Ok(candidate) = BoundedRuleCandidate::network_exact_read(
-                        operation.workspace,
-                        agent,
-                        *scheme,
-                        host.clone(),
-                        *port,
-                        *method,
-                        *browser_action,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistent,
-                        "Allow exact host for 1 hour / 20 uses".to_string(),
-                        candidate,
-                    ));
-                }
-                if let OperationIdentity::Network { scheme, host, port, method, browser_action } =
-                    &operation.identity
-                    && let Ok(candidate) = BoundedRuleCandidate::network_exact_read_short(
-                        operation.workspace,
-                        agent,
-                        *scheme,
-                        host.clone(),
-                        *port,
-                        *method,
-                        *browser_action,
-                        now,
-                    )
-                {
-                    candidates.push((
-                        ApprovalChoice::AllowPersistentShort,
-                        "Allow exact host for 10 minutes / 5 uses".to_string(),
-                        candidate,
-                    ));
-                }
-            }
-            ApprovalKind::Filesystem { .. } | ApprovalKind::WorkspaceMemoryApproval { .. } => {}
-        }
-        for (choice, label, candidate) in candidates {
-            prompt.options.push((label, choice));
-            prompt.allow_candidates.push((choice, candidate));
         }
     }
 
@@ -523,7 +290,7 @@ impl App {
     pub(super) fn request_web_approval(&mut self, mut prompt: ApprovalPrompt) {
         let fingerprint = approval_fingerprint(&prompt.kind);
         let operation = self.trust_operation_for_prompt(&prompt);
-        self.attach_bounded_allows(&mut prompt, &operation);
+        self.attach_always_allows(&mut prompt, &operation);
         self.attach_persistent_deny(&mut prompt, &operation);
         let decision = self.evaluate_operation(&operation, &prompt.session_id, &fingerprint);
         self.mark_mandatory_confirmation(&mut prompt, &operation, &decision);
@@ -704,7 +471,7 @@ impl App {
         let fingerprint = approval_fingerprint(&prompt.kind);
         let operation = self.trust_operation_for_prompt(&prompt);
         let safeguard = self.built_in_safeguard_for_prompt(&prompt);
-        self.attach_bounded_allows(&mut prompt, &operation);
+        self.attach_always_allows(&mut prompt, &operation);
         self.attach_persistent_deny(&mut prompt, &operation);
         let mut decision = self.evaluate_operation_with_safeguard(
             &operation,
@@ -847,10 +614,8 @@ impl App {
             !matches!(
                 choice,
                 ApprovalChoice::AllowSession
-                    | ApprovalChoice::AllowPersistent
-                    | ApprovalChoice::AllowPersistentShort
-                    | ApprovalChoice::AllowPersistentPrefix(_)
-                    | ApprovalChoice::AllowPersistentPrefixShort(_)
+                    | ApprovalChoice::AllowAlways
+                    | ApprovalChoice::AllowAlwaysPrefix(_)
             )
         });
         prompt.allow_candidates.clear();

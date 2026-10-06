@@ -1,17 +1,20 @@
 //! Interactive `[mcp.servers]` setup: add or remove servers across the
 //! workspace/user config layers.
 //!
-//! Secret env/header values never enter the workspace config layer: they are
-//! written to the user config layer as split-layer patches (transport plus the
-//! secret tables) that the workspace server definition completes at merge.
+//! Values flagged as secrets are stored in the host-bound encrypted secrets
+//! store; config carries only their `secret://` references. Workspace-layer
+//! references resolve only for a trusted workspace (EOF-safe: user-layer
+//! values always resolve).
 
 use std::collections::BTreeMap;
 
 use crate::config::{self, ConfigScope, McpServerToml, McpTransportToml};
+use crate::secrets::{SecretName, SecretReference, SecretStore};
 use crate::setup_prompt::{
     confirm, prompt_line, prompt_value, read_hidden_value, validate_env_name, validate_header_name,
     validate_server_name,
 };
+use zeroize::Zeroizing;
 
 /// One prompted key/value pair with its secret flag.
 struct PromptedValue {
@@ -78,7 +81,7 @@ fn add_server(scope: ConfigScope) -> Result<(), String> {
             _ => eprintln!("Enter 1 or 2."),
         }
     };
-    let (server, secret_env, secret_headers) = match transport {
+    let (server, stored_secrets) = match transport {
         McpTransportToml::Stdio => {
             let command = prompt_value("Command", None, true)?
                 .ok_or_else(|| String::from("missing command"))?;
@@ -86,28 +89,19 @@ fn add_server(scope: ConfigScope) -> Result<(), String> {
                 .unwrap_or_default();
             let args = args.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
             let env = prompt_pairs("Env var name", validate_env_name, "environment variable")?;
-            let mut secret_env = BTreeMap::new();
-            let mut public_env = BTreeMap::new();
-            for (name, value) in env {
-                if value.secret {
-                    secret_env.insert(name, value.value);
-                } else {
-                    public_env.insert(name, value.value);
-                }
-            }
+            let (env, stored) = store_secret_values(&id, "env", env)?;
             (
                 McpServerToml {
                     transport: McpTransportToml::Stdio,
                     command: Some(command),
                     args: Some(args),
-                    env: public_env,
+                    env,
                     cwd: None,
                     url: None,
                     headers: BTreeMap::new(),
                     timeout_ms: None,
                 },
-                secret_env,
-                BTreeMap::new(),
+                stored,
             )
         }
         McpTransportToml::StreamableHttp => {
@@ -118,15 +112,7 @@ fn add_server(scope: ConfigScope) -> Result<(), String> {
                 .parse::<u64>()
                 .map_err(|_| String::from("timeout must be a number of milliseconds"))?;
             let headers = prompt_pairs("Header name", validate_header_name, "header")?;
-            let mut secret_headers = BTreeMap::new();
-            let mut public_headers = BTreeMap::new();
-            for (name, value) in headers {
-                if value.secret {
-                    secret_headers.insert(name, value.value);
-                } else {
-                    public_headers.insert(name, value.value);
-                }
-            }
+            let (headers, stored) = store_secret_values(&id, "headers", headers)?;
             (
                 McpServerToml {
                     transport: McpTransportToml::StreamableHttp,
@@ -135,26 +121,58 @@ fn add_server(scope: ConfigScope) -> Result<(), String> {
                     env: BTreeMap::new(),
                     cwd: None,
                     url: Some(url),
-                    headers: public_headers,
+                    headers,
                     timeout_ms: Some(timeout_ms),
                 },
-                BTreeMap::new(),
-                secret_headers,
+                stored,
             )
         }
     };
 
     let written = config::write_mcp_server(scope, &id, &server)?;
     println!("Added mcp server `{id}` to {}.", written.display());
-    if scope == ConfigScope::Local && (!secret_env.is_empty() || !secret_headers.is_empty()) {
-        let user_path =
-            config::write_mcp_server_user_partial(&id, transport, &secret_env, &secret_headers)?;
+    if stored_secrets != 0 && scope == ConfigScope::Local {
         println!(
-            "Stored mcp secrets for `{id}` in {} (user config; workspace config stays clean).",
-            user_path.display()
+            "Stored {stored_secrets} secret value(s) in the encrypted store; workspace config \
+             carries only `secret://` references, which resolve after the workspace is trusted."
         );
     }
     Ok(())
+}
+
+/// Stores secret-flagged values in the encrypted secrets store and returns
+/// the config values (references for secrets, literals otherwise) plus the
+/// number of stored secrets. Fails before any config write on store errors.
+fn store_secret_values(
+    server_id: &str,
+    table: &str,
+    prompted: BTreeMap<String, PromptedValue>,
+) -> Result<(BTreeMap<String, String>, usize), String> {
+    let store = if prompted.values().any(|value| value.secret) {
+        Some(
+            SecretStore::default()
+                .map_err(|error| format!("cannot open encrypted secrets store: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let mut values = BTreeMap::new();
+    let mut stored = 0;
+    for (name, value) in prompted {
+        if !value.secret {
+            values.insert(name, value.value);
+            continue;
+        }
+        let secret_name = SecretName::new(&format!("mcp.{server_id}.{table}.{name}"))
+            .map_err(|error| format!("cannot store `{name}` as a secret: {error}"))?;
+        let store = store.as_ref().ok_or_else(|| String::from("secrets store unavailable"))?;
+        store
+            .set(&secret_name, &Zeroizing::new(value.value))
+            .map_err(|error| format!("cannot store secret `{name}`: {error}"))?;
+        values.insert(name, SecretReference::from_name(secret_name).to_string());
+        stored += 1;
+    }
+    Ok((values, stored))
 }
 
 /// Prompts for repeated `name → value` pairs; an empty name finishes.
@@ -219,17 +237,87 @@ fn remove_server(
         let user_path = config::remove_mcp_server(ConfigScope::Global, id)?;
         println!("Removed user-layer mcp entries for `{id}` from {}.", user_path.display());
     }
+    report_orphaned_secrets(id);
     Ok(())
+}
+
+/// Prints the vault entries this wizard created for `server_id` when no config
+/// layer defines the server anymore. Never deletes: removing stored values
+/// stays an explicit `ee do secrets delete <name>`. Best-effort: store or
+/// config errors stay silent because the config removal already succeeded.
+fn report_orphaned_secrets(server_id: &str) {
+    let still_configured = [ConfigScope::Local, ConfigScope::Global].iter().any(|scope| {
+        config::list_mcp_servers(*scope)
+            .map(|servers| servers.iter().any(|(id, _)| id == server_id))
+            // On a config read error stay quiet instead of claiming orphaned.
+            .unwrap_or(true)
+    });
+    if still_configured {
+        return;
+    }
+    let Ok(store) = SecretStore::default() else {
+        return;
+    };
+    let names = orphaned_secret_names(&store, server_id);
+    if names.is_empty() {
+        return;
+    }
+    println!("Stored secret(s) for `{server_id}` are no longer referenced by any config layer:");
+    for name in names {
+        println!("  ee do secrets delete {name}");
+    }
+}
+
+/// Names in `mcp.<server_id>.` namespace, sorted. Server ids cannot contain
+/// `.`, so the trailing dot makes the namespace exact.
+fn orphaned_secret_names(store: &SecretStore, server_id: &str) -> Vec<String> {
+    let prefix = format!("mcp.{server_id}.");
+    let Ok(names) = store.list() else {
+        return Vec::new();
+    };
+    let mut orphaned = names
+        .into_iter()
+        .map(|name| name.to_string())
+        .filter(|name| name.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    orphaned.sort();
+    orphaned
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::test_support::{StoredKeychain, test_binding};
 
     #[test]
     fn prompted_env_names_use_env_rule_and_headers_use_token_rule() {
         assert!(validate_env_name("API_KEY"));
         assert!(!validate_header_name("Bearer: abc"), "colon is not a header token");
         assert!(validate_header_name("X-API-Key"));
+    }
+
+    #[test]
+    fn orphaned_secret_names_match_only_the_removed_server_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SecretStore::new(
+            Box::new(StoredKeychain::new()),
+            test_binding(),
+            temp.path().join("vault.json"),
+        );
+        for name in [
+            "mcp.github.env.GITHUB_TOKEN",
+            "mcp.github.headers.Authorization",
+            "mcp.github-tools.env.TOKEN",
+            "mcp.other.env.TOKEN",
+            "agent.github.KEY",
+        ] {
+            store.set(&SecretName::new(name).unwrap(), &Zeroizing::new(String::from("v"))).unwrap();
+        }
+
+        assert_eq!(
+            orphaned_secret_names(&store, "github"),
+            ["mcp.github.env.GITHUB_TOKEN", "mcp.github.headers.Authorization"]
+        );
+        assert!(orphaned_secret_names(&store, "absent").is_empty());
     }
 }

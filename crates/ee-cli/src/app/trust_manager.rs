@@ -93,7 +93,7 @@ impl App {
         for (effect, heading) in [
             (crate::policy::TrustEffect::Deny, "persistent deny"),
             (crate::policy::TrustEffect::Confirm, "mandatory confirm"),
-            (crate::policy::TrustEffect::Allow, "bounded allow"),
+            (crate::policy::TrustEffect::Allow, "always allow"),
         ] {
             lines.push(format!("[{heading}]"));
             lines.extend(

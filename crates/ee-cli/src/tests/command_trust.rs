@@ -421,12 +421,12 @@ fn set_owner_only(_path: &Path) {}
 mod e2e {
     use super::*;
     use crate::app::App;
-    use crate::app::{ApprovalChoice, PERSISTENT_TERMINAL_MAX_USES};
+    use crate::app::ApprovalChoice;
     use crate::tests::agent_mcp::{
         base_agent_script, connect_proxy, mcp_app, open_pane_and_wait_ready, press, proxy_recv,
         proxy_send, wait_until,
     };
-    use crate::tests::helpers::run_ex;
+    use crate::tests::helpers::{CurrentDirGuard, run_ex};
     use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::{Value, json};
 
@@ -514,12 +514,21 @@ mod e2e {
     }
 
     #[test]
-    fn persistent_option_creates_and_activates_host_local_rule() {
+    fn always_allow_option_creates_and_activates_host_local_rule() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        // The always-allow trust gate resolves the workspace from the process
+        // cwd; pin it to the fixture workspace before recording the decision.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        crate::workspace_trust::WorkspaceTrustStore::at(&state_dir, temp.path())
+            .expect("workspace trust store")
+            .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
+            .expect("trusted decision");
 
         let mut stream = connect_proxy(&app);
         proxy_send(&mut stream, 1, terminal_frame("git", json!(["status"])));
@@ -528,14 +537,16 @@ mod e2e {
             let prompt = app.agents.approvals.front().unwrap();
             assert_eq!(
                 prompt.options.len(),
-                9,
-                "default/short exact, prefix, and deny persistence offered"
+                7,
+                "exact always-allow, deduped prefix, and deny persistence offered"
             );
-            assert_eq!(prompt.options[4].0, "Allow for 1 hour / 20 uses");
-            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowPersistent);
-            assert_eq!(prompt.options[6].1, ApprovalChoice::AllowPersistentPrefix(1));
+            assert_eq!(prompt.options[4].0, "Allow always");
+            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
+            assert_eq!(prompt.options[5].0, "Allow always: prefix through argument 1");
+            assert_eq!(prompt.options[5].1, ApprovalChoice::AllowAlwaysPrefix(1));
+            assert_eq!(prompt.options[6].1, ApprovalChoice::DenyPersistent);
         }
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
+        open_pane_and_select(&mut app, 4); // Allow always (exact)
 
         wait_until(&mut app, "rule persisted and terminal spawned", |app| {
             app.agents.terminals.tracked_count() == 1
@@ -555,42 +566,36 @@ mod e2e {
         assert_eq!(rule.executable, "git");
         assert_eq!(rule.argv, vec!["status".to_string()]);
         assert_eq!(rule.match_mode, MatchMode::ArgvExact);
-        assert_eq!(rule.scope.max_uses, Some(PERSISTENT_TERMINAL_MAX_USES));
-        assert_eq!(rule.scope.agent, None, "proxy session is not agent-scoped");
-        let expiry = rule.scope.expires_at.expect("expiry");
-        let now = app.trust_clock.now();
-        assert!(expiry > now + Duration::from_secs(59 * 60), "expiry ~1h ahead");
-        assert!(expiry < now + Duration::from_secs(61 * 60), "expiry ~1h ahead");
-        let used = app.agents.usage_ledger.used(
-            ledger_workspace(&state_dir, temp.path()),
-            "proxy",
-            &rule.id,
-        );
-        assert_eq!(used, 1, "the creating dispatch consumes one use");
+        assert_eq!(rule.scope.expires_at, None, "always-allow rules never expire");
+        assert_eq!(rule.scope.max_uses, None, "always-allow rules carry no use budget");
+        assert_eq!(rule.scope.agent, None, "workspace-wide, not agent-scoped");
         let _ = proxy_recv(&mut stream);
 
         // The persisted rule activates immediately: identical request
-        // auto-allows with no prompt and consumes the second use.
+        // auto-allows with no prompt.
         proxy_send(&mut stream, 2, terminal_frame("git", json!(["status"])));
         wait_until(&mut app, "second trusted terminal spawned", |app| {
             app.agents.terminals.tracked_count() == 2 && app.agents.approvals.is_empty()
         });
-        assert_eq!(
-            app.agents.usage_ledger.used(
-                ledger_workspace(&state_dir, temp.path()),
-                "proxy",
-                &rule.id
-            ),
-            2
-        );
         let _ = proxy_recv(&mut stream);
     }
 
     #[test]
-    fn shell_wrapper_and_external_cwd_requests_never_offer_persistent() {
+    fn shell_wrapper_and_external_cwd_requests_never_offer_always_allow() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
-        app.agents.test_trust_store_base = Some(temp.path().join("state"));
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        app.agents.test_trust_store_base = Some(state_dir.clone());
+        // The always-allow trust gate resolves the workspace from the process
+        // cwd; pin it to the fixture workspace before recording the decision.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        crate::workspace_trust::WorkspaceTrustStore::at(&state_dir, temp.path())
+            .expect("workspace trust store")
+            .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
+            .expect("trusted decision");
 
         let mut stream = connect_proxy(&app);
         proxy_send(&mut stream, 1, terminal_frame("sh", json!(["-c", "echo hi"])));
@@ -598,7 +603,13 @@ mod e2e {
         {
             let prompt = app.agents.approvals.front().unwrap();
             assert_eq!(prompt.options.len(), 5, "shell wrapper offers deny only");
-            assert!(prompt.options.iter().all(|(label, _)| !label.contains("1 hour")));
+            assert!(
+                !prompt.options.iter().any(|(_, choice)| matches!(
+                    choice,
+                    ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
+                )),
+                "shell wrapper never offers always-allow"
+            );
             assert!(prompt.options.iter().any(|(label, choice)| {
                 label == "Deny for this workspace" && *choice == ApprovalChoice::DenyPersistent
             }));
@@ -607,7 +618,7 @@ mod e2e {
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
         let _ = proxy_recv(&mut stream);
 
-        // External cwd: prompt-only, no persistent option.
+        // External cwd: prompt-only, no always-allow option.
         let outside = TempDir::new().unwrap();
         proxy_send(
             &mut stream,
@@ -624,7 +635,14 @@ mod e2e {
         });
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 4, "external cwd never offers persistent");
+            assert_eq!(prompt.options.len(), 4, "external cwd never offers always-allow");
+            assert!(
+                !prompt.options.iter().any(|(_, choice)| matches!(
+                    choice,
+                    ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
+                )),
+                "external cwd never offers always-allow"
+            );
         }
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
         let _ = proxy_recv(&mut stream);
@@ -638,6 +656,15 @@ mod e2e {
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        // The always-allow trust gate resolves the workspace from the process
+        // cwd; pin it to the fixture workspace before recording the decision.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        crate::workspace_trust::WorkspaceTrustStore::at(&state_dir, temp.path())
+            .expect("workspace trust store")
+            .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
+            .expect("trusted decision");
         // Create the store (and its 0700 trust directory) first.
         seed_rule(&state_dir, temp.path(), "git", &["diff"], 20);
 
@@ -661,7 +688,7 @@ mod e2e {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&trust_dir, fs::Permissions::from_mode(0o500)).unwrap();
         }
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
+        open_pane_and_select(&mut app, 4); // Allow always (exact)
         wait_until(&mut app, "denied reply", |app| app.agents.approvals.is_empty());
         #[cfg(unix)]
         {

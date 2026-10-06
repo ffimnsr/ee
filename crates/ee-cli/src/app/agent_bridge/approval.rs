@@ -10,13 +10,12 @@ use crate::app::agents_mcp::ProxyRoute;
 
 use crate::policy::TrustRule;
 
-// ── Policy constants ─────────────────────────────────────────────────────────
+// ── Policy constants ────────────────────────────────────────────────────────
 
-/// The persistent terminal approval option label.
-pub(crate) const PERSISTENT_TERMINAL_OPTION_LABEL: &str = "Allow for 1 hour / 20 uses";
-
-/// The persistent write approval option label.
-pub(crate) const PERSISTENT_WRITE_OPTION_LABEL: &str = "Allow for 1 hour / 5 uses";
+/// The always-allow approval option label. Always-allow rules live in the
+/// host-local workspace trust store, are workspace-wide (no agent binding),
+/// and are offered only while the workspace trust decision is `trusted`.
+pub(crate) const ALWAYS_ALLOW_LABEL: &str = "Allow always";
 
 // ── Approval prompt ──────────────────────────────────────────────────────────
 
@@ -208,14 +207,12 @@ pub(crate) enum ApprovalChoice {
     DenyOnce,
     /// Deny this and every identical operation for the rest of the session.
     DenySession,
-    /// Preview and persist the exact bounded candidate using default limits.
-    AllowPersistent,
-    /// Preview and persist the exact bounded candidate using shorter fixed limits.
-    AllowPersistentShort,
-    /// Preview and persist a command argv prefix ending at selected token boundary.
-    AllowPersistentPrefix(usize),
-    /// Preview and persist a command argv prefix using shorter fixed limits.
-    AllowPersistentPrefixShort(usize),
+    /// Preview and persist the exact operation as a workspace-wide
+    /// always-allow rule (no expiry, no use budget, trusted workspace only).
+    AllowAlways,
+    /// Preview and persist a command argv prefix ending at the selected token
+    /// boundary as a workspace-wide always-allow rule.
+    AllowAlwaysPrefix(usize),
     /// Preview and persist a narrow host-local deny rule before denying.
     DenyPersistent,
 }
@@ -227,12 +224,8 @@ impl ApprovalChoice {
             ApprovalChoice::AllowSession => "Allow session",
             ApprovalChoice::DenyOnce => "Deny",
             ApprovalChoice::DenySession => "Deny session",
-            ApprovalChoice::AllowPersistent => PERSISTENT_TERMINAL_OPTION_LABEL,
-            ApprovalChoice::AllowPersistentShort => "Allow for 10 minutes / 5 uses",
-            ApprovalChoice::AllowPersistentPrefix(_) => "Allow structured command prefix",
-            ApprovalChoice::AllowPersistentPrefixShort(_) => {
-                "Allow structured command prefix for 10 minutes"
-            }
+            ApprovalChoice::AllowAlways => ALWAYS_ALLOW_LABEL,
+            ApprovalChoice::AllowAlwaysPrefix(_) => "Allow always (token prefix)",
             ApprovalChoice::DenyPersistent => "Deny for this workspace",
         }
     }
@@ -242,10 +235,8 @@ impl ApprovalChoice {
             self,
             ApprovalChoice::AllowOnce
                 | ApprovalChoice::AllowSession
-                | ApprovalChoice::AllowPersistent
-                | ApprovalChoice::AllowPersistentShort
-                | ApprovalChoice::AllowPersistentPrefix(_)
-                | ApprovalChoice::AllowPersistentPrefixShort(_)
+                | ApprovalChoice::AllowAlways
+                | ApprovalChoice::AllowAlwaysPrefix(_)
         )
     }
 }
@@ -257,9 +248,9 @@ impl ApprovalChoice {
 /// layer and never recorded; `allow_session` / `deny_session` decisions are
 /// remembered per session, keyed by action kind and fingerprint (path for
 /// writes, command+args fingerprint for terminals), and invalidated when the
-/// session closes.  Allow-always persistence is deliberately not
-/// implemented: persistent grants live only in the host-local trust store,
-/// and the option does not exist at the schema level.
+/// session closes.  Always-allow persistence is separate from session state:
+/// grants live only in the host-local trust store and are reused by matcher,
+/// never recorded as session decisions.
 pub(crate) use crate::policy::session::{SessionChoice, SessionPolicy as ApprovalPolicy};
 
 /// Fingerprint for one approval operation: action kind + stable identity.
@@ -299,15 +290,13 @@ pub(super) fn approval_fingerprint(kind: &ApprovalKind) -> String {
 
 /// Session-scoped counterpart of an approval choice; once-only choices are
 /// never recorded (shared precedence contract, Phase 1 foundation), and
-/// persistent grants are host-local rules, not session decisions.
+/// always-allow grants are host-local rules, not session decisions.
 pub(super) fn session_decision(choice: ApprovalChoice) -> Option<SessionChoice> {
     match choice {
         ApprovalChoice::AllowOnce
         | ApprovalChoice::DenyOnce
-        | ApprovalChoice::AllowPersistent
-        | ApprovalChoice::AllowPersistentShort
-        | ApprovalChoice::AllowPersistentPrefix(_)
-        | ApprovalChoice::AllowPersistentPrefixShort(_)
+        | ApprovalChoice::AllowAlways
+        | ApprovalChoice::AllowAlwaysPrefix(_)
         | ApprovalChoice::DenyPersistent => None,
         ApprovalChoice::AllowSession => Some(SessionChoice::Allow),
         ApprovalChoice::DenySession => Some(SessionChoice::Deny),

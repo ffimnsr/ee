@@ -18,12 +18,15 @@
 //!   in application-owned state (`$XDG_STATE_HOME/ee/trust/` on Linux), never
 //!   in repository `ee.toml`, XDG project config, system config, or
 //!   agent-provided files, and are keyed by the canonical workspace identity
-//!   digest so copying repository or trust files grants nothing.
+//!   digest so copying repository or trust files grants nothing.  Always-allow
+//!   rules are workspace-wide (no agent binding), carry no expiry or use
+//!   budget, and apply only while the host-local workspace trust decision
+//!   remains `trusted`.
 //! - `evaluate`: the pure shared evaluator.  It performs no filesystem,
 //!   process, transport, UI, clock, or counter mutation; time and usage are
 //!   injected.
 
-pub(crate) mod bounded;
+pub(crate) mod always;
 pub(crate) mod clock;
 pub(crate) mod command;
 pub(crate) mod evaluator;
@@ -47,11 +50,7 @@ use sha2::{Digest as _, Sha256};
 // Re-exports feed the approval flow (`agents` feature), bin tests, and
 // later phases; without `agents` the lib build uses none of them yet.
 #[allow(unused_imports)]
-pub(crate) use bounded::{
-    BoundedRuleCandidate, BoundedRuleKind, BoundedRulePreview, EXECUTE_GRANT_DURATION,
-    EXECUTE_GRANT_MAX_USES, NETWORK_GRANT_DURATION, NETWORK_GRANT_MAX_USES, WRITE_GRANT_DURATION,
-    WRITE_GRANT_MAX_USES,
-};
+pub(crate) use always::{AlwaysRuleCandidate, AlwaysRuleKind, AlwaysRulePreview};
 #[allow(unused_imports)]
 pub(crate) use clock::PolicyClock;
 #[allow(unused_imports)]

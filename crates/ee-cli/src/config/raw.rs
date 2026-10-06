@@ -385,9 +385,13 @@ pub(crate) struct AgentServerToml {
     pub args: Option<Vec<String>>,
     /// Environment variables for the agent subprocess. An exact
     /// `secret://<name>` value is resolved from the host-bound encrypted
-    /// secrets store (`ee do secrets`) only when the agent launches, and only
-    /// when the value comes from a user config layer (XDG or legacy user
-    /// config); system and workspace config layers cannot reference secrets.
+    /// secrets store (`ee do secrets`) only when the agent launches.
+    /// User-layer values resolve unconditionally; workspace (`Ancestor`)
+    /// values resolve only when the host-local workspace trust decision
+    /// allows it (`ee do trust`), and system-layer references are rejected.
+    /// Env values are exact-reference-only: a value that merely embeds the
+    /// prefix is rejected so a mistaken template never reaches the agent
+    /// process unresolved.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Working directory for the agent subprocess; inherits `ee` when unset.
@@ -421,6 +425,12 @@ pub(crate) struct McpServerToml {
     /// Executable invoked to start the MCP server.
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
+    /// Environment variables for the stdio server. An exact
+    /// `secret://<name>` value resolves from the host-bound encrypted
+    /// secrets store only when the server starts; workspace (`Ancestor`)
+    /// references resolve only for a trusted workspace, and system-layer
+    /// references are rejected. Env values are exact-reference-only: a value
+    /// that merely embeds the prefix is rejected.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Working directory for the MCP server; inherits `ee` when unset.
@@ -428,6 +438,11 @@ pub(crate) struct McpServerToml {
     // ── streamable_http transport fields ───────────────────────────────────
     /// Absolute `http(s)` endpoint URL of the MCP server.
     pub url: Option<String>,
+    /// HTTP headers for the streamable_http server. A header value may be an
+    /// exact `secret://<name>` reference or a template embedding exactly one
+    /// reference token (for example `Bearer secret://mcp-token`); either
+    /// resolves only when the server starts, under the same workspace trust
+    /// rule as `env`.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// Request timeout in milliseconds; defaults to 30 000.

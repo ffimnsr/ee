@@ -13,10 +13,7 @@ use super::app_search::{
     PROXY_REFERENCES_LIMIT, PROXY_RENAME_EDITS_LIMIT, PROXY_RENAME_FILES_LIMIT,
     PROXY_REVIEW_SYMBOL_FILE_LIMIT, PROXY_REVIEW_SYMBOLS_LIMIT, paths_equivalent,
 };
-use super::approval::{
-    PERSISTENT_TERMINAL_OPTION_LABEL, PreparedWrite, ProxyWriteSpec, WriteExpectation,
-    WriteReplyKind,
-};
+use super::approval::{PreparedWrite, ProxyWriteSpec, WriteExpectation, WriteReplyKind};
 use super::prompt::ApprovalPrompt;
 use super::write::{
     AgentCodeActionPayload, AgentDocumentSymbolsPayload, AgentReferencesPayload,
@@ -499,12 +496,7 @@ impl App {
                     json!({ "action_id": action_id, "path": path }),
                     route,
                 );
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(
-                    spec,
-                    mcp,
-                    Some(PERSISTENT_TERMINAL_OPTION_LABEL),
-                    reply,
-                ));
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, mcp, true, reply));
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -555,10 +547,7 @@ impl App {
                             route,
                         );
                         self.request_bridge_approval(ApprovalPrompt::proxy_write(
-                            spec,
-                            mcp,
-                            Some(PERSISTENT_TERMINAL_OPTION_LABEL),
-                            reply,
+                            spec, mcp, true, reply,
                         ));
                     }
                     Err(error) => {
@@ -642,7 +631,7 @@ impl App {
                         writes,
                         total_edits,
                         mcp,
-                        Some(PERSISTENT_TERMINAL_OPTION_LABEL),
+                        true,
                         reply,
                     ));
                 }

@@ -51,6 +51,7 @@ mod app_validation;
 mod app_web;
 mod app_write;
 mod approval;
+mod approval_always;
 mod bridge_ui;
 mod prompt;
 mod pump;
@@ -68,8 +69,8 @@ static WEB_DISPATCH_TEST_COUNT: std::sync::atomic::AtomicUsize =
 // otherwise strip them from the non-test build.
 #[allow(unused_imports)]
 pub(crate) use approval::{
-    ApprovalChoice, ApprovalPolicy, PERSISTENT_TERMINAL_OPTION_LABEL, PreparedWrite,
-    ToolApprovalMode, WriteExpectation, WriteReplyKind,
+    ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalPolicy, PreparedWrite, ToolApprovalMode,
+    WriteExpectation, WriteReplyKind,
 };
 pub(crate) use bridge_ui::{BridgeUiHandler, BridgeUiMessage};
 pub(crate) use prompt::ApprovalPrompt;

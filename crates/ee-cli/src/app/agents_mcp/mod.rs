@@ -262,39 +262,136 @@ enum McpHostCommand {
     },
     Shutdown,
 }
-pub(crate) fn mcp_forward_entries(settings: &crate::config::McpSettings) -> Vec<McpServer> {
-    let mut entries = Vec::new();
-    for (id, server) in &settings.servers {
-        match server {
-            crate::config::McpServerSettings::Stdio { command, args, env, cwd } => {
-                let mut stdio = McpServerStdio::new(id.clone(), command.clone()).args(args.clone());
-                let variables = env
+/// One MCP server with env/headers resolved for use, plus the bare secret
+/// values that must feed stderr/diagnostic redaction.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMcpServer {
+    pub(crate) id: String,
+    pub(crate) settings: crate::config::McpServerSettings,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) secrets: Vec<String>,
+}
+
+/// Resolves one MCP server's env/headers. Returns `Err` (fail closed, server
+/// skipped and reported) when references cannot resolve: missing store,
+/// denied workspace trust, malformed reference, or a missing/foreign secret.
+/// Literal-only servers never touch the store.
+fn resolve_mcp_values(
+    id: &str,
+    settings: &crate::config::McpServerSettings,
+    store: Option<&crate::secrets::SecretStore>,
+    workspace_refs: crate::secrets::resolve::WorkspaceRefPolicy,
+) -> Result<ResolvedMcpServer, String> {
+    use crate::secrets::resolve::{
+        header_value_has_reference, resolve_embedded_reference, resolve_secret_values_collect,
+    };
+
+    let mut env = BTreeMap::new();
+    let mut headers = BTreeMap::new();
+    let mut secrets = Vec::new();
+    match settings {
+        crate::config::McpServerSettings::Stdio { env: configured, .. } => {
+            if crate::secrets::resolve::mcp_server_has_references(settings) {
+                // Exact references resolve from the store; a literal that
+                // embeds the prefix fails closed instead of reaching the
+                // server as an unresolved template.
+                let Some(store) = store else {
+                    return Err(String::from("secrets store unavailable"));
+                };
+                (env, secrets) = resolve_secret_values_collect(store, configured, workspace_refs)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                env = configured
                     .iter()
-                    .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
+                    .map(|(key, value)| (key.clone(), value.raw.clone()))
                     .collect();
-                stdio = stdio.env(variables);
-                if let Some(cwd) = cwd {
-                    let mut meta = serde_json::Map::new();
-                    meta.insert(
-                        String::from("ee"),
-                        serde_json::json!({ "cwd": cwd.display().to_string() }),
-                    );
-                    stdio = stdio.meta(meta);
-                }
-                entries.push(McpServer::Stdio(stdio));
             }
-            crate::config::McpServerSettings::StreamableHttp { url, headers, .. } => {
-                let header_values = headers
-                    .iter()
-                    .map(|(name, value)| HttpHeader::new(name.clone(), value.clone()))
-                    .collect();
-                entries.push(McpServer::Http(
-                    McpServerHttp::new(id.clone(), url.clone()).headers(header_values),
-                ));
+        }
+        crate::config::McpServerSettings::StreamableHttp { headers: configured, .. } => {
+            for (key, value) in configured {
+                if header_value_has_reference(value) {
+                    let Some(store) = store else {
+                        return Err(String::from("secrets store unavailable"));
+                    };
+                    match resolve_embedded_reference(store, value, workspace_refs) {
+                        Ok(resolved) => {
+                            headers.insert(key.clone(), resolved.resolved);
+                            secrets.extend(resolved.secret);
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                } else {
+                    headers.insert(key.clone(), value.raw.clone());
+                }
             }
         }
     }
-    entries
+    Ok(ResolvedMcpServer { id: id.to_owned(), settings: settings.clone(), env, headers, secrets })
+}
+
+/// Converts one resolved server into an ACP `session/new` entry.
+fn forward_entry(server: &ResolvedMcpServer) -> McpServer {
+    match &server.settings {
+        crate::config::McpServerSettings::Stdio { command, args, cwd, .. } => {
+            let mut stdio =
+                McpServerStdio::new(server.id.clone(), command.clone()).args(args.clone());
+            let variables = server
+                .env
+                .iter()
+                .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
+                .collect();
+            stdio = stdio.env(variables);
+            if let Some(cwd) = cwd {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    String::from("ee"),
+                    serde_json::json!({ "cwd": cwd.display().to_string() }),
+                );
+                stdio = stdio.meta(meta);
+            }
+            McpServer::Stdio(stdio)
+        }
+        crate::config::McpServerSettings::StreamableHttp { url, .. } => {
+            let header_values = server
+                .headers
+                .iter()
+                .map(|(name, value)| HttpHeader::new(name.clone(), value.clone()))
+                .collect();
+            McpServer::Http(
+                McpServerHttp::new(server.id.clone(), url.clone()).headers(header_values),
+            )
+        }
+    }
+}
+
+/// Builds raw MCP settings from one resolved server for ee's own client host.
+fn raw_server_settings(server: &ResolvedMcpServer) -> ee_mcp::RawMcpServerSettings {
+    match &server.settings {
+        crate::config::McpServerSettings::Stdio { command, args, cwd, .. } => {
+            ee_mcp::RawMcpServerSettings {
+                stdio: Some(ee_mcp::RawStdioSettings {
+                    command: command.clone(),
+                    args: args.clone(),
+                    env: server.env.clone(),
+                    cwd: cwd.clone(),
+                    stderr_cap: None,
+                }),
+                streamable_http: None,
+                timeout_ms: None,
+            }
+        }
+        crate::config::McpServerSettings::StreamableHttp { url, timeout_ms, .. } => {
+            ee_mcp::RawMcpServerSettings {
+                stdio: None,
+                streamable_http: Some(ee_mcp::RawStreamableHttpSettings {
+                    url: url.clone(),
+                    headers: server.headers.clone(),
+                }),
+                timeout_ms: Some(*timeout_ms),
+            }
+        }
+    }
 }
 
 /// The stdio `ee --mcp-proxy` fallback entry for the ee proxy.
@@ -329,37 +426,6 @@ fn browse_item_from_value(kind: &McpBrowseKind, value: serde_json::Value) -> Opt
         }
     };
     Some(McpBrowseItem { label: title, insert, detail })
-}
-
-/// Builds raw MCP settings from resolved ee-cli settings.
-fn raw_server_settings(
-    settings: &crate::config::McpServerSettings,
-) -> ee_mcp::RawMcpServerSettings {
-    match settings {
-        crate::config::McpServerSettings::Stdio { command, args, env, cwd } => {
-            ee_mcp::RawMcpServerSettings {
-                stdio: Some(ee_mcp::RawStdioSettings {
-                    command: command.clone(),
-                    args: args.clone(),
-                    env: env.clone(),
-                    cwd: cwd.clone(),
-                    stderr_cap: None,
-                }),
-                streamable_http: None,
-                timeout_ms: None,
-            }
-        }
-        crate::config::McpServerSettings::StreamableHttp { url, headers, timeout_ms } => {
-            ee_mcp::RawMcpServerSettings {
-                stdio: None,
-                streamable_http: Some(ee_mcp::RawStreamableHttpSettings {
-                    url: url.clone(),
-                    headers: headers.clone(),
-                }),
-                timeout_ms: Some(*timeout_ms),
-            }
-        }
-    }
 }
 
 /// A per-run proxy socket path under the temp directory.

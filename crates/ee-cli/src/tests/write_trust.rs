@@ -114,8 +114,9 @@ fn decide(
     })
 }
 
-/// `finite` bundles the mandatory expiry and use budget; invalid-variant
-/// cases clone the base record and mutate one field.
+/// `finite` optionally bundles an expiry and use budget; `None` yields an
+/// always-allow rule. Invalid-variant cases clone the base record and mutate
+/// one field.
 #[allow(clippy::too_many_arguments)]
 fn raw_write_rule(
     id: &str,
@@ -163,9 +164,9 @@ fn write_rules_do_not_require_the_workspace_gate() {
 }
 
 #[test]
-fn write_rule_requires_finite_expiry_and_use_budget() {
+fn write_rule_allows_finite_and_always_allow_scopes() {
     let ws = identity(b"/work/root");
-    let base = raw_write_rule(
+    let finite = raw_write_rule(
         "write_1",
         WriteOperationKind::Create,
         "src/generated",
@@ -174,20 +175,24 @@ fn write_rule_requires_finite_expiry_and_use_budget() {
         16_384,
         Some(("2026-08-08T12:00:00Z", 5)),
     );
-    assert!(WriteRule::from_raw(base.clone(), ws).is_ok());
+    assert!(WriteRule::from_raw(finite.clone(), ws).is_ok(), "finite allow");
 
-    let mut no_expiry = base.clone();
-    no_expiry.id = "write_2".into();
-    no_expiry.expires_at = None;
-    assert!(WriteRule::from_raw(no_expiry, ws).is_err(), "expiry is mandatory");
+    // Always-allow write rules carry no expiry and no use budget.
+    let unbounded = raw_write_rule(
+        "write_2",
+        WriteOperationKind::Create,
+        "src/generated",
+        5,
+        65_536,
+        16_384,
+        None,
+    );
+    let unbounded = WriteRule::from_raw(unbounded, ws).expect("always-allow scope");
+    assert_eq!(unbounded.scope.expires_at, None);
+    assert_eq!(unbounded.scope.max_uses, None);
 
-    let mut no_uses = base.clone();
-    no_uses.id = "write_3".into();
-    no_uses.max_uses = None;
-    assert!(WriteRule::from_raw(no_uses, ws).is_err(), "max_uses is mandatory");
-
-    let mut zero_uses = base.clone();
-    zero_uses.id = "write_4".into();
+    let mut zero_uses = finite.clone();
+    zero_uses.id = "write_3".into();
     zero_uses.max_uses = Some(0);
     assert!(WriteRule::from_raw(zero_uses, ws).is_err(), "zero budget is invalid");
 }
@@ -351,7 +356,8 @@ mod e2e {
         base_agent_script, connect_proxy, mcp_app, open_pane_and_wait_ready, press, proxy_recv,
         proxy_send, settle, wait_until,
     };
-    use crate::tests::helpers::run_ex;
+    use crate::tests::helpers::{CurrentDirGuard, run_ex};
+    use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
     use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::{Value, json};
     use std::fs;
@@ -612,16 +618,25 @@ mod e2e {
     }
 
     #[test]
-    fn persistent_option_appears_only_for_eligible_writes() {
+    fn always_option_appears_only_for_eligible_writes() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        // Always-allow is offered only while the host-local workspace decision
+        // is `trusted`; the gate resolves the workspace from the process cwd.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
         fs::create_dir_all(temp.path().join("src/generated")).unwrap();
 
         let mut stream = connect_proxy(&app);
-        // Eligible narrow create: the persistent write option is offered.
+        // Eligible narrow create: the always-allow write option is offered.
         let eligible = temp.path().join("src/generated/a.rs");
         proxy_send(&mut stream, 1, write_frame(&eligible, "fn a() {}"));
         wait_until(&mut app, "eligible write queued", |app| !app.agents.approvals.is_empty());
@@ -635,13 +650,13 @@ mod e2e {
             .map(|(label, _)| label.as_str())
             .collect();
         assert!(
-            labels.contains(&"Allow for 1 hour / 5 uses"),
-            "eligible write must offer the bounded persistent option: {labels:?}"
+            labels.contains(&"Allow always"),
+            "eligible write must offer the always-allow option: {labels:?}"
         );
         open_pane_and_select(&mut app, 0); // Allow once
         let _ = proxy_recv(&mut stream);
 
-        // Over-budget write: no persistent option.
+        // Over-budget write: no always-allow option.
         let oversized = temp.path().join("src/generated/big.rs");
         let huge = "x".repeat((crate::policy::MAX_WRITE_FILE_BYTES + 1) as usize);
         proxy_send(&mut stream, 2, write_frame(&oversized, &huge));
@@ -656,13 +671,13 @@ mod e2e {
             .map(|(label, _)| label.as_str())
             .collect();
         assert!(
-            !labels.iter().any(|label| label.contains("1 hour")),
-            "over-budget write must not offer persistence: {labels:?}"
+            !labels.iter().any(|label| label.contains("Allow always")),
+            "over-budget write must not offer always-allow: {labels:?}"
         );
         open_pane_and_select(&mut app, 0); // Allow once
         let _ = proxy_recv(&mut stream);
 
-        // Protected write: no persistent option either.
+        // Protected write: no always-allow option either.
         let env = temp.path().join("src/generated/.env");
         proxy_send(&mut stream, 3, write_frame(&env, "TOKEN=x"));
         wait_until(&mut app, "protected write queued", |app| !app.agents.approvals.is_empty());
@@ -676,27 +691,37 @@ mod e2e {
             .map(|(label, _)| label.as_str())
             .collect();
         assert!(
-            !labels.iter().any(|label| label.contains("1 hour")),
-            "protected write must not offer persistence: {labels:?}"
+            !labels.iter().any(|label| label.contains("Allow always")),
+            "protected write must not offer always-allow: {labels:?}"
         );
         open_pane_and_select(&mut app, 0); // Allow once
         let _ = proxy_recv(&mut stream);
     }
 
     #[test]
-    fn persist_grant_derives_narrow_rule_and_auto_allows_next_write() {
+    fn always_allow_derives_narrow_write_rule_and_auto_allows_next_write() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
+        // Always-allow is offered and persisted only while the host-local
+        // workspace decision is `trusted`; the gate resolves the workspace from
+        // the process cwd.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
         fs::create_dir_all(temp.path().join("src/generated")).unwrap();
 
         let mut stream = connect_proxy(&app);
         let first = temp.path().join("src/generated/first.rs");
         proxy_send(&mut stream, 1, write_frame(&first, "fn first() {}"));
         wait_until(&mut app, "first write queued", |app| !app.agents.approvals.is_empty());
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 5 uses
+        open_pane_and_select(&mut app, 4); // Allow always
         wait_until(&mut app, "first write dispatched", |_| first.exists());
         let reply = proxy_recv(&mut stream);
         assert!(reply["result"]["value"].as_str() == Some("ok"), "persisted allow: {reply}");
@@ -714,7 +739,9 @@ mod e2e {
         assert_eq!(write.max_files, 1);
         assert_eq!(write.max_total_bytes, "fn first() {}".len() as u64);
         assert_eq!(write.max_file_bytes, "fn first() {}".len() as u64);
-        assert_eq!(write.scope.max_uses, Some(crate::app::PERSISTENT_WRITE_MAX_USES));
+        assert_eq!(write.scope.agent, None, "workspace-wide, not agent-scoped");
+        assert_eq!(write.scope.expires_at, None, "always-allow rules never expire");
+        assert_eq!(write.scope.max_uses, None, "always-allow rules carry no use budget");
 
         // The identical operation and any other in-prefix create within the
         // derived byte budget auto-allow through the persisted rule.
@@ -726,15 +753,6 @@ mod e2e {
         let reply = proxy_recv(&mut stream);
         assert!(reply["result"]["value"].as_str() == Some("ok"), "auto-allowed: {reply}");
         assert_eq!(fs::read_to_string(&second).unwrap().trim_end(), "fn a() {}");
-        assert_eq!(
-            app.agents.usage_ledger.used(
-                ledger_workspace(&state_dir, temp.path()),
-                "proxy",
-                &write.id
-            ),
-            2,
-            "two uses consumed"
-        );
     }
 
     #[test]
@@ -745,6 +763,15 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         fs::create_dir_all(temp.path().join("src/generated")).unwrap();
+        // Always-allow persistence requires a trusted workspace; the gate
+        // resolves the workspace from the process cwd.
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
         // Create the store (and its 0700 trust directory) first.
         seed_write_store(
             &state_dir,
@@ -770,7 +797,7 @@ mod e2e {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&trust_dir, fs::Permissions::from_mode(0o500)).unwrap();
         }
-        open_pane_and_select(&mut app, 4); // Allow for 1 hour / 5 uses
+        open_pane_and_select(&mut app, 4); // Allow always
         wait_until(&mut app, "denied reply", |app| app.agents.approvals.is_empty());
         #[cfg(unix)]
         {

@@ -7,9 +7,10 @@ pub(crate) mod agent_bridge;
 pub(crate) mod agent_mcp;
 #[cfg(feature = "agents")]
 pub(crate) mod agent_pane;
+pub(crate) mod always_allow_trust_gate;
+pub(crate) mod always_rule_extraction;
 pub(crate) mod app;
 pub(crate) mod blob_frames;
-pub(crate) mod bounded_rule_extraction;
 #[cfg(feature = "agents")]
 pub(crate) mod builtin_tool_safeguards;
 pub(crate) mod command_profiles;
@@ -37,6 +38,8 @@ pub(crate) mod persistent_deny;
 pub(crate) mod render;
 pub(crate) mod secrets_command;
 pub(crate) mod secrets_e2e;
+#[cfg(feature = "agents")]
+pub(crate) mod secrets_mcp;
 pub(crate) mod swift_motion;
 pub(crate) mod trust_lifecycle;
 pub(crate) mod trust_matrix;

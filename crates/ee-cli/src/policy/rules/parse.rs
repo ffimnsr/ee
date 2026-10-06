@@ -25,8 +25,7 @@ impl CommandRule {
             }
             MatchMode::ArgvPrefix => {}
         }
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, true)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -51,8 +50,7 @@ impl TrustRule {
             &raw.tool,
             raw.tool_schema_version,
         )?;
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, true)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         let scope = TrustRuleScope { workspace, agent, expires_at, max_uses };
         if raw.effect != TrustEffect::Allow {
             if raw.arguments_json.is_some() {
@@ -99,8 +97,7 @@ impl ReadPathRule {
         let id = validate_rule_id(&raw.id)?;
         let agent = optional_non_empty("agent", raw.agent)?;
         let max_bytes = parse_allow_ceiling(raw.effect, "max_bytes", raw.max_bytes)?;
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, false)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -125,8 +122,7 @@ impl McpReadRule {
             raw.tool_schema_version,
         )?;
         let max_bytes = parse_allow_ceiling(raw.effect, "max_bytes", raw.max_bytes)?;
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, false)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -159,8 +155,7 @@ impl McpReadProfileRule {
         if !crate::policy::profiles::is_known_mcp_read_profile(&profile) {
             return Err(format!("unknown MCP read profile id: {profile}"));
         }
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, false)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -187,8 +182,7 @@ impl ProfileRule {
         if !crate::policy::profiles::is_known_profile(&profile) {
             return Err(format!("unknown curated profile id: {profile}"));
         }
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, true)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -229,8 +223,7 @@ impl WriteRule {
         if max_file_bytes > max_total_bytes {
             return Err("max_file_bytes must not exceed max_total_bytes".to_string());
         }
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, true)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -257,9 +250,6 @@ impl NetworkRule {
         method: NetworkMethodClass,
         browser_action: BrowserActionClass,
     ) -> Result<Self, String> {
-        if scope.expires_at.is_none() || scope.max_uses.is_none() {
-            return Err("network allow requires expiration and use budget".to_string());
-        }
         if method != NetworkMethodClass::Read
             || !matches!(browser_action, BrowserActionClass::Fetch | BrowserActionClass::Navigate)
         {
@@ -334,8 +324,7 @@ impl NetworkRule {
                 "network allow requires exact host and read-only method/action classes".to_string()
             );
         }
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, true)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id,
             effect: raw.effect,
@@ -365,8 +354,7 @@ impl FilesystemRule {
         operations.sort_unstable();
         operations.dedup();
         let agent = optional_non_empty("agent", raw.agent)?;
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, false)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id: validate_rule_id(&raw.id)?,
             effect: raw.effect,
@@ -415,8 +403,7 @@ impl ToolRule {
             }
         };
         let agent = optional_non_empty("agent", raw.agent)?;
-        let (expires_at, max_uses) =
-            parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses, false)?;
+        let (expires_at, max_uses) = parse_effect_scope(raw.effect, raw.expires_at, raw.max_uses)?;
         Ok(Self {
             id: validate_rule_id(&raw.id)?,
             effect: raw.effect,

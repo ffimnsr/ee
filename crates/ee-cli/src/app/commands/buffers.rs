@@ -2,7 +2,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn current_workspace_root(&self) -> PathBuf {
+    pub(crate) fn current_workspace_root(&self) -> PathBuf {
         self.backend
             .active()
             .path

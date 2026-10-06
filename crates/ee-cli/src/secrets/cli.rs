@@ -81,9 +81,9 @@ pub(crate) fn exit_code(err: &SecretsCliError) -> i32 {
     match err {
         SecretsCliError::Store(e) => match e {
             SecretStoreError::NotFound => EXIT_SECRETS_NOT_FOUND,
-            SecretStoreError::InvalidName(_) | SecretStoreError::InvalidReference(_) => {
-                EXIT_SECRETS_USER_INPUT
-            }
+            SecretStoreError::InvalidName(_)
+            | SecretStoreError::InvalidReference(_)
+            | SecretStoreError::WorkspaceUntrusted => EXIT_SECRETS_USER_INPUT,
             SecretStoreError::KeychainUnavailable
             | SecretStoreError::KeychainCorruption
             | SecretStoreError::CspRngUnavailable => EXIT_SECRETS_KEYCHAIN,

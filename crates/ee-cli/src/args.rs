@@ -60,6 +60,11 @@ pub(crate) enum DoCommands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+    /// Manage host-local workspace trust for workspace secret references
+    Trust {
+        #[command(subcommand)]
+        command: WorkspaceTrustCommands,
+    },
     /// List installed plugins from configured plugin directories
     Plugins {
         #[command(subcommand)]
@@ -148,6 +153,17 @@ pub(crate) enum AgentTrustCommands {
         #[arg(long = "profile", value_enum, required = true)]
         profiles: Vec<AgentTrustProfile>,
     },
+}
+
+/// Workspace trust decision for the current directory.
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceTrustCommands {
+    /// Trust the current workspace and allow its secret references
+    Grant,
+    /// Record the current workspace as untrusted and block its secret references
+    Revoke,
+    /// Print the recorded workspace trust decision
+    Status,
 }
 
 /// Application-owned trust profiles exposed by the CLI. Project configuration

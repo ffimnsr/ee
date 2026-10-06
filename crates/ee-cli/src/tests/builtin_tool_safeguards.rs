@@ -97,20 +97,37 @@ fn builtin_tool_safeguards_deny_workspace_root_and_guarded_parse_ambiguity() {
 
 #[test]
 fn builtin_tool_safeguards_do_not_match_similar_names_or_quoted_text() {
-    let (mut app, temp, _state_dir) = app_with_store();
+    let (mut app, temp, state_dir) = app_with_store();
+    // Trust the workspace so ineligibility comes from the operation itself,
+    // not from the always-allow trust gate failing closed. The gate resolves
+    // the workspace from the process cwd; pin it to the fixture workspace.
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = crate::tests::helpers::CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    crate::workspace_trust::WorkspaceTrustStore::at(&state_dir, temp.path())
+        .expect("workspace trust store")
+        .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
+        .expect("trusted decision");
+
     for command in ["echo 'rm -rf /'", "remove-all /", "rm -r /workspace-copy"] {
         let mut reply = queue_terminal(&mut app, temp.path(), command);
         assert_eq!(app.agents.approvals.len(), 1, "command should prompt: {command}");
+        let prompt = app.agents.approvals.front().expect("approval");
         assert!(
-            !app.agents
-                .approvals
-                .front()
-                .expect("approval")
-                .options
-                .iter()
-                .any(|(_, choice)| *choice == ApprovalChoice::AllowPersistent),
-            "shell text must never offer persistent allow"
+            !prompt.options.iter().any(|(_, choice)| matches!(
+                choice,
+                ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
+            )),
+            "shell text must never offer always-allow: {command}"
         );
+        // The confirmation preview is candidate-backed: forcing the
+        // always-allow confirmation must not find a preview for shell text.
+        app.confirm_bridge_approval_for_test(ApprovalChoice::AllowAlways);
+        assert!(
+            app.agents.approvals.front().expect("approval").allow_confirmation_preview().is_none(),
+            "shell text must have no always-allow preview: {command}"
+        );
+        app.cancel_rule_confirmation_for_test();
         assert!(reply.try_recv().is_err());
         app.confirm_bridge_approval_for_test(ApprovalChoice::DenyOnce);
         assert!(matches!(

@@ -25,7 +25,7 @@ impl App {
             .args(args.iter().map(|value| (*value).to_string()).collect())
             .env(env.iter().map(|(name, value)| EnvVariable::new(*name, *value)).collect())
             .cwd(cwd);
-        let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
+        let always_allowed = self.command_invocation_for_request(&request).is_ok();
         let (reply, receiver) = oneshot::channel();
         self.request_bridge_approval(ApprovalPrompt::terminal(
             None,
@@ -33,7 +33,7 @@ impl App {
             &SessionId::new(session_id),
             &request,
             reply,
-            persistent_allowed,
+            always_allowed,
         ));
         receiver
     }
@@ -51,7 +51,7 @@ impl App {
             None,
             &request.session_id,
             &request,
-            None,
+            false,
             reply,
         ));
         receiver
@@ -67,7 +67,7 @@ impl App {
     ) -> oneshot::Receiver<ClientRequestResult> {
         let request = WriteTextFileRequest::new(SessionId::new(session_id), path, content);
         let (reply, receiver) = oneshot::channel();
-        let mut prompt = ApprovalPrompt::write(None, &request.session_id, &request, None, reply);
+        let mut prompt = ApprovalPrompt::write(None, &request.session_id, &request, false, reply);
         prompt.agent_id = Some(agent_id.to_string());
         self.request_bridge_approval(prompt);
         receiver
@@ -148,7 +148,7 @@ impl App {
         self.request_bridge_approval(ApprovalPrompt::proxy_write(
             spec,
             Some(invocation),
-            None,
+            true,
             reply,
         ));
         receiver
@@ -171,18 +171,12 @@ impl App {
 
     /// Confirms the front approval with the selected option.
     pub(crate) fn confirm_bridge_approval(&mut self, choice: ApprovalChoice) {
-        if matches!(
-            choice,
-            ApprovalChoice::AllowPersistent
-                | ApprovalChoice::AllowPersistentShort
-                | ApprovalChoice::AllowPersistentPrefix(_)
-                | ApprovalChoice::AllowPersistentPrefixShort(_)
-        ) && let Some(prompt) = self.agents.approvals.front_mut()
+        if matches!(choice, ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_))
+            && let Some(prompt) = self.agents.approvals.front_mut()
             && prompt.confirming_allow != Some(choice)
         {
             prompt.confirming_allow = Some(choice);
-            self.backend.status_message =
-                Some(String::from("confirm bounded workspace allow rule"));
+            self.backend.status_message = Some(String::from("confirm workspace always-allow rule"));
             return;
         }
         if choice == ApprovalChoice::DenyPersistent

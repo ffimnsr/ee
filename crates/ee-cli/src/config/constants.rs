@@ -177,6 +177,11 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # env = { API_KEY = "secret://agent-api-key" }
 # cwd = "/path/to/workspace"
 #
+# A `secret://` reference in a workspace `.ee.toml` resolves only after the
+# workspace is trusted (`ee do trust grant|revoke|status`); ee asks once on
+# first open. User-config references resolve without that decision. Env values
+# take exact references only; embedding one inside a longer value is rejected.
+#
 # User-global env-only entries (env without command) are inert decoration:
 # they merge into the server only when a workspace `.ee.toml` supplies the
 # command, and drop silently otherwise.
@@ -190,6 +195,10 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # args = ["--stdio"]
 # env = { EXAMPLE_LOG = "info" }
 # cwd = "/path/to/workspace"
+#
+# MCP secret references follow the same workspace trust rule as agent env:
+# stdio `env` accepts exact `secret://<name>` values only, and HTTP `headers`
+# accept exact references or one embedded token (`Bearer secret://<name>`).
 #
 # # For a remote MCP server, replace stdio fields with:
 # # [mcp.servers.remote]

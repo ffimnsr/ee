@@ -36,7 +36,7 @@ impl App {
                         continue;
                     }
                     let thread = self.session_thread(&request.session_id);
-                    let persistent_label = self.native_write_persistent_label(
+                    let always_allowed = self.native_write_always_allowed(
                         &request.path,
                         &request.content,
                         &WriteExpectation::Blind,
@@ -45,7 +45,7 @@ impl App {
                         thread,
                         &request.session_id,
                         &request,
-                        persistent_label,
+                        always_allowed,
                         reply,
                     ));
                 }
@@ -57,14 +57,14 @@ impl App {
                     // Normalize after request validation and before approval
                     // queue insertion: only validated invocations may offer
                     // persistent command trust (Phase 2).
-                    let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
+                    let always_allowed = self.command_invocation_for_request(&request).is_ok();
                     self.request_bridge_approval(ApprovalPrompt::terminal(
                         thread,
                         agent_id,
                         &request.session_id,
                         &request,
                         reply,
-                        persistent_allowed,
+                        always_allowed,
                     ));
                 }
                 BridgeUiMessage::Elicitation { session_id, request, reply } => {
@@ -667,7 +667,7 @@ impl App {
                     None,
                     &session_id,
                     &request,
-                    self.native_write_persistent_label(
+                    self.native_write_always_allowed(
                         &request.path,
                         &request.content,
                         &WriteExpectation::Blind,
@@ -676,14 +676,14 @@ impl App {
                 ));
             }
             crate::app::agents_mcp::ProxyToolCall::Terminal(request) => {
-                let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
+                let always_allowed = self.command_invocation_for_request(&request).is_ok();
                 self.request_bridge_approval(ApprovalPrompt::terminal(
                     None,
                     None,
                     &session_id,
                     &request,
                     reply,
-                    persistent_allowed,
+                    always_allowed,
                 ));
             }
             crate::app::agents_mcp::ProxyToolCall::Diagnostics => {

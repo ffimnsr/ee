@@ -9,14 +9,14 @@ use tokio::sync::oneshot;
 use super::super::*;
 
 use crate::policy::{
-    BoundedRuleCandidate, DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES,
-    MAX_WRITE_TOTAL_BYTES, OperationIdentity, PathPrefix, TrustCategory, TrustDecision,
-    TrustEffect, TrustStoreError, WriteOperationKind, is_protected_relative_path,
+    DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES, MAX_WRITE_TOTAL_BYTES,
+    OperationIdentity, PathPrefix, TrustCategory, TrustDecision, TrustStoreError,
+    WriteOperationKind, is_protected_relative_path,
 };
 
 use super::approval::{
-    ApprovalChoice, ApprovalKind, PERSISTENT_WRITE_OPTION_LABEL, PreparedWrite, WebApprovalCall,
-    WorkspaceMemoryApprovalTarget, WriteExpectation, approval_fingerprint, session_decision,
+    ApprovalChoice, ApprovalKind, PreparedWrite, WebApprovalCall, WorkspaceMemoryApprovalTarget,
+    WriteExpectation, approval_fingerprint, session_decision,
 };
 use super::prompt::ApprovalPrompt;
 use super::write::ActionLogEntry;
@@ -117,65 +117,6 @@ impl App {
         self.backend.status_message = Some(summary);
     }
 
-    fn persist_allow_candidate(
-        &mut self,
-        candidate: &BoundedRuleCandidate,
-    ) -> Result<String, TrustStoreError> {
-        if candidate.rule.effect() != TrustEffect::Allow
-            || candidate.rule.scope().expires_at.is_none()
-            || candidate.rule.scope().max_uses.is_none()
-        {
-            return Err(TrustStoreError::ValidationFailure(
-                "bounded allow candidate lacks mandatory limits".into(),
-            ));
-        }
-        let rule_id = candidate.rule.id().to_string();
-        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
-        store.add_rule(candidate.rule.clone())?;
-        self.reload_workspace_trust_store()?;
-        self.agents.action_log.push(ActionLogEntry::TrustRuleMutation {
-            rule_id: Some(rule_id.clone()),
-            action: "create".into(),
-            source: "approval-bounded-allow".into(),
-        });
-        Ok(rule_id)
-    }
-
-    fn resolve_persistent_allow_choice(
-        &mut self,
-        mut prompt: ApprovalPrompt,
-        choice: ApprovalChoice,
-    ) {
-        let Some(candidate) =
-            prompt.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
-                (*candidate_choice == choice).then_some(candidate.clone())
-            })
-        else {
-            self.release_prompt_write_lease(&mut prompt);
-            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                reason: "persistent approval has no previewed bounded candidate".into(),
-            }));
-            return;
-        };
-        let rule_id = match self.persist_allow_candidate(&candidate) {
-            Ok(rule_id) => rule_id,
-            Err(error) => {
-                self.record_denied_write(&prompt.session_id, &prompt.kind);
-                self.release_prompt_write_lease(&mut prompt);
-                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                    reason: format!("persistent approval unavailable: {error}"),
-                }));
-                if let Some(thread) = prompt.thread_index
-                    && let Some(thread) = self.agents.threads.get_mut(thread)
-                {
-                    thread.push_system("approval denied");
-                }
-                return;
-            }
-        };
-        self.resolve_persistent_allow(prompt, rule_id);
-    }
-
     /// Resolves one approval with the chosen policy decision.
     pub(super) fn resolve_approval(&mut self, mut prompt: ApprovalPrompt, choice: ApprovalChoice) {
         // A disconnected proxy client has dropped its receiver. Do not record
@@ -265,14 +206,8 @@ impl App {
         if let Some(decision) = session_decision(choice) {
             self.agents.approval_policy.record(&prompt.session_id, &fingerprint, decision);
         }
-        if matches!(
-            choice,
-            ApprovalChoice::AllowPersistent
-                | ApprovalChoice::AllowPersistentShort
-                | ApprovalChoice::AllowPersistentPrefix(_)
-                | ApprovalChoice::AllowPersistentPrefixShort(_)
-        ) {
-            self.resolve_persistent_allow_choice(prompt, choice);
+        if matches!(choice, ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)) {
+            self.resolve_always_choice(prompt, choice);
             return;
         }
         let allow = choice.allows();
@@ -485,7 +420,7 @@ impl App {
         }
     }
 
-    // ── Phase 5: native write normalization and bounded write grants ─────
+    // ── Phase 5: native write normalization and always-allow write grants ─────
 
     /// Canonical path identity shared by workspace validation, write leases,
     /// and policy normalization.
@@ -500,7 +435,7 @@ impl App {
         Some(candidate)
     }
 
-    /// Canonical in-workspace target eligible for bounded native-write trust.
+    /// Canonical in-workspace target eligible for always-allow native-write trust.
     /// Protected and secret-store targets never qualify.
     pub(super) fn canonical_native_write_target(&self, path: &Path) -> Option<PathBuf> {
         let candidate = self.canonical_workspace_write_target(path)?;
@@ -595,7 +530,7 @@ impl App {
         ))
     }
 
-    /// Bounded persistent write rule derivable from one native write
+    /// Always-allow write rule derivable from one native write
     /// request: canonical directory prefix, exact request sizes, and the
     /// create/modify operation kind — all within the application safety
     /// maxima.  Root-level targets (no directory prefix) and over-maximum
@@ -649,17 +584,16 @@ impl App {
         Some((operation, prefix, file_count, total, max_file))
     }
 
-    /// Persistent option label for one eligible native write; `None` keeps
-    /// the prompt on the four-choice UI (protected, external, root-level,
-    /// and over-maximum requests never get a persistent grant).
-    pub(super) fn native_write_persistent_label(
+    /// Whether one native write is eligible for the always-allow option;
+    /// `false` keeps the prompt on the four-choice UI (protected, external,
+    /// root-level, and over-maximum requests never get a persistent grant).
+    pub(super) fn native_write_always_allowed(
         &self,
         path: &Path,
         content: &str,
         expectation: &WriteExpectation,
-    ) -> Option<&'static str> {
-        self.native_single_write_rule_shape(path, content, expectation)
-            .map(|_| PERSISTENT_WRITE_OPTION_LABEL)
+    ) -> bool {
+        self.native_single_write_rule_shape(path, content, expectation).is_some()
     }
 
     /// Spawns an approved terminal through the existing pipeline and records

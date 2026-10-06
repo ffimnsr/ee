@@ -286,6 +286,48 @@ pub(crate) enum TrustRule {
         rule: Box<TrustRule>,
     },
 }
+
+impl TrustRule {
+    /// Matcher-only equality: effect and domain fields that grant authority,
+    /// ignoring rule id and scope. Used to reuse an identical always-allow
+    /// rule instead of appending a duplicate.
+    pub(crate) fn same_matcher(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Command(a), Self::Command(b)) => {
+                a.effect == b.effect
+                    && a.executable == b.executable
+                    && a.match_mode == b.match_mode
+                    && a.argv == b.argv
+            }
+            (Self::Mcp(a), Self::Mcp(b)) => {
+                a.effect == b.effect
+                    && a.server == b.server
+                    && a.transport_identity == b.transport_identity
+                    && a.tool == b.tool
+                    && a.tool_schema_version == b.tool_schema_version
+                    && a.arguments_json == b.arguments_json
+            }
+            (Self::Write(a), Self::Write(b)) => {
+                a.effect == b.effect
+                    && a.operation == b.operation
+                    && a.path_prefix == b.path_prefix
+                    && a.max_files == b.max_files
+                    && a.max_total_bytes == b.max_total_bytes
+                    && a.max_file_bytes == b.max_file_bytes
+            }
+            (Self::Network(a), Self::Network(b)) => {
+                a.effect == b.effect
+                    && a.scheme == b.scheme
+                    && a.host == b.host
+                    && a.host_match == b.host_match
+                    && a.port == b.port
+                    && a.method == b.method
+                    && a.browser_action == b.browser_action
+            }
+            _ => false,
+        }
+    }
+}
 /// Stable rule id for a newly created write grant (`write_…`).
 pub(crate) fn generate_write_rule_id() -> String {
     format!("write_{:016x}", rand::random::<u64>())

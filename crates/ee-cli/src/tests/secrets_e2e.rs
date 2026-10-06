@@ -117,7 +117,9 @@ fn secrets_e2e_global_reference_reaches_launch_config_never_user_visible() {
     assert_eq!(value.layer, ConfigLayerKind::UserXdg);
 
     // Build the launch environment without spawning any process.
-    let launch_env = resolve::resolve_agent_env(&fixture.store, server).expect("all resolved");
+    let launch_env =
+        resolve::resolve_agent_env(&fixture.store, server, resolve::WorkspaceRefPolicy::Resolve)
+            .expect("all resolved");
     assert_eq!(
         launch_env.get("OPENROUTER_API_KEY").map(String::as_str),
         Some(SEEDED),
@@ -183,7 +185,8 @@ OPENROUTER_API_KEY = "secret://openrouter-api-key"
     assert_eq!(api_key.layer, ConfigLayerKind::UserXdg);
 
     let launch_env =
-        resolve::resolve_agent_env(&fixture.store, server).expect("resolved launch env");
+        resolve::resolve_agent_env(&fixture.store, server, resolve::WorkspaceRefPolicy::Resolve)
+            .expect("resolved launch env");
     assert_eq!(launch_env.get("OPENROUTER_API_KEY").map(String::as_str), Some(SEEDED));
     assert_eq!(launch_env.get("LOG_LEVEL").map(String::as_str), Some("info"));
 
@@ -199,8 +202,12 @@ OPENROUTER_API_KEY = "secret://openrouter-api-key"
 fn secrets_e2e_missing_referenced_secret_prevents_launch_env() {
     // Vault exists but the referenced secret was never created.
     let fixture = E2eStore::new();
-    let err =
-        resolve::resolve_agent_env(&fixture.store, &referencing_server()).expect_err("must fail");
+    let err = resolve::resolve_agent_env(
+        &fixture.store,
+        &referencing_server(),
+        resolve::WorkspaceRefPolicy::Resolve,
+    )
+    .expect_err("must fail");
     assert!(matches!(err, SecretStoreError::NotFound));
     assert!(!err.to_string().contains(SEEDED));
 }
@@ -218,7 +225,12 @@ fn secrets_e2e_copied_vault_under_different_binding_prevents_launch_env() {
         other_binding,
         fixture.vault_path.clone(),
     );
-    let err = resolve::resolve_agent_env(&foreign, &referencing_server()).expect_err("must fail");
+    let err = resolve::resolve_agent_env(
+        &foreign,
+        &referencing_server(),
+        resolve::WorkspaceRefPolicy::Resolve,
+    )
+    .expect_err("must fail");
     assert!(matches!(err, SecretStoreError::HostBindingMismatch { version: 1 }));
     assert!(!err.to_string().contains(SEEDED), "mismatch error hides the secret");
 }
@@ -233,7 +245,12 @@ fn secrets_e2e_unavailable_keychain_prevents_launch_env() {
         fixture.binding.clone(),
         fixture.vault_path.clone(),
     );
-    let err = resolve::resolve_agent_env(&broken, &referencing_server()).expect_err("must fail");
+    let err = resolve::resolve_agent_env(
+        &broken,
+        &referencing_server(),
+        resolve::WorkspaceRefPolicy::Resolve,
+    )
+    .expect_err("must fail");
     assert!(matches!(err, SecretStoreError::KeychainUnavailable));
     assert!(!err.to_string().contains(SEEDED));
 }
@@ -251,14 +268,18 @@ fn secrets_e2e_corrupt_vault_prevents_launch_env() {
     std::fs::write(&fixture.vault_path, serde_json::to_string(&json).expect("serialize"))
         .expect("tamper write");
 
-    let err =
-        resolve::resolve_agent_env(&fixture.store, &referencing_server()).expect_err("must fail");
+    let err = resolve::resolve_agent_env(
+        &fixture.store,
+        &referencing_server(),
+        resolve::WorkspaceRefPolicy::Resolve,
+    )
+    .expect_err("must fail");
     assert!(matches!(err, SecretStoreError::VaultCorruption));
     assert!(!err.to_string().contains(SEEDED), "corruption error hides the secret");
 }
 
 #[test]
-fn secrets_e2e_project_reference_rejected_while_project_literals_supported() {
+fn secrets_e2e_project_reference_merges_and_trust_gates_resolution() {
     let dir = tempfile::tempdir().expect("temp dir");
     let env = test_config_environment(dir.path());
     write_config_layer(
@@ -276,18 +297,40 @@ env = { OPENROUTER_API_KEY = "sk-project-literal" }
     );
     let settings = load_config_for_test(&env);
 
-    // The workspace reference cannot create a launch configuration at all.
-    assert!(
-        !settings.agents.servers.contains_key("referencing"),
-        "project secret reference rejected at merge"
-    );
+    // The workspace reference merges with workspace provenance.
+    let server = settings.agents.servers.get("referencing").expect("workspace reference merges");
+    let value = server.env.get("OPENROUTER_API_KEY").expect("env value");
+    assert_eq!(value.raw, REFERENCE);
+    assert_eq!(value.layer, ConfigLayerKind::Ancestor);
 
-    // Project literal env stays fully supported through the existing path.
-    let literal = settings.agents.servers.get("literal").expect("literal server");
+    // Untrusted (or undecided) workspace: launch aborts before any secret read.
     let fixture = E2eStore::new();
-    let launch = resolve::resolve_agent_env(&fixture.store, literal).expect("literal launch");
+    fixture.create_secret("openrouter-api-key", SEEDED);
+    let loads_before = fixture.keychain.load_calls();
+    let err = resolve::resolve_agent_env(&fixture.store, server, resolve::WorkspaceRefPolicy::Deny)
+        .expect_err("untrusted workspace denies references");
+    assert!(matches!(err, SecretStoreError::WorkspaceUntrusted));
+    assert_eq!(fixture.keychain.load_calls(), loads_before, "deny happens before store access");
+
+    // Trusted workspace: the same reference reaches the launch environment.
+    let launch =
+        resolve::resolve_agent_env(&fixture.store, server, resolve::WorkspaceRefPolicy::Resolve)
+            .expect("trusted workspace resolves");
+    assert_eq!(launch.get("OPENROUTER_API_KEY").map(String::as_str), Some(SEEDED));
+
+    // Project literals stay fully supported through the existing path,
+    // regardless of the workspace trust decision.
+    let loads_after_trusted = fixture.keychain.load_calls();
+    let literal = settings.agents.servers.get("literal").expect("literal server");
+    let launch =
+        resolve::resolve_agent_env(&fixture.store, literal, resolve::WorkspaceRefPolicy::Deny)
+            .expect("literal launch");
     assert_eq!(launch.get("OPENROUTER_API_KEY").map(String::as_str), Some("sk-project-literal"));
-    assert_eq!(fixture.keychain.load_calls(), 0, "literals never touch the store");
+    assert_eq!(
+        fixture.keychain.load_calls(),
+        loads_after_trusted,
+        "literals never touch the store"
+    );
 }
 
 // ── Legacy behavior regressions ──────────────────────────────────────────────
@@ -311,7 +354,9 @@ env = { OPENROUTER_API_KEY = "sk-literal-111" }
     assert_eq!(server.env.get("OPENROUTER_API_KEY").expect("env").raw, "sk-literal-111");
 
     let loads_before = fixture.keychain.load_calls();
-    let launch = resolve::resolve_agent_env(&fixture.store, server).expect("literal launch");
+    let launch =
+        resolve::resolve_agent_env(&fixture.store, server, resolve::WorkspaceRefPolicy::Resolve)
+            .expect("literal launch");
     assert_eq!(
         launch.get("OPENROUTER_API_KEY").map(String::as_str),
         Some("sk-literal-111"),
@@ -335,7 +380,9 @@ fn secrets_e2e_agent_without_references_launches_through_existing_path() {
     assert!(!resolve::agent_env_has_references(&server.env));
 
     // Works even though the vault has no key and the keychain is empty.
-    let launch = resolve::resolve_agent_env(&fixture.store, &server).expect("literal launch");
+    let launch =
+        resolve::resolve_agent_env(&fixture.store, &server, resolve::WorkspaceRefPolicy::Deny)
+            .expect("literal launch");
     assert_eq!(launch.get("LANG").map(String::as_str), Some("en_US.UTF-8"));
     assert_eq!(fixture.keychain.load_calls(), 0);
 }

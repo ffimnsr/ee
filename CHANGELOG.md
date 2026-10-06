@@ -4,6 +4,9 @@
 
 ### Features
 
+- replace time-bounded persistent approvals with `Allow always`: eligible terminal, write, MCP, and network-read prompts in a trusted workspace preview one workspace-wide pattern (exact argv or selected token prefix, write path prefix, exact MCP invocation, exact read-only host) and persist it with no expiry and no use budget; identical matchers reuse the existing rule, mandatory-confirm operations still refuse reusable grants, and revoking workspace trust makes stored always-allow rules inert
+- add vault-backed MCP secrets: `ee do config setup mcp` stores prompted env/header values in the encrypted secrets store and writes only `secret://` references; stdio `env` resolves exact references, HTTP `headers` resolve exact references or one embedded token (`Bearer secret://<name>`), all under the same workspace trust gate and with fail-closed per-server skipping shown as failed pane entries
+- add workspace trust for workspace-scoped `secret://` references: agent setup writes references straight into `.ee.toml`, ee asks once per workspace (keyed to the opened file's git root) on first open, listing agent and MCP reference locations, `ee do trust grant|revoke|status` manages the host-local decision, and undecided or untrusted workspaces fail closed before reading any secret value
 - add incremental runtime grammar builds: build stamps (pin + rev + staged source mtimes) skip recompiling unchanged grammars; rev-pinned git fetches skip the network fetch when the staged checkout already matches (`mk install` no longer rebuilds daily)
 - beautify `ee do runtime fetch/build` output: short source refs (`crate:tree-sitter-ruby@0.23.1`, `github:owner/repo@<sha>`), `--verbose`/`-v` prints full staged/output paths, ANSI colors for labels when stdout is a tty
 - add language catalog parity (sourced from the upstream zed editor docs): 36 git-pinned tree-sitter grammars and 18 bundled LSP servers generated from `zed-industries/zed` docs/src/languages
@@ -13,6 +16,11 @@
 - `:wq`/`:x` now fully exit once a deferred format-on-save pipeline completes; failed deferred saves clear the quit request and keep the session
 
 ### Fixes
+
+- reject values that only embed `secret://` in agent env and MCP stdio env instead of passing the unresolved template to the child process; exact references and MCP header templates are unchanged
+- retire a lower-layer MCP server when a higher-priority layer declares a different transport, even if that layer's patch is incomplete, instead of leaving the old transport effective
+- surface skipped agent launches (workspace trust, missing store, unresolved secret) in `:doctor` and the status line, mirroring the MCP failed-server pane entries
+- print the exact `ee do secrets delete <name>` commands for the vault entries a removed MCP server leaves behind, and stop `expect`-ing on agent setup secret names
 
 - runtime build/fetch now skip per-grammar failures instead of aborting the whole run: each failure is logged with language + stage + reason, remaining grammars still build, command exits 0
 - defer swift grammar: tree-sitter-swift is codegen-only (no `src/parser.c` in the repo), recorded in the catalog and manifest

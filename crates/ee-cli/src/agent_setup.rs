@@ -78,8 +78,7 @@ fn setup_local_agent(
     println!("Setting up {}.", manifest.agent.display_name);
     let server_id = prompt_server_name(&manifest.agent.display_name, &manifest.agent.id)?;
     let env = collect_setup_values(&manifest)?;
-    let secret_names = manifest_secret_env_names(&manifest);
-    configure_agent_setup(&server_id, &candidate.path, &[], &env, &secret_names, scope)?;
+    configure_agent_setup(&server_id, &candidate.path, &[], &env, scope)?;
     Ok(server_id)
 }
 
@@ -124,15 +123,9 @@ fn setup_registry_agent(
         agent_registry::FirstRunBootstrap::NotApplicable => {}
     }
     // Registry launch metadata carries no secret marker; provider credentials
-    // stay agent-owned, so no env values need the user config layer.
-    configure_agent_setup(
-        &server_id,
-        &prepared.command,
-        &prepared.args,
-        &prepared.env,
-        &BTreeSet::new(),
-        scope,
-    )?;
+    // stay agent-owned. Workspace-scope secret references (from local
+    // manifests) resolve only when the workspace trust decision allows it.
+    configure_agent_setup(&server_id, &prepared.command, &prepared.args, &prepared.env, scope)?;
     println!(
         "Configured external agent {}. Authentication remains agent-owned.",
         prepared.display_name
@@ -140,31 +133,30 @@ fn setup_registry_agent(
     Ok(server_id)
 }
 
-/// Writes the server definition to the chosen config layer. In workspace
-/// scope, `secret://` env references are routed to the user config layer;
-/// the encrypted secrets store already holds the values themselves.
+/// Writes the server definition to the chosen config layer. Workspace
+/// (`Local`) scope may include `secret://` env references; they resolve only
+/// when the workspace trust decision for this repository allows it, and the
+/// encrypted secrets store already holds the values themselves.
 fn configure_agent_setup(
     agent_id: &str,
     command: &Path,
     args: &[String],
     env_values: &BTreeMap<String, String>,
-    secret_names: &BTreeSet<String>,
     scope: config::ConfigScope,
 ) -> Result<(), String> {
+    let has_secret_references = has_secret_references(env_values);
     match scope {
         config::ConfigScope::Global => {
             let path = config::configure_global_agent_server(agent_id, command, args, env_values)?;
             println!("Configured agent `{agent_id}` in {}.", path.display());
         }
         config::ConfigScope::Local => {
-            let (local_env, secret_refs) = split_setup_env(env_values, secret_names);
-            let path = config::configure_local_agent_server(agent_id, command, args, &local_env)?;
+            let path = config::configure_local_agent_server(agent_id, command, args, env_values)?;
             println!("Configured agent `{agent_id}` in {}.", path.display());
-            if !secret_refs.is_empty() {
-                let user_path = config::configure_agent_server_user_env(agent_id, &secret_refs)?;
+            if has_secret_references {
                 println!(
-                    "Stored env secrets for `{agent_id}` in {} (values stay in the secrets store).",
-                    user_path.display()
+                    "This workspace now references stored secrets; ee asks once whether the \
+                     workspace is trusted (`ee do trust grant|revoke|status`)."
                 );
             }
         }
@@ -178,28 +170,6 @@ fn configure_agent_setup(
         }
     }
     Ok(())
-}
-
-/// Partitions collected env values into workspace-safe literals and
-/// user-layer `secret://` references.
-fn split_setup_env(
-    env: &BTreeMap<String, String>,
-    secret_names: &BTreeSet<String>,
-) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
-    let mut literals = BTreeMap::new();
-    let mut refs = BTreeMap::new();
-    for (name, value) in env {
-        if secret_names.contains(name) {
-            refs.insert(name.clone(), value.clone());
-        } else {
-            literals.insert(name.clone(), value.clone());
-        }
-    }
-    (literals, refs)
-}
-
-fn manifest_secret_env_names(manifest: &SetupManifest) -> BTreeSet<String> {
-    manifest.env_vars.iter().filter(|env| env.secret).map(|env| env.name.clone()).collect()
 }
 
 enum RubberDuckBackendChoice {
@@ -536,7 +506,9 @@ fn collect_setup_values(manifest: &SetupManifest) -> Result<BTreeMap<String, Str
                         "agent.{}.{}",
                         manifest.agent.id, env.name
                     ))
-                    .expect("validated setup manifest makes canonical secret names");
+                    .map_err(|error| {
+                        format!("cannot store secret `{}`: invalid name: {error}", env.name)
+                    })?;
                     let reference =
                         secrets::SecretReference::from_name(secret_name.clone()).to_string();
                     let store = secret_store.get_or_insert_with(secrets::SecretStore::default);
@@ -580,6 +552,11 @@ fn prompt_server_name(display_name: &str, default: &str) -> Result<String, Strin
         }
         eprintln!("Server name must use only letters, digits, `-`, or `_` (max 64).");
     }
+}
+
+/// True when any collected env value is an exact `secret://` reference.
+fn has_secret_references(env_values: &BTreeMap<String, String>) -> bool {
+    env_values.values().any(|value| crate::secrets::is_secret_reference_text(value))
 }
 
 #[cfg(test)]
@@ -769,71 +746,16 @@ mod tests {
             assert!(described.contains(root), "setup shows the `{root}` root");
         }
     }
-
     #[test]
-    fn split_setup_env_partitions_secret_references_from_literals() {
-        let env = BTreeMap::from([
-            (
-                String::from("OPENROUTER_API_KEY"),
-                String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
-            ),
-            (String::from("OPENROUTER_MODEL"), String::from("example/model")),
-        ]);
-        let secret_names = BTreeSet::from([String::from("OPENROUTER_API_KEY")]);
-
-        let (literals, refs) = split_setup_env(&env, &secret_names);
-
-        assert_eq!(
-            literals,
-            BTreeMap::from([(String::from("OPENROUTER_MODEL"), String::from("example/model"))])
-        );
-        assert_eq!(
-            refs,
-            BTreeMap::from([(
-                String::from("OPENROUTER_API_KEY"),
-                String::from("secret://agent.openrouter.OPENROUTER_API_KEY")
-            )])
-        );
-    }
-
-    #[test]
-    fn split_setup_env_without_secret_names_keeps_full_env_local() {
-        let env = BTreeMap::from([(String::from("MODEL"), String::from("example/model"))]);
-
-        let (literals, refs) = split_setup_env(&env, &BTreeSet::new());
-
-        assert_eq!(literals, env);
-        assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn manifest_secret_env_names_returns_only_secret_flagged_vars() {
-        let manifest = SetupManifest {
-            schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
-            agent: SetupAgent {
-                id: String::from("example"),
-                display_name: String::from("Example"),
-            },
-            env_vars: vec![
-                SetupEnvVar {
-                    name: String::from("SECRET_KEY"),
-                    required: true,
-                    secret: true,
-                    description: String::from("Secret."),
-                },
-                SetupEnvVar {
-                    name: String::from("MODEL"),
-                    required: false,
-                    secret: false,
-                    description: String::from("Model."),
-                },
-            ],
-            inputs: Vec::new(),
-        };
-
-        assert_eq!(
-            manifest_secret_env_names(&manifest),
-            BTreeSet::from([String::from("SECRET_KEY")])
-        );
+    fn secret_reference_detection_matches_exact_prefix_only() {
+        assert!(!has_secret_references(&BTreeMap::new()));
+        assert!(!has_secret_references(&BTreeMap::from([(
+            String::from("NOTE"),
+            String::from("see secret://docs"),
+        )])));
+        assert!(has_secret_references(&BTreeMap::from([(
+            String::from("API_KEY"),
+            String::from("secret://agent.example.API_KEY"),
+        )])));
     }
 }

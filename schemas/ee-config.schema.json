@@ -829,7 +829,7 @@
           }
         },
         "env": {
-          "description": "Environment variables for the agent subprocess. An exact\n`secret://<name>` value is resolved from the host-bound encrypted\nsecrets store (`ee do secrets`) only when the agent launches, and only\nwhen the value comes from a user config layer (XDG or legacy user\nconfig); system and workspace config layers cannot reference secrets.",
+          "description": "Environment variables for the agent subprocess. An exact\n`secret://<name>` value is resolved from the host-bound encrypted\nsecrets store (`ee do secrets`) only when the agent launches.\nUser-layer values resolve unconditionally; workspace (`Ancestor`)\nvalues resolve only when the host-local workspace trust decision\nallows it (`ee do trust`), and system-layer references are rejected.\nEnv values are exact-reference-only: a value that merely embeds the\nprefix is rejected so a mistaken template never reaches the agent\nprocess unresolved.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -1447,6 +1447,7 @@
           }
         },
         "env": {
+          "description": "Environment variables for the stdio server. An exact\n`secret://<name>` value resolves from the host-bound encrypted\nsecrets store only when the server starts; workspace (`Ancestor`)\nreferences resolve only for a trusted workspace, and system-layer\nreferences are rejected. Env values are exact-reference-only: a value\nthat merely embeds the prefix is rejected.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -1468,6 +1469,7 @@
           ]
         },
         "headers": {
+          "description": "HTTP headers for the streamable_http server. A header value may be an\nexact `secret://<name>` reference or a template embedding exactly one\nreference token (for example `Bearer secret://mcp-token`); either\nresolves only when the server starts, under the same workspace trust\nrule as `env`.",
           "type": "object",
           "additionalProperties": {
             "type": "string"

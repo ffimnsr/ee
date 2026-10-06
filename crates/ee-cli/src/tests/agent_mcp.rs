@@ -1735,8 +1735,8 @@ fn configured_secret_values_are_collected_for_redaction() {
 #[test]
 fn resolved_secret_values_are_collected_for_redaction_only_after_launch() {
     let temp = tempfile::tempdir().unwrap();
-    // The reference must come from a user config layer (XDG), not the
-    // ancestor workspace layer, or the merge rejects it.
+    // User-layer reference (XDG): resolves regardless of the workspace trust
+    // decision, so the merge and launch path stay independent of it.
     let xdg = temp.path().join("xdg");
     fs::create_dir_all(xdg.join("ee")).unwrap();
     fs::write(
@@ -1791,4 +1791,30 @@ fn resolved_secret_values_are_collected_for_redaction_only_after_launch() {
     let redacted = ee_agent_host::redact::redact_secret_values(text, &secrets);
     assert_eq!(redacted, "stderr: token *** leaked");
     assert!(!redacted.contains("sk-resolved-42"));
+}
+
+#[test]
+fn workspace_secret_policy_follows_the_host_local_decision() {
+    use crate::secrets::resolve::WorkspaceRefPolicy;
+    use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    app.agents.test_trust_store_base = Some(state.clone());
+
+    // Undecided workspaces deny workspace-layer references (fail closed).
+    assert_eq!(app.workspace_secret_ref_policy(), WorkspaceRefPolicy::Deny);
+
+    let store = WorkspaceTrustStore::at(&state, temp.path()).unwrap();
+    store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
+    assert_eq!(app.workspace_secret_ref_policy(), WorkspaceRefPolicy::Resolve);
+
+    store.set_decision(WorkspaceTrustDecision::Untrusted).unwrap();
+    assert_eq!(app.workspace_secret_ref_policy(), WorkspaceRefPolicy::Deny);
 }

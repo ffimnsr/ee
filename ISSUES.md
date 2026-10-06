@@ -3345,6 +3345,12 @@ Rules:
 
 Goal: allow user-global agent configuration to supply a stored API key at launch while preventing workspace configuration from selecting or exfiltrating host secrets.
 
+> Partially superseded by "Workspace-Trusted Secret References" (2026-10-06):
+> workspace `.ee.toml` may reference stored secrets, but they resolve only
+> when the host-local workspace trust decision allows it; system layers
+> remain rejected. The user-layer-only rule and its ancestor-reject tests
+> below are historical and were replaced by the workspace trust gate.
+
 Overview: preserve config-layer provenance for agent environment values, retain `secret://` text in config inspection output, resolve approved references only immediately before ACP agent process construction, and feed resolved values into existing redaction collection.
 
 Rules:
@@ -3439,11 +3445,159 @@ Rules:
 - [x] End-to-end tests prove a global OpenRouter secret reference reaches agent launch configuration but never any captured user-visible output.
 - [x] End-to-end tests prove keychain failure, host mismatch, vault corruption, missing secret, and workspace reference each fail before child process creation.
 
+## Workspace-Trusted Secret References [2026-10-06]
+
+Goal: remove the two-config burden for workspace-scoped agent secrets by
+allowing `secret://` references in workspace `.ee.toml`, gated on an explicit
+VS Code-style workspace trust decision recorded host-locally.
+
+Rules:
+
+- Workspace-layer references merge normally; resolution requires the
+  host-local decision for that canonical workspace to be `trusted`.
+- Missing, unreadable, malformed, wrong-identity, or `untrusted` decisions
+  fail closed: the agent launch aborts before any secret value is read.
+- User-layer (XDG/legacy) references keep resolving without a decision.
+- System-layer references remain rejected at merge.
+- Non-interactive startup never prompts; the decision must come from
+  `ee do trust grant`.
+
+Work items:
+
+- [x] Allow ancestor-layer `secret://` references at config merge while keeping
+      system-layer rejection and reference grammar validation.
+- [x] Add a host-local workspace trust decision store (owner-only file per
+      canonical workspace, atomic writes, identity verification), separate
+      from the rule trust store document.
+- [x] Gate workspace-layer resolution with `WorkspaceRefPolicy`, failing before
+      `SecretStore::get` on deny.
+- [x] Ask once at startup when a configured workspace carries secret
+      references and no decision exists; persist the answer.
+- [x] Add `ee do trust grant|revoke|status` for the current workspace.
+- [x] Stop writing split user-layer secret patches from the agent setup
+      wizard; workspace setup writes a single config file.
+- [x] Extend MCP `env`/`headers` to layered values with per-field provenance
+      through split-layer partials; system-layer references stay rejected.
+- [x] Resolve MCP references at session forward and MCP host start, failing
+      closed per server (missing store, denied trust, malformed reference,
+      missing/foreign secret) and feeding redaction with bare values.
+- [x] Support one embedded reference token in MCP HTTP header templates
+      (`Bearer secret://name`); two tokens or an empty name fail closed.
+- [x] Vault-back the MCP setup wizard: prompted secrets go to the encrypted
+      store, config carries only references, no split user-layer patch.
+- [x] Extend the startup trust prompt and `ee do trust` to MCP references,
+      listing dotted locations for agent env and MCP env/headers.
+- [x] Key the trust decision to the opened file's workspace (its git root,
+      else its directory) so trust never bleeds between repositories.
+- [x] Surface refused MCP servers as failed pane entries instead of leaving
+      them silently absent.
+- [x] Update wiki config docs, config template comments, and Phase 5 plan notes.
+
+Second pass (2026-10-06, post-review):
+
+- [x] Reject env values that only embed `secret://` (agent env and MCP stdio
+      env) at config validation and again at resolution, so a mistaken
+      template never reaches a child process as an unresolved literal.
+- [x] Retire the lower-layer MCP server when a higher-priority layer declares
+      a different transport, even when that layer's patch is incomplete.
+- [x] Surface skipped agent launches (trust gate, missing store, unresolved
+      secret) in `:doctor` and the agent status line, mirroring the MCP
+      failed-server pane entries.
+- [x] Print the exact `ee do secrets delete <name>` commands for vault entries
+      a removed MCP server leaves behind; the wizard never deletes values.
+- [x] Deduplicate the stdio env resolution path through
+      `resolve_secret_values_collect` and drop a production `expect` in the
+      agent setup wizard.
+
+Acceptance criteria:
+
+- [x] `cargo test --quiet -p ee-cli workspace_trust` passes.
+- [x] `cargo test --quiet -p ee-cli secret` passes.
+- [x] Tests prove an undecided or untrusted workspace denies references before
+      keychain/vault access, while a trusted workspace resolves the same value.
+- [x] Tests prove user-layer references and workspace literals are unaffected by
+      the trust decision.
+- [x] Tests prove workspace-scope setup writes references into `.ee.toml` and
+      no longer needs a user-layer patch file.
+- [x] `cargo test --quiet -p ee-cli secrets_mcp` passes.
+- [x] Tests prove undecided or untrusted MCP references deny before store
+      access, a trusted workspace resolves env and header templates, literal
+      servers never touch the store, and a missing secret skips only the
+      referencing server.
+- [x] Tests prove trust for one repository never unlocks references from a
+      config file opened in another repository.
+
+## Always-Allow Persistent Approvals [2026-10-06]
+
+Goal: align persistent approval with VS Code / Zed behavior by offering one
+`Allow always` choice instead of time-bounded grants, while keeping every
+grant host-local, workspace-trusted, browsable, and revocable.
+
+Overview: replace the bounded `Allow for 1 hour / 20 uses`,
+`Allow for 10 minutes / 5 uses`, and prefix variants with workspace-wide
+always-allow rules in the host-local trust store. One previewed pattern per
+operation (exact argv or selected token prefix for commands, exact MCP
+invocation, write path prefix, exact read-only host) persists with no expiry
+and no use budget. Generation, persistence, and rule matching require the
+host-local workspace trust decision `trusted`; revocation makes stored
+always-allow rules inert on reload.
+
+Rules:
+
+- Always-allow rules are workspace-wide (`agent = None`), carry no expiry and
+  no use budget, and never suppress session deny, persistent deny,
+  mandatory-confirm rules, or non-overridable safeguards.
+- Persistence stays host-local (`$XDG_STATE_HOME/ee/trust/`); repository
+  config can never create or broaden a grant.
+- Identical matchers reuse the existing rule id; a matching but disabled rule
+  fails closed instead of duplicating or silently re-enabling it.
+- Mandatory-confirm operations (VCS mutation/push, package install/publish,
+  privilege escalation, destructive filesystem, workflow config writes, new
+  network hosts) never offer always-allow; the existing strip removes session
+  and always choices before the prompt is shown.
+- Legacy finite allow rules with expiry and/or use budget remain loadable and
+  enforce their caps; deny/confirm rules still reject use budgets.
+- `/permissions` lists always-allow grants under the `always allow` heading;
+  disable, enable, and revoke behave as before.
+
+Work items:
+
+- [x] Replace bounded approval choices with `AllowAlways` and
+      `AllowAlwaysPrefix(token)`; drop bounded duration/use constants and labels.
+- [x] Derive candidates in `policy::always`: command exact/prefix, MCP exact,
+      write prefix, and exact read-only network host, each with a
+      pattern-only preview.
+- [x] Persist reuse-or-append by matcher; disabled matches fail closed.
+- [x] Gate candidate generation, persistence, and evaluation on the workspace
+      trust decision; revocation filters always-allow rules at reload.
+- [x] Keep terminal prefix boundaries explicit (first argument and full argv,
+      deduped for single-argument commands).
+
+Tests:
+
+- [x] `cargo test --quiet -p ee-cli always_rule_extraction` passes.
+- [x] `cargo test --quiet -p ee-cli always_allow_trust_gate` proves the option
+      is hidden for undecided/untrusted workspaces, persists and auto-allows
+      under a trusted workspace, becomes inert after revocation, and reuses an
+      identical matcher instead of duplicating.
+- [x] E2E command, MCP, and write trust tests cover always-allow persistence,
+      reload, narrow caps, and auto-allow on the next identical operation.
+- [x] Mandatory-confirm and built-in safeguard tests prove dangerous
+      operations still never offer reusable allows.
+
+Exit criteria:
+
+- [x] One `Allow always` option exists for eligible terminal, write, MCP, and
+      network-read prompts in trusted workspaces; no time-bounded option
+      remains in policy, UI, or tests.
+- [x] Stored always-allow rules survive reload, stay workspace-bound, and are
+      revoked by an untrusted workspace decision.
+
 ## Unified Host-Local Workspace Trust Policy
 
 Goal: reduce repetitive approval prompts with one bounded trust engine while preventing repository content, unknown tools, external paths, sensitive data, destructive operations, and malformed rules from granting authority.
 
-Overview: replace independent command, MCP, and workspace trust implementations with one policy foundation. Rule matching remains operation-specific, but every rule shares host-local persistence, canonical workspace binding, agent scope, session-deny precedence, expiration, budgets, redaction, atomic persistence, explicit trust-store reload, and fail-closed behavior.
+Overview: replace independent command, MCP, and workspace trust implementations with one policy foundation. Rule matching remains operation-specific, but every rule shares host-local persistence, canonical workspace binding, agent scope, session-deny precedence, expiration, budgets, redaction, atomic persistence, explicit trust-store reload, and fail-closed behavior. Always-allow grants (2026-10-06 decision) carry no expiry or budget and additionally require a trusted workspace decision.
 
 Rules:
 
@@ -3453,7 +3607,7 @@ Rules:
 - Project configuration has no trust or capability-request fields in version one; host-local trust store alone controls authority.
 - Every operation begins with validated normalized identity. Missing identity, unknown category, malformed config, invalid path, expired rule, exhausted rule, or tool metadata mismatch returns prompt.
 - Session deny takes precedence over every persistent or session allow.
-- Phases 1-7 establish allow-only persistent grants. Phases 8-14 extend the same host-local engine with typed persistent deny, mandatory-confirm rules, non-overridable safeguards, and confirm/deny defaults; no phase adds unlimited persistent allow.
+- Phases 1-7 establish allow-only persistent grants. Phases 8-14 extend the same host-local engine with typed persistent deny, mandatory-confirm rules, non-overridable safeguards, and confirm/deny defaults. Bounded-only allow was superseded on 2026-10-06 by workspace-trusted always-allow grants (see "Always-Allow Persistent Approvals" above).
 - Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools are never auto-allowed; they resolve to mandatory confirm or deny.
 - Rule evaluator is pure. It does not write files, dispatch tools, consume budgets, mutate UI, or access system clock.
 
@@ -3792,7 +3946,7 @@ Overview: complete common scope lifecycle for all rule variants with injected ti
 Rules:
 
 - Read rules may be unlimited only when workspace gate and all scope constraints match.
-- Execute and write rules require both expiration and finite maximum use.
+- Execute and write rules required expiration and finite maximum use through Phase 6; superseded 2026-10-06 by workspace-trusted always-allow grants (no expiry, no budget, trusted workspace required). The engine still enforces finite caps when present.
 - Expired or exhausted rules remain stored but evaluate as prompt; runtime never renews automatically.
 - Clock is injected; no test uses wall-clock sleep.
 - Audit output includes rule id/category/scope/remaining use only; never raw paths beyond approved display policy, command env, secret values, or MCP arguments.
@@ -3801,7 +3955,7 @@ Rules:
 
 - [x] Extend common scope validation and store serialization.
   - [x] Add schema fields for absolute UTC expiration and maximum successful uses.
-  - [x] Reject invalid timestamp, past expiry, zero uses, use cap above safety maximum, unlimited execute/write, and expiration beyond maximum duration.
+  - [x] Reject invalid timestamp, past expiry, zero uses, use cap above safety maximum, and expiration beyond maximum duration. (Phase-6 rule that also rejected unlimited execute/write was superseded 2026-10-06 by workspace-trusted always-allow grants.)
   - [x] Assign stable rule id at creation and retain it across reload.
 - [x] Implement injected clock and lifecycle ledger.
   - [x] Add production clock implementation and deterministic fake clock for tests.
@@ -3809,7 +3963,7 @@ Rules:
   - [x] Check expiry/use before allow decision and increment only after successful dispatch.
   - [x] Clear session rows on close and connection loss.
 - [x] Add approval/status integration.
-  - [x] Offer only `Allow for 1 hour / 20 uses` for execute actions and `Allow for 1 hour / 5 uses` for write actions; do not expose an unlimited persistent execute/write choice.
+  - [x] Offer only `Allow for 1 hour / 20 uses` for execute actions and `Allow for 1 hour / 5 uses` for write actions; do not expose an unlimited persistent execute/write choice. (Superseded 2026-10-06: one `Allow always` choice replaces all bounded options in trusted workspaces.)
   - [x] Show redacted expiration and remaining-use metadata in approval and status surfaces.
   - [x] Emit redacted matched-rule audit event for automatic allow and prompt fallback.
 - [x] Add deterministic lifecycle tests.
@@ -3891,7 +4045,7 @@ Rules:
 - [x] Introduce trust-store schema version `2`.
   - [x] Replace effect-specific allow array names with typed command, MCP, path, profile, write, network, and tool-default rule arrays carrying explicit `effect`.
   - [x] Preserve workspace identity, agent scope, canonical matching fields, expiry, use budget, stable rule id, restrictive permissions, and atomic write rules.
-  - [x] Reject unknown effect, `default = "allow"`, unlimited execute/write allow, effect-incompatible fields, duplicate ids, and mixed version fields.
+  - [x] Reject unknown effect, `default = "allow"`, effect-incompatible fields, duplicate ids, and mixed version fields. (Phase-8 rule that also rejected unlimited execute/write allow was superseded 2026-10-06 by workspace-trusted always-allow grants.)
   - [x] Add one atomic version 1 to version 2 migration that maps every valid old allow entry to `effect = "allow"` without broadening scope; corruption or unsafe permissions fail closed without rewriting source bytes.
   - [x] Remove version 1 runtime evaluation after successful migration; do not maintain parallel evaluators.
 - [x] Add deterministic schema and precedence tests.
@@ -4049,17 +4203,17 @@ Rules:
   - [x] First choice selects allow once, allow session, exact bounded grant, or eligible structured-prefix bounded grant.
   - [x] Second view shows effect, matcher, workspace, agent, expiration, maximum uses, size/result caps, transport identity, and exclusions.
   - [x] Require explicit confirm/cancel; cancellation executes nothing and writes no rule.
-  - [x] Keep current `1 hour / 20 uses` execute and `1 hour / 5 uses` write defaults while allowing only application-approved shorter alternatives.
+  - [x] Keep current `1 hour / 20 uses` execute and `1 hour / 5 uses` write defaults while allowing only application-approved shorter alternatives. (Superseded 2026-10-06: bounded choices removed in favor of `Allow always`.)
 - [x] Add extraction safety tests.
   - [x] Cover token/path/host boundaries, shell wrappers, empty prefixes, root paths, protected paths, MCP argument changes, and schema-version changes.
-  - [x] Snapshot approval preview text and prove displayed scope equals serialized rule fields.
-  - [x] Prove no UI path creates `expires_at = None` or `max_uses = None` for authority-granting operation.
+  - [x] Snapshot approval preview text and prove displayed scope equals serialized rule fields (always-allow previews show the pattern only).
+  - [x] Prove the UI creates no `expires_at`/`max_uses` for always-allow rules and no broader pattern than displayed.
 
 #### Actionable criteria
 
-- [x] `cargo test --quiet -p ee-cli bounded_rule_extraction` passes.
-- [x] Automated tests prove every UI-created allow is bounded, typed, previewed, and no broader than displayed.
-- [x] No regex engine or unrestricted always-allow option exists in policy or UI.
+- [x] `cargo test --quiet -p ee-cli always_rule_extraction` passes.
+- [x] Automated tests prove every always-allow grant is typed, previewed, workspace-trusted, and no broader than displayed.
+- [x] No regex engine exists in policy or UI; always-allow is workspace-trusted, workspace-wide, and revocable.
 
 ### Phase 13: Add trust-rule manager, tester, and explainability UI
 
@@ -5260,6 +5414,11 @@ Prove critic quality before automatic enablement. Use existing replay harness an
     - [x] Write secret env/headers to the user config layer as split-layer patches; workspace config stays clean.
     - [x] Remove workspace-scoped servers along with their user-layer patches.
     - [x] Field-level MCP server merge across layers with partial parking; transport mismatch replaces wholesale.
+
+> Superseded in part (2026-10-06): the MCP setup wizard now stores prompted
+> secrets in the encrypted secrets store and writes `secret://` references
+> into the chosen config layer; the split user-layer patch writer was
+> removed. See "Workspace-Trusted Secret References".
 
 #### Exit criteria
 
