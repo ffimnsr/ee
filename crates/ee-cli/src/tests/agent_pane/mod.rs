@@ -39,7 +39,8 @@ use tokio::sync::watch;
 use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range};
 
 use crate::app::{
-    AgentPaneLayout, App, MessageRenderKind, Mode, ThreadUiState, TranscriptItem, wrap_text,
+    AgentPaneLayout, AgentPermissionPreview, App, MessageRenderKind, Mode, ThreadUiState,
+    TranscriptItem, wrap_text,
 };
 use crate::registers::RegisterName;
 use crate::tests::helpers::*;

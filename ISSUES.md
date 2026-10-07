@@ -5890,3 +5890,196 @@ The workspace pins `agent-client-protocol` 2.2.0 (bumped from 2.0.0 as part of t
 - [x] Formatting passes.
 - [x] Clippy passes for the changed crates.
 - [x] v1 and v2 suites both green after every phase.
+
+## Agent-Permission Alignment for Bridge Approvals [2026-10-07]
+
+Goal: stop asking twice when the user already decided on the agent's own
+`session/request_permission` (ACP v1 `toolCall` / v2 `subject`) and the agent
+then performs the same operation through ee client capabilities
+(`fs/write_text_file`, `terminal/create`) or the `ee_*` proxy.
+
+Overview: a session-scoped, bounded in-memory ledger remembers the
+agent-proposed decision keyed by the ee-validated operation — canonical path
+plus exact content for writes, validated executable plus argv for terminals —
+never by agent display text. A matching bridge approval resolves without UI:
+`AllowOnce` / `AllowAlways` become single-use / session-wide allow grants,
+`RejectOnce` / `RejectAlways` become single-use / session-wide deny grants.
+Alignment never overrides mandatory-confirm rules, safeguards, persistent or
+session deny, unknown operations, write batches, shell command text, or
+non-exact matches; mismatches stay on the explicit approval path.
+
+Rules:
+
+- Payloads that cannot be normalized to an ee-validated operation record no
+grant, and bridge prompts keep the existing UI path (fail closed).
+- Exact match only: writes require canonical in-workspace path and byte-equal
+content; terminals require validated argv equality; shell wrappers, quoting,
+metacharacters, control characters, relative paths, and external paths never
+align.
+- Grants are session-bound, invalidated on session close, session deletion,
+and host rebuild; `*_once` grants are single-use and expire after 120 s; the
+ledger is capped at 64 entries.
+- Mandatory confirmations and non-overridable safeguards always prompt, even
+under an `AllowAlways` alignment grant.
+- Deny grants win over allow grants for the same key.
+- Automatic decisions record the new redacted reasons
+`agent_permission_allow` / `agent_permission_deny` in the trust audit and push
+a visible transcript notice.
+
+Work items:
+
+- [x] Add `agent_permissions` ledger module (key extraction, strict command
+tokenizer, grant lifecycle) with unit coverage.
+- [x] Compute the ee-validated operation key when presenting the ACP
+permission prompt; store it on the pending prompt.
+- [x] Record `*_once` / `*_always` grants from the user's permission choice.
+- [x] Consult the ledger in `request_bridge_approval` before mode-based
+auto-approval, guarded by the mandatory-confirm exclusion.
+- [x] Invalidate grants on session close, session deletion, and host rebuild.
+- [x] Add `DecisionReason::{AgentPermissionAllow, AgentPermissionDeny}` audit
+reasons.
+
+Tests:
+
+- [x] `cargo test --quiet -p ee-cli agent_permissions` covers ledger lifetime,
+single use, expiry, session isolation, deny precedence, tokenizer, and payload
+parsing.
+- [x] `cargo test --quiet -p ee-cli alignment_tests` covers matching write and
+terminal suppression, content and argv mismatch fallback, reject propagation,
+single-use replay, and allow-always reuse.
+
+Exit criteria:
+
+- [x] A user decision on the agent's own permission request resolves exactly
+one matching bridge request without a second prompt, visibly and auditable.
+- [x] Mismatched, unknown, expired, or already-consumed grants keep the
+explicit bridge approval path.
+
+### Phase 2: ee-validated previews in the layer-1 prompt (implemented)
+
+Goal: the agent's own permission prompt shows what ee itself validated —
+canonical path plus content digest for writes, structured argv for terminals —
+so aligning a later bridge request rests on ee-computed facts, not agent
+display text. Payloads without an ee-validated identity say so explicitly and
+never align.
+
+Work items:
+
+- [x] Add `AgentOperationKey::verified_summary` (canonical path · byte count ·
+sha256 prefix for writes; validated argv for terminals; spaced tokens quoted;
+raw content is never rendered).
+- [x] Carry the summary on the pending permission prompt and the transcript
+permission item.
+- [x] Render `ee verified: …` under the permission question (wrapped) and a
+`· ee verified` marker in the composer; render
+`ee check: unverifiable payload · bridge approval will still prompt` when the
+payload has no ee-validated identity.
+- [x] Include the verified summary in the transcript export for audit.
+
+Tests:
+
+- [x] Unit coverage for summary formatting (stable write digest prefix,
+terminal argv, quoted tokens).
+- [x] Render tests cover the verified write line, the verified terminal line,
+the composer marker, and the unverifiable-payload hint.
+
+Exit criteria:
+
+- [x] An approval that can auto-resolve a later bridge request visibly states
+the ee-validated operation before the user confirms.
+- [x] Payloads without ee-validated identity are marked unverifiable and keep
+the explicit bridge prompt.
+
+### Phase 3: config-gated heuristic alignment and counters (implemented)
+
+Goal: measure how often the duplicate bridge prompt actually happens, and give
+users an explicit, host-global opt-in that lets an opaque agent payload cover
+the next matching operation when exact verification is impossible.
+
+Rules:
+
+- `[agents.approval] alignment` is `"exact"` (default), `"heuristic"`, or
+`"off"`.  `heuristic` requires host-global config; repository (ancestor)
+`.ee.toml` layers may only set `exact` or `off`, matching the web-context rule
+that workspace config can restrict but never broaden authority.
+- Heuristic grants are single-use with the shared 120 s TTL
+(`Allow once` / `Reject once`) or session-wide (`Allow always` /
+`Reject always`).  The structured ACP tool kind picks the class
+(`execute` → terminal, `edit`/`delete`/`move` → write); an unknown kind covers
+any class.  Mandatory-confirm rules, safeguards, deny rules, protected paths,
+workspace boundaries, and argv/write validation all still apply.
+- In `exact` mode a keyless decision records a counting-only candidate that
+never resolves; the first matching bridge request consumes it and increments
+the dry-run counter, so the would-resolve rate is measurable before enabling
+heuristic mode.
+- Counters are privacy-safe integers surfaced by `/permissions`:
+`exact-resolved`, `heuristic-resolved`, `heuristic-candidates`,
+`heuristic-would-resolve`, `bridge-prompts`.
+- Prompts disclose the mode: the transcript renders
+`ee check: unverifiable payload · heuristic alignment covers the next matching
+write or terminal operation` and the composer marks the pending choice
+`· ee heuristic`.
+
+Work items:
+
+- [x] Parse `[agents.approval] alignment` with fail-closed unknown values and
+host-global-only `heuristic` (schema regenerated, init template example
+added).
+- [x] Extend the ledger with class-scoped heuristic grants, session grants,
+counting-only candidates, and the `observe_candidate` probe that never
+consumes real grants.
+- [x] Record exact grants, heuristic grants, or candidates from the user's
+permission choice according to the active mode.
+- [x] Resolve bridge approvals through exact matching first, then heuristic
+matching in `heuristic` mode; `off` skips alignment entirely.
+- [x] Add mode-aware permission-prompt previews (`Verified`, `Heuristic`,
+`Unverifiable`) and the `/permissions` counter line.
+
+Tests:
+
+- [x] Ledger unit coverage: class matching, class-less grants, session reuse,
+candidate counting without grant consumption, tool-kind mapping, preview
+texts.
+- [x] Config coverage: parsing, unknown-value fallback, repository-layer
+rejection of `heuristic`, schema currency, init template.
+- [x] E2E coverage: heuristic mode resolves an opaque write and discloses
+itself, respects the tool-kind class, propagates opaque rejection, exact mode
+counts would-resolve candidates without resolving, and `off` disables
+alignment.
+
+Exit criteria:
+
+- [x] A double-prompt rate is measurable without behavior change.
+- [x] Heuristic alignment is explicit, host-global config only, class-scoped,
+visible before confirmation, and never bypasses mandatory confirmations or
+safeguards.
+
+### Second-pass review (implemented)
+
+- [x] Persisted agent transcripts written before Phase 2 (permission items
+without a `preview` member) restore again: the member defaults to
+`Unverifiable`, so a legacy transcript line can never render as verified or
+heuristically aligned; covered by a serde round-trip test and an end-to-end
+restart test that rewrites the member away.
+- [x] Confirmed no mode-switch leak in the ledger: exact grants resolve
+regardless of the active mode, heuristic grants and candidates stay invisible
+to exact matching, and `off` records and resolves nothing.
+
+### Third-pass review (implemented)
+
+- [x] Extracted the preview surface (`AgentOperationKey::verified_summary`,
+`display_token`, `AgentPermissionPreview`) into
+`agent_bridge/agent_preview.rs`, keeping `agent_permissions.rs` below the 1K
+LOC threshold.
+- [x] Escaped control characters (and quoted whitespace/embedded quotes) in the
+verified write path and terminal tokens so a crafted in-workspace path cannot
+move the terminal cursor or forge summary fields in the prompt, transcript, or
+export.
+- [x] Added adversarial e2e coverage: byte-exact content at a different path
+still prompts, and a persistent mandatory-confirm rule keeps the bridge prompt
+while leaving the alignment grant unconsumed.
+
+Open follow-up: agent-controlled text rendered in the agents pane and composer
+(permission titles, tool titles, stderr lines, paths) still bypasses
+`ui::spans::sanitize_control_chars`, which only buffer panes call; the
+verification summary now escapes locally, but the pane-wide gap remains.

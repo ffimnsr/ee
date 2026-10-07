@@ -56,6 +56,8 @@ impl App {
         self.agents.workspace_restore = None;
         self.agents.approval_policy = crate::app::agent_bridge::ApprovalPolicy::default();
         self.agents.approval_modes.clear();
+        self.agents.agent_permissions.clear();
+        self.agents.alignment_stats = crate::app::agent_bridge::AgentAlignmentStats::default();
         self.agents.usage_ledger = crate::policy::UsageLedger::default();
     }
 

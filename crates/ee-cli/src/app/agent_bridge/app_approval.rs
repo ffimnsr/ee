@@ -19,6 +19,7 @@ use crate::policy::{
     generate_mcp_rule_id, generate_network_rule_id, generate_tool_rule_id, generate_write_rule_id,
 };
 
+use super::agent_permissions::AgentPermissionAlignment;
 use super::app_web::{NEXT_WEB_LIFECYCLE_ID, web_context_agent_error};
 use super::approval::{
     ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation, PersistentDenyCandidate,
@@ -578,6 +579,23 @@ impl App {
             TrustDecision { outcome: TrustOutcome::Deny, .. } => unreachable!(),
             _ => {}
         }
+        // Phase 1 agent-permission alignment: an exact match against the
+        // decision the user just made on the agent's own
+        // `session/request_permission` resolves without a second prompt.
+        // Mandatory confirmations always stay on the explicit UI path.
+        if decision.reason != DecisionReason::MandatoryConfirm {
+            match self.agent_permission_alignment(&prompt) {
+                AgentPermissionAlignment::Deny => {
+                    self.resolve_agent_permission_deny(prompt, &audited_operation, &session_id);
+                    return;
+                }
+                AgentPermissionAlignment::Allow => {
+                    self.resolve_agent_permission_allow(prompt, &audited_operation, &session_id);
+                    return;
+                }
+                AgentPermissionAlignment::None => {}
+            }
+        }
         let approval_mode =
             self.agents.approval_modes.get(&session_id).copied().unwrap_or_default();
         if decision.reason != DecisionReason::MandatoryConfirm
@@ -593,6 +611,7 @@ impl App {
             self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
             return;
         }
+        self.agents.alignment_stats.prompts_queued += 1;
         self.agents.approvals.push_back(prompt);
         self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
             String::from("agent approval required (open :agents)")

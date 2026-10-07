@@ -15,6 +15,9 @@ use ee_agent_protocol::{
 use super::super::*;
 use super::pump;
 
+use crate::app::agent_bridge::AgentPermissionPreview;
+use crate::config::AgentAlignmentMode;
+
 use super::constants::AGENT_PROMPT_HISTORY_MAX;
 use super::elicitation::ElicitationPrompt;
 use super::format::{
@@ -145,6 +148,7 @@ impl App {
                 // the session; persistent host-local rules remain.
                 self.agents.approval_policy.invalidate_session(session_id.0.as_ref());
                 self.agents.approval_modes.remove(session_id.0.as_ref());
+                self.agents.agent_permissions.invalidate_session(session_id.0.as_ref());
                 if self
                     .agents
                     .approval_mode_confirmation
@@ -497,9 +501,23 @@ impl App {
         let titles: Vec<String> = options.iter().map(|option| option.name.clone()).collect();
         let tool_title =
             request.tool_call.fields.title.clone().unwrap_or_else(|| String::from("tool call"));
+        // Alignment (Phases 1–3): remember the ee-validated operation
+        // identity (if the payload normalizes) so a matching bridge prompt
+        // can reuse the user's decision instead of asking twice, and render
+        // what ee itself checked.
+        let agent_permission_key = self.agent_operation_key_for_tool_call(&request.tool_call);
+        let agent_permission_class = self.agent_operation_class_for_tool_call(&request.tool_call);
+        let preview = match agent_permission_key.as_ref() {
+            Some(key) => AgentPermissionPreview::Verified(key.verified_summary()),
+            None if self.config.agents.approval.alignment == AgentAlignmentMode::Heuristic => {
+                AgentPermissionPreview::Heuristic { class: agent_permission_class }
+            }
+            None => AgentPermissionPreview::Unverifiable,
+        };
         self.agents.threads[thread_index].transcript.push(TranscriptItem::Permission {
             title: tool_title.clone(),
             options: titles.clone(),
+            preview: preview.clone(),
             at: SystemTime::now(),
         });
         self.agents.permissions.entry(session_id.0.to_string()).or_default().push_back(
@@ -509,6 +527,9 @@ impl App {
                 tool_title,
                 options,
                 selected: 0,
+                agent_permission_key,
+                agent_permission_class,
+                preview,
             },
         );
         self.agents.threads[thread_index].state = ThreadUiState::AwaitingPermission;

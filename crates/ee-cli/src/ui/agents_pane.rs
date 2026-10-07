@@ -88,7 +88,7 @@ pub(super) fn transcript_lines(
             }
         }
 
-        TranscriptItem::Permission { title, at, .. } => {
+        TranscriptItem::Permission { title, preview, at, .. } => {
             // Only the question renders in the chat thread; the user picks a
             // choice in the composer (the bottom prompt section). The full
             // option list is preserved in the transcript export for audit.
@@ -98,6 +98,25 @@ pub(super) fn transcript_lines(
                 Span::styled(" permission: ", Style::default().fg(theme::FG_WARNING)),
                 Span::styled(title.clone(), Style::default().fg(theme::FG_TEXT)),
             ]));
+            // ee-validated facts (or the alignment/verification note), so the
+            // decision is informed by what ee checked, not only agent display
+            // text.
+            let preview_text = preview.transcript_text();
+            let preview_style = match preview {
+                crate::app::AgentPermissionPreview::Verified(_) => {
+                    Style::default().fg(theme::FG_KEY)
+                }
+                crate::app::AgentPermissionPreview::Heuristic { .. } => {
+                    Style::default().fg(theme::FG_INFO)
+                }
+                crate::app::AgentPermissionPreview::Unverifiable => dim,
+            };
+            for segment in crate::app::wrap_text(&preview_text, text_width) {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(segment, preview_style),
+                ]));
+            }
         }
         TranscriptItem::Elicitation { agent, message, url, url_host, at } => {
             let time = fmt_hhmm(*at);

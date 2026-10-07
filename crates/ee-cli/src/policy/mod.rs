@@ -466,6 +466,12 @@ pub(crate) enum DecisionReason {
     BuiltInAllow,
     /// A recorded session allow matched the operation.
     SessionAllow,
+    /// The user's decision on the agent's own permission request covered the
+    /// exact bridge operation (agent-permission alignment).
+    AgentPermissionAllow,
+    /// The user's rejection on the agent's own permission request covered the
+    /// exact bridge operation (agent-permission alignment).
+    AgentPermissionDeny,
     /// A validated persistent rule matched the operation.
     PersistentAllow,
     /// The operation has no valid normalized identity.
@@ -497,6 +503,8 @@ impl DecisionReason {
             DecisionReason::MandatoryConfirm => "mandatory_confirm",
             DecisionReason::BuiltInAllow => "built_in_allow",
             DecisionReason::SessionAllow => "session_allow",
+            DecisionReason::AgentPermissionAllow => "agent_permission_allow",
+            DecisionReason::AgentPermissionDeny => "agent_permission_deny",
             DecisionReason::PersistentAllow => "persistent_allow",
             DecisionReason::UnknownOperation => "unknown_operation",
             DecisionReason::WorkspaceDisabled => "workspace_disabled",

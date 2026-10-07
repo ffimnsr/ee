@@ -91,6 +91,9 @@ pub(crate) use agent_bridge::{
 };
 
 #[cfg(feature = "agents")]
+pub(crate) use agent_bridge::AgentPermissionPreview;
+
+#[cfg(feature = "agents")]
 pub(crate) use crate::text::{wrap_text, wrap_text_hard, wrapped_caret_position};
 #[cfg(feature = "agents")]
 pub(crate) use agent_pane::{

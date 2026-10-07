@@ -12,7 +12,7 @@
 
 use super::agents;
 use super::agents_settings::{
-    AgentsSettings, MAX_AGENT_MAX_CONCURRENT_PROMPTS, merge_agent_server,
+    AgentsSettings, MAX_AGENT_MAX_CONCURRENT_PROMPTS, merge_agent_approval, merge_agent_server,
 };
 use super::discovery::ConfigLayerKind;
 use super::init::load_config;
@@ -408,6 +408,9 @@ impl EditorSettings {
         }
         if let Some(workspace_memory) = &patch.workspace_memory {
             merge_workspace_memory(&mut self.agents.workspace_memory, workspace_memory);
+        }
+        if let Some(approval) = &patch.approval {
+            merge_agent_approval(&mut self.agents.approval, approval, kind);
         }
         for (id, server) in &patch.servers {
             let existing = self.agents.servers.get(id);

@@ -473,32 +473,39 @@ impl App {
         self.active_root_path().map_or_else(|| self.canonical_workspace_roots(), |root| vec![root])
     }
 
-    pub(super) fn validate_workspace_write_path(&self, path: &Path) -> Result<(), AgentError> {
+    /// Canonical form of one requested path: existing paths resolve fully;
+    /// new files resolve through their canonical parent.  Root containment is
+    /// checked separately so callers that only need the canonical path (the
+    /// agent-permission ledger) can reuse it.
+    pub(super) fn canonical_workspace_path(&self, path: &Path) -> Result<PathBuf, AgentError> {
         if !path.is_absolute() {
             return Err(AgentError::invalid_params("path must be absolute"));
         }
-        let candidate = if path.exists() {
-            std::fs::canonicalize(path).map_err(|error| {
+        if path.exists() {
+            return std::fs::canonicalize(path).map_err(|error| {
                 AgentError::Io(format!("cannot access {}: {error}", path.display()))
-            })?
-        } else {
-            let Some(parent) = path.parent() else {
-                return Err(AgentError::invalid_params(format!(
-                    "path has no parent directory: {}",
-                    path.display()
-                )));
-            };
-            let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
-                AgentError::Io(format!("cannot access parent {}: {error}", parent.display()))
-            })?;
-            let Some(name) = path.file_name() else {
-                return Err(AgentError::invalid_params(format!(
-                    "path has no file name: {}",
-                    path.display()
-                )));
-            };
-            canonical_parent.join(name)
+            });
+        }
+        let Some(parent) = path.parent() else {
+            return Err(AgentError::invalid_params(format!(
+                "path has no parent directory: {}",
+                path.display()
+            )));
         };
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+            AgentError::Io(format!("cannot access parent {}: {error}", parent.display()))
+        })?;
+        let Some(name) = path.file_name() else {
+            return Err(AgentError::invalid_params(format!(
+                "path has no file name: {}",
+                path.display()
+            )));
+        };
+        Ok(canonical_parent.join(name))
+    }
+
+    pub(super) fn validate_workspace_write_path(&self, path: &Path) -> Result<(), AgentError> {
+        let candidate = self.canonical_workspace_path(path)?;
         if self.allowed_fs_roots().iter().any(|root| candidate.starts_with(root)) {
             Ok(())
         } else {

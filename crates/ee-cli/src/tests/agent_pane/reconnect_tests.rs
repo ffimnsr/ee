@@ -325,6 +325,95 @@ fn workspace_restart_restores_local_transcript_when_agent_load_has_no_replay() {
 }
 
 #[test]
+fn workspace_restart_restores_transcript_whose_permission_items_lack_preview() {
+    // Documents written before the Phase 2 `preview` member persisted
+    // permission items without it.  Rewriting the member away and restarting
+    // must still restore the local transcript fallback (before the serde
+    // default existed the whole-document parse failed and the record was
+    // silently dropped).
+    let workspace = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let first_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut first_app, _first_fake) = fake_agents_app_in(workspace.path(), first_script);
+    first_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+    open_pane_and_wait_ready(&mut first_app);
+    first_app.agents.threads[0].transcript.push(TranscriptItem::Permission {
+        title: String::from("legacy prompt"),
+        options: vec![String::from("allow once")],
+        preview: AgentPermissionPreview::Verified(String::from(
+            "write /w/a.txt · 1 bytes · sha256:00",
+        )),
+        at: SystemTime::now(),
+    });
+    first_app.shutdown_agents();
+    drop(first_app);
+
+    let record_path = state_dir.path().join("agent-sessions.json");
+    let text = fs::read_to_string(&record_path).unwrap();
+    let mut documents: Value = serde_json::from_str(&text).unwrap();
+    let mut stripped = 0usize;
+    for document in documents.as_object_mut().unwrap().values_mut() {
+        let Some(sessions) = document.get_mut("sessions").and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for session in sessions {
+            let Some(items) = session.get_mut("transcript").and_then(|value| value.as_array_mut())
+            else {
+                continue;
+            };
+            for item in items {
+                if let Some(fields) =
+                    item.get_mut("Permission").and_then(|value| value.as_object_mut())
+                    && fields.remove("preview").is_some()
+                {
+                    stripped += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(stripped, 1, "fixture rewrites exactly the persisted permission item");
+    fs::write(&record_path, serde_json::to_string(&documents).unwrap()).unwrap();
+
+    let restarted_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true }
+        }))
+        .wait_for("session/load")
+        .respond(json!({}))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut restarted_app, restarted_fake) =
+        fake_agents_app_in(workspace.path(), restarted_script);
+    restarted_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+
+    run_ex(&mut restarted_app, "agents");
+    wait_until(&mut restarted_app, "legacy transcript restored", |app| {
+        app.agents.threads.first().is_some_and(|thread| {
+            thread.state == ThreadUiState::Ready
+                && thread.transcript.iter().any(|item| {
+                    matches!(
+                        item,
+                        TranscriptItem::Permission { preview, .. }
+                            if *preview == AgentPermissionPreview::Unverifiable
+                    )
+                })
+        })
+    });
+
+    assert_eq!(restarted_fake.agent().requests_by_method("session/load").len(), 1);
+    assert!(restarted_fake.agent().requests_by_method("session/new").is_empty());
+}
+
+#[test]
 fn agents_reconnect_without_persisted_session_reports_error() {
     // A fresh state directory and no session ever created: there is no
     // persisted record to reconnect.

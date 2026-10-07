@@ -145,11 +145,14 @@ pub(super) fn format_agent_transcript_markdown(
                     secrets,
                 );
             }
-            TranscriptItem::Permission { title, options, .. } => {
+            TranscriptItem::Permission { title, options, preview, .. } => {
                 output.push_str(&format!(
                     "### {timestamp} · Permission\n\n{}\n\n",
                     redacted_export_text(title, secrets)
                 ));
+                if let Some(note) = preview.export_text() {
+                    output.push_str(&format!("**{}**\n\n", redacted_export_text(&note, secrets)));
+                }
                 for option in options {
                     output.push_str(&format!("- {}\n", redacted_export_text(option, secrets)));
                 }

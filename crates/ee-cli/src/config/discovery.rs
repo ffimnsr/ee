@@ -38,6 +38,13 @@ impl ConfigLayerKind {
             Self::Ancestor => "ancestor",
         }
     }
+
+    /// Whether this layer is host-administered rather than repository-owned.
+    /// Host layers may broaden approval policy (`heuristic` alignment);
+    /// repository (ancestor) config may only restrict it.
+    pub(crate) fn is_host_global(self) -> bool {
+        !matches!(self, Self::Ancestor)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

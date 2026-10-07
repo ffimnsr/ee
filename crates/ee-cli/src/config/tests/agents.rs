@@ -50,6 +50,44 @@ command = "other-agent"
     assert_eq!(settings.agents.servers.len(), 2);
 }
 #[test]
+fn agents_approval_alignment_parses_and_fails_closed_on_unknown_values() {
+    assert_eq!(
+        EditorSettings::default().agents.approval.alignment,
+        AgentAlignmentMode::Exact,
+        "default alignment is exact"
+    );
+
+    let raw: EeToml = toml::from_str(
+        "[agents]\nenabled = true\n\n[agents.approval]\nalignment = \"heuristic\"\n",
+    )
+    .unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.agents.approval.alignment, AgentAlignmentMode::Heuristic);
+
+    // Unknown values keep the previous mode instead of widening authority.
+    let raw: EeToml = toml::from_str("[agents.approval]\nalignment = \"yolo\"\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.agents.approval.alignment, AgentAlignmentMode::Heuristic);
+}
+#[test]
+fn repository_config_cannot_enable_heuristic_alignment() {
+    // Host-global config may broaden approval reuse; repository (ancestor)
+    // config may only restrict it.
+    let raw: EeToml = toml::from_str(
+        "[agents]\nenabled = true\n\n[agents.approval]\nalignment = \"heuristic\"\n",
+    )
+    .unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::Ancestor);
+    assert_eq!(settings.agents.approval.alignment, AgentAlignmentMode::Exact);
+
+    // A repository layer may still disable or pin exact alignment.
+    let raw: EeToml = toml::from_str("[agents.approval]\nalignment = \"off\"\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::Ancestor);
+    assert_eq!(settings.agents.approval.alignment, AgentAlignmentMode::Off);
+}
+#[test]
 fn agent_env_secret_reference_from_xdg_layer_is_preserved() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());

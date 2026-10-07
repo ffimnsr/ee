@@ -177,6 +177,14 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # env = { API_KEY = "secret://agent-api-key" }
 # cwd = "/path/to/workspace"
 #
+# Bridge approvals reuse a decision already made on the agent's own ACP
+# permission prompt only when ee itself validated the exact operation.
+# "heuristic" also lets one decision cover the next matching operation for
+# opaque agent payloads; "off" disables alignment. Default: exact.
+#
+# [agents.approval]
+# alignment = "exact"
+#
 # A `secret://` reference in a workspace `.ee.toml` resolves only after the
 # workspace is trusted (`ee do trust grant|revoke|status`); ee asks once on
 # first open. User-config references resolve without that decision. Env values

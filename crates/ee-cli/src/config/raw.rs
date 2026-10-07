@@ -107,6 +107,14 @@ pub(crate) struct FormatterToml {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct AgentApprovalToml {
+    /// Bridge-approval alignment policy: `"exact"` (default),
+    /// `"heuristic"`, or `"off"`.
+    pub alignment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AgentsToml {
     /// Runtime switch for agents mode.  Defaults to `false`; agents mode is
     /// disabled unless a config layer sets this to `true`.
@@ -116,6 +124,8 @@ pub(crate) struct AgentsToml {
     pub default_agent: Option<String>,
     /// Per-connection prompt concurrency. Valid range: 1 through 32.
     pub max_concurrent_prompts: Option<usize>,
+    /// Bridge-approval alignment policy (`[agents.approval]` table).
+    pub approval: Option<AgentApprovalToml>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
     /// Optional bounded critic policy.

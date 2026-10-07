@@ -180,6 +180,7 @@ fn terminal_create(id: i64, session_id: &str, command: &str, args: Value, extra:
     json!({ "jsonrpc": "2.0", "id": id, "method": "terminal/create", "params": params })
 }
 
+mod alignment_tests;
 mod read_tests;
 mod terminal_tests;
 mod write_tests;

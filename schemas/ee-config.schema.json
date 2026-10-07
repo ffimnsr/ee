@@ -758,6 +758,17 @@
           "format": "uint",
           "minimum": 0
         },
+        "approval": {
+          "description": "Bridge-approval alignment policy (`[agents.approval]` table).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentApprovalToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "servers": {
           "type": "object",
           "additionalProperties": {
@@ -796,6 +807,19 @@
             {
               "type": "null"
             }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentApprovalToml": {
+      "type": "object",
+      "properties": {
+        "alignment": {
+          "description": "Bridge-approval alignment policy: `\"exact\"` (default),\n`\"heuristic\"`, or `\"off\"`.",
+          "type": [
+            "string",
+            "null"
           ]
         }
       },

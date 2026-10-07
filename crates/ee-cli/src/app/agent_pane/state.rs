@@ -51,6 +51,16 @@ pub(crate) struct PermissionPrompt {
     pub(crate) tool_title: String,
     pub(crate) options: Vec<PermissionOption>,
     pub(crate) selected: usize,
+    /// ee-validated operation identity computed when the request was
+    /// presented; `None` means the payload could not be normalized and the
+    /// bridge always prompts for the follow-up execution.
+    pub(crate) agent_permission_key: Option<crate::app::agent_bridge::AgentOperationKey>,
+    /// Coarse operation class from the structured tool kind, used only by
+    /// heuristic alignment.
+    pub(crate) agent_permission_class: Option<crate::app::agent_bridge::AgentGrantClass>,
+    /// ee-computed summary of the same operation, rendered in the permission
+    /// prompt and transcript export (never agent display text).
+    pub(crate) preview: crate::app::agent_bridge::AgentPermissionPreview,
 }
 
 /// Local picker shown after submitting `/mode` without an argument.
@@ -262,6 +272,11 @@ pub(crate) struct AgentPaneState {
     pub(crate) action_log: Vec<crate::app::agent_bridge::ActionLogEntry>,
     /// Session-scoped approval policy (Phase 7).
     pub(crate) approval_policy: crate::app::agent_bridge::ApprovalPolicy,
+    /// Agent-proposed permission decisions (Phases 1–3); entries die with
+    /// their session and never bypass mandatory confirmations.
+    pub(crate) agent_permissions: crate::app::agent_bridge::AgentPermissionLedger,
+    /// Privacy-safe alignment counters for `/permissions` (counts only).
+    pub(crate) alignment_stats: crate::app::agent_bridge::AgentAlignmentStats,
     /// Lazy service instance. Its bounded cache dies with this pane/session scope.
     pub(crate) web_context_service:
         Option<Arc<ee_agent_host::WebContextService<ee_agent_host::ReqwestWebTransport>>>,
@@ -351,6 +366,8 @@ impl Default for AgentPaneState {
             terminals: crate::app::agent_bridge::AgentTerminals::default(),
             action_log: Vec::new(),
             approval_policy: crate::app::agent_bridge::ApprovalPolicy::default(),
+            agent_permissions: crate::app::agent_bridge::AgentPermissionLedger::default(),
+            alignment_stats: crate::app::agent_bridge::AgentAlignmentStats::default(),
             web_context_service: None,
             web_context_config_fingerprint: None,
             approval_modes: BTreeMap::new(),

@@ -1,5 +1,6 @@
 //! `impl App`: key handling, permission/elicitation confirmation, selection moves.
 
+use crate::app::agent_bridge::grant_for_option_kind;
 use crate::policy::is_protected_relative_path;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::ClientRequestResponse;
@@ -37,6 +38,39 @@ impl App {
             option.option_id.clone(),
         ));
         let resolved = thread.respond_permission(request_id, outcome);
+        if resolved {
+            // Alignment (Phases 1–3): record the agent-proposed decision keyed
+            // by the ee-validated operation so the matching bridge request
+            // does not prompt twice.  Stale responses record nothing.
+            let mode = self.config.agents.approval.alignment;
+            if mode != crate::config::AgentAlignmentMode::Off {
+                let now = self.trust_clock.now();
+                if let Some(key) = prompt.agent_permission_key.clone() {
+                    self.agents.agent_permissions.record_agent_option(
+                        &prompt.session_id,
+                        key,
+                        option.kind,
+                        now,
+                    );
+                } else if let Some((decision, once)) = grant_for_option_kind(option.kind) {
+                    // No ee-validated identity: `heuristic` records a real
+                    // class grant; `exact` records a counting-only candidate
+                    // that never resolves.
+                    let candidate = mode == crate::config::AgentAlignmentMode::Exact;
+                    self.agents.agent_permissions.record_heuristic_decision(
+                        &prompt.session_id,
+                        prompt.agent_permission_class,
+                        decision,
+                        once,
+                        candidate,
+                        now,
+                    );
+                    if candidate {
+                        self.agents.alignment_stats.heuristic_candidates += 1;
+                    }
+                }
+            }
+        }
         if let Some(thread) = self.agents.threads.get_mut(thread_index) {
             thread.push_system(format!(
                 "approval: {} ({})",

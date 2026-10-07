@@ -30,6 +30,7 @@
 //! - `read.rs`       — bounded text-read helpers and the `impl App` read path
 //! - `pump.rs`       — request pump, workspace-memory operations, proxy dispatch
 //! - `app_*.rs`      — `impl App` blocks grouped by concern
+//! - `agent_preview.rs` — ee-validated permission previews (prompt/transcript text, export note)
 //!
 //! Privacy note: items moved from this single module into the submodules
 //! below keep `pub(crate)`/`pub(super)` visibility tailored to where they are
@@ -40,6 +41,8 @@
 #[cfg(test)]
 pub(super) mod test_hooks;
 
+mod agent_permissions;
+mod agent_preview;
 mod app_approval;
 mod app_decision;
 mod app_proxy;
@@ -67,6 +70,13 @@ static WEB_DISPATCH_TEST_COUNT: std::sync::atomic::AtomicUsize =
 // `unused_imports` is allowed here on purpose: several re-exported names are
 // only referenced from test code or `crate::tests`, so `cargo fix` would
 // otherwise strip them from the non-test build.
+#[allow(unused_imports)]
+pub(crate) use agent_permissions::{
+    AgentAlignmentStats, AgentGrantClass, AgentOperationKey, AgentPermissionLedger,
+    grant_for_option_kind,
+};
+#[allow(unused_imports)]
+pub(crate) use agent_preview::AgentPermissionPreview;
 #[allow(unused_imports)]
 pub(crate) use approval::{
     ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalPolicy, PreparedWrite, ToolApprovalMode,

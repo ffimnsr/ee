@@ -13,7 +13,9 @@
 use super::discovery::ConfigLayerKind;
 #[cfg(feature = "agents")]
 use super::discovery::{ConfigEnvironment, ConfigScope};
-use super::raw::{AgentServerToml, AgentsToml, RubberDuckToml, WorkspaceMemoryToml};
+use super::raw::{
+    AgentApprovalToml, AgentServerToml, AgentsToml, RubberDuckToml, WorkspaceMemoryToml,
+};
 use super::rubber_duck::{RubberDuckModeSetting, RubberDuckSettings};
 use super::secret_value::ConfigSecretValue;
 #[cfg(feature = "agents")]
@@ -32,6 +34,78 @@ use ee_agent_host::AgentWebContextConfig;
 const DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS: usize = 4;
 pub(super) const MAX_AGENT_MAX_CONCURRENT_PROMPTS: usize = 32;
 
+/// Bridge-approval alignment with the agent's own permission prompt.
+///
+/// `exact` (default) reuses a decision only when the ee-validated operation
+/// matches the bridge request exactly.  `heuristic` additionally lets one
+/// agent-prompt decision cover the next bridge operation of the same kind
+/// when the payload carries no verifiable identity.  `off` disables alignment
+/// entirely.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AgentAlignmentMode {
+    #[default]
+    Exact,
+    Heuristic,
+    Off,
+}
+
+impl AgentAlignmentMode {
+    /// Parses the configured value; unknown values fail closed to an error
+    /// the caller reports while keeping the previous mode.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "heuristic" => Ok(Self::Heuristic),
+            "off" => Ok(Self::Off),
+            other => Err(format!(
+                "unsupported alignment {other:?}; expected \"exact\", \"heuristic\", or \"off\""
+            )),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Heuristic => "heuristic",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Resolved `[agents.approval]` policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentApprovalSettings {
+    pub alignment: AgentAlignmentMode,
+}
+
+/// Merges one `[agents.approval]` patch.  `heuristic` alignment is
+/// host-global only: repository (ancestor) config may restrict to `exact` or
+/// `off` but can never broaden approval reuse.  Invalid values keep the
+/// previous mode and print a bounded warning.
+pub(super) fn merge_agent_approval(
+    settings: &mut AgentApprovalSettings,
+    patch: &AgentApprovalToml,
+    kind: ConfigLayerKind,
+) {
+    if let Some(value) = patch.alignment.as_deref() {
+        match AgentAlignmentMode::parse(value.trim()) {
+            Ok(AgentAlignmentMode::Heuristic) if !kind.is_host_global() => {
+                eprintln!(
+                    "ee: warning: agents.approval.alignment = \"heuristic\" requires host-global config; keeping {} for {} config",
+                    settings.alignment.label(),
+                    kind.label()
+                );
+            }
+            Ok(mode) => settings.alignment = mode,
+            Err(error) => eprintln!(
+                "ee: warning: invalid agents.approval.alignment: {error}; keeping {}",
+                settings.alignment.label()
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentsSettings {
     pub enabled: bool,
@@ -39,6 +113,8 @@ pub(crate) struct AgentsSettings {
     /// Maximum provider prompts in flight on each configured agent connection.
     pub max_concurrent_prompts: usize,
     pub servers: BTreeMap<String, AgentServerSettings>,
+    /// Bridge-approval alignment with the agent's own permission prompt.
+    pub approval: AgentApprovalSettings,
     /// Frontend-resolved critic policy; translated to backend policy on use.
     pub rubber_duck: RubberDuckSettings,
     /// Durable workspace memory with persistence. Enabled by default when
@@ -57,6 +133,7 @@ impl Default for AgentsSettings {
             default_agent: None,
             max_concurrent_prompts: DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS,
             servers: BTreeMap::new(),
+            approval: AgentApprovalSettings::default(),
             rubber_duck: RubberDuckSettings::default(),
             workspace_memory: WorkspaceMemorySettings::default(),
             #[cfg(any(feature = "agents", test))]
@@ -153,6 +230,9 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
         enabled: Some(agents.enabled),
         default_agent: agents.default_agent.clone(),
         max_concurrent_prompts: Some(agents.max_concurrent_prompts),
+        approval: Some(AgentApprovalToml {
+            alignment: Some(agents.approval.alignment.label().to_string()),
+        }),
         workspace_memory: Some(WorkspaceMemoryToml {
             enabled: Some(agents.workspace_memory.enabled),
             persist_notes: Some(agents.workspace_memory.persist_notes),

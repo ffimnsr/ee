@@ -418,15 +418,24 @@ pub(super) fn agents_composer_line(
             .get(selected)
             .map(|option| option.name.clone())
             .unwrap_or_else(|| String::from("(none)"));
-        return vec![
+        let mut spans = vec![
             Span::styled("> ", Style::default().fg(theme::FG_KEY)),
             Span::styled(
                 format!("[{}/{}] ", selected + 1, count),
                 Style::default().fg(theme::FG_WARNING),
             ),
             Span::styled(option, Style::default().fg(theme::FG_TEXT)),
-            Span::styled(" (Enter confirm, ←/→ change, Esc back)", theme_style(theme::FG_DIM)),
         ];
+        if let Some(marker) = permission.preview.composer_marker() {
+            // The full validated summary (or heuristic note) renders in the
+            // transcript line above.
+            spans.push(Span::styled(format!(" {marker}"), Style::default().fg(theme::FG_KEY)));
+        }
+        spans.push(Span::styled(
+            " (Enter confirm, ←/→ change, Esc back)",
+            theme_style(theme::FG_DIM),
+        ));
+        return spans;
     }
     if let Some(elicitation) = app.agents.elicitation() {
         let mut spans = vec![Span::styled("> ", Style::default().fg(theme::FG_KEY))];

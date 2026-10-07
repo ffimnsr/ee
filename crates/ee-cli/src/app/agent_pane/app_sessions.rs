@@ -493,6 +493,7 @@ impl App {
                 .invalidate_session(&format!("proxy-network:{}", route.transport_identity()));
         }
         self.agents.approval_modes.remove(&removed.session_id);
+        self.agents.agent_permissions.invalidate_session(&removed.session_id);
         self.agents.active_thread = (!self.agents.threads.is_empty())
             .then_some(confirmation.thread_index.min(self.agents.threads.len() - 1));
         self.persist_agent_workspace();

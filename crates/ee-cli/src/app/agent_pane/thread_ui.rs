@@ -63,7 +63,15 @@ pub(crate) enum TranscriptItem {
         at: SystemTime,
     },
     /// A permission request shown in the transcript.
-    Permission { title: String, options: Vec<String>, at: SystemTime },
+    Permission {
+        title: String,
+        options: Vec<String>,
+        /// Defaulted for documents written before Phase 2, which persisted
+        /// permission items without a preview member.
+        #[serde(default = "legacy_permission_preview")]
+        preview: crate::app::agent_bridge::AgentPermissionPreview,
+        at: SystemTime,
+    },
     /// An elicitation request shown in the transcript.
     Elicitation {
         agent: String,
@@ -76,6 +84,13 @@ pub(crate) enum TranscriptItem {
     System { text: String, at: SystemTime },
     /// `-!-` stderr/debug line.
     Stderr { text: String, at: SystemTime },
+}
+
+/// Serde default for permission items persisted before the `preview` member
+/// existed: `Unverifiable` claims nothing, so an old transcript line never
+/// renders as ee-verified or heuristically aligned after a restore.
+fn legacy_permission_preview() -> crate::app::agent_bridge::AgentPermissionPreview {
+    crate::app::agent_bridge::AgentPermissionPreview::Unverifiable
 }
 
 /// Thread lifecycle state shown in the channel list and footer.
@@ -714,5 +729,57 @@ impl AgentThreadUi {
             }
             summary
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::app::agent_bridge::AgentPermissionPreview;
+
+    fn permission_item() -> TranscriptItem {
+        TranscriptItem::Permission {
+            title: String::from("legacy prompt"),
+            options: vec![String::from("allow once"), String::from("reject once")],
+            preview: AgentPermissionPreview::Verified(String::from(
+                "write /w/a.txt · 2 bytes · sha256:00",
+            )),
+            at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+        }
+    }
+
+    #[test]
+    fn legacy_permission_item_without_preview_restores_as_unverifiable() {
+        let mut value = serde_json::to_value(permission_item()).unwrap();
+        let fields = value["Permission"].as_object_mut().unwrap();
+        assert!(fields.remove("preview").is_some(), "fixture removes the preview member");
+
+        let restored: TranscriptItem = serde_json::from_value(value).unwrap();
+        match restored {
+            TranscriptItem::Permission { title, options, preview, .. } => {
+                assert_eq!(title, "legacy prompt");
+                assert_eq!(options.len(), 2);
+                assert_eq!(preview, AgentPermissionPreview::Unverifiable);
+            }
+            other => panic!("unexpected restored item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permission_item_preview_round_trips_the_verified_summary() {
+        let restored: TranscriptItem =
+            serde_json::from_value(serde_json::to_value(permission_item()).unwrap()).unwrap();
+        match restored {
+            TranscriptItem::Permission { preview, .. } => {
+                assert_eq!(
+                    preview,
+                    AgentPermissionPreview::Verified(String::from(
+                        "write /w/a.txt · 2 bytes · sha256:00"
+                    ))
+                );
+            }
+            other => panic!("unexpected restored item: {other:?}"),
+        }
     }
 }

@@ -63,7 +63,7 @@ impl App {
             .filter(|rule| managed.state(rule.id()).is_none_or(|state| state.enabled))
             .count();
         self.permissions_notice(&format!(
-            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} session-scope:memory-only store:{}",
+            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} session-scope:memory-only store:{}\n{}",
             managed.document.workspace.as_string(),
             enabled,
             managed.document.rules.len(),
@@ -71,6 +71,9 @@ impl App {
             managed.document.category_defaults.len(),
             managed.document.global_default,
             store.path().display(),
+            self.agents
+                .alignment_stats
+                .summary_line(self.config.agents.approval.alignment),
         ));
     }
 
