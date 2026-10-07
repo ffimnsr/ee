@@ -67,6 +67,9 @@ impl App {
             "list" | "show_visible_whitespace" => {
                 set_bool_value(&mut self.config.show_visible_whitespace, value)
             }
+            "indentguides" | "indent_guides" => {
+                set_bool_value(&mut self.config.indent_guides, value)
+            }
             "signcolumn" | "smc" | "sign_column" => {
                 set_bool_value(&mut self.config.sign_column, value)
             }
@@ -97,6 +100,10 @@ impl App {
             "scrolloff" | "so" => {
                 value.parse::<usize>().map(|n| self.config.scroll_offset = n).map_err(|_| ())
             }
+            "indentguidemaxlines" | "indent_guides_max_lines" => value
+                .parse::<usize>()
+                .map(|n| self.config.indent_guides_max_lines = n)
+                .map_err(|_| ()),
             "colorcolumn" | "cc" => value
                 .parse::<usize>()
                 .map(|n| self.config.color_column = (n > 0).then_some(n))
@@ -178,6 +185,7 @@ impl App {
             "wrap" | "wrap_lines" => self.config.wrap_lines.to_string(),
             "cursorline" | "cul" | "cursor_line" => self.config.cursor_line.to_string(),
             "list" | "show_visible_whitespace" => self.config.show_visible_whitespace.to_string(),
+            "indentguides" | "indent_guides" => self.config.indent_guides.to_string(),
             "signcolumn" | "smc" | "sign_column" => self.config.sign_column.to_string(),
             "autoindent" | "auto_indent" => self.config.auto_indent.to_string(),
             "smartindent" | "smart_indent" => self.config.smart_indent.to_string(),
@@ -198,6 +206,9 @@ impl App {
                 matches!(self.config.number_style, NumberStyle::RelativeAbsolute).to_string()
             }
             "scrolloff" | "so" => self.config.scroll_offset.to_string(),
+            "indentguidemaxlines" | "indent_guides_max_lines" => {
+                self.config.indent_guides_max_lines.to_string()
+            }
             "colorcolumn" | "cc" => {
                 self.config.color_column.map(|n| n.to_string()).unwrap_or_else(|| "0".to_owned())
             }
@@ -231,6 +242,7 @@ impl App {
             "wrap",
             "cursorline",
             "list",
+            "indentguides",
             "signcolumn",
             "autoindent",
             "smartindent",
@@ -240,6 +252,7 @@ impl App {
             "relativenumber",
             "relativenumberabsolute",
             "scrolloff",
+            "indentguidemaxlines",
             "colorcolumn",
             "tabwidth",
             "shiftwidth",
@@ -272,6 +285,7 @@ impl App {
             "wrap" => defaults.wrap_lines.to_string(),
             "cursorline" => defaults.cursor_line.to_string(),
             "list" => defaults.show_visible_whitespace.to_string(),
+            "indentguides" => defaults.indent_guides.to_string(),
             "signcolumn" => defaults.sign_column.to_string(),
             "autoindent" => defaults.auto_indent.to_string(),
             "smartindent" => defaults.smart_indent.to_string(),
@@ -289,6 +303,7 @@ impl App {
                     .to_string()
             }
             "scrolloff" => defaults.scroll_offset.to_string(),
+            "indentguidemaxlines" => defaults.indent_guides_max_lines.to_string(),
             "colorcolumn" => {
                 defaults.color_column.map(|n| n.to_string()).unwrap_or_else(|| "0".to_owned())
             }
@@ -648,6 +663,8 @@ fn is_value_option(name: &str) -> bool {
         name,
         "scrolloff"
             | "so"
+            | "indentguidemaxlines"
+            | "indent_guides_max_lines"
             | "colorcolumn"
             | "cc"
             | "tabwidth"

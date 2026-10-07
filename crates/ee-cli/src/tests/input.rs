@@ -252,33 +252,41 @@ fn next_char_start_multibyte() {
 
 #[test]
 fn byte_col_to_display_col_ascii() {
-    assert_eq!(byte_col_to_display_col("hello", 3), 3);
+    assert_eq!(byte_col_to_display_col("hello", 3, 4), 3);
 }
 
 #[test]
 fn byte_col_to_display_col_expands_tabs() {
-    assert_eq!(byte_col_to_display_col("\tabc", 4), 7);
-    assert_eq!(byte_col_to_display_col("ab\tcd", 5), 6);
+    assert_eq!(byte_col_to_display_col("\tabc", 4, 4), 7);
+    assert_eq!(byte_col_to_display_col("ab\tcd", 5, 4), 6);
 }
 
 #[test]
 fn display_col_to_byte_respects_tab_stops() {
-    assert_eq!(display_col_to_byte("\tabc", 4), 1);
-    assert_eq!(display_col_to_byte("ab\tcd", 4), 3);
-    assert_eq!(display_col_to_byte("ab\tcd", 6), 5);
+    assert_eq!(display_col_to_byte("\tabc", 4, 4), 1);
+    assert_eq!(display_col_to_byte("ab\tcd", 4, 4), 3);
+    assert_eq!(display_col_to_byte("ab\tcd", 6, 4), 5);
+}
+
+#[test]
+fn tab_stops_follow_the_configured_tab_width() {
+    assert_eq!(byte_col_to_display_col("\tabc", 1, 2), 2);
+    // Column 3 is past `a` with 2-wide tabs but still inside the 4-wide tab stop.
+    assert_eq!(display_col_to_byte("\tabc", 3, 2), 2);
+    assert_eq!(display_col_to_byte("\tabc", 3, 4), 1);
 }
 
 #[test]
 fn byte_col_to_display_col_wide_char() {
     let s = "日本";
-    assert_eq!(byte_col_to_display_col(s, 3), 2);
-    assert_eq!(byte_col_to_display_col(s, 6), 4);
+    assert_eq!(byte_col_to_display_col(s, 3, 4), 2);
+    assert_eq!(byte_col_to_display_col(s, 6, 4), 4);
 }
 
 #[test]
 fn display_col_to_byte_wide_char() {
     let s = "日本";
-    assert_eq!(display_col_to_byte(s, 0), 0);
-    assert_eq!(display_col_to_byte(s, 2), 3);
-    assert_eq!(display_col_to_byte(s, 4), 6);
+    assert_eq!(display_col_to_byte(s, 0, 4), 0);
+    assert_eq!(display_col_to_byte(s, 2, 4), 3);
+    assert_eq!(display_col_to_byte(s, 4, 4), 6);
 }

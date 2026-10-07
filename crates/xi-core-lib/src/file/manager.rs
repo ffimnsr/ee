@@ -1,4 +1,4 @@
-// Copyright 2018 The xi-editor Authors.
+// Copyright 2016 The xi-editor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,115 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Interactions with the file system.
-//!
-//! Ownership boundary: this module owns save-path validation, external-change
-//! checks, metadata refresh, and file-manager integration.
+//! The `FileManager`: open-mode policy application, buffer metadata, and the
+//! open/close/save lifecycle.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, Metadata};
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::str;
 use std::time::SystemTime;
 
-use fs2::FileExt;
-use log::warn;
-
 use xi_rope::Rope;
-use xi_rpc::RemoteErrorDetails;
 
-use crate::line_ending::{LineEnding, LineEndingError};
 use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
 use crate::vlf::overlay::VlfSavePolicy;
 use crate::vlf::save::{PreparedVlfSavePlan, SaveProgress, VlfSaveError, stream_save_snapshot};
 use crate::vlf::store::VlfStore;
-use crate::whitespace::{Indentation, MixedIndentError};
 
 #[cfg(feature = "notify")]
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
 #[cfg(feature = "notify")]
 use crate::watcher::FileWatcher;
-#[cfg(target_family = "unix")]
-use std::os::unix::fs::MetadataExt;
-#[cfg(target_family = "unix")]
-use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
-#[cfg(test)]
-use std::alloc::{GlobalAlloc, Layout, System};
-#[cfg(test)]
-use std::cell::Cell;
-
-const UTF8_BOM: &str = "\u{feff}";
-const MAX_FORMATTING_PROBE_BYTES: usize = 65_536;
-
-#[cfg(test)]
-struct TrackingAlloc;
-
-#[cfg(test)]
-thread_local! {
-    static TRACK_ALLOC_THRESHOLD: Cell<usize> = const { Cell::new(0) };
-    static TRACK_LARGE_ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
-    static TRACK_LARGEST_ALLOC: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-#[global_allocator]
-static GLOBAL_ALLOCATOR: TrackingAlloc = TrackingAlloc;
-
-#[cfg(test)]
-#[inline]
-fn record_large_alloc(layout: Layout) {
-    TRACK_ALLOC_THRESHOLD.with(|threshold| {
-        let threshold = threshold.get();
-        if threshold == 0 || layout.size() < threshold {
-            return;
-        }
-        TRACK_LARGE_ALLOC_COUNT.with(|count| count.set(count.get() + 1));
-        TRACK_LARGEST_ALLOC.with(|largest| largest.set(largest.get().max(layout.size())));
-    });
-}
-
-#[cfg(test)]
-unsafe impl GlobalAlloc for TrackingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record_large_alloc(layout);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record_large_alloc(layout);
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record_large_alloc(Layout::from_size_align(new_size, layout.align()).unwrap());
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn with_large_alloc_tracking<T>(
-    threshold: usize,
-    f: impl FnOnce() -> T,
-) -> (T, usize, usize) {
-    TRACK_ALLOC_THRESHOLD.with(|value| value.set(threshold));
-    TRACK_LARGE_ALLOC_COUNT.with(|value| value.set(0));
-    TRACK_LARGEST_ALLOC.with(|value| value.set(0));
-    let result = f();
-    let alloc_count = TRACK_LARGE_ALLOC_COUNT.with(|value| value.get());
-    let largest_alloc = TRACK_LARGEST_ALLOC.with(|value| value.get());
-    TRACK_ALLOC_THRESHOLD.with(|value| value.set(0));
-    (result, alloc_count, largest_alloc)
-}
+use super::*;
 
 /// Tracks all state related to open files.
 pub struct FileManager {
@@ -143,19 +59,10 @@ pub struct FileInfo {
     #[cfg(target_family = "unix")]
     pub permissions: Option<u32>,
     #[cfg(target_family = "unix")]
-    change_cookie: Option<FileChangeCookie>,
+    pub(crate) change_cookie: Option<FileChangeCookie>,
     /// Advisory exclusive lock held for the lifetime of this open buffer.
     /// Prevents a second editor instance from silently corrupting the file.
-    _lock: Option<File>,
-}
-
-#[cfg(target_family = "unix")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileChangeCookie {
-    device_id: u64,
-    inode: u64,
-    change_seconds: i64,
-    change_nanoseconds: i64,
+    pub(crate) _lock: Option<File>,
 }
 
 impl fmt::Debug for FileInfo {
@@ -172,219 +79,6 @@ impl fmt::Debug for FileInfo {
         debug.field("change_cookie", &self.change_cookie);
         debug.finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampledIndentation {
-    Tabs,
-    Spaces(usize),
-    Mixed,
-    None,
-}
-
-impl From<Result<Option<Indentation>, MixedIndentError>> for SampledIndentation {
-    fn from(value: Result<Option<Indentation>, MixedIndentError>) -> Self {
-        match value {
-            Ok(Some(Indentation::Tabs)) => Self::Tabs,
-            Ok(Some(Indentation::Spaces(width))) => Self::Spaces(width),
-            Ok(None) => Self::None,
-            Err(_) => Self::Mixed,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampledLineEnding {
-    CrLf,
-    Lf,
-    Mixed,
-    LegacyCr,
-    None,
-}
-
-impl From<Result<Option<LineEnding>, LineEndingError>> for SampledLineEnding {
-    fn from(value: Result<Option<LineEnding>, LineEndingError>) -> Self {
-        match value {
-            Ok(Some(LineEnding::CrLf)) => Self::CrLf,
-            Ok(Some(LineEnding::Lf)) => Self::Lf,
-            Ok(None) => Self::None,
-            Err(LineEndingError::Mixed) => Self::Mixed,
-            Err(LineEndingError::LegacyCr) => Self::LegacyCr,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FileOpenAnalysis {
-    pub indentation: SampledIndentation,
-    pub line_ending: SampledLineEnding,
-    pub line_ending_complete: bool,
-}
-
-impl Default for FileOpenAnalysis {
-    fn default() -> Self {
-        Self {
-            indentation: SampledIndentation::None,
-            line_ending: SampledLineEnding::None,
-            line_ending_complete: true,
-        }
-    }
-}
-
-impl FileOpenAnalysis {
-    fn from_bytes(bytes: &[u8], encoding: CharacterEncoding) -> Self {
-        let Some(sample) = formatting_probe_str(bytes, encoding) else {
-            return Self::default();
-        };
-
-        let sample_rope = Rope::from(sample);
-        let indentation =
-            SampledIndentation::from(Indentation::parse_bounded(&sample_rope, usize::MAX));
-        let line_ending =
-            SampledLineEnding::from(LineEnding::parse_bounded(&sample_rope, usize::MAX));
-        let skipped_bom =
-            usize::from(matches!(encoding, CharacterEncoding::Utf8WithBom)) * UTF8_BOM.len();
-        let line_ending_complete =
-            bytes.len().saturating_sub(skipped_bom) <= MAX_FORMATTING_PROBE_BYTES;
-
-        Self { indentation, line_ending, line_ending_complete }
-    }
-
-    pub fn needs_line_ending_verification(self) -> bool {
-        !self.line_ending_complete
-    }
-}
-
-fn formatting_probe_str(bytes: &[u8], encoding: CharacterEncoding) -> Option<&str> {
-    let bytes = match encoding {
-        CharacterEncoding::Utf8WithBom if bytes.starts_with(UTF8_BOM.as_bytes()) => {
-            &bytes[UTF8_BOM.len()..]
-        }
-        _ => bytes,
-    };
-
-    let probe = &bytes[..bytes.len().min(MAX_FORMATTING_PROBE_BYTES)];
-    match str::from_utf8(probe) {
-        Ok(text) => Some(text),
-        Err(err) if err.valid_up_to() > 0 => str::from_utf8(&probe[..err.valid_up_to()]).ok(),
-        Err(_) => None,
-    }
-}
-
-fn sampled_line_count_hint(path: &Path, file_size_bytes: u64) -> Option<u64> {
-    let sample_len =
-        usize::try_from(file_size_bytes.min(MAX_FORMATTING_PROBE_BYTES as u64)).ok()?;
-    let mut sample = vec![0; sample_len];
-    let mut file = File::open(path).ok()?;
-    let bytes_read = file.read(&mut sample).ok()?;
-    sample.truncate(bytes_read);
-    estimate_line_count_from_sample(&sample, file_size_bytes)
-}
-
-fn estimate_line_count_from_sample(sample: &[u8], file_size_bytes: u64) -> Option<u64> {
-    if sample.is_empty() {
-        return Some(0);
-    }
-
-    let newline_count = sample.iter().filter(|&&byte| byte == b'\n').count() as u64;
-    let sample_len = sample.len() as u64;
-
-    if newline_count == 0 {
-        return (sample_len == file_size_bytes).then_some(1);
-    }
-
-    let mut estimated = newline_count.saturating_mul(file_size_bytes).div_ceil(sample_len);
-    if sample_len == file_size_bytes && !sample.ends_with(b"\n") {
-        estimated = estimated.saturating_add(1);
-    }
-
-    Some(estimated.max(newline_count))
-}
-
-#[derive(Debug)]
-pub enum FileError {
-    Io(io::Error, PathBuf),
-    UnknownEncoding(PathBuf),
-    HasChanged(PathBuf),
-    /// The path contains non-UTF-8 bytes and cannot be used as an RPC string.
-    NonUtf8Path(PathBuf),
-    /// File size could not be determined; refusing to load to avoid memory exhaustion.
-    MetadataUntrusted(PathBuf),
-    /// File exceeds the full-memory confirmation threshold for its location.
-    ///
-    /// The caller must surface `reason` to the user.  If the user accepts, retry
-    /// with [`FileManager::open_with_override`] passing the appropriate
-    /// [`ModeOverride`].
-    ConfirmationRequired {
-        path: PathBuf,
-        reason: &'static str,
-        /// The mode that would be used after confirmation.
-        mode: DocumentMode,
-    },
-}
-
-/// Result of opening a file, distinguishing the document mode.
-///
-/// - `Rope` is returned for `Normal` and `ConstrainedNormal` files loaded fully
-///   into memory via `try_load_file`.
-/// - `Vlf` is returned for files above the VLF threshold; the caller must use
-///   the [`VlfStore`] for all reads.  No `Rope` is ever constructed.
-pub enum OpenResult {
-    /// Normal / ConstrainedNormal mode: full file content as a `Rope`.
-    Rope { text: Rope, mode: DocumentMode },
-    /// VLF mode: paged file reader with bounded cache.  No full buffer.
-    Vlf(Box<VlfStore>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum CharacterEncoding {
-    Utf8,
-    Utf8WithBom,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SaveOptions {
-    #[cfg(target_family = "unix")]
-    permissions: Option<u32>,
-}
-
-impl SaveOptions {
-    fn from_info(info: Option<&FileInfo>) -> Self {
-        Self {
-            #[cfg(target_family = "unix")]
-            permissions: info.and_then(|info| info.permissions),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PreparedRopeSaveKind {
-    New,
-    ExistingSamePath,
-    ExistingMove { prev_path: PathBuf },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedRopeSave {
-    pub(crate) buffer_id: BufferId,
-    pub(crate) path: PathBuf,
-    pub(crate) encoding: CharacterEncoding,
-    pub(crate) kind: PreparedRopeSaveKind,
-    pub(crate) options: SaveOptions,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PreparedVlfSaveKind {
-    ExistingSamePath,
-    ExistingMove { prev_path: PathBuf },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PreparedVlfSave {
-    pub(crate) buffer_id: BufferId,
-    pub(crate) path: PathBuf,
-    pub(crate) policy: VlfSavePolicy,
-    pub(crate) kind: PreparedVlfSaveKind,
 }
 
 impl FileManager {
@@ -481,11 +175,15 @@ impl FileManager {
         // Stat the file for size *before* reading any bytes.
         // Fail-closed: if metadata is unavailable, refuse to proceed.
         // Note: we already returned early for non-existent paths above.
-        let size_opt = fs::metadata(path).ok().map(|m| m.len());
+        #[cfg(test)]
+        let stat_started = std::time::Instant::now();
+        let size_opt = std::fs::metadata(path).ok().map(|m| m.len());
         let line_count_hint = size_opt.and_then(|size| sampled_line_count_hint(path, size));
 
         let decision =
             self.open_policy.decide(size_opt, line_count_hint, None, location, mode_override);
+        #[cfg(test)]
+        crate::open_probe::record(crate::open_probe::OpenStage::Stat, stat_started.elapsed());
         let rope_mode = match decision {
             OpenDecision::Open(mode @ (DocumentMode::Normal | DocumentMode::ConstrainedNormal)) => {
                 // Rope backing for both Normal and ConstrainedNormal.
@@ -512,11 +210,18 @@ impl FileManager {
                 // VLF files must never be loaded into a full Rope.
                 // Open via VlfStore which uses bounded pread I/O; the file
                 // is never read_to_end or converted to a Rope.
+                #[cfg(test)]
+                let vlf_started = std::time::Instant::now();
                 let store = VlfStore::open(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
 
                 // Kick off background indexing immediately so line-count
                 // estimates become available without blocking the first render.
                 store.start_background_indexing();
+                #[cfg(test)]
+                crate::open_probe::record(
+                    crate::open_probe::OpenStage::VlfOpen,
+                    vlf_started.elapsed(),
+                );
 
                 // Register file metadata so close/reload work correctly.
                 let info = FileInfo {
@@ -830,363 +535,13 @@ impl FileManager {
     }
 }
 
-fn try_load_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
-where
-    P: AsRef<Path>,
-{
-    // Non-UTF-8 file contents are rejected with FileError::UnknownEncoding.
-    // it's arguable that the rope crate should have file loading functionality
-    let mut f =
-        File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-    let metadata = f.metadata().ok();
-    let mut text = metadata
-        .as_ref()
-        .and_then(|meta| usize::try_from(meta.len()).ok())
-        .map(String::with_capacity)
-        .unwrap_or_default();
-    f.read_to_string(&mut text).map_err(|e| match e.kind() {
-        io::ErrorKind::InvalidData => FileError::UnknownEncoding(path.as_ref().to_owned()),
-        _ => FileError::Io(e, path.as_ref().to_owned()),
-    })?;
-
-    // Acquire an advisory exclusive lock so that a second editor instance
-    // cannot open the same file for writing without first detecting the lock.
-    // `try_lock_exclusive` is non-blocking; if another process holds the lock
-    // we warn and proceed without the lock rather than refusing to open the file.
-    let lock = match f.try_lock_exclusive() {
-        Ok(()) => Some(f),
-        Err(e) => {
-            warn!(
-                "Could not acquire advisory lock on {:?}: {}. \
-                     Another editor instance may have the file open.",
-                path.as_ref(),
-                e
-            );
-            None
-        }
-    };
-
-    let encoding = CharacterEncoding::guess(text.as_bytes());
-    let open_analysis = FileOpenAnalysis::from_bytes(text.as_bytes(), encoding);
-    let decoded = match encoding {
-        CharacterEncoding::Utf8 => text.as_str(),
-        CharacterEncoding::Utf8WithBom => &text[UTF8_BOM.len()..],
-    };
-    let rope = Rope::from(decoded);
-    let info = FileInfo {
-        encoding,
-        mod_time: metadata.as_ref().and_then(mod_time_from_metadata),
-        len: metadata.as_ref().map(Metadata::len),
-        open_analysis,
-        #[cfg(target_family = "unix")]
-        permissions: metadata.as_ref().map(permissions_from_metadata),
-        #[cfg(target_family = "unix")]
-        change_cookie: metadata.as_ref().map(change_cookie_from_metadata),
-        path: path.as_ref().to_owned(),
-        has_changed: false,
-        _lock: lock,
-    };
-    Ok((rope, info))
-}
-
-#[allow(unused)]
-fn try_save(
-    path: &Path,
-    text: &Rope,
-    encoding: CharacterEncoding,
-    save_options: SaveOptions,
-    should_continue: &mut dyn FnMut() -> bool,
-    on_progress: &mut dyn FnMut(SaveProgress),
-) -> Result<(), FileError> {
-    let tmp_extension = path.extension().map_or_else(
-        || OsString::from("swp"),
-        |ext| {
-            let mut ext = ext.to_os_string();
-            ext.push(".swp");
-            ext
-        },
-    );
-    let tmp_path = &path.with_extension(tmp_extension);
-
-    let mut f = File::create(tmp_path).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
-    let total_bytes = text.len() as u64
-        + u64::from(matches!(encoding, CharacterEncoding::Utf8WithBom)) * UTF8_BOM.len() as u64;
-    let mut bytes_written = 0u64;
-    match encoding {
-        CharacterEncoding::Utf8WithBom => {
-            f.write_all(UTF8_BOM.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
-            bytes_written += UTF8_BOM.len() as u64;
-            on_progress(SaveProgress { bytes_written, total_bytes });
-        }
-        CharacterEncoding::Utf8 => (),
-    }
-
-    if !should_continue() {
-        drop(f);
-        let _ = fs::remove_file(tmp_path);
-        return Err(cancelled_save_error(tmp_path));
-    }
-
-    let mut writer = ChunkedSaveWriter {
-        inner: &mut f,
-        should_continue,
-        on_progress,
-        bytes_written: &mut bytes_written,
-        total_bytes,
-    };
-    text.write_to(&mut writer).map_err(|e| match e.kind() {
-        io::ErrorKind::Interrupted => cancelled_save_error(tmp_path),
-        _ => FileError::Io(e, tmp_path.to_owned()),
-    })?;
-
-    // Flush OS buffers and sync to storage before rename so that a crash
-    // after the rename cannot leave the destination file with stale data.
-    f.sync_all().map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
-    drop(f);
-
-    if !should_continue() {
-        let _ = fs::remove_file(tmp_path);
-        return Err(cancelled_save_error(tmp_path));
-    }
-
-    fs::rename(tmp_path, path).map_err(|e| FileError::Io(e, path.to_owned()))?;
-
-    // Sync the parent directory entry so the rename itself is durable.
-    #[cfg(target_family = "unix")]
-    {
-        if let Some(parent) = path.parent() {
-            // Best-effort: ignore errors (some fs don't support dir fsync).
-            let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
-        }
-    }
-
-    #[cfg(target_family = "unix")]
-    {
-        fs::set_permissions(
-            path,
-            Permissions::from_mode(save_options.permissions.unwrap_or(0o644)),
-        )
-        .unwrap_or_else(|e| {
-            warn!("Couldn't set permissions on file {} due to error {}", path.display(), e)
-        });
-    }
-
-    Ok(())
-}
-
-pub(crate) fn execute_prepared_rope_save(
-    request: &PreparedRopeSave,
-    text: &Rope,
-    should_continue: &mut dyn FnMut() -> bool,
-) -> Result<(), FileError> {
-    let mut ignore_progress = |_progress: SaveProgress| {};
-    execute_prepared_rope_save_with_progress(request, text, should_continue, &mut ignore_progress)
-}
-
-pub(crate) fn execute_prepared_rope_save_with_progress(
-    request: &PreparedRopeSave,
-    text: &Rope,
-    should_continue: &mut dyn FnMut() -> bool,
-    on_progress: &mut dyn FnMut(SaveProgress),
-) -> Result<(), FileError> {
-    try_save(&request.path, text, request.encoding, request.options, should_continue, on_progress)
-}
-
-pub(crate) fn execute_prepared_vlf_save(
-    request: &PreparedVlfSave,
-    plan: &PreparedVlfSavePlan,
-    on_progress: &mut dyn FnMut(SaveProgress) -> bool,
-) -> Result<(), FileError> {
-    stream_save_snapshot(plan, &request.path, &request.policy, on_progress).map_err(|e| match e {
-        VlfSaveError::Io(io_err, err_path) => FileError::Io(io_err, err_path),
-        VlfSaveError::Cancelled => FileError::Io(
-            io::Error::new(io::ErrorKind::Interrupted, "VLF save cancelled"),
-            request.path.clone(),
-        ),
-        VlfSaveError::EditingNotEnabled => FileError::Io(
-            io::Error::new(io::ErrorKind::InvalidInput, "VLF editing not enabled; nothing to save"),
-            request.path.clone(),
-        ),
-        VlfSaveError::InvalidPolicy(reason) => {
-            FileError::Io(io::Error::new(io::ErrorKind::InvalidInput, reason), request.path.clone())
-        }
-    })
-}
-
-struct ChunkedSaveWriter<'a, W> {
-    inner: &'a mut W,
-    should_continue: &'a mut dyn FnMut() -> bool,
-    on_progress: &'a mut dyn FnMut(SaveProgress),
-    bytes_written: &'a mut u64,
-    total_bytes: u64,
-}
-
-impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        if !(self.should_continue)() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "save cancelled"));
-        }
-        self.inner.write_all(buf)?;
-        *self.bytes_written += buf.len() as u64;
-        (self.on_progress)(SaveProgress {
-            bytes_written: *self.bytes_written,
-            total_bytes: self.total_bytes,
-        });
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Result<Rope, FileError> {
-    let text = match encoding {
-        CharacterEncoding::Utf8 => {
-            str::from_utf8(&bytes).map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?
-        }
-        CharacterEncoding::Utf8WithBom => {
-            let s =
-                str::from_utf8(&bytes).map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?;
-            &s[UTF8_BOM.len()..]
-        }
-    };
-
-    Ok(Rope::from(text))
-}
-
-impl CharacterEncoding {
-    fn guess(s: &[u8]) -> Self {
-        if s.starts_with(UTF8_BOM.as_bytes()) {
-            CharacterEncoding::Utf8WithBom
-        } else {
-            CharacterEncoding::Utf8
-        }
-    }
-}
-
-/// Returns the modification timestamp for the file at a given path,
-/// if present.
-fn get_mod_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
-    File::open(path).and_then(|f| f.metadata()).ok().and_then(|meta| mod_time_from_metadata(&meta))
-}
-
-fn mod_time_from_metadata(meta: &Metadata) -> Option<SystemTime> {
-    meta.modified().ok()
-}
-
-fn get_file_len<P: AsRef<Path>>(path: P) -> Option<u64> {
-    File::open(path).and_then(|f| f.metadata()).map(|meta| meta.len()).ok()
-}
-
-#[cfg(target_family = "unix")]
-fn get_change_cookie<P: AsRef<Path>>(path: P) -> Option<FileChangeCookie> {
-    File::open(path).and_then(|f| f.metadata()).ok().map(|meta| change_cookie_from_metadata(&meta))
-}
-
-#[cfg(target_family = "unix")]
-fn change_cookie_from_metadata(meta: &Metadata) -> FileChangeCookie {
-    FileChangeCookie {
-        device_id: meta.dev(),
-        inode: meta.ino(),
-        change_seconds: meta.ctime(),
-        change_nanoseconds: meta.ctime_nsec(),
-    }
-}
-
-fn cancelled_save_error(path: &Path) -> FileError {
-    FileError::Io(io::Error::new(io::ErrorKind::Interrupted, "save cancelled"), path.to_owned())
-}
-
-fn open_advisory_lock(path: &Path) -> Option<File> {
-    File::open(path).ok().and_then(|lf| match lf.try_lock_exclusive() {
-        Ok(()) => Some(lf),
-        Err(e) => {
-            warn!("Could not lock newly saved file {:?}: {}", path, e);
-            None
-        }
-    })
-}
-
-/// Returns the file permissions for the file at a given path on UNIXy systems,
-/// if present.
-#[cfg(target_family = "unix")]
-fn get_permissions<P: AsRef<Path>>(path: P) -> Option<u32> {
-    File::open(path).and_then(|f| f.metadata()).map(|meta| permissions_from_metadata(&meta)).ok()
-}
-
-#[cfg(target_family = "unix")]
-fn permissions_from_metadata(meta: &Metadata) -> u32 {
-    meta.permissions().mode()
-}
-
-impl RemoteErrorDetails for FileError {
-    fn remote_error_code(&self) -> i64 {
-        match self {
-            FileError::Io(_, _) => 5,
-            FileError::UnknownEncoding(_) => 6,
-            FileError::HasChanged(_) => 7,
-            FileError::NonUtf8Path(_) => 8,
-            FileError::MetadataUntrusted(_) => 9,
-            FileError::ConfirmationRequired { .. } => 10,
-        }
-    }
-}
-
-impl fmt::Display for FileError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            FileError::Io(e, p) => write!(f, "{}. File path: {}", e, p.display()),
-            FileError::UnknownEncoding(p) => {
-                write!(f, "Error decoding UTF-8 file contents: {}", p.display())
-            }
-            FileError::HasChanged(p) => write!(
-                f,
-                "File has changed on disk. \
-                 Please save elsewhere and reload the file. File path: {}",
-                p.display()
-            ),
-            FileError::NonUtf8Path(p) => {
-                write!(f, "File path contains non-UTF-8 bytes and cannot be used: {}", p.display())
-            }
-            FileError::MetadataUntrusted(p) => write!(
-                f,
-                "File size could not be determined safely; refusing to load: {}",
-                p.display()
-            ),
-            FileError::ConfirmationRequired { path, reason, mode } => {
-                write!(f, "{}; selected mode: {:?}. File path: {}", reason, mode, path.display())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::path::PathBuf;
-
-    use xi_rpc::RemoteError;
-
-    #[cfg(all(target_family = "unix", not(feature = "notify")))]
-    use super::OpenResult;
-    use super::{
-        CharacterEncoding, FileError, FileOpenAnalysis, SampledIndentation, SampledLineEnding,
-    };
-    use crate::text_store::DocumentMode;
-
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn open_rejects_non_utf8_path() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
-
-        use super::FileManager;
 
         let mut mgr = FileManager::new();
         // Construct a path with a raw non-UTF-8 byte sequence.
@@ -1200,61 +555,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn try_load_file_rejects_non_utf8_contents() {
-        use std::io::Write;
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(b"ok\n\xff\n").unwrap();
-
-        let result = super::try_load_file(tmp.path());
-
-        assert!(
-            matches!(result, Err(FileError::UnknownEncoding(_))),
-            "expected UnknownEncoding error, got {:?}",
-            result.err().map(|err| err.to_string())
-        );
-    }
-
-    #[test]
-    fn file_error_converts_into_remote_error() {
-        let err: RemoteError = FileError::UnknownEncoding(PathBuf::from("/tmp/demo.txt")).into();
-
-        assert_eq!(
-            err,
-            RemoteError::custom(
-                6,
-                "Error decoding UTF-8 file contents: /tmp/demo.txt",
-                None::<serde_json::Value>,
-            )
-        );
-    }
-
-    #[test]
-    fn metadata_untrusted_has_correct_code() {
-        let err = FileError::MetadataUntrusted(PathBuf::from("/tmp/big.bin"));
-        use xi_rpc::RemoteErrorDetails;
-        assert_eq!(err.remote_error_code(), 9);
-        assert!(err.to_string().contains("refusing to load"));
-    }
-
-    #[test]
-    fn confirmation_required_has_correct_code() {
-        use xi_rpc::RemoteErrorDetails;
-        let err = FileError::ConfirmationRequired {
-            path: PathBuf::from("/tmp/huge.bin"),
-            reason: "file is too large for a full-memory open; use VLF mode or confirm normal open",
-            mode: DocumentMode::Normal,
-        };
-        assert_eq!(err.remote_error_code(), 10);
-        assert!(err.to_string().contains("full-memory open"));
-        assert!(err.to_string().contains("selected mode: Normal"));
-    }
-
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn small_real_file_opens_normally() {
-        use super::FileManager;
         use std::io::Write;
 
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1268,7 +571,6 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn force_normal_file_above_confirmation_threshold_requires_confirmation() {
-        use super::FileManager;
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
         use std::io::Write;
 
@@ -1304,7 +606,6 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn strict_byte_thresholds_choose_rope_then_vlf_in_file_manager_open_flow() {
-        use super::FileManager;
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
         use std::fs::OpenOptions;
 
@@ -1354,7 +655,6 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn sampled_line_count_hint_can_force_vlf_for_small_high_loc_file() {
-        use super::FileManager;
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
         use std::io::Write;
 
@@ -1388,62 +688,9 @@ mod tests {
         assert!(matches!(result, OpenResult::Vlf(_)));
     }
 
-    #[test]
-    fn open_analysis_detects_small_complete_sample() {
-        let bytes = b"  alpha\r\n  beta\r\n";
-        let analysis = FileOpenAnalysis::from_bytes(bytes, CharacterEncoding::Utf8);
-
-        assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
-        assert_eq!(analysis.line_ending, SampledLineEnding::CrLf);
-        assert!(analysis.line_ending_complete);
-    }
-
-    #[test]
-    fn open_analysis_uses_head_sample_and_defers_line_ending_verification() {
-        let head: String = (0..10_000).map(|_| "  item\n").collect();
-        let tail = "tail\r\n";
-        let bytes = format!("{head}{tail}").into_bytes();
-
-        let analysis = FileOpenAnalysis::from_bytes(&bytes, CharacterEncoding::Utf8);
-
-        assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
-        assert_eq!(analysis.line_ending, SampledLineEnding::Lf);
-        assert!(analysis.needs_line_ending_verification());
-    }
-
-    #[test]
-    fn try_decode_large_bom_text_builds_multi_leaf_rope() {
-        let text = format!("{}{}{}", "a".repeat(1500), "\r\n", "🙂é".repeat(400));
-        let bytes = format!("{}{text}", super::UTF8_BOM).into_bytes();
-
-        let rope = super::try_decode(bytes, CharacterEncoding::Utf8WithBom, Path::new("/tmp/demo"))
-            .unwrap();
-
-        assert_eq!(String::from(&rope), text);
-        assert!(rope.iter_chunks(..).count() >= 2);
-    }
-
-    #[test]
-    fn try_decode_does_not_allocate_full_intermediate_string() {
-        let text = format!("{}{}{}", "line\r\n".repeat(4096), "🙂é", "tail\n".repeat(1024));
-        let bytes = format!("{}{text}", super::UTF8_BOM).into_bytes();
-        let threshold = text.len();
-
-        let (rope, large_alloc_count, largest_alloc) =
-            super::with_large_alloc_tracking(threshold, || {
-                super::try_decode(bytes, CharacterEncoding::Utf8WithBom, Path::new("/tmp/demo"))
-                    .unwrap()
-            });
-
-        assert_eq!(String::from(&rope), text);
-        assert_eq!(large_alloc_count, 0, "unexpected >=full-buffer allocation: {largest_alloc}");
-        assert_eq!(largest_alloc, 0);
-    }
-
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn open_large_normal_file_uses_multi_leaf_rope() {
-        use super::{FileManager, OpenResult};
         use std::io::Write;
 
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1460,13 +707,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn line_count_estimate_scales_head_sample_to_full_file() {
-        let sample = b"x\nx\nx\n";
-        let estimated = super::estimate_line_count_from_sample(sample, 12).unwrap();
-        assert_eq!(estimated, 6);
-    }
-
     /// Contract test: `ConstrainedNormal` files open with Rope backing.
     ///
     /// Documents the current evaluation decision from ISSUES.md Item 2:
@@ -1479,9 +719,7 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn constrained_normal_uses_rope_backing() {
-        use super::{FileManager, OpenResult};
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
-        use crate::text_store::DocumentMode;
 
         // Thresholds: ConstrainedNormal range is [normal_bytes, vlf_bytes).
         let thresholds = OpenThresholds {
@@ -1527,7 +765,6 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn check_file_detects_same_size_rewrite_when_mtime_is_restored() {
-        use super::FileManager;
         use std::fs::{File, FileTimes};
         use std::io::Write;
 

@@ -440,6 +440,8 @@ impl CoreState {
             Some(p) => self.file_manager.open(p, buffer_id)?,
             None => OpenResult::Rope { text: Rope::from(""), mode: DocumentMode::Normal },
         };
+        #[cfg(test)]
+        let editor_started = std::time::Instant::now();
         let editor = match open_result {
             OpenResult::Rope { text, mode } => RefCell::new(Editor::with_text_mode(text, mode)),
             OpenResult::Vlf(store) => {
@@ -448,6 +450,14 @@ impl CoreState {
                 RefCell::new(editor)
             }
         };
+        #[cfg(test)]
+        crate::open_probe::record(
+            crate::open_probe::OpenStage::EditorCreate,
+            editor_started.elapsed(),
+        );
+
+        #[cfg(test)]
+        let view_started = std::time::Instant::now();
         let view = RefCell::new(View::new(view_id, buffer_id));
 
         self.editors.insert(buffer_id, editor);
@@ -468,6 +478,8 @@ impl CoreState {
 
         self.pending_views.push((view_id, config));
         self.peer.schedule_idle(NEW_VIEW_IDLE_TOKEN);
+        #[cfg(test)]
+        crate::open_probe::record(crate::open_probe::OpenStage::ViewInit, view_started.elapsed());
 
         Ok(json!(view_id))
     }

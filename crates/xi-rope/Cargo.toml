@@ -48,5 +48,9 @@ name = "rope_builder"
 harness = false
 
 [[bench]]
+name = "load_paths"
+harness = false
+
+[[bench]]
 name = "metadata_layout"
 harness = false

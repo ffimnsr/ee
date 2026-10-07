@@ -597,12 +597,44 @@ scroll back to a previously rendered window:  2176-2297 us  ->  263-271 us
    costs 1.6 ms, so the 26 ms lives in the render path's own work rather than in
    the parse/walk of the window. Red flag: 26 ms per YAML `Render` segment is the
    largest per-render cost measured anywhere in this plan (13x a Rust window at
-   the same line count) and would be user-visible on YAML edits and scrolls.
-   Next step before touching the parse window: profile
-   `backend_syntax_spans_for_segment` for YAML to separate context-line
-   collection, chunk slicing, and span assembly. This is pre-existing behavior,
-   not a Phase 1b regression. Tracked in `ISSUES.md` under "Editor Syntax Span
-   Performance".
+   the same line count) and would be user-visible on YAML edits and scrolls. This
+   is pre-existing behavior, not a Phase 1b regression. Tracked in `ISSUES.md`
+   under "Editor Syntax Span Performance" — Phase 1 resolved it (see item 4).
+4. **YAML window cost: fixed and measured (Phase 1).** Stage attribution (probe
+   `yaml render probe` lines; one process, warm, 200-line window on the 5,000-line
+   fixture): the render path's own work was ~0.1 ms; the flat 26.7 ms was
+   `chunk_syntax_spans` running over the **whole document at every offset** — the
+   YAML branch of the context collection in `backend_syntax_spans_for_segment`
+   had no upper bound (`collect()` without `take`), so the chunk spanned from
+   line 0 to EOF regardless of the window. That is what made offsets measure
+   flat, hiding the actual shapes: parse ~9.3 ms (linear in prefix), highlight
+   walk ~9.4 ms, injection scan ~6.8 ms (runs per window for YAML; the fixture
+   has no `commands:` regions), compact ~0.1 ms. Three fixes shipped:
+
+   - Context end bounded: `iter_lines(...).take(window end + trailing context)`;
+     `parse_from_document_start` is untouched — YAML still parses from line 0.
+   - Highlight walk segment scan bounded: a capture only visits the segments it
+     can overlap (ordered line ranges), removing the O(matches x context lines)
+     term.
+   - Walk window-scoped via `chunk_syntax_spans_for_segments(language, text,
+     segments, requested, limits)`: match/capture budgets count, and both query
+     scans plus the fallback node walk visit, only the requested rows' byte
+     range (`set_byte_range`; pattern roots outside the range cannot contribute
+     captures overlapping requested rows, so emitted spans are identical).
+     Before this, deep YAML windows were starved to empty spans once prefix
+     captures consumed the 2,048-match budget.
+
+   Measured before/after, same fixture and window:
+
+   ```
+   offset 0:    26.2 ms -> 1.4 ms     offset 2,400: 27.7 ms -> 6.5-8.3 ms
+   offset 4,800: 25.9 ms -> 11.2-14.7 ms
+   ```
+
+   All offsets stay under the 60 fps frame budget (16.7 ms). The remaining tail
+   cost is the YAML prefix parse (~9-13 ms), which is inherent to
+   parse-from-document-start; the incremental-reparse trigger in item 1 (query
+   walk no longer dominates production) is now met.
 
 ### Phase 2 — Borrowed chunk read on `TextStore` (additive)
 

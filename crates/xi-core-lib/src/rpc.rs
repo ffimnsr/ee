@@ -689,6 +689,10 @@ pub enum EditNotification {
     },
     GotoColumn {
         display_col: usize,
+        /// Display width of a hard tab, resolved by the frontend from the
+        /// editor config; used to map `display_col` back to a byte column.
+        #[serde(default = "default_tab_width")]
+        tab_width: usize,
         #[serde(default)]
         modify_selection: bool,
     },
@@ -867,6 +871,10 @@ impl<'de> Deserialize<'de> for LineRange {
 
 fn default_align_it_occurrence() -> i64 {
     1
+}
+
+fn default_tab_width() -> usize {
+    4
 }
 
 #[cfg(test)]

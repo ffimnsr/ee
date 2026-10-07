@@ -256,7 +256,9 @@ pub(super) fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Ap
     ]);
     frame.render_widget(Paragraph::new(search_line), search_inner);
 
-    let cursor_x = (search_inner.x + search_prefix.len() as u16 + picker.query.len() as u16)
+    let cursor_x = (search_inner.x
+        + search_prefix.len() as u16
+        + UnicodeWidthStr::width(picker.query.as_str()) as u16)
         .min(search_inner.right().saturating_sub(1));
     frame.set_cursor_position(Position::new(cursor_x, search_inner.y));
 

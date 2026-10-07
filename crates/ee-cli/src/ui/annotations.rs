@@ -116,6 +116,7 @@ pub(super) fn apply_annotation_overlay(
     col_end: usize,
     left: usize,
     visual: AnnotationVisual,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let sel_start = col_start.saturating_sub(left);
     let mut sel_end = col_end.saturating_sub(left);
@@ -130,7 +131,7 @@ pub(super) fn apply_annotation_overlay(
     for sp in spans {
         let content = sp.content.into_owned();
         let style = sp.style;
-        let span_cols = byte_col_to_display_col(&content, content.len());
+        let span_cols = byte_col_to_display_col(&content, content.len(), tab_width);
         let sp_end = col + span_cols;
 
         if sp_end <= sel_start || col >= sel_end {
@@ -141,8 +142,8 @@ pub(super) fn apply_annotation_overlay(
 
         let local_start = sel_start.saturating_sub(col).min(span_cols);
         let local_end = sel_end.saturating_sub(col).min(span_cols);
-        let start_byte = display_col_to_byte(&content, local_start);
-        let end_byte = display_col_to_byte(&content, local_end);
+        let start_byte = display_col_to_byte(&content, local_start, tab_width);
+        let end_byte = display_col_to_byte(&content, local_end, tab_width);
 
         if start_byte > 0 {
             out.push(Span::styled(content[..start_byte].to_owned(), style));
@@ -181,6 +182,7 @@ pub(super) fn replace_display_column(
     display_col: usize,
     replacement: char,
     replacement_style: Style,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut col = 0usize;
@@ -199,8 +201,8 @@ pub(super) fn replace_display_column(
         }
 
         let local_start = display_col - col;
-        let start_byte = display_col_to_byte(&content, local_start);
-        let end_byte = display_col_to_byte(&content, local_start + 1);
+        let start_byte = display_col_to_byte(&content, local_start, tab_width);
+        let end_byte = display_col_to_byte(&content, local_start + 1, tab_width);
 
         if start_byte > 0 {
             out.push(Span::styled(content[..start_byte].to_owned(), style));
@@ -221,6 +223,7 @@ pub(super) fn apply_swift_motion_targets(
     mut spans: Vec<Span<'static>>,
     targets: &[SwiftMotionTarget],
     left: usize,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let visual =
         AnnotationVisual { bg: theme::FG_KEY, fg: Some(theme::BG_APP), modifier: Modifier::BOLD };
@@ -237,6 +240,7 @@ pub(super) fn apply_swift_motion_targets(
             target.end_display_col,
             left,
             visual,
+            tab_width,
         );
     }
 
@@ -244,7 +248,13 @@ pub(super) fn apply_swift_motion_targets(
         if target.display_col < left {
             continue;
         }
-        spans = replace_display_column(spans, target.display_col - left, target.label, label_style);
+        spans = replace_display_column(
+            spans,
+            target.display_col - left,
+            target.label,
+            label_style,
+            tab_width,
+        );
     }
 
     spans
@@ -254,6 +264,7 @@ pub(super) fn collect_line_annotation_segments(
     line: &str,
     log_idx: usize,
     annotations: &[CoreAnnotation],
+    tab_width: usize,
 ) -> Vec<LineAnnotationSegment> {
     let mut segments = Vec::new();
 
@@ -268,8 +279,8 @@ pub(super) fn collect_line_annotation_segments(
 
             let start_byte = if log_idx == start_line { start_col.min(line.len()) } else { 0 };
             let end_byte = if log_idx == end_line { end_col.min(line.len()) } else { line.len() };
-            let start_display = byte_col_to_display_col(line, start_byte);
-            let mut end_display = byte_col_to_display_col(line, end_byte);
+            let start_display = byte_col_to_display_col(line, start_byte, tab_width);
+            let mut end_display = byte_col_to_display_col(line, end_byte, tab_width);
             if end_display <= start_display {
                 end_display = start_display + 1;
             }
@@ -302,14 +313,16 @@ pub(super) fn apply_core_annotations(
     log_idx: usize,
     annotations: &[CoreAnnotation],
     left: usize,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
-    for segment in collect_line_annotation_segments(line, log_idx, annotations) {
+    for segment in collect_line_annotation_segments(line, log_idx, annotations, tab_width) {
         spans = apply_annotation_overlay(
             spans,
             segment.start_display,
             segment.end_display,
             left,
             segment.visual,
+            tab_width,
         );
     }
     spans
@@ -320,10 +333,18 @@ pub(super) fn apply_vlf_search_ranges(
     log_idx: usize,
     ranges: &[VlfSearchRange],
     left: usize,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let visual = annotation_visual("find");
     for range in ranges.iter().filter(|range| range.line as usize == log_idx) {
-        spans = apply_annotation_overlay(spans, range.start_col, range.end_col, left, visual);
+        spans = apply_annotation_overlay(
+            spans,
+            range.start_col,
+            range.end_col,
+            left,
+            visual,
+            tab_width,
+        );
     }
     spans
 }

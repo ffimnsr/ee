@@ -311,12 +311,14 @@ impl BufferManager {
     pub(crate) fn goto_column(
         &mut self,
         display_col: usize,
+        tab_width: usize,
         modify_selection: bool,
     ) -> io::Result<()> {
         self.send_edit(
             "goto_column",
             json!({
                 "display_col": display_col,
+                "tab_width": tab_width,
                 "modify_selection": modify_selection,
             }),
         )

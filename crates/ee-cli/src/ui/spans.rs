@@ -27,36 +27,122 @@ pub(crate) fn compute_editor_width(terminal_size: ratatui::layout::Rect, app: &A
 
 // ── Visible-whitespace substitution ──────────────────────────────────────────
 
-/// Substitute space `' '` → `'·'` and tab `'\t'` → `'→'` in rendered spans,
-/// applying a dimmed style to the replaced characters.
-pub(super) fn apply_visible_whitespace(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(theme::FG_SUBTLE);
+/// Hardcoded whitespace markers, in the spirit of vim's `listchars`.
+///
+/// The characters are fixed for now; a customizable `listchars`-style config
+/// value is deliberately out of scope.  The renderer and its tests share these
+/// constants so a future config surface only has to feed them.
+pub(super) const SPACE_GLYPH: char = '·';
+pub(super) const TAB_GLYPH: char = '→';
+pub(super) const LEAD_GLYPH: char = '╎';
+pub(super) const TRAIL_GLYPH: char = '•';
+pub(super) const NBSP_GLYPH: char = '␣';
+pub(super) const EOL_GLYPH: char = '↵';
+pub(super) const EXTENDS_GLYPH: char = '>';
+pub(super) const PRECEDES_GLYPH: char = '<';
+
+/// Dim style shared by every whitespace marker.
+pub(super) fn whitespace_marker_style() -> Style {
+    Style::default().fg(theme::FG_SUBTLE)
+}
+
+/// Per-line facts for the visible-whitespace pass, all in absolute display
+/// columns (never viewport-relative) so horizontal scrolling cannot skew tab
+/// stops or marker placement.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct WhitespaceLayout {
+    /// Display column of the first cell in the rendered span list.
+    pub(super) start_col: usize,
+    /// Display column where the line's leading whitespace run ends (`0` = no
+    /// leading whitespace).  Leading spaces render as `LEAD_GLYPH`.
+    pub(super) lead_end_col: usize,
+    /// Display column where the line's trailing whitespace run starts.
+    /// Trailing spaces render as `TRAIL_GLYPH` unless the run is also leading
+    /// (a whitespace-only line prefers the lead marker).
+    pub(super) trail_start_col: Option<usize>,
+    /// Append the end-of-line marker after the last rendered cell.
+    pub(super) eol: bool,
+}
+
+/// Substitute the hardcoded whitespace markers in one rendered line.
+///
+/// Space → `SPACE_GLYPH`, leading space → `LEAD_GLYPH`, trailing space →
+/// `TRAIL_GLYPH`, non-breaking space → `NBSP_GLYPH`; tab → `TAB_GLYPH` plus
+/// `SPACE_GLYPH` padding up to the next `tab_width` stop.  Tabs are expanded
+/// here rather than by [`expand_tabs_in_spans`] so the markers keep the source
+/// text's display columns: cursor placement reads the raw line, not these
+/// glyphs.  Markers render dimmed; everything else keeps its span style.
+pub(super) fn apply_visible_whitespace(
+    spans: Vec<Span<'static>>,
+    tab_width: usize,
+    layout: WhitespaceLayout,
+) -> Vec<Span<'static>> {
+    let tab_width = tab_width.max(1);
+    let dim = whitespace_marker_style();
     let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_style = Style::default();
+    let mut col = layout.start_col;
+
     for span in spans {
-        let style = span.style;
-        let mut current = String::new();
-        let mut current_is_ws = false;
         for ch in span.content.chars() {
-            let is_ws = ch == ' ' || ch == '\t';
-            let disp = match ch {
-                ' ' => '·',
-                '\t' => '→',
-                c => c,
-            };
-            if is_ws != current_is_ws && !current.is_empty() {
-                let s = if current_is_ws { dim } else { style };
-                out.push(Span::styled(current.clone(), s));
-                current.clear();
+            match ch {
+                '\t' => {
+                    let width = tab_width - (col % tab_width);
+                    flush_run(&mut out, &mut run, &mut run_style, dim);
+                    run.push(TAB_GLYPH);
+                    for _ in 1..width {
+                        run.push(SPACE_GLYPH);
+                    }
+                    col += width;
+                }
+                ' ' => {
+                    flush_run(&mut out, &mut run, &mut run_style, dim);
+                    run.push(space_glyph(col, &layout));
+                    col += 1;
+                }
+                '\u{a0}' => {
+                    flush_run(&mut out, &mut run, &mut run_style, dim);
+                    run.push(NBSP_GLYPH);
+                    col += 1;
+                }
+                c => {
+                    flush_run(&mut out, &mut run, &mut run_style, span.style);
+                    run.push(c);
+                    col += UnicodeWidthChar::width(c).unwrap_or(0);
+                }
             }
-            current_is_ws = is_ws;
-            current.push(disp);
-        }
-        if !current.is_empty() {
-            let s = if current_is_ws { dim } else { style };
-            out.push(Span::styled(current, s));
         }
     }
+    if !run.is_empty() {
+        out.push(Span::styled(run, run_style));
+    }
+    if layout.eol {
+        out.push(Span::styled(EOL_GLYPH.to_string(), dim));
+    }
     out
+}
+
+/// Marker for a literal space at display column `col`: leading whitespace uses
+/// `LEAD_GLYPH`, a trailing run uses `TRAIL_GLYPH`, everything else
+/// `SPACE_GLYPH`.  Lead wins when a whitespace-only line is both.
+fn space_glyph(col: usize, layout: &WhitespaceLayout) -> char {
+    if col < layout.lead_end_col {
+        LEAD_GLYPH
+    } else if layout.trail_start_col.is_some_and(|start| col >= start) {
+        TRAIL_GLYPH
+    } else {
+        SPACE_GLYPH
+    }
+}
+
+/// Flush the pending run into `out` when the next cell needs a different
+/// style, then adopt that style for the cells that follow.
+fn flush_run(out: &mut Vec<Span<'static>>, run: &mut String, run_style: &mut Style, next: Style) {
+    if !run.is_empty() && *run_style != next {
+        out.push(Span::styled(std::mem::take(run), *run_style));
+    }
+    *run_style = next;
 }
 
 pub(super) fn control_picture(ch: char) -> Option<char> {
@@ -93,9 +179,9 @@ pub(super) fn sanitize_control_chars(spans: Vec<Span<'static>>) -> Vec<Span<'sta
 // ── Color column injection ────────────────────────────────────────────────────
 
 /// Inject a distinct background color at display column `screen_col` within
-/// the given span list.  Characters at that column keep their foreground but
-/// get the color-column background.  When the line is shorter than `screen_col`,
-/// a trailing colored space is appended.
+/// the given span list.  The glyph covering that column (which may be a wide
+/// character) keeps its foreground but gets the color-column background.  When
+/// the line is shorter than `screen_col`, a trailing colored space is appended.
 pub(super) fn apply_color_column(
     spans: Vec<Span<'static>>,
     screen_col: usize,
@@ -111,27 +197,24 @@ pub(super) fn apply_color_column(
             continue;
         }
         let style = span.style;
-        let content: Vec<char> = span.content.chars().collect();
-        let span_cols = content.len();
-        if col + span_cols <= screen_col {
-            // Color column is beyond this span.
-            col += span_cols;
-            out.push(span);
-        } else {
-            // Color column falls within this span.
-            let offset = screen_col - col;
-            let before: String = content[..offset].iter().collect();
-            let at_ch: String = content[offset..offset + 1].iter().collect();
-            let after: String = content[offset + 1..].iter().collect();
-            if !before.is_empty() {
-                out.push(Span::styled(before, style));
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if !injected && col <= screen_col && screen_col < col + width {
+                // The color column falls inside this glyph region: paint the
+                // glyph's background (a wide glyph is painted whole).
+                if !text.is_empty() {
+                    out.push(Span::styled(std::mem::take(&mut text), style));
+                }
+                out.push(Span::styled(ch.to_string(), style.bg(col_bg)));
+                injected = true;
+            } else {
+                text.push(ch);
             }
-            out.push(Span::styled(at_ch, style.bg(col_bg)));
-            if !after.is_empty() {
-                out.push(Span::styled(after, style));
-            }
-            col += span_cols;
-            injected = true;
+            col += width;
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, style));
         }
     }
 
@@ -159,13 +242,17 @@ pub(super) fn pad_spans_to_width(
     spans
 }
 
+/// Expand tabs to spaces at `tab_width` stops, starting from absolute display
+/// column `start_col` so tab stops stay correct when the line is scrolled
+/// horizontally (`spans` start at the display column of their first char).
 pub(super) fn expand_tabs_in_spans(
     spans: Vec<Span<'static>>,
     tab_width: usize,
+    start_col: usize,
 ) -> Vec<Span<'static>> {
     let tab_width = tab_width.max(1);
     let mut out = Vec::with_capacity(spans.len());
-    let mut col = 0usize;
+    let mut col = start_col;
     for span in spans {
         let style = span.style;
         let mut text = String::new();
@@ -186,6 +273,55 @@ pub(super) fn expand_tabs_in_spans(
     out
 }
 
+// ── Clipped-edge markers ─────────────────────────────────────────────────────
+
+/// Draw the vim `extends`/`precedes` markers in the viewport edge cells when a
+/// line continues off-screen, clipping the line first so the markers always
+/// fit inside `viewport_width`.
+pub(super) fn apply_edge_markers(
+    spans: Vec<Span<'static>>,
+    viewport_width: usize,
+    precedes: bool,
+    extends: bool,
+) -> Vec<Span<'static>> {
+    let budget =
+        viewport_width.saturating_sub(usize::from(precedes)).saturating_sub(usize::from(extends));
+    let mut out = clip_spans_to_width(spans, budget);
+    if extends {
+        out.push(Span::styled(EXTENDS_GLYPH.to_string(), whitespace_marker_style()));
+    }
+    if precedes {
+        out.insert(0, Span::styled(PRECEDES_GLYPH.to_string(), whitespace_marker_style()));
+    }
+    out
+}
+
+/// Truncate a span list to at most `max` display cells.  A glyph that would
+/// straddle the limit is dropped whole, so wide characters are never split.
+pub(super) fn clip_spans_to_width(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    for span in spans {
+        if used >= max {
+            break;
+        }
+        let style = span.style;
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + width > max {
+                break;
+            }
+            used += width;
+            text.push(ch);
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, style));
+        }
+    }
+    out
+}
+
 /// Overlay visual-mode selection highlight on a rendered span list.
 ///
 /// `col_start`/`col_end` are display-column bounds (inclusive); pass `None`
@@ -198,6 +334,7 @@ pub(super) fn apply_visual_highlight(
     col_start: Option<usize>,
     col_end: Option<usize>,
     left: usize,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let vis_bg = theme::BG_SELECTION;
     let vis_fg = theme::FG_TEXT;
@@ -224,41 +361,37 @@ pub(super) fn apply_visual_highlight(
 
     for sp in spans {
         let style = sp.style;
-        let chars: Vec<char> = sp.content.chars().collect();
-        let sp_len = chars.len();
+        let content = sp.content.as_ref();
+        // Wide glyphs occupy two columns, so columns and byte offsets only
+        // coincide for ASCII — walk display columns, not char counts.
+        let span_cols = UnicodeWidthStr::width(content);
+        let sp_end = col + span_cols;
 
         // Fast path: entire span is outside the selection.
-        let sp_end = col + sp_len;
         if sp_end <= sel_start || sel_end.is_some_and(|e| col > e) {
             col = sp_end;
-            out.push(Span::styled(chars.iter().collect::<String>(), style));
+            out.push(Span::styled(content.to_owned(), style));
             continue;
         }
 
         // The span overlaps the selection — split into up to three parts.
-        let mut i = 0usize; // index into `chars`
-        // Part before selection.
-        let before = sel_start.saturating_sub(col);
-        if before > 0 && i < chars.len() {
-            let end = before.min(chars.len());
-            out.push(Span::styled(chars[i..end].iter().collect::<String>(), style));
-            i = end;
+        let local_start = sel_start.saturating_sub(col).min(span_cols);
+        let local_end =
+            sel_end.map(|e| (e + 1).saturating_sub(col).min(span_cols)).unwrap_or(span_cols);
+        let start_byte = display_col_to_byte(content, local_start, tab_width);
+        let end_byte = display_col_to_byte(content, local_end, tab_width);
+
+        if start_byte > 0 {
+            out.push(Span::styled(content[..start_byte].to_owned(), style));
         }
-        // Selected part.
-        let sel_end_in_span = sel_end.map(|e| (e + 1).saturating_sub(col)).unwrap_or(sp_len);
-        if i < chars.len() {
-            let end = sel_end_in_span.min(chars.len());
-            if i < end {
-                out.push(Span::styled(
-                    chars[i..end].iter().collect::<String>(),
-                    style.bg(vis_bg).fg(vis_fg),
-                ));
-                i = end;
-            }
+        if end_byte > start_byte {
+            out.push(Span::styled(
+                content[start_byte..end_byte].to_owned(),
+                style.bg(vis_bg).fg(vis_fg),
+            ));
         }
-        // Part after selection.
-        if i < chars.len() {
-            out.push(Span::styled(chars[i..].iter().collect::<String>(), style));
+        if end_byte < content.len() {
+            out.push(Span::styled(content[end_byte..].to_owned(), style));
         }
 
         col = sp_end;
@@ -283,16 +416,19 @@ pub(super) fn apply_visual_highlight(
 
 /// Overlay search match highlighting on an already-rendered span list.
 ///
-/// `line` is the full line byte string, `pattern` is the raw search query,
-/// `byte_start..byte_end` is the rendered slice, and `bg` is the background
-/// colour inherited from the cursor-line flag.
+/// Matches are located in `line` bytes and painted through the display-column
+/// annotation overlay, so the highlight stays aligned when the rendered spans
+/// are no longer byte-identical to `line` (tabs expanded, wide glyphs, visible
+/// whitespace markers).  Only matches overlapping `byte_start..byte_end` are
+/// painted; the caller passes the slice it rendered.
 pub(super) fn apply_search_highlights(
     spans: Vec<Span<'static>>,
     line: &str,
     pattern: &str,
     byte_start: usize,
     byte_end: usize,
-    bg: Color,
+    left: usize,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     // Build case-aware regex from the plain-text pattern.
     let case_insensitive = !smart_case_sensitive(pattern);
@@ -301,69 +437,22 @@ pub(super) fn apply_search_highlights(
     } else {
         regex::escape(pattern)
     };
-    let re = match regex::Regex::new(&re_src) {
-        Ok(r) => r,
-        Err(_) => return spans,
-    };
-
-    let Some(search_slice) = line.get(byte_start..byte_end.min(line.len())) else {
+    let Ok(re) = regex::Regex::new(&re_src) else {
         return spans;
     };
 
-    let matches: Vec<(usize, usize)> = re
-        .find_iter(search_slice)
-        .map(|m| (byte_start + m.start(), byte_start + m.end()))
-        .collect();
-    if matches.is_empty() {
-        return spans;
-    }
-
-    let match_hl =
-        Style::default().fg(theme::BG_APP).bg(theme::BG_FIND).add_modifier(Modifier::BOLD);
-
-    // Re-build spans, splitting on match boundaries inside the rendered slice.
-    let mut out: Vec<Span<'static>> = Vec::new();
-    // Accumulate raw bytes across all input spans so we can apply match ranges.
-    // Build a flat (byte_offset, char_group, style) representation first.
-    let mut flat: Vec<(String, Style)> = Vec::new();
-    for span in &spans {
-        let content = span.content.as_ref();
-        let style = span.style;
-        flat.push((content.to_owned(), style));
-    }
-
-    // Re-emit spans split by match ranges.
-    let mut byte_pos = byte_start; // position in `line` of the start of the current flat span
-    for (content, base_style) in flat {
-        let span_start = byte_pos;
-        let span_end = byte_pos + content.len();
-        byte_pos = span_end;
-
-        // Find matches that overlap this span.
-        let mut local_pos = 0usize; // position within `content` (bytes)
-        for &(ms, me) in &matches {
-            if me <= span_start || ms >= span_end {
-                continue; // no overlap
-            }
-            let rel_start = ms.saturating_sub(span_start);
-            let rel_end = me.min(span_end) - span_start;
-            // Emit text before the match.
-            if rel_start > local_pos {
-                let s = content[local_pos..rel_start].to_owned();
-                out.push(Span::styled(s, base_style.bg(bg)));
-            }
-            // Emit the match.
-            let s = content[rel_start.min(content.len())..rel_end.min(content.len())].to_owned();
-            if !s.is_empty() {
-                out.push(Span::styled(s, match_hl));
-            }
-            local_pos = rel_end;
+    let visual = annotation_visual("find");
+    let mut out = spans;
+    for found in re.find_iter(line) {
+        if found.end() <= byte_start || found.start() >= byte_end {
+            continue;
         }
-        // Emit remainder.
-        if local_pos < content.len() {
-            out.push(Span::styled(content[local_pos..].to_owned(), base_style.bg(bg)));
+        let start = byte_col_to_display_col(line, found.start(), tab_width);
+        let end = byte_col_to_display_col(line, found.end(), tab_width);
+        if end <= start {
+            continue;
         }
+        out = apply_annotation_overlay(out, start, end, left, visual, tab_width);
     }
-
-    if out.is_empty() { spans } else { out }
+    out
 }

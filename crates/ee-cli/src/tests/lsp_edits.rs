@@ -152,7 +152,7 @@ fn goto_column_emits_edit_notification() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.goto_column(2, true).expect("goto column should send");
+    client.goto_column(2, 4, true).expect("goto column should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");

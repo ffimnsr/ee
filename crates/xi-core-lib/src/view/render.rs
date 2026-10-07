@@ -144,28 +144,40 @@ impl View {
             return vec![Vec::new(); line_count];
         }
 
+        // YAML still parses from line 0 (its block context is
+        // document-relative), but the window never runs past its own trailing
+        // context. Without the bound the YAML branch collected to EOF, so
+        // every render parsed and walked the whole document regardless of
+        // offset (measured before the fix: ~26 ms flat on a 5,000-line
+        // fixture; see the yaml stage probe).
         let parse_from_document_start = language_name.eq_ignore_ascii_case("yaml");
+        #[cfg(test)]
+        let stage_started = std::time::Instant::now();
         let context_start_line = if parse_from_document_start {
             0
         } else {
             start_line.saturating_sub(BACKEND_SYNTAX_CONTEXT_LINES)
         };
-        let context_lines = if parse_from_document_start {
-            self.lines.iter_lines(rope, context_start_line).collect::<Vec<VisualLine>>()
-        } else {
-            let context_line_count = line_count
-                + start_line.saturating_sub(context_start_line)
-                + BACKEND_SYNTAX_CONTEXT_LINES;
-            self.lines
-                .iter_lines(rope, context_start_line)
-                .take(context_line_count)
-                .collect::<Vec<VisualLine>>()
-        };
+        let context_line_count = line_count
+            + start_line.saturating_sub(context_start_line)
+            + BACKEND_SYNTAX_CONTEXT_LINES;
+        let context_lines = self
+            .lines
+            .iter_lines(rope, context_start_line)
+            .take(context_line_count)
+            .collect::<Vec<VisualLine>>();
+        #[cfg(test)]
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::ContextLines,
+            stage_started.elapsed(),
+        );
 
         if context_lines.is_empty() {
             return vec![Vec::new(); line_count];
         }
 
+        #[cfg(test)]
+        let stage_started = std::time::Instant::now();
         let chunk_start = context_lines.first().map(|line| line.interval.start()).unwrap_or(0);
         let chunk_end = context_lines.last().map(|line| line.interval.end()).unwrap_or(chunk_start);
         if chunk_end <= chunk_start {
@@ -180,22 +192,42 @@ impl View {
                     ..line.interval.end().saturating_sub(chunk_start)
             })
             .collect::<Vec<_>>();
+        #[cfg(test)]
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::ChunkSlice,
+            stage_started.elapsed(),
+        );
 
-        let rendered_syntax = chunk_syntax_spans(
+        #[cfg(test)]
+        let stage_started = std::time::Instant::now();
+        let skip = start_line.saturating_sub(context_start_line);
+        let rendered_syntax = chunk_syntax_spans_for_segments(
             language_name,
             &chunk_text,
             &segments,
+            skip..(skip + line_count),
             VisibleSyntaxLimits {
                 timeout: BACKEND_SYNTAX_TIMEOUT,
                 ..VisibleSyntaxLimits::default()
             },
         );
-        let skip = start_line.saturating_sub(context_start_line);
+        #[cfg(test)]
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::ChunkSpans,
+            stage_started.elapsed(),
+        );
+        #[cfg(test)]
+        let stage_started = std::time::Instant::now();
         let mut segment_syntax =
             rendered_syntax.into_iter().skip(skip).take(line_count).collect::<Vec<_>>();
         while segment_syntax.len() < line_count {
             segment_syntax.push(Vec::new());
         }
+        #[cfg(test)]
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::Assembly,
+            stage_started.elapsed(),
+        );
         segment_syntax
     }
 

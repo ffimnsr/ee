@@ -348,9 +348,10 @@ fn pty_wrap_blanks_continuation_rows_and_stays_aligned() {
 
 #[test]
 fn pty_git_sign_absent_for_tracked_clean_file() {
-    // `test_assets/hello.txt` is gitignored (`*.txt`), so the app correctly
-    // shows it as an all-added file.  A tracked, clean file must show no git
-    // signs in the gutter; capture it through the same PTY path for review.
+    // `test_assets/hello.txt` is gitignored (`*.txt`), so it has no HEAD
+    // baseline: the app must show no git signs in its gutter. The unrelated
+    // sample-program.rs fixture is tracked and clean; capture it through the
+    // same PTY path for review.
     let temp = tempfile::tempdir().expect("temp dir");
     let (master, slave) = open_pty(ROWS, COLS);
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -364,12 +365,32 @@ fn pty_git_sign_absent_for_tracked_clean_file() {
         row_text(screen, 0).contains("use std::collections")
             && row_text(screen, 9).contains("use std::time")
     });
+    // The large fixture loads in viewport-scoped waves, so a snapshot taken
+    // while rows are still filling is racy (the gutter is present but later
+    // rows are blank). Wait until every editor row is populated before
+    // snapshotting; populated rows always carry at least their gutter number,
+    // so a blank row means the wave has not landed yet.
+    wait_for_screen(
+        &rx,
+        &mut parser,
+        Duration::from_secs(20),
+        "viewport fully populated",
+        |screen| (0..ROWS as usize - 2).all(|row| !row_text(screen, row).trim().is_empty()),
+    );
     // Source-control refresh runs ~250ms after startup idle; the large
     // fixture is never fully cached, so no git status is ever cached for it —
     // wait out the refresh window and assert both the missing badge and the
     // absence of phantom gutter signs.
     std::thread::sleep(Duration::from_millis(1500));
-    wait_stable(&rx, &mut parser, Duration::from_secs(10), "git refresh settled", |_| true);
+    wait_stable(
+        &rx,
+        &mut parser,
+        Duration::from_secs(10),
+        "git refresh settled",
+        // Keep requiring the fully populated viewport: a repaint must not
+        // regress back to the pre-size phase.
+        |screen| (0..ROWS as usize - 2).all(|row| !row_text(screen, row).trim().is_empty()),
+    );
 
     let status = row_text(parser.screen(), ROWS as usize - 2);
     assert!(
@@ -384,4 +405,75 @@ fn pty_git_sign_absent_for_tracked_clean_file() {
         );
     }
     insta::assert_snapshot!(editor_rows(parser.screen()));
+}
+
+/// Fixture with one function holding a nested block; `deep();` is the row the
+/// guide assertions look at.
+const GUIDE_FIXTURE: &[&str] = &["fn main() {", "    if x {", "        deep();", "    }", "}"];
+
+/// Temp home holding a user config, plus a small fixture file to open.
+fn setup_with_config(
+    config: &str,
+    fixture: &[&str],
+) -> (EditorProcess, File, mpsc::Receiver<Option<Vec<u8>>>, vt100::Parser, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config_dir = temp.path().join("config/ee");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config.toml"), config).expect("write config");
+    let file = temp.path().join("fixture.txt");
+    std::fs::write(&file, format!("{}\n", fixture.join("\n"))).expect("write fixture");
+
+    let (master, slave) = open_pty(ROWS, COLS);
+    let proc = spawn_ee(Some(&file), slave, temp.path());
+    let rx = spawn_reader(master.try_clone().expect("clone master reader"));
+    let parser = vt100::Parser::new(ROWS, COLS, 0);
+    (proc, master, rx, parser, temp)
+}
+
+#[test]
+fn pty_indent_guides_honour_config_and_safety_cap() {
+    // The cap is two lines, so the five-line function and its three-line nested
+    // block both draw nothing while the config still enables guides.
+    let (_proc, mut master, rx, mut parser, _temp) =
+        setup_with_config("indent_guides = true\nindent_guides_max_lines = 2\n", GUIDE_FIXTURE);
+
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "fixture render", |screen| {
+        row_text(screen, 2).contains("deep();") && row_text(screen, 0).contains("fn main() {")
+    });
+    assert!(
+        !screen_text(parser.screen()).contains('│'),
+        "cap of two lines must hide every guide;\nscreen:\n{}",
+        screen_text(parser.screen())
+    );
+
+    // `0` lifts the cap and the guides appear on the next paint.
+    send_keys(&mut master, b":set indent_guides_max_lines=0\r");
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "uncapped guides", |screen| {
+        row_text(screen, 2).contains("│   │   deep();")
+            && row_text(screen, 1).contains("│   if x {")
+    });
+}
+
+#[test]
+fn pty_indent_guides_toggle_from_set_command() {
+    let (_proc, mut master, rx, mut parser, _temp) = setup_with_config("", GUIDE_FIXTURE);
+
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "fixture render", |screen| {
+        row_text(screen, 2).contains("deep();")
+    });
+    assert!(
+        !screen_text(parser.screen()).contains('│'),
+        "guides must stay off without config;\nscreen:\n{}",
+        screen_text(parser.screen())
+    );
+
+    send_keys(&mut master, b":set indentguides\r");
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "guides enabled", |screen| {
+        row_text(screen, 2).contains("│   │   deep();")
+    });
+
+    send_keys(&mut master, b":set noindentguides\r");
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "guides disabled", |screen| {
+        row_text(screen, 2).contains("deep();") && !screen_text(screen).contains('│')
+    });
 }

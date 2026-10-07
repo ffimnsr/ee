@@ -389,6 +389,110 @@ tasks:
 }
 
 #[test]
+fn yaml_render_window_deep_in_document_keeps_document_start_parse() {
+    let _guard = crate::runtime_loader::runtime_loader_test_guard();
+    warm_syntax_queries(&["yaml", "bash"]);
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+    // The unit-test loader resolves no query files from disk; the dedicated
+    // injection tests record the yaml injections query by hand. Same setup
+    // here so the deep window exercises the real injection path.
+    crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+        loader.invalidate_language("yaml");
+        loader.record_query_artifact(
+            "yaml",
+            crate::runtime_loader::RuntimeQueryKind::Injections,
+            include_str!("../../../../../runtime/queries/yaml/injections.scm").to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+    });
+    // The window sits ~2,000 lines deep, inside the `commands:` block scalar
+    // and its following key. Only a parse that starts at line 0 sees the
+    // `commands:` key and the open block scalar, so the window rows get bash
+    // spans and the following key gets a YAML key span. This pins the bounded
+    // context collection (view/render.rs) to keep the YAML start at the
+    // document start while capping the context end, and the match budget to
+    // count window work only.
+    let mut doc =
+        (0..2_000).map(|index| format!("key_{index}: value_{index}\n")).collect::<String>();
+    doc.push_str(
+        "logs:\n  commands:\n    - |\n      for candidate in \\\n        \"$PWD/deep.log\"\n      do\n        break\n      done\n  description: Deep window key.\n",
+    );
+    let bash_line = doc
+        .lines()
+        .position(|line| line.contains("for candidate"))
+        .expect("fixture includes the bash body");
+    let rope = Rope::from(doc.clone());
+    let mut view = View::new(1.into(), BufferId::new(2));
+    view.debug_force_rewrap_cols(&rope, 0);
+    let store = RopeTextStore::new(rope, 0);
+
+    let spans = view.backend_syntax_spans_for_segment(&store, bash_line, 6, "yaml", true);
+    assert_eq!(spans.len(), 6, "one span list per requested row");
+    assert!(
+        spans[0].iter().any(|span| {
+            span.scope.starts_with("keyword")
+                && render_probe_line_span_text(&doc, bash_line, span) == "for"
+        }),
+        "deep bash rows must still be parsed as bash"
+    );
+    assert!(
+        !spans[0].iter().any(|span| span.scope == "error"),
+        "deep window rows must not be parse error spans"
+    );
+    // The `description:` key after the block scalar keeps its YAML key span.
+    assert!(
+        spans[5]
+            .iter()
+            .any(|span| span.scope.starts_with("variable") || span.scope.starts_with("property")),
+        "key after the block scalar must stay a YAML key"
+    );
+
+    crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+        loader.invalidate_language("yaml");
+    });
+}
+
+/// Text of one span resolved against the whole document, for window rows whose
+/// span offsets are relative to their own line.
+fn render_probe_line_span_text<'a>(
+    src: &'a str,
+    line_index: usize,
+    span: &VisibleSyntaxSpan,
+) -> &'a str {
+    let line_start = src.lines().take(line_index).map(|line| line.len() + 1).sum::<usize>();
+    &src[(line_start + span.start_byte)..(line_start + span.end_byte)]
+}
+
+#[test]
+fn yaml_render_window_pads_rows_past_eof() {
+    let _guard = crate::runtime_loader::runtime_loader_test_guard();
+    warm_syntax_queries(&["yaml"]);
+    let doc = (0..1_000).map(|index| format!("key_{index}: value_{index}\n")).collect::<String>();
+    let doc = Rope::from(doc);
+    let mut view = View::new(1.into(), BufferId::new(2));
+    view.debug_force_rewrap_cols(&doc, 0);
+    let store = RopeTextStore::new(doc.clone(), 0);
+
+    // The window reaches 50 rows past EOF: the bounded context collection must
+    // still return one list per requested row, with the in-document rows
+    // carrying spans and the tail rows empty.
+    let spans = view.backend_syntax_spans_for_segment(&store, 950, 200, "yaml", true);
+    assert_eq!(spans.len(), 200, "one span list per requested row");
+    assert!(
+        spans[0]
+            .iter()
+            .any(|span| span.scope.starts_with("variable") || span.scope.starts_with("property")),
+        "in-document row must carry key spans"
+    );
+    assert!(
+        spans[49].iter().any(|span| span.scope.starts_with("variable")),
+        "last in-document row must carry key spans"
+    );
+    assert!(spans[100].is_empty(), "rows past EOF must stay empty");
+}
+
+#[test]
 fn render_if_dirty_omits_syntax_spans_for_unsupported_language() {
     let mut view = View::new(1.into(), BufferId::new(2));
     let editor = crate::editor::Editor::with_text("plain text\n");
@@ -430,7 +534,9 @@ fn syntax_span_render_perf_probe() {
     let jump = syntax_probe_caret_jump(&text);
     let drag = syntax_probe_drag_render(&text);
     let scroll_back = syntax_probe_scroll_back(&text);
-    let (yaml_first_us, yaml_mid_us, yaml_late_us) = syntax_probe_yaml_offset_scale();
+    let yaml = syntax_probe_yaml_offset_scale();
+    let (yaml_first_us, yaml_mid_us, yaml_late_us) =
+        (yaml.windows[0].render_us, yaml.windows[1].render_us, yaml.windows[2].render_us);
     let span_count: usize = spans_per_line.iter().map(Vec::len).sum();
     let encodings = syntax_probe_encodings(&spans_per_line);
     let span_bytes = syntax_bytes.saturating_sub(plain_bytes);
@@ -482,6 +588,26 @@ fn syntax_span_render_perf_probe() {
         encodings.records_u16_us,
         encodings.records_u16_decode_us,
     );
+    eprintln!(
+        "yaml stage probe: window_chunk_bytes={} full_chunk_bytes={} direct_window_us={}",
+        yaml.window_chunk_bytes, yaml.full_chunk_bytes, yaml.direct_window_us,
+    );
+    eprintln!("yaml direct window stages: {}", yaml.direct_window_stages.summary());
+    for window in &yaml.windows {
+        eprintln!(
+            "yaml render probe: start_line={} render_us={} direct_us={} stages={}",
+            window.start_line,
+            window.render_us,
+            window.direct_us,
+            window.stages.summary(),
+        );
+        eprintln!(
+            "yaml direct mirror stages: start_line={} direct_us={} stages={}",
+            window.start_line,
+            window.direct_us,
+            window.direct_stages.summary(),
+        );
+    }
 
     assert!(plain_bytes > 0, "probe should emit a measured baseline payload");
     assert!(
@@ -658,32 +784,112 @@ fn syntax_probe_scroll_back(text: &Rope) -> SyntaxProbeRepaint {
     syntax_probe_repaint_stats(peer.take_notifications(), us)
 }
 
-/// YAML production cost for the same 200-line window at three document offsets,
-/// measured through the real render path after a warm-up call.
+/// YAML stage attribution for the same 200-line window at three document
+/// offsets, measured through the real render path against direct
+/// `chunk_syntax_spans` calls on the same inputs, in one process.
 ///
 /// `parse_from_document_start` (view/render.rs) gives YAML windows a context
-/// start of line 0, so later windows parse a longer prefix. Measuring via
-/// `backend_syntax_spans_for_segment` keeps that behavior in the loop; calling
-/// `chunk_syntax_spans` directly would only ever see the window. The warm-up
-/// call absorbs first-use grammar loading so the sweep shows steady state.
-fn syntax_probe_yaml_offset_scale() -> (u128, u128, u128) {
+/// start of line 0, so each window's chunk is the document prefix through its
+/// own trailing context; the direct mirror call replays the exact chunk,
+/// segments, and requested rows the render path built, separating the render
+/// path's own work from the chunk it asks the walk to process. The armed stage
+/// recorder splits every call into named stages. Warm-up calls absorb first-use
+/// grammar and query loading so the sweep shows steady state.
+fn syntax_probe_yaml_offset_scale() -> SyntaxProbeYamlScale {
     let yaml = Rope::from(
         (0..5_000).map(|index| format!("key_{index}: value_{index}\n")).collect::<String>(),
     );
     let mut view = View::new(1.into(), BufferId::new(2));
     view.debug_force_rewrap_cols(&yaml, 0);
     let store = RopeTextStore::new(yaml.clone(), 0);
+    let limits =
+        VisibleSyntaxLimits { timeout: BACKEND_SYNTAX_TIMEOUT, ..VisibleSyntaxLimits::default() };
 
-    let window_cost = |start_line: usize| -> u128 {
-        let started = Instant::now();
-        let spans = view.backend_syntax_spans_for_segment(&store, start_line, 200, "yaml", true);
-        let elapsed_us = started.elapsed().as_micros();
+    // The 200-line window alone: the direct baseline the recorded decision
+    // compares against the render path (1.6 ms at recording time).
+    let window_chunk =
+        (0..200).map(|index| format!("key_{index}: value_{index}\n")).collect::<String>();
+    let window_segments = syntax_probe_line_segments(&window_chunk);
+    let _ = chunk_syntax_spans("yaml", &window_chunk, &window_segments, limits);
+    let (_, direct_window_us, direct_window_stages) = syntax_probe_measured(|| {
+        chunk_syntax_spans("yaml", &window_chunk, &window_segments, limits)
+    });
+
+    // The whole document, for the chunk the render path hands the walk at the
+    // sweep's tail offsets.
+    let full_chunk = yaml.slice_to_cow(0..yaml.len()).into_owned();
+
+    let window_cost = |start_line: usize| -> SyntaxProbeYamlWindow {
+        let (spans, render_us, stages) = syntax_probe_measured(|| {
+            view.backend_syntax_spans_for_segment(&store, start_line, 200, "yaml", true)
+        });
         assert_eq!(spans.len(), 200, "one span list per rendered line");
-        elapsed_us
+        // The same chunk the render path builds (prefix through the window's
+        // trailing context), walked directly with the same requested rows, in
+        // the same process: the render path and the direct walk must agree.
+        let chunk_end_line = (start_line + 200 + 32).min(5_000);
+        let mirror_chunk = yaml.slice_to_cow(0..yaml.offset_of_line(chunk_end_line)).into_owned();
+        let mirror_segments = syntax_probe_line_segments(&mirror_chunk);
+        let _ = chunk_syntax_spans_for_segments(
+            "yaml",
+            &mirror_chunk,
+            &mirror_segments,
+            start_line..(start_line + 200),
+            limits,
+        );
+        let (_, direct_us, direct_stages) = syntax_probe_measured(|| {
+            chunk_syntax_spans_for_segments(
+                "yaml",
+                &mirror_chunk,
+                &mirror_segments,
+                start_line..(start_line + 200),
+                limits,
+            )
+        });
+        SyntaxProbeYamlWindow { start_line, render_us, stages, direct_us, direct_stages }
     };
 
     let _warmup = window_cost(0);
-    (window_cost(0), window_cost(2_400), window_cost(4_800))
+    SyntaxProbeYamlScale {
+        windows: [window_cost(0), window_cost(2_400), window_cost(4_800)],
+        direct_window_us,
+        direct_window_stages,
+        full_chunk_bytes: full_chunk.len(),
+        window_chunk_bytes: window_chunk.len(),
+    }
+}
+
+/// Stage split for one YAML window through the real render path, plus the
+/// direct walk over the same chunk.
+struct SyntaxProbeYamlWindow {
+    start_line: usize,
+    render_us: u128,
+    stages: crate::syntax_span_probe::SpanStageTimings,
+    direct_us: u128,
+    direct_stages: crate::syntax_span_probe::SpanStageTimings,
+}
+
+/// Render-path versus direct-walk costs, and the stage split of each, for the
+/// YAML sweep.
+struct SyntaxProbeYamlScale {
+    windows: [SyntaxProbeYamlWindow; 3],
+    direct_window_us: u128,
+    direct_window_stages: crate::syntax_span_probe::SpanStageTimings,
+    window_chunk_bytes: usize,
+    full_chunk_bytes: usize,
+}
+
+/// Runs `run` with the stage recorder armed, returning its value, wall time,
+/// and the recorded stage breakdown.
+fn syntax_probe_measured<T>(
+    run: impl FnOnce() -> T,
+) -> (T, u128, crate::syntax_span_probe::SpanStageTimings) {
+    crate::syntax_span_probe::arm();
+    let started = Instant::now();
+    let value = run();
+    let elapsed_us = started.elapsed().as_micros();
+    let stages = crate::syntax_span_probe::take().expect("probe arms the stage recorder");
+    (value, elapsed_us, stages)
 }
 
 /// Cold render so the frontend cache holds spans for the whole probe window,

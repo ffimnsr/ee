@@ -94,6 +94,12 @@ pub(crate) struct EditorSettings {
     pub color_column: Option<usize>,
     /// Show whitespace characters (spaces as `·`, tabs as `→`) in the buffer.
     pub show_visible_whitespace: bool,
+    /// Draw indent guides: a vertical rule at each indent level of a line.
+    pub indent_guides: bool,
+    /// Safety cap for `indent_guides`: a block (function or scope) spanning more
+    /// lines than this draws no guides, so huge functions stay quiet.  `0`
+    /// disables the cap; rendering also caps the scan at 4096 rows per side.
+    pub indent_guides_max_lines: usize,
     /// Minimum number of screen rows to keep between cursor and the top/bottom edge.
     pub scroll_offset: usize,
     /// Soft-wrap long lines instead of truncating at the viewport right edge.
@@ -130,6 +136,8 @@ impl Default for EditorSettings {
             number_style: NumberStyle::Absolute,
             color_column: None,
             show_visible_whitespace: false,
+            indent_guides: false,
+            indent_guides_max_lines: 300,
             scroll_offset: 5,
             wrap_lines: false,
             sign_column: true,
@@ -269,6 +277,12 @@ impl EditorSettings {
         }
         if let Some(v) = patch.show_visible_whitespace {
             self.show_visible_whitespace = v;
+        }
+        if let Some(v) = patch.indent_guides {
+            self.indent_guides = v;
+        }
+        if let Some(v) = patch.indent_guides_max_lines {
+            self.indent_guides_max_lines = v;
         }
         if let Some(v) = patch.scroll_offset {
             self.scroll_offset = v;

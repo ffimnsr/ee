@@ -96,6 +96,73 @@ fn git_status_marks_detached_head_and_file_limit_truncation() {
 }
 
 #[test]
+fn inspect_buffer_untracked_file_has_no_gutter_signs() {
+    // Regression: an untracked file used to be diffed against an empty base,
+    // which painted every line as an addition (`+`) in the gutter. Files with
+    // no HEAD baseline (untracked, gitignored, staged-but-uncommitted) must
+    // show no git signs; the statusline `*` still marks them dirty.
+    let (directory, _repository) = fixture();
+    fs::write(directory.path().join("new.txt"), "alpha\nbeta\n").expect("write new file");
+
+    let status = crate::git::inspect_buffer(
+        &directory.path().join("new.txt"),
+        &[String::from("alpha"), String::from("beta"), String::new()],
+    )
+    .expect("inspect_buffer should not error")
+    .expect("git status should exist for untracked file");
+
+    assert!(!status.tracked);
+    assert!(status.dirty, "untracked file must stay dirty in the statusline");
+    assert!(status.line_signs.is_empty(), "untracked file must not paint + on every line");
+    assert_eq!(status.sign_for_line(0), None);
+    assert_eq!(status.sign_for_line(1), None);
+    assert_eq!(status.sign_for_line(2), None);
+    // Hunks stay available so `:gdiff` still renders the whole file as added
+    // and hunk navigation keeps working once the file exists in HEAD.
+    assert!(!status.hunks.is_empty());
+}
+
+#[test]
+fn inspect_buffer_ignored_file_has_no_gutter_signs() {
+    let (directory, repository) = fixture();
+    fs::write(directory.path().join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+    fs::write(directory.path().join("ignored.txt"), "secret\n").expect("write ignored file");
+    commit_all(&repository, "add gitignore");
+
+    let status = crate::git::inspect_buffer(
+        &directory.path().join("ignored.txt"),
+        &[String::from("secret"), String::new()],
+    )
+    .expect("inspect_buffer should not error")
+    .expect("git status should exist for ignored file");
+
+    assert!(!status.tracked);
+    assert!(status.dirty);
+    assert!(status.line_signs.is_empty(), "gitignored file must not paint + on every line");
+    assert_eq!(status.sign_for_line(0), None);
+}
+
+#[test]
+fn inspect_buffer_tracked_file_signs_only_changed_lines() {
+    // `tracked.txt` is committed as "before\n". Inserting a line must paint
+    // exactly one `+` sign, not the whole buffer.
+    let (directory, _repository) = fixture();
+
+    let status = crate::git::inspect_buffer(
+        &directory.path().join("tracked.txt"),
+        &[String::from("before"), String::from("inserted"), String::new()],
+    )
+    .expect("inspect_buffer should not error")
+    .expect("git status should exist for tracked file");
+
+    assert!(status.tracked);
+    assert_eq!(status.line_signs.len(), 1, "only the inserted line may carry a sign");
+    assert_eq!(status.line_signs.get(&1), Some(&crate::git::GitSign::Added));
+    assert_eq!(status.sign_for_line(0), None);
+    assert_eq!(status.sign_for_line(2), None);
+}
+
+#[test]
 fn git_diffs_are_path_scoped_staged_and_byte_bounded() {
     let (directory, repository) = fixture();
     modify_fixture(&repository, directory.path());

@@ -25,7 +25,7 @@ fn apply_annotation_overlay_styles_target_range() {
     let spans = vec![Span::styled("alpha", Style::default().fg(theme::BORDER_PICKER_RESULTS))];
     let visual = annotation_visual("find");
 
-    let out = apply_annotation_overlay(spans, 1, 3, 0, visual);
+    let out = apply_annotation_overlay(spans, 1, 3, 0, visual, 4);
 
     assert_eq!(out.len(), 3);
     assert_eq!(out[0].content, "a");
@@ -46,7 +46,7 @@ fn apply_core_annotations_maps_byte_ranges_to_display_cols() {
         payloads: None,
     }];
 
-    let out = apply_core_annotations(spans, "abcdef", 0, &annotations, 0);
+    let out = apply_core_annotations(spans, "abcdef", 0, &annotations, 0, 4);
 
     assert_eq!(out.len(), 3);
     assert_eq!(out[0].content, "ab");
@@ -72,7 +72,7 @@ fn collect_line_annotation_segments_merges_same_priority_overlaps() {
         },
     ];
 
-    let segments = collect_line_annotation_segments("abcdef", 0, &annotations);
+    let segments = collect_line_annotation_segments("abcdef", 0, &annotations, 4);
 
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].start_display, 1);
@@ -94,7 +94,7 @@ fn collect_line_annotation_segments_sorts_by_priority() {
         },
     ];
 
-    let segments = collect_line_annotation_segments("abcdef", 0, &annotations);
+    let segments = collect_line_annotation_segments("abcdef", 0, &annotations, 4);
 
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].priority, annotation_priority("selection"));
@@ -174,6 +174,24 @@ fn status_messages_render_as_top_right_toasts_not_prompt_text() {
     assert_eq!(buffer.cell((rect.right() - 2, rect.y + 1)).unwrap().symbol(), " ");
     assert!(prompt_row.trim().is_empty(), "prompt row: {prompt_row:?}");
     assert_eq!(buffer.cell((rect.x + 1, rect.y + 1)).unwrap().bg, theme::BG_CHROME);
+}
+
+#[test]
+fn command_line_cursor_advances_by_display_width() {
+    let mut app = App::from_path(None).unwrap();
+    app.mode = Mode::CommandLine;
+    app.command_buffer = String::from("日");
+
+    let pos = cursor_position_for(
+        app.backend.active(),
+        app.viewport,
+        &app,
+        Rect { x: 0, y: 0, width: 20, height: 4 },
+        Rect { x: 0, y: 7, width: 20, height: 1 },
+    );
+
+    // Prompt prefix (1 cell) plus the wide glyph's two columns.
+    assert_eq!(pos, Position::new(3, 7));
 }
 
 #[test]
@@ -306,11 +324,180 @@ fn rendered_spans_pad_to_viewport_width() {
 #[test]
 fn rendered_spans_expand_tabs_to_spaces() {
     let spans = vec![Span::styled("ab\tcd", Style::default().fg(Color::Green))];
-    let expanded = expand_tabs_in_spans(spans, 4);
+    let expanded = expand_tabs_in_spans(spans, 4, 0);
     let joined = expanded.iter().map(|span| span.content.as_ref()).collect::<String>();
 
     assert_eq!(joined, "ab  cd");
     assert_eq!(expanded[0].style.fg, Some(Color::Green));
+}
+
+#[test]
+fn rendered_spans_expand_tabs_from_the_absolute_scroll_column() {
+    // Scrolled to column 2 the tab still lands on the next multiple of 4.
+    let spans = vec![Span::styled("\tcd", Style::default())];
+    let expanded = expand_tabs_in_spans(spans, 4, 2);
+    let joined = expanded.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "  cd");
+}
+
+#[test]
+fn visible_whitespace_expands_tabs_to_tab_stops() {
+    let spans = vec![Span::styled("ab\tcd", Style::default().fg(Color::Green))];
+    let layout =
+        WhitespaceLayout { start_col: 0, lead_end_col: 0, trail_start_col: None, eol: false };
+    let out = apply_visible_whitespace(spans, 4, layout);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    // `ab` + `→` + one pad cell to reach the next 4-column stop + `cd`.
+    assert_eq!(joined, "ab→·cd");
+    assert_eq!(out[1].style.fg, Some(theme::FG_SUBTLE));
+}
+
+#[test]
+fn visible_whitespace_keeps_tab_stops_when_scrolled() {
+    let layout = WhitespaceLayout { start_col: 2, ..Default::default() };
+    let out = apply_visible_whitespace(vec![Span::styled("\tcd", Style::default())], 4, layout);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "→·cd");
+}
+
+#[test]
+fn visible_whitespace_marks_lead_trail_nbsp_and_eol() {
+    let layout =
+        WhitespaceLayout { start_col: 0, lead_end_col: 2, trail_start_col: Some(3), eol: true };
+    let out = apply_visible_whitespace(vec![Span::styled("  a  ", Style::default())], 4, layout);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "╎╎a••↵");
+
+    let out = apply_visible_whitespace(
+        vec![Span::styled("a\u{a0}b", Style::default())],
+        4,
+        WhitespaceLayout::default(),
+    );
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "a␣b");
+}
+
+#[test]
+fn visible_whitespace_only_line_prefers_the_lead_marker() {
+    let layout =
+        WhitespaceLayout { start_col: 0, lead_end_col: 2, trail_start_col: None, eol: false };
+    let out = apply_visible_whitespace(vec![Span::styled("  ", Style::default())], 4, layout);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "╎╎");
+}
+
+#[test]
+fn search_highlight_follows_display_columns_after_markers_expand_tabs() {
+    // Rendered spans stop being byte-identical to the line once tabs expand
+    // into `→` plus padding, so the highlight must work in display columns.
+    let spans = apply_visible_whitespace(
+        vec![Span::styled("ab\tcd", Style::default())],
+        4,
+        WhitespaceLayout::default(),
+    );
+    let out = apply_search_highlights(spans, "ab\tcd", "cd", 0, 6, 0, 4);
+    let highlighted = paint_contents(&out, theme::BG_FIND);
+
+    assert_eq!(highlighted, vec!["cd"]);
+
+    let spans = apply_visible_whitespace(
+        vec![Span::styled("ab\tcd", Style::default())],
+        4,
+        WhitespaceLayout::default(),
+    );
+    let out = apply_search_highlights(spans, "ab\tcd", "ab", 0, 6, 0, 4);
+    let highlighted = paint_contents(&out, theme::BG_FIND);
+
+    assert_eq!(highlighted, vec!["ab"]);
+}
+
+#[test]
+fn color_column_paints_the_wide_glyph_covering_the_column() {
+    let spans = vec![Span::styled("日本語", Style::default())];
+    let out = apply_color_column(spans, 3);
+
+    // Column 3 falls inside `本` (columns 2-3), which is painted whole.
+    assert_eq!(paint_contents(&out, theme::BG_COLOR_COLUMN), vec!["本"]);
+}
+
+#[test]
+fn visual_highlight_marks_whole_wide_glyphs() {
+    let spans = vec![Span::styled("日本語", Style::default())];
+    let out = apply_visual_highlight(spans, Some(1), Some(2), 0, 4);
+
+    // Columns 1..=2 cannot be split out of `日` (0-1), so the highlight starts
+    // at the next glyph boundary and covers `本` whole.
+    assert_eq!(paint_contents(&out, theme::BG_SELECTION), vec!["本"]);
+}
+
+/// Contents of every span carrying `bg`, in render order.
+fn paint_contents<'a>(spans: &'a [Span<'static>], bg: Color) -> Vec<&'a str> {
+    spans
+        .iter()
+        .filter(|span| span.style.bg == Some(bg))
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn edge_markers_clip_and_mark_both_edges() {
+    let spans = vec![Span::styled("abcdefgh", Style::default())];
+    let out = apply_edge_markers(spans, 6, true, true);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "<abcd>");
+    assert_eq!(UnicodeWidthStr::width(joined.as_str()), 6);
+}
+
+#[test]
+fn edge_markers_leave_fitting_lines_untouched() {
+    let spans = vec![Span::styled("abc", Style::default())];
+    let out = apply_edge_markers(spans, 6, false, false);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    assert_eq!(joined, "abc");
+}
+
+#[test]
+fn clip_spans_to_width_never_splits_wide_glyphs() {
+    let spans = vec![Span::styled("日本語", Style::default())];
+    let out = clip_spans_to_width(spans, 3);
+    let joined = out.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+    // `本` would straddle the 3-cell limit, so it is dropped whole.
+    assert_eq!(joined, "日");
+}
+
+#[test]
+fn list_markers_render_through_buffer_render() {
+    let mut app = App::from_path(None).unwrap();
+    app.config.show_visible_whitespace = true;
+    app.backend.lines = vec![String::from("ab\tcd")];
+
+    let width = 40;
+    let height = 6;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let row: String =
+        (0..width).map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol()).collect();
+    let marker = "ab→·cd↵";
+
+    assert!(row.contains(marker), "row: {row:?}");
+    let start = row.find(marker).expect("marker row");
+    let content = row.find("cd").expect("content");
+    assert_eq!(
+        UnicodeWidthStr::width(&row[start..content]),
+        4,
+        "tab pads to the next 4-column stop"
+    );
 }
 
 #[cfg(feature = "agents")]

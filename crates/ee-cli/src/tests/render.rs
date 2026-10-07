@@ -756,3 +756,142 @@ fn wrap_mode_resets_left_col_to_zero() {
     app.scroll_into_view(20, 80);
     assert_eq!(app.viewport.left_col, 0, "wrap mode must reset left_col to 0");
 }
+
+/// Load `lines` as a fully-known, unwrapped row cache.
+fn load_lines(app: &mut App, lines: &[&str]) {
+    app.backend.lines = lines.iter().map(|line| (*line).to_string()).collect();
+    app.backend.line_cache =
+        lines.iter().enumerate().map(|(index, line)| cached_row(line, Some(index))).collect();
+}
+
+/// One known row; `logical_line` is `None` on wrapped continuation rows.
+fn cached_row(text: &str, logical_line: Option<usize>) -> LineSlot {
+    LineSlot::Known(CachedLine {
+        text: text.to_string(),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+        logical_line,
+    })
+}
+
+#[test]
+fn ui_render_draws_indent_guides_only_when_enabled() {
+    let mut app = App::from_path(None).unwrap();
+    load_lines(&mut app, &["fn main() {", "    if x {", "        deep();", "    }", "}"]);
+
+    let off = render_editor_screen(&app, 40, 8);
+    assert!(!off.contains('│'), "guides must stay off by default:\n{off}");
+
+    app.config.indent_guides = true;
+    let on = render_editor_screen(&app, 40, 8);
+    // The deep row carries one rule per enclosing level: column 0 (function
+    // body) and column 4 (if body).
+    assert!(on.contains("│   │   deep();"), "screen:\n{on}");
+    // The nested `if` line only has the function body's rule above it.
+    assert!(on.contains("│   if x {"), "screen:\n{on}");
+    // A top-level line has no enclosing block, so it draws none.
+    let main_row = on.lines().find(|row| row.contains("fn main() {")).unwrap();
+    assert!(!main_row.contains('│'), "top-level row got a guide: {main_row:?}");
+}
+
+#[test]
+fn ui_render_draws_indent_guides_over_expanded_tabs() {
+    let mut app = App::from_path(None).unwrap();
+    load_lines(&mut app, &["fn main() {", "\tif x {", "\t\tdeep();", "\t}", "}"]);
+    app.config.indent_guides = true;
+
+    // Tabs expand to `tab_width` columns before the overlay runs, so the rules
+    // land on the same columns as space-indented text.
+    let grid = render_editor_screen(&app, 40, 8);
+    assert!(grid.contains("│   │   deep();"), "screen:\n{grid}");
+}
+
+#[test]
+fn ui_render_skips_indent_guides_on_wrapped_continuation_rows() {
+    let mut app = App::from_path(None).unwrap();
+    let lines = ["fn main() {", "    wrapped-a", "wrapped-b", "    ok();", "}"];
+    app.backend.lines = lines.iter().map(|line| (*line).to_string()).collect();
+    app.backend.line_cache = vec![
+        cached_row("fn main() {", Some(0)),
+        cached_row("    wrapped-a", Some(1)),
+        // Continuation rows carry no logical line.
+        cached_row("wrapped-b", None),
+        cached_row("    ok();", Some(2)),
+        cached_row("}", Some(3)),
+    ];
+    app.config.indent_guides = true;
+
+    let grid = render_editor_screen(&app, 40, 8);
+    let continuation = grid.lines().find(|row| row.contains("wrapped-b")).unwrap();
+    assert!(!continuation.contains('│'), "continuation row got a guide: {continuation:?}");
+    assert!(grid.contains("│   ok();"), "screen:\n{grid}");
+}
+
+#[test]
+fn ui_render_draws_indent_guides_with_syntax_spans() {
+    let mut app = App::from_path(None).unwrap();
+    load_lines(&mut app, &["fn main() {", "    let x = 42;", "}"]);
+    app.config.indent_guides = true;
+    // The highlighter emits one span per captured range and fills the gaps
+    // between them, so the guide overlay must track columns across several
+    // spans rather than assume one span per row.
+    app.backend.line_cache[1] = LineSlot::Known(CachedLine {
+        text: "    let x = 42;".to_string(),
+        cursors: Vec::new(),
+        syntax_spans: vec![
+            CoreSyntaxSpan { start_byte: 4, end_byte: 7, scope: "keyword.control.rust".into() },
+            CoreSyntaxSpan { start_byte: 12, end_byte: 14, scope: "constant.numeric.rust".into() },
+        ],
+        logical_line: Some(1),
+    });
+
+    let grid = render_editor_screen(&app, 40, 8);
+    assert!(grid.contains("│   let x = 42;"), "screen:\n{grid}");
+}
+
+#[test]
+fn ui_render_keeps_indent_guides_after_a_large_fold() {
+    let mut app = App::from_path(None).unwrap();
+    let mut lines = vec!["fn a() {".to_string()];
+    lines.extend((0..30).map(|_| "    more();".to_string()));
+    lines.push("}".to_string());
+    lines.push("fn b() {".to_string());
+    lines.push("    work();".to_string());
+    lines.push("}".to_string());
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    load_lines(&mut app, &refs);
+    app.config.indent_guides = true;
+    app.config.indent_guides_max_lines = 4;
+
+    // Fold `fn a`'s 30-line body away: rendered rows jump from 1 to 31, past
+    // any viewport-sized plan window, while `fn b`'s three-line block stays
+    // under the cap and must still draw.
+    let buffer_id = app.backend.active().id;
+    app.folds.replace_all(buffer_id, vec![(1, 30)]);
+
+    let grid = render_editor_screen(&app, 40, 8);
+    assert!(grid.contains("(folded)"), "fold header missing:\n{grid}");
+    assert!(grid.contains("│   work();"), "screen:\n{grid}");
+}
+
+#[test]
+fn ui_render_skips_indent_guides_for_blocks_over_the_cap() {
+    let mut app = App::from_path(None).unwrap();
+    let mut lines = vec!["fn big() {"];
+    lines.extend((0..8).map(|_| "    step();"));
+    lines.push("}");
+    load_lines(&mut app, &lines);
+    app.config.indent_guides = true;
+
+    // The function block is ten lines; an eight-line cap hides its guide.
+    app.config.indent_guides_max_lines = 8;
+    let capped = render_editor_screen(&app, 40, 12);
+    assert!(!capped.contains('│'), "capped guides must not draw:\n{capped}");
+
+    // Raising the cap (or `0` for unlimited) brings the guide back.
+    for cap in [10, 0] {
+        app.config.indent_guides_max_lines = cap;
+        let screen = render_editor_screen(&app, 40, 12);
+        assert!(screen.contains("│   step();"), "cap {cap} screen:\n{screen}");
+    }
+}

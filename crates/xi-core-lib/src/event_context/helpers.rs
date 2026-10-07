@@ -793,13 +793,22 @@ fn line_end_offset_inclusive(text: &Rope, line: usize) -> usize {
     if line + 1 < total_lines { text.offset_of_line(line + 1) } else { text.len() }
 }
 
-pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+/// Map a display column to a byte column: the first glyph whose start column is
+/// at or after `display_col`, with tabs expanded to the next `tab_width` stop.
+/// Tabs use the same width the frontend rendered with, so both sides agree on
+/// the target byte.  A column past the line end returns the line length.
+pub(crate) fn display_col_to_byte(line: &str, display_col: usize, tab_width: usize) -> usize {
+    let tab_width = tab_width.max(1);
     let mut col = 0usize;
     for (byte_idx, ch) in line.char_indices() {
         if col >= display_col {
             return byte_idx;
         }
-        col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch == '\t' {
+            col += tab_width - (col % tab_width);
+        } else {
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
     }
     line.len()
 }

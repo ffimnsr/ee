@@ -102,4 +102,5 @@ fn vlf_text(core: &crate::XiCore, buffer_id: super::BufferId) -> String {
 use super::*;
 
 mod core_tests;
+mod open_perf;
 mod save_tests;

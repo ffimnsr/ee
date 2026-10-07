@@ -163,8 +163,13 @@ impl App {
                         continue;
                     }
 
-                    let display_col = byte_col_to_display_col(line, byte_idx);
-                    let end_display_col = byte_col_to_display_col(line, byte_idx + query.len());
+                    let display_col =
+                        byte_col_to_display_col(line, byte_idx, self.config.tab_width);
+                    let end_display_col = byte_col_to_display_col(
+                        line,
+                        byte_idx + query.len(),
+                        self.config.tab_width,
+                    );
                     let visible = self.config.wrap_lines
                         || (display_col >= left && display_col < right && end_display_col > left);
                     if visible {

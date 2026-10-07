@@ -44,6 +44,8 @@ pub(crate) mod ui {
     pub(crate) const FG_INVERTED: Color = Color::Rgb(11, 14, 20);
     pub(crate) const FG_SUBTLE: Color = Color::Rgb(70, 80, 100);
     pub(crate) const FG_TILDE: Color = Color::Rgb(65, 72, 95);
+    /// Indent-guide rule: dimmer than the tilde fill so deep nesting stays calm.
+    pub(crate) const FG_INDENT_GUIDE: Color = Color::Rgb(56, 62, 80);
     pub(crate) const FG_FOLD: Color = Color::Rgb(100, 130, 160);
     pub(crate) const FG_GUTTER_DIM: Color = Color::Rgb(90, 100, 125);
     pub(crate) const FG_LOADING: Color = Color::Rgb(90, 95, 115);

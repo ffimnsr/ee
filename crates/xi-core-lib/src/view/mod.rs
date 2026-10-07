@@ -41,8 +41,10 @@ pub(crate) use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};
 pub(crate) use crate::tabs::{BufferId, Counter, ViewId};
 pub(crate) use crate::text_store::rope_store::RopeTextStore;
 pub(crate) use crate::text_store::{LineLookup, ReadResult, RenderLineCount, RenderSource};
+#[cfg(test)]
+pub(crate) use crate::tree_sitter_support::chunk_syntax_spans;
 pub(crate) use crate::tree_sitter_support::{
-    VisibleSyntaxLimits, VisibleSyntaxSpan, chunk_syntax_spans,
+    VisibleSyntaxLimits, VisibleSyntaxSpan, chunk_syntax_spans_for_segments,
 };
 pub(crate) use crate::vlf::search::{VlfMatchRange, VlfSearchState, VlfSearchStatus};
 pub(crate) use crate::width_cache::WidthCache;

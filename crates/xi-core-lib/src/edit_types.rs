@@ -165,6 +165,7 @@ pub(crate) enum SpecialEvent {
     },
     GotoColumn {
         display_col: usize,
+        tab_width: usize,
         modify_selection: bool,
     },
     AddNewlineAbove,
@@ -628,8 +629,8 @@ impl From<EditNotification> for EventDomain {
             SetSelections { selections } =>
                 SpecialEvent::SetSelections { selections }.into(),
             SelectionIntoLines => ViewEvent::SelectionIntoLines.into(),
-            GotoColumn { display_col, modify_selection } => {
-                SpecialEvent::GotoColumn { display_col, modify_selection }.into()
+            GotoColumn { display_col, tab_width, modify_selection } => {
+                SpecialEvent::GotoColumn { display_col, tab_width, modify_selection }.into()
             }
             AddNewlineAbove =>
                 SpecialEvent::AddNewlineAbove.into(),

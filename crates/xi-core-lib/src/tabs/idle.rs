@@ -27,6 +27,8 @@ impl CoreState {
     }
 
     pub(super) fn finalize_new_views(&mut self) {
+        #[cfg(test)]
+        let finalize_started = std::time::Instant::now();
         let to_start = mem::take(&mut self.pending_views);
 
         to_start.iter().for_each(|(id, config)| {
@@ -35,6 +37,11 @@ impl CoreState {
             let mut edit_ctx = self.make_context(*id).unwrap();
             edit_ctx.finish_init(config);
         });
+        #[cfg(test)]
+        crate::open_probe::record(
+            crate::open_probe::OpenStage::Finalize,
+            finalize_started.elapsed(),
+        );
     }
 
     // Detects whitespace settings from the file and merges them with the config

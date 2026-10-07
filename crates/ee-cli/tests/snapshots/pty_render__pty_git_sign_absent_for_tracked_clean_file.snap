@@ -14,3 +14,13 @@ expression: editor_rows(parser.screen())
     10  use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     11
     12  use crossterm::event::{
+    13      Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, Mou
+    14  };
+    15  use ratatui::Terminal;
+    16  use ratatui::backend::TestBackend;
+    17  use ratatui::layout::Rect;
+    18  use serde_json::{Value, json};
+    19  use xi_core_lib::open_policy::OpenThresholds;
+    20  use xi_core_lib::plugin_rpc::{
+    21      CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, Selecti
+    22  };

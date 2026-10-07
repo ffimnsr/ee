@@ -35,6 +35,35 @@ impl RopeBuilder {
         }
     }
 
+    /// Push an owned string onto the rope, consuming it.
+    ///
+    /// A string that fits in a single leaf becomes that leaf directly (zero
+    /// copies). A larger string is copied once, leaf by leaf, so the total
+    /// copy volume is O(N) and peak extra memory is one leaf. The original
+    /// buffer is dropped in O(1) when the loop ends.
+    ///
+    /// Do not split the buffer in place with `split_off` here: `String` keeps
+    /// the original capacity on the prefix, so a single-line fixture would
+    /// retain a near-full-size allocation per leaf (O(N²) retained memory).
+    pub fn push_owned(&mut self, text: String) {
+        if text.len() <= MAX_LEAF {
+            if !text.is_empty() {
+                self.tree.push_leaf(text);
+            }
+            return;
+        }
+        let mut rest = text.as_str();
+        while rest.len() > MAX_LEAF {
+            let splitpoint = find_leaf_split_for_bulk(rest);
+            debug_assert!(splitpoint > 0);
+            self.tree.push_leaf(rest[..splitpoint].to_owned());
+            rest = &rest[splitpoint..];
+        }
+        if !rest.is_empty() {
+            self.tree.push_leaf(rest.to_owned());
+        }
+    }
+
     pub fn append(&mut self, rope: &Rope) {
         for chunk in rope.iter_chunks(..) {
             self.push_str(chunk);

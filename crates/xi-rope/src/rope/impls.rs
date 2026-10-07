@@ -11,6 +11,23 @@ impl FromStr for Rope {
 }
 
 impl Rope {
+    /// Creates a `Rope` from an owned string, consuming it.
+    ///
+    /// A string that fits in a single leaf becomes that leaf directly (zero
+    /// copies); a larger string is copied once, leaf by leaf (O(N) copy
+    /// volume, peak extra memory one leaf). Content and metrics are identical
+    /// to [`Rope::from`]`(&text)`; only the leaf layout can differ.
+    ///
+    /// This is the natural load path for callers that already own the decoded
+    /// text (for example the editor's file-open read buffer).
+    pub fn from_owned(text: String) -> Rope {
+        let mut builder = RopeBuilder::new();
+        builder.push_owned(text);
+        builder.finish()
+    }
+}
+
+impl Rope {
     /// Creates a `Rope` by streaming UTF-8 data from a reader.
     ///
     /// Data is appended to a [`RopeBuilder`] in bounded chunks as it is read,

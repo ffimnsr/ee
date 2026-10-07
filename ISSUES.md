@@ -5728,27 +5728,65 @@ already exists.
 
 #### Work items
 
-- [ ] Extend the probe to report sub-timings inside
+- [x] Extend the probe to report sub-timings inside
       `View::backend_syntax_spans_for_segment` for YAML: context-line collection,
       chunk slicing, `chunk_syntax_spans`, span assembly, and padding.
-- [ ] Confirm the 1.6 ms direct versus 26.7 ms render-path gap is not a probe
+- [x] Confirm the 1.6 ms direct versus 26.7 ms render-path gap is not a probe
       artifact by running both paths in one process after a warm-up.
-- [ ] Attribute the 26 ms to a named stage with numbers before changing any code.
-- [ ] Do not change `parse_from_document_start` while the flat-offset measurement
-      stands; it is not the driver.
-- [ ] Check whether injection handling (`apply_injection_spans`, depth capped at 4)
+- [x] Attribute the 26 ms to a named stage with numbers before changing any code.
+- [x] Do not change `parse_from_document_start` while the flat-offset measurement
+      stands; it is not the driver. Kept as-is: YAML still parses from line 0; the
+      context collection end was bounded instead (see results below).
+- [x] Check whether injection handling (`apply_injection_spans`, depth capped at 4)
       runs per window for YAML and what it costs.
-- [ ] Keep every change behind the existing `VisibleSyntaxLimits` budgets and fail
+- [x] Keep every change behind the existing `VisibleSyntaxLimits` budgets and fail
       closed to empty spans on timeout.
 
 #### Exit criteria
 
-- [ ] The 26 ms is attributed to a named stage with reproducible numbers.
-- [ ] Either a fix ships with measured before/after, or the cost is explained by an
-      unavoidable grammar property and recorded as accepted.
-- [ ] The probe keeps both paths (real render path and direct `chunk_syntax_spans`)
+- [x] The 26 ms is attributed to a named stage with reproducible numbers.
+- [x] Either a fix ships with measured before/after, or the cost is explained by an
+      unavoidable grammar property and recorded as accepted. Fix shipped; residual
+      recorded in `docs/upgrades/line-payload-binary-framing.md`.
+- [x] The probe keeps both paths (real render path and direct `chunk_syntax_spans`)
       so a future change cannot hide the difference.
-- [ ] YAML typing and scrolling stay within frame budget on the reference fixture.
+- [x] YAML typing and scrolling stay within frame budget on the reference fixture.
+
+#### Phase 1 results
+
+Attribution (200-line window, 5,000-line YAML fixture, one process, warm, probe
+`yaml render probe` lines): the render path's own work is ~0.1 ms; the rest was
+`chunk_syntax_spans` over the **whole document** — the YAML branch of the context
+collection in `backend_syntax_spans_for_segment` had no upper bound, so every
+window chunk ran from line 0 to EOF (which is why offsets measured flat). Inside
+the walk: parse ~9.3 ms, highlight walk ~9.4 ms (dominated by a per-capture scan
+of all segments, O(matches x context lines)), injection scan ~6.8 ms, compact
+~0.1 ms. Injection does run per YAML window (regions found via the injections
+query; depth cap 4), and it scanned the whole parsed prefix.
+
+Fixes shipped (probe before/after, same fixture, same window):
+
+- Bounded YAML context end: `take()` the context collection at
+  `line_count + start_line + BACKEND_SYNTAX_CONTEXT_LINES`, `parse_from_document_start`
+  unchanged.
+- Bounded highlight segment scan in `apply_highlight_query_spans`: only segments a
+  capture can overlap are visited (segments are ordered line ranges), killing the
+  O(matches x context lines) term.
+- Window-scoped work in the walk (`chunk_syntax_spans_for_segments`): the
+  match/capture budgets count, and both query scans plus the fallback node walk
+  visit, only the requested rows' byte range — before this, deep YAML windows
+  were starved to empty spans by prefix captures consuming the 2,048-match
+  budget before the walk reached them.
+
+| Offset | Before | After | parse / highlight / injection |
+| --- | --- | --- | --- |
+| 0 | 26.2 ms | 1.4 ms | 0.43 / 0.50 / 0.24 ms |
+| 2,400 | 27.7 ms | 6.5-8.3 ms | ~5 / 0.6 / 0.25 ms |
+| 4,800 | 25.9 ms | 11.2-14.7 ms | ~9-13 / 0.6 / 0.25 ms |
+
+Frame budget (16.7 ms @ 60 fps) holds at every offset; the residual at the tail
+is the YAML prefix parse, which is inherent to parse-from-document-start (incremental
+reparse is the recorded deferred lever, and its trigger is now met).
 
 ## Language Catalog Parity [2026-09-27]
 Scope: extend runtime grammar catalog + bundled LSP defaults to match the upstream editor docs catalog (`docs/src/languages`, 71 pages). Grammar sources git-pinned (url + rev), no crates.io for new entries. Design: docs/upgrades/language-catalog.md.
@@ -6083,3 +6121,110 @@ Open follow-up: agent-controlled text rendered in the agents pane and composer
 (permission titles, tool titles, stderr lines, paths) still bypasses
 `ui::spans::sanitize_control_chars`, which only buffer panes call; the
 verification summary now escapes locally, but the pane-wide gap remains.
+
+## File Open Path Profiling and Rope Load Optimization
+
+Goal: make the file-open pipeline (read → decode/analysis → rope or VLF →
+editor/view init → first render) continuously measurable without an
+interactive TTY, and ship the rope load optimizations the measurements
+evidence. Rope work stays behind the `TextStore` boundary rule; this issue only
+touches the rope construction and metric hot paths, never the render model.
+
+### Deliverables (implemented)
+
+- [x] `crates/xi-core-lib/src/open_probe.rs`: test-only thread-local stage
+      recorder mirroring `syntax_span_probe.rs`. Stages: `stat`,
+      `read_decode`, `analysis`, `rope_build`, `vlf_open`, `editor_create`,
+      `view_init`, `finalize`, `render`. Hooks land in `file.rs`
+      (`open_with_override`, `try_load_file`), `tabs/contexts.rs`
+      (`do_new_view`), `tabs/idle.rs` (`finalize_new_views`), and
+      `event_context/dispatch.rs` (`render`). Compiled out of release builds
+      (one thread-local branch per hook).
+- [x] `open_path_perf_probe` (ignored manual test,
+      `crates/xi-core-lib/src/tabs/tests/open_perf.rs`): drives the real
+      `CoreState::do_new_view` + `finalize` path through `XiCore` with a
+      recording peer. Deterministic fixtures (`code`, `longline`, `mixedcrlf`),
+      cold + warm iterations, per-stage µs, rope leaves/lines, first-payload
+      bytes, and a JSON artifact
+      (`EE_OPEN_PROBE_SIZES|SHAPES|ITERS|EXT|JSON` knobs; defaults `1,4,8` MiB
+      to stay memory-frugal — larger sweeps are opt-in).
+- [x] `scripts/profile-open.sh`: builds the test binary (cargo jobs capped at
+      2 by default — parallel rustc is the usual OOM source on 16 GiB boxes),
+      runs the timing probe, or delegates to `scripts/profile.sh --no-build
+      --bin <test-bin>` for samply/perf/flamegraph/callgrind/heaptrack so the
+      open path can be sampled or attributed.
+- [x] Second pass: probe reports the backing mode (`mode=rope|vlf`) with real
+      VLF byte counts instead of zeroed rope stats, MiB/s throughput is
+      stage-name based (no magic indices) and suppressed for VLF, and the rope
+      test suite gained empty-push, exact-leaf-boundary, and ASCII-control
+      regression tests (297 tests total).
+- [x] Split `src/file.rs` (1,582 LOC) into `src/file/` submodules —
+      `mod.rs` (re-exports, 52), `manager.rs` (790), `open.rs` (365),
+      `save.rs` (236), `support.rs` (145), `error.rs` (129) — so every file
+      stays under 1K LOC. Public surface (`crate::file::*`) is preserved via
+      `pub use`/`pub(crate) use` in `mod.rs`; open-probe hooks moved
+      verbatim (`open_with_override`, `try_load_file`).
+- [x] `crates/xi-rope/benches/load_paths.rs` (registered in Cargo.toml):
+      `rope_from_str` and `rope_from_owned` at 8 MiB across three payload
+      shapes, `rope_info_compute` (ascii vs mixed 1 KiB leaves), and
+      `rope_metrics_whole` (full 8 MiB metric pass).
+- [x] Rope optimization 1 — ASCII fast path in `RopeInfo::compute_info`
+      (`xi-rope/src/rope/metrics.rs`): pure-ASCII leaves skip the two scalar
+      `count_utf16_code_units` / `count_chars` passes (chars and UTF-16 units
+      both equal byte length); only the SIMD newline count plus `is_ascii()`
+      remain.
+- [x] Rope optimization 2 — owned-string load path
+      (`RopeBuilder::push_owned` + `Rope::from_owned`): a string that fits in
+      one leaf becomes that leaf directly (zero copies); larger strings are
+      copied exactly once, leaf by leaf (O(N) copy volume, peak extra memory
+      one leaf). `FileManager::try_load_file` now moves its read buffer into
+      the rope (`Rope::from_owned`, BOM drained in place), removing the full
+      intermediate copy.
+- [x] OOM root cause found and fixed (kernel log evidence): the first
+      `push_owned` implementation split the buffer in place with
+      `String::split_off`, which keeps the original near-full capacity on the
+      prefix — so on single-line fixtures every leaf retained a near-full-size
+      allocation (O(N²) retained memory; 13-14 GiB anon-RSS in the
+      `load_paths` bench and in the probe before the fix, killed by the OOM
+      killer at 19:43/19:49/19:51/19:53). Slice-based leaf copying is the
+      recorded replacement; never split an owned buffer in place here.
+
+### Measurements (this machine, warm)
+
+| Operation | Before | After |
+| --- | --- | --- |
+| `rope_info_compute` ascii 1 KiB leaf | 836 ns (1.14 GiB/s) | 44 ns (21.5 GiB/s) |
+| `rope_metrics_whole` ascii 8 MiB | 6.87 ms | 0.38 ms |
+| `rope_from_str` 8 MiB many-line | 9.34 ms (856 MiB/s) | 2.22 ms (3.52 GiB/s) |
+| `rope_from_str` 8 MiB single line | 9.64 ms | 2.33 ms |
+| `rope_from_owned` 8 MiB (open path) | — | 2.06-2.27 ms |
+| Open probe `rope_build` 1 MiB code | ~1.07 ms (warm) | 0.18 ms (warm) |
+| Open probe `rope_build` 8 MiB longline | — | 1.5 ms (warm) |
+
+Mixed-UTF-8 content is intentionally unchanged (still two scalar passes,
+~1.14 GiB/s): the leaves there genuinely need char/UTF-16 accounting, and the
+fast path must not change semantics — see `compute_info_mixed_utf8_keeps_generic_counts`.
+
+### Recorded observations
+
+- Default open policy sends the `code`/`mixedcrlf` fixtures at 4 MiB+ to VLF
+  (line-count hint ≥ 50K), so the probe covers both rope and VLF modes
+  automatically (`vlf_open` stage). Nothing changed there.
+- The 8 MiB single-line fixture still spends ~11.8 ms in `finalize`/`render`
+  (line wrap over one 8 MiB line); this matches the known pathological case in
+  `CONVERT_TO_ROPE.md` and is not a rope-build cost.
+- Remaining levers, in order: single-pass fused metrics for non-ASCII leaves;
+  avoiding the analysis-sample rope on open (`FileOpenAnalysis` builds a
+  bounded `Rope::from(sample)` just to parse indentation); rendering
+  long-line payloads (see `line-payload-binary-framing.md`).
+
+### Exit criteria
+
+- [x] `scripts/profile-open.sh` (timing mode) and `open_path_perf_probe` print
+      per-stage open timings on this machine without a TTY.
+- [x] Profiler delegation works via `scripts/profile.sh --no-build --bin <test-bin>`.
+- [x] `cargo test --quiet -p ee-xi-rope` (294 tests incl. new load-path tests)
+      passes; `cargo test --quiet -p ee-xi-core-lib open` passes.
+- [x] `cargo fmt --all -- --check` and clippy clean on touched crates.
+- [x] Bench and probe runtimes stay small enough to run on a 16 GiB box
+      (no 32 MiB+ default sweeps).

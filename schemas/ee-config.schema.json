@@ -96,10 +96,27 @@
       "minimum": 0
     },
     "show_visible_whitespace": {
+      "description": "Render visible whitespace markers: `·` space, `→` tab, `╎` leading\nwhitespace, `•` trailing whitespace, `␣` non-breaking space, `↵` end of\nline, and `<`/`>` at clipped left/right edges.  Characters are fixed.",
       "type": [
         "boolean",
         "null"
       ]
+    },
+    "indent_guides": {
+      "description": "Draw indent guides (a vertical rule at each indent level).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "indent_guides_max_lines": {
+      "description": "Safety cap for indent guides: a block (function or scope) spanning more\nlines than this draws no guides.  `0` disables the cap.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
     },
     "scroll_offset": {
       "description": "Minimum rows between cursor and screen top/bottom edge.",

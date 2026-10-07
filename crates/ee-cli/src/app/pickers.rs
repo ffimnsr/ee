@@ -289,7 +289,8 @@ impl App {
             total_lines,
         );
         let line = self.backend.get_line(cursor_line).unwrap_or("");
-        let cursor_display_col = byte_col_to_display_col(line, self.backend.cursor_col);
+        let cursor_display_col =
+            byte_col_to_display_col(line, self.backend.cursor_col, self.config.tab_width);
         self.viewport.target_col = cursor_display_col;
 
         // Horizontal scroll: keep cursor within the visible column range.

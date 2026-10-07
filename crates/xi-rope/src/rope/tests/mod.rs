@@ -97,6 +97,7 @@ mod eq_tests;
 mod iter_tests;
 mod leaf_tests;
 mod lines_tests;
+mod load_tests;
 mod metric_tests;
 mod slice_tests;
 mod stream_tests;

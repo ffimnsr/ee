@@ -301,22 +301,69 @@ pub(crate) fn visible_syntax_spans(
 ) -> Vec<Vec<VisibleSyntaxSpan>> {
     let line_starts = line_start_offsets(visible_text);
     let segments = line_segments(visible_text, &line_starts);
-    chunk_syntax_spans_with_depth(language_name, visible_text, &segments, limits, 0, Instant::now())
+    chunk_syntax_spans_with_depth(
+        language_name,
+        visible_text,
+        &segments,
+        0..segments.len(),
+        limits,
+        0,
+        Instant::now(),
+    )
 }
 
+/// Test-only wrapper over the full-range walk; production calls
+/// [`chunk_syntax_spans_for_segments`] so window budgets are not consumed by
+/// parse-context rows.
+#[cfg(test)]
 pub(crate) fn chunk_syntax_spans(
     language_name: &str,
     chunk_text: &str,
     segments: &[Range<usize>],
     limits: VisibleSyntaxLimits,
 ) -> Vec<Vec<VisibleSyntaxSpan>> {
-    chunk_syntax_spans_with_depth(language_name, chunk_text, segments, limits, 0, Instant::now())
+    chunk_syntax_spans_with_depth(
+        language_name,
+        chunk_text,
+        segments,
+        0..segments.len(),
+        limits,
+        0,
+        Instant::now(),
+    )
+}
+
+/// Like [`chunk_syntax_spans`], with the match/capture budgets and span
+/// emission scoped to the `requested` segment indices.
+///
+/// Segments outside the range are still parsed (languages that must start at
+/// the document start, YAML, rely on the prefix for block context), but a
+/// prefix's captures must not consume the window's budgets or starve its rows:
+/// before this, deep YAML windows rendered without spans once the walk hit the
+/// match cap on the context above them.
+pub(crate) fn chunk_syntax_spans_for_segments(
+    language_name: &str,
+    chunk_text: &str,
+    segments: &[Range<usize>],
+    requested: Range<usize>,
+    limits: VisibleSyntaxLimits,
+) -> Vec<Vec<VisibleSyntaxSpan>> {
+    chunk_syntax_spans_with_depth(
+        language_name,
+        chunk_text,
+        segments,
+        requested,
+        limits,
+        0,
+        Instant::now(),
+    )
 }
 
 fn chunk_syntax_spans_with_depth(
     language_name: &str,
     chunk_text: &str,
     segments: &[Range<usize>],
+    requested: Range<usize>,
     limits: VisibleSyntaxLimits,
     injection_depth: usize,
     started_at: Instant,
@@ -349,26 +396,48 @@ fn chunk_syntax_spans_with_depth(
     let bytes = chunk_text.as_bytes();
     let mut read = |offset: usize, _: Point| bytes.get(offset..).unwrap_or_default();
     let options = ParseOptions { progress_callback: Some(&mut progress) };
+    #[cfg(test)]
+    let stage_started = Instant::now();
     let Some(tree) = parser.parse_with_options(&mut read, None, Some(options)) else {
         return per_segment;
     };
     if started_at.elapsed() >= limits.timeout {
         return per_segment;
     }
+    #[cfg(test)]
+    if injection_depth == 0 {
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::Parse,
+            stage_started.elapsed(),
+        );
+    }
 
+    #[cfg(test)]
+    let stage_started = Instant::now();
     let highlighted = apply_highlight_query_spans(
         language_name,
         chunk_text,
         segments,
+        &requested,
         &tree,
         &mut per_segment,
         limits,
         started_at,
     );
-    if !highlighted {
+    #[cfg(test)]
+    if injection_depth == 0 {
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::HighlightWalk,
+            stage_started.elapsed(),
+        );
+    }
+    if !highlighted && requested.start < requested.end {
+        #[cfg(test)]
+        let stage_started = Instant::now();
         let mut state = VisibleSyntaxWalk {
             text: chunk_text,
             segments,
+            requested: &requested,
             per_segment: &mut per_segment,
             started: started_at,
             limits,
@@ -376,21 +445,47 @@ fn chunk_syntax_spans_with_depth(
             captures: 0,
         };
         state.walk(tree.root_node());
+        #[cfg(test)]
+        if injection_depth == 0 {
+            crate::syntax_span_probe::record(
+                crate::syntax_span_probe::SpanStage::FallbackWalk,
+                stage_started.elapsed(),
+            );
+        }
     }
     if injection_depth < MAX_VISIBLE_INJECTION_DEPTH {
+        #[cfg(test)]
+        let stage_started = Instant::now();
         apply_injection_spans(
             language_name,
             chunk_text,
             segments,
+            &requested,
             &tree,
             &mut per_segment,
             limits,
             injection_depth,
             started_at,
         );
+        #[cfg(test)]
+        if injection_depth == 0 {
+            crate::syntax_span_probe::record(
+                crate::syntax_span_probe::SpanStage::Injection,
+                stage_started.elapsed(),
+            );
+        }
     }
+    #[cfg(test)]
+    let stage_started = Instant::now();
     for spans in &mut per_segment {
         compact_visible_spans(spans);
+    }
+    #[cfg(test)]
+    if injection_depth == 0 {
+        crate::syntax_span_probe::record(
+            crate::syntax_span_probe::SpanStage::Compact,
+            stage_started.elapsed(),
+        );
     }
     per_segment
 }
@@ -413,6 +508,7 @@ fn apply_highlight_query_spans(
     language_name: &str,
     chunk_text: &str,
     segments: &[Range<usize>],
+    requested: &Range<usize>,
     tree: &Tree,
     per_segment: &mut [Vec<VisibleSyntaxSpan>],
     limits: VisibleSyntaxLimits,
@@ -435,6 +531,13 @@ fn apply_highlight_query_spans(
         let bytes = chunk_text.as_bytes();
         let capture_names = highlights.query.capture_names();
         let mut cursor = QueryCursor::new();
+        // Only pattern roots intersecting the requested byte range are walked;
+        // roots outside it cannot contribute captures that overlap requested
+        // rows, so the emitted spans are identical while deep windows skip the
+        // parse-context prefix.
+        if let Some(range) = requested_segment_bytes(segments, requested) {
+            cursor.set_byte_range(range);
+        }
         let mut captures = cursor.captures(&highlights.query, tree.root_node(), bytes);
         let scan_started = Instant::now();
         let mut match_count = 0usize;
@@ -449,7 +552,6 @@ fn apply_highlight_query_spans(
             let Some((query_match, capture_index)) = captures.get() else {
                 break;
             };
-            match_count += 1;
             let capture = &query_match.captures[*capture_index];
             let Some(scope) = capture_names.get(capture.index as usize) else {
                 continue;
@@ -462,8 +564,27 @@ fn apply_highlight_query_spans(
             if end <= start {
                 continue;
             }
-
-            for (segment_idx, segment) in segments.iter().enumerate() {
+            if requested.start >= requested.end || requested.start >= segments.len() {
+                break;
+            }
+            // Segments are line ranges in ascending order, so a capture can
+            // only overlap the ones starting before `end`; visit just those.
+            // Context rows outside `requested` are not window work: they must
+            // not consume the match budget, or deep windows in
+            // parse-from-document-start languages (YAML) starve before the
+            // walk reaches them and render without spans.
+            let first_overlapping = segments.partition_point(|segment| segment.end <= start);
+            if first_overlapping >= segments.len() || segments[first_overlapping].start >= end {
+                continue;
+            }
+            let mut emitted_by_capture = false;
+            for (segment_idx, segment) in segments.iter().enumerate().skip(first_overlapping) {
+                if segment.start >= end {
+                    break;
+                }
+                if !requested.contains(&segment_idx) {
+                    continue;
+                }
                 if capture_count >= limits.max_captures {
                     break;
                 }
@@ -476,8 +597,12 @@ fn apply_highlight_query_spans(
                         scope: scope.to_string(),
                     });
                     capture_count += 1;
-                    emitted = true;
+                    emitted_by_capture = true;
                 }
+            }
+            if emitted_by_capture {
+                match_count += 1;
+                emitted = true;
             }
         }
 
@@ -489,6 +614,7 @@ fn apply_injection_spans(
     language_name: &str,
     chunk_text: &str,
     segments: &[Range<usize>],
+    requested: &Range<usize>,
     tree: &Tree,
     per_segment: &mut [Vec<VisibleSyntaxSpan>],
     limits: VisibleSyntaxLimits,
@@ -499,12 +625,19 @@ fn apply_injection_spans(
         return;
     }
 
-    let injections = injection_regions(language_name, chunk_text, tree, limits);
+    let scan_range = requested_segment_bytes(segments, requested);
+    let injections =
+        injection_regions(language_name, chunk_text, scan_range.as_ref(), tree, limits);
     for injection in injections {
         let Some(child_text) = chunk_text.get(injection.range.clone()) else {
             continue;
         };
-        let mappings = injection_segment_mappings(segments, &injection.range);
+        // Child spans only matter for requested parent rows; rows outside the
+        // range are parse context the caller discards.
+        let mappings = injection_segment_mappings(segments, &injection.range)
+            .into_iter()
+            .filter(|mapping| requested.contains(&mapping.parent_index))
+            .collect::<Vec<_>>();
         if mappings.is_empty() {
             continue;
         }
@@ -514,6 +647,7 @@ fn apply_injection_spans(
             &injection.language_name,
             child_text,
             &child_segments,
+            0..child_segments.len(),
             limits,
             injection_depth + 1,
             Instant::now(),
@@ -545,6 +679,7 @@ fn apply_injection_spans(
 fn injection_regions(
     language_name: &str,
     chunk_text: &str,
+    requested_bytes: Option<&Range<usize>>,
     tree: &Tree,
     limits: VisibleSyntaxLimits,
 ) -> Vec<InjectionRegion> {
@@ -565,6 +700,12 @@ fn injection_regions(
 
         let bytes = chunk_text.as_bytes();
         let mut cursor = QueryCursor::new();
+        // Same requested-range restriction as the highlight walk: injection
+        // matches whose root cannot intersect the window cannot produce child
+        // spans for requested rows either.
+        if let Some(range) = requested_bytes {
+            cursor.set_byte_range(range.clone());
+        }
         let mut captures = cursor.captures(&injections.query, tree.root_node(), bytes);
         let mut regions = Vec::new();
         let scan_started = Instant::now();
@@ -644,6 +785,19 @@ fn normalize_injection_language_identifier(value: &str) -> String {
     value.trim().trim_matches(|ch| matches!(ch, '"' | '\'' | '`')).trim().to_string()
 }
 
+/// Byte span covered by the `requested` segment indices, clamped to `segments`.
+///
+/// `None` when the range selects no segments (a fully past-EOF window), which
+/// callers treat as "nothing to scan".
+fn requested_segment_bytes(
+    segments: &[Range<usize>],
+    requested: &Range<usize>,
+) -> Option<Range<usize>> {
+    let start = requested.start.min(segments.len());
+    let end = requested.end.min(segments.len()).max(start);
+    (start < end).then(|| segments[start].start..segments[end - 1].end)
+}
+
 fn injection_segment_mappings(
     segments: &[Range<usize>],
     injection_range: &Range<usize>,
@@ -671,6 +825,7 @@ fn remove_overlapping_spans(spans: &mut Vec<VisibleSyntaxSpan>, range: &Range<us
 struct VisibleSyntaxWalk<'a> {
     text: &'a str,
     segments: &'a [Range<usize>],
+    requested: &'a Range<usize>,
     per_segment: &'a mut [Vec<VisibleSyntaxSpan>],
     started: Instant,
     limits: VisibleSyntaxLimits,
@@ -691,8 +846,12 @@ impl VisibleSyntaxWalk<'_> {
         }
 
         if let Some(scope) = scope_for_node(node, self.text) {
-            self.matches += 1;
-            self.push_node_spans(node, scope);
+            // Same window-scoped budget as the highlight walk: nodes that
+            // cannot produce spans in a requested row are context, not work.
+            if self.node_overlaps_requested(node) {
+                self.matches += 1;
+                self.push_node_spans(node, scope);
+            }
         }
 
         let mut cursor = node.walk();
@@ -704,6 +863,18 @@ impl VisibleSyntaxWalk<'_> {
         }
     }
 
+    fn node_overlaps_requested(&self, node: Node<'_>) -> bool {
+        let start = node.start_byte().min(self.text.len());
+        let end = node.end_byte().min(self.text.len());
+        let first = self.segments.partition_point(|segment| segment.end <= start);
+        self.segments
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take_while(|(_, segment)| segment.start < end)
+            .any(|(segment_idx, _)| self.requested.contains(&segment_idx))
+    }
+
     fn push_node_spans(&mut self, node: Node<'_>, scope: &'static str) {
         let start = node.start_byte().min(self.text.len());
         let end = node.end_byte().min(self.text.len());
@@ -711,7 +882,16 @@ impl VisibleSyntaxWalk<'_> {
             return;
         }
 
-        for (segment_idx, segment) in self.segments.iter().enumerate() {
+        // Ordered line ranges: only the segments a node can overlap are
+        // visited, and only requested ones count toward the budgets.
+        let first = self.segments.partition_point(|segment| segment.end <= start);
+        for (segment_idx, segment) in self.segments.iter().enumerate().skip(first) {
+            if segment.start >= end {
+                break;
+            }
+            if !self.requested.contains(&segment_idx) {
+                continue;
+            }
             if self.captures >= self.limits.max_captures {
                 break;
             }
@@ -1515,6 +1695,66 @@ mod tests {
                 && &src[(config_line + span.start_byte)..(config_line + span.end_byte)]
                     == "config-nearest"
         }));
+    }
+
+    #[test]
+    fn visible_syntax_spans_distribute_multiline_captures_across_segments() {
+        let _guard = runtime_loader_test_guard();
+        // One capture (the two-line string literal) overlaps two line
+        // segments; each must carry a span relative to its own segment. This
+        // pins the bounded segment scan in `apply_highlight_query_spans`, which
+        // visits only segments a capture can overlap.
+        let src = "let s = \"line one\nline two\";\nlet t = 2;\n";
+        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
+
+        assert!(
+            spans[0].iter().any(|span| span.scope.starts_with("string")
+                && line_span_text(src, 0, span) == "\"line one")
+        );
+        assert!(
+            spans[1].iter().any(|span| span.scope.starts_with("string")
+                && line_span_text(src, 1, span) == "line two\"")
+        );
+    }
+
+    #[test]
+    fn visible_walk_scopes_budgets_and_spans_to_requested_rows() {
+        let _guard = runtime_loader_test_guard();
+        // The fallback node walk must mirror the highlight walk's window
+        // scoping: rows outside `requested` get no spans (they are parse
+        // context), and the match/capture budgets count requested-row work
+        // only.
+        let src = "let a = 1; // one\nlet b = 2; // two\nlet c = 3; // three\n";
+        let tree = parse_rust(src);
+        let line_starts = line_start_offsets(src);
+        let segments = line_segments(src, &line_starts);
+        let mut per_segment = vec![Vec::new(); segments.len()];
+        let requested = 1..2;
+        let (walked_matches, walked_captures) = {
+            let mut walk = VisibleSyntaxWalk {
+                text: src,
+                segments: &segments,
+                requested: &requested,
+                per_segment: &mut per_segment,
+                started: Instant::now(),
+                limits: test_visible_syntax_limits(),
+                matches: 0,
+                captures: 0,
+            };
+            walk.walk(tree.root_node());
+            (walk.matches, walk.captures)
+        };
+
+        assert!(per_segment[0].is_empty(), "row outside requested must stay empty");
+        assert!(
+            per_segment[1]
+                .iter()
+                .any(|span| span.scope.starts_with("comment") || span.scope.starts_with("keyword")),
+            "requested row must carry fallback spans"
+        );
+        assert!(per_segment[2].is_empty(), "row outside requested must stay empty");
+        assert_eq!(walked_matches, walked_captures, "one emitted span per matched node");
+        assert!(walked_matches > 0, "budgets must count requested-row work");
     }
 
     #[test]

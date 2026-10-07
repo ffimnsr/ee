@@ -90,12 +90,49 @@ fn goto_column_uses_display_width_and_can_extend_selection() {
     let harness = ContextHarness::new("日本x");
     let mut ctx = harness.make_context();
 
-    ctx.do_edit(EditNotification::GotoColumn { display_col: 2, modify_selection: false });
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 2,
+        tab_width: 4,
+        modify_selection: false,
+    });
     assert_eq!(harness.debug_render(), "日|本x");
 
-    ctx.do_edit(EditNotification::GotoColumn { display_col: 0, modify_selection: false });
-    ctx.do_edit(EditNotification::GotoColumn { display_col: 2, modify_selection: true });
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 0,
+        tab_width: 4,
+        modify_selection: false,
+    });
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 2,
+        tab_width: 4,
+        modify_selection: true,
+    });
     assert_eq!(harness.debug_render(), "[日|]本x");
+}
+
+#[test]
+fn goto_column_expands_tabs_with_the_frontend_tab_width() {
+    use crate::rpc::EditNotification;
+
+    let harness = ContextHarness::new("\tabc");
+    let mut ctx = harness.make_context();
+
+    // A 4-wide tab covers columns 0-3, so column 2 snaps to the first glyph at
+    // or after it: `a`.
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 2,
+        tab_width: 4,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "\t|abc");
+
+    // A 2-wide tab covers columns 0-1, so column 3 is past `a` and lands on `b`.
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 3,
+        tab_width: 2,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "\ta|bc");
 }
 
 #[test]
@@ -109,7 +146,11 @@ fn goto_column_uses_logical_column_even_when_view_is_wrapped() {
     }
 
     let mut ctx = harness.make_context();
-    ctx.do_edit(EditNotification::GotoColumn { display_col: 4, modify_selection: false });
+    ctx.do_edit(EditNotification::GotoColumn {
+        display_col: 4,
+        tab_width: 4,
+        modify_selection: false,
+    });
 
     assert_eq!(harness.debug_render(), "abcd|ef");
 }

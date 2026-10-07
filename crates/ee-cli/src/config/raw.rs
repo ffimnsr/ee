@@ -49,7 +49,15 @@ pub(crate) struct EeToml {
     pub number_style: Option<String>,
     /// Column position for the color column guide (e.g. `80`).  Omit to disable.
     pub color_column: Option<usize>,
+    /// Render visible whitespace markers: `·` space, `→` tab, `╎` leading
+    /// whitespace, `•` trailing whitespace, `␣` non-breaking space, `↵` end of
+    /// line, and `<`/`>` at clipped left/right edges.  Characters are fixed.
     pub show_visible_whitespace: Option<bool>,
+    /// Draw indent guides (a vertical rule at each indent level).
+    pub indent_guides: Option<bool>,
+    /// Safety cap for indent guides: a block (function or scope) spanning more
+    /// lines than this draws no guides.  `0` disables the cap.
+    pub indent_guides_max_lines: Option<usize>,
     /// Minimum rows between cursor and screen top/bottom edge.
     pub scroll_offset: Option<usize>,
     pub wrap_lines: Option<bool>,

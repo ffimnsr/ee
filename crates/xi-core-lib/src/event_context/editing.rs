@@ -441,13 +441,14 @@ impl<'a> EventContext<'a> {
     pub(super) fn do_goto_column(
         &mut self,
         display_col: usize,
+        tab_width: usize,
         modify_selection: bool,
     ) -> Option<Selection> {
         self.with_view(|view, text| {
             let region = view.primary_sel_region()?;
             let line = text.line_of_offset(region.end);
             let line_text = line_text(text, line);
-            let target_col = display_col_to_byte(&line_text, display_col);
+            let target_col = display_col_to_byte(&line_text, display_col, tab_width);
             let target_offset = text.offset_of_line(line) + target_col;
 
             if modify_selection {

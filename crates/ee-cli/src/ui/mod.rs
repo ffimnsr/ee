@@ -352,6 +352,7 @@ fn fmt_hhmm(at: std::time::SystemTime) -> String {
 pub(crate) mod agents_pane;
 mod annotations;
 mod composer;
+mod indent_guides;
 mod markdown;
 mod panels;
 mod picker;

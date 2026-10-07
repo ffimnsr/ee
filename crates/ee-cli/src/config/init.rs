@@ -67,6 +67,8 @@ pub(crate) fn resolved_config_with_env(
         }),
         color_column: settings.color_column,
         show_visible_whitespace: Some(settings.show_visible_whitespace),
+        indent_guides: Some(settings.indent_guides),
+        indent_guides_max_lines: Some(settings.indent_guides_max_lines),
         scroll_offset: Some(settings.scroll_offset),
         wrap_lines: Some(settings.wrap_lines),
         sign_column: Some(settings.sign_column),

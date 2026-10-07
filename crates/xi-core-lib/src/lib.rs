@@ -54,6 +54,8 @@ pub mod linewrap;
 pub mod movement;
 pub mod object;
 pub mod open_policy;
+#[cfg(test)]
+pub(crate) mod open_probe;
 pub(crate) mod paths;
 pub mod plugins;
 #[cfg(test)]
@@ -64,6 +66,8 @@ pub(crate) mod span_payload;
 pub mod styles;
 pub mod symbol_index;
 pub mod syntax;
+#[cfg(test)]
+pub(crate) mod syntax_span_probe;
 pub mod tabs;
 pub mod text_blob;
 pub mod text_store;

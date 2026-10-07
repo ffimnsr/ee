@@ -402,8 +402,15 @@ pub(crate) fn inspect_buffer(
     let branch = branch_name(&repository).unwrap_or_else(|_| String::from("HEAD"));
     let tracked_blob = read_head_blob(&repository, &repo_relative)?;
     let tracked = tracked_blob.is_some();
-    let base_lines = tracked_blob.unwrap_or_default();
-    let (hunks, line_signs) = diff_hunks(&base_lines, current_lines);
+    // With no HEAD blob there is no baseline: diffing the whole buffer against
+    // an empty base would paint every line as added in the gutter. Untracked,
+    // gitignored, and staged-but-uncommitted files therefore get no gutter
+    // signs (the statusline `*` still marks them dirty); hunks stay available
+    // for `:gdiff` and hunk navigation while the file is not in HEAD.
+    let (hunks, mut line_signs) = diff_hunks(&tracked_blob.unwrap_or_default(), current_lines);
+    if !tracked {
+        line_signs.clear();
+    }
 
     Ok(Some(GitBufferStatus {
         repo_name: repository

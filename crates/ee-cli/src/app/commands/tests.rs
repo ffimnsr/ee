@@ -82,6 +82,29 @@ fn set_command_queries_and_summarizes() {
 }
 
 #[test]
+fn set_command_toggles_indent_guides_and_cap() {
+    let mut app = App::from_path(None).unwrap();
+    assert!(!app.config.indent_guides, "guides are opt-in");
+
+    app.command_buffer = String::from("set indentguides");
+    app.execute_command();
+    assert!(app.config.indent_guides);
+
+    app.command_buffer = String::from("set indent_guides_max_lines=40");
+    app.execute_command();
+    assert_eq!(app.config.indent_guides_max_lines, 40);
+
+    // `0` disables the cap.
+    app.command_buffer = String::from("set indent_guides_max_lines=0");
+    app.execute_command();
+    assert_eq!(app.config.indent_guides_max_lines, 0);
+
+    app.command_buffer = String::from("set noindentguides");
+    app.execute_command();
+    assert!(!app.config.indent_guides);
+}
+
+#[test]
 fn set_command_reports_unknown_and_invalid() {
     let mut app = App::from_path(None).unwrap();
 

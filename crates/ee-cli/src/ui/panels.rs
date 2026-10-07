@@ -189,6 +189,7 @@ pub(super) fn render_buffer(
     let cursor_line = buf.cursor_line;
     let cursor_line_bg = theme::BG_CURSOR_LINE;
     let buf_bg = theme::BG_APP;
+    let tab_width = app.config.tab_width;
 
     frame.render_widget(Block::default().style(Style::default().bg(buf_bg)), area);
 
@@ -242,6 +243,23 @@ pub(super) fn render_buffer(
     // Style for lines not yet loaded in VLF mode.
     let loading_style = Style::default().fg(theme::FG_LOADING).add_modifier(Modifier::ITALIC);
 
+    // Indent guides (config-gated): one plan per pass, consulted per row.  The
+    // plan follows the fold-aware rendered rows (a fold can jump the last
+    // rendered row far past the viewport) and reads `indent_guides_max_lines`
+    // rows beyond them, so a block ending outside the window is known to exceed
+    // the cap.
+    let guides = app.config.indent_guides.then(|| {
+        let first = visible.first().copied().unwrap_or(top);
+        let end = visible.last().map_or(first, |last| last + 1);
+        indent_guides::plan(
+            buf,
+            first,
+            end,
+            app.config.tab_width,
+            app.config.indent_guides_max_lines,
+        )
+    });
+
     let text: Vec<Line> = visible
         .iter()
         .map(|&log_idx| {
@@ -262,9 +280,13 @@ pub(super) fn render_buffer(
 
             let line = line_opt.unwrap_or("");
             let is_fold_header = app.folds.fold_at(buf.id, log_idx).is_some();
-            let byte_start = display_col_to_byte(line, left);
-            let byte_end =
-                display_col_to_byte(line, left.saturating_add(viewport_width).saturating_add(1));
+            let guide_mask = guides.as_ref().map_or(0, |plan| plan.mask(log_idx));
+            let byte_start = display_col_to_byte(line, left, tab_width);
+            let byte_end = display_col_to_byte(
+                line,
+                left.saturating_add(viewport_width).saturating_add(1),
+                tab_width,
+            );
 
             let mut spans: Vec<Span<'static>> = if is_fold_header {
                 // Show fold marker line (abbreviated first line + fold indicator).
@@ -306,26 +328,54 @@ pub(super) fn render_buffer(
                 }
             };
 
-            // Apply visible-whitespace substitution when enabled.
+            // Tab stops and whitespace markers both work on absolute display
+            // columns, so they stay aligned when the line is scrolled
+            // horizontally.  With `list` on the marker pass expands tabs itself
+            // (`→` plus padding), so the two passes must not both run.
+            let line_end_col = byte_col_to_display_col(line, line.len(), tab_width);
+            let start_col = byte_col_to_display_col(line, byte_start, tab_width);
             if app.config.show_visible_whitespace && !is_fold_header {
-                spans = apply_visible_whitespace(spans);
+                let lead_end_byte = line.len() - line.trim_start_matches([' ', '\t']).len();
+                let trail_start_byte = line.trim_end_matches([' ', '\t']).len();
+                spans = apply_visible_whitespace(
+                    spans,
+                    tab_width,
+                    WhitespaceLayout {
+                        start_col,
+                        lead_end_col: byte_col_to_display_col(line, lead_end_byte, tab_width),
+                        trail_start_col: (trail_start_byte > 0 && trail_start_byte < line.len())
+                            .then(|| byte_col_to_display_col(line, trail_start_byte, tab_width)),
+                        // Show the EOL marker only when the line end is inside the
+                        // viewport with one cell to spare for the marker itself.
+                        eol: left <= line_end_col && line_end_col < left + viewport_width,
+                    },
+                );
+            } else {
+                spans = expand_tabs_in_spans(spans, tab_width, start_col);
             }
 
             if !is_fold_header {
-                spans = apply_core_annotations(spans, line, log_idx, &buf.annotations, left);
+                spans =
+                    apply_core_annotations(spans, line, log_idx, &buf.annotations, left, tab_width);
                 if buf.is_vlf {
-                    spans = apply_vlf_search_ranges(spans, log_idx, &buf.vlf_search_ranges, left);
+                    spans = apply_vlf_search_ranges(
+                        spans,
+                        log_idx,
+                        &buf.vlf_search_ranges,
+                        left,
+                        tab_width,
+                    );
                 }
             }
-
-            spans = expand_tabs_in_spans(spans, app.config.tab_width);
 
             // Apply search match highlighting over the rendered spans.
             if let Some(ref pat) = app.search_pattern
                 && !is_fold_header
                 && !buf.is_vlf
             {
-                spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
+                spans = apply_search_highlights(
+                    spans, line, pat, byte_start, byte_end, left, tab_width,
+                );
             }
 
             spans = sanitize_control_chars(spans);
@@ -363,7 +413,7 @@ pub(super) fn render_buffer(
                             (cs, ce)
                         }
                     };
-                    spans = apply_visual_highlight(spans, col_start, col_end, left);
+                    spans = apply_visual_highlight(spans, col_start, col_end, left, tab_width);
                 }
             }
 
@@ -375,7 +425,31 @@ pub(super) fn render_buffer(
                     .cloned()
                     .collect::<Vec<_>>();
                 if !line_targets.is_empty() {
-                    spans = apply_swift_motion_targets(spans, &line_targets, left);
+                    spans = apply_swift_motion_targets(spans, &line_targets, left, tab_width);
+                }
+            }
+
+            // Indent guides go on top of every other style: they only rewrite
+            // the foreground of leading-whitespace cells, so backgrounds from
+            // the cursor line, selections, and annotations stay intact.
+            if guide_mask != 0 && !is_fold_header {
+                spans = indent_guides::overlay(
+                    spans,
+                    guide_mask,
+                    app.config.tab_width,
+                    left,
+                    app.config.show_visible_whitespace,
+                );
+            }
+
+            // Vim `extends`/`precedes`: with `list` on and wrapping off, mark the
+            // edge cells when the line continues off-screen.
+            if app.config.show_visible_whitespace && !app.config.wrap_lines && !is_fold_header {
+                let continues_left = left > 0;
+                let continues_right = line_end_col > left + viewport_width;
+                if continues_left || continues_right {
+                    spans =
+                        apply_edge_markers(spans, viewport_width, continues_left, continues_right);
                 }
             }
 

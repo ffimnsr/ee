@@ -43,10 +43,18 @@ impl NodeInfo for RopeInfo {
     }
 
     fn compute_info(s: &String) -> Self {
-        RopeInfo {
-            lines: count_newlines(s),
-            utf16_size: count_utf16_code_units(s),
-            chars: count_chars(s),
+        // ASCII is the common case for source files: `chars` and UTF-16 code
+        // units both equal the byte length, so only the newline count needs a
+        // scan (bytecount is SIMD). The mixed path needs two extra scalar
+        // passes over the leaf.
+        if s.is_ascii() {
+            RopeInfo { lines: count_newlines(s), utf16_size: s.len(), chars: s.len() }
+        } else {
+            RopeInfo {
+                lines: count_newlines(s),
+                utf16_size: count_utf16_code_units(s),
+                chars: count_chars(s),
+            }
         }
     }
 

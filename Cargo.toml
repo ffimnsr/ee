@@ -27,6 +27,18 @@ exclude = ["fuzz"]
 [profile.dev]
 opt-level = 2
 
+# Profiling builds: release codegen plus line tables and symbols so sampling and
+# instrumentation profilers can attribute work to functions. Build through
+# `scripts/profile.sh` (or `cargo build --profile profiling`).
+# Keep the inherited codegen settings identical to `release`: a difference in
+# `lto` or `codegen-units` changes inlining and makes profiles unrepresentative.
+# `strip = "none"` is explicit so a future `strip` setting on `release` cannot
+# silently remove the symbols this profile exists to provide.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.95"

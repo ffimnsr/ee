@@ -142,3 +142,23 @@ fn xi_config_table_uses_configured_auto_and_smart_indent() {
     assert_eq!(table.get("auto_indent").and_then(Value::as_bool), Some(false));
     assert_eq!(table.get("smart_indent").and_then(Value::as_bool), Some(false));
 }
+
+#[test]
+fn ee_toml_parses_indent_guides_with_defaults_and_safety_cap() {
+    let raw: EeToml =
+        toml::from_str("indent_guides = true\nindent_guides_max_lines = 12\n").unwrap();
+    let mut settings = EditorSettings::default();
+
+    // Guides are opt-in and the safety cap defaults to 300 lines.
+    assert!(!settings.indent_guides);
+    assert_eq!(settings.indent_guides_max_lines, 300);
+
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert!(settings.indent_guides);
+    assert_eq!(settings.indent_guides_max_lines, 12);
+
+    // `0` means "no cap" and must survive the merge.
+    let raw: EeToml = toml::from_str("indent_guides_max_lines = 0\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.indent_guides_max_lines, 0);
+}

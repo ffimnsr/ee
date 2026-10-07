@@ -202,10 +202,10 @@ impl App {
             .char_indices()
             .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
             .unwrap_or(0);
-        self.goto_column(byte_col_to_display_col(line, target_byte));
+        self.goto_column(byte_col_to_display_col(line, target_byte, self.config.tab_width));
     }
     pub(super) fn goto_column(&mut self, display_col: usize) {
-        let _ = self.backend.goto_column(display_col, self.mode.is_visual());
+        let _ = self.backend.goto_column(display_col, self.config.tab_width, self.mode.is_visual());
     }
     pub(super) fn goto_column_from_count(&mut self) {
         let target = self.input_state.count().saturating_sub(1) as usize;

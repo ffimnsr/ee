@@ -194,7 +194,9 @@ pub(super) fn cursor_position_for(
 ) -> Position {
     if matches!(app.mode, Mode::CommandLine | Mode::Search) {
         let max_x = prompt_area.right().saturating_sub(1);
-        let x = (prompt_area.x + 1 + app.command_buffer.len() as u16).min(max_x);
+        // The buffer can hold wide glyphs, so advance by display columns.
+        let width = UnicodeWidthStr::width(app.command_buffer.as_str());
+        let x = (prompt_area.x + 1 + width as u16).min(max_x);
         return Position::new(x, prompt_area.y);
     }
 
@@ -202,7 +204,7 @@ pub(super) fn cursor_position_for(
     let max_y = editor_area.bottom().saturating_sub(1);
 
     let line = buf.get_line(buf.cursor_line).unwrap_or("");
-    let display_col = byte_col_to_display_col(line, buf.cursor_col);
+    let display_col = byte_col_to_display_col(line, buf.cursor_col, app.config.tab_width);
 
     let screen_line =
         app.folds.rendered_row_for_line(buf.id, vp.top_line, buf.cursor_line).unwrap_or_default();

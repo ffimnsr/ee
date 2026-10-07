@@ -250,8 +250,8 @@ impl<'a> EventContext<'a> {
                 None
             }
             SpecialEvent::SetSelections { selections } => self.do_set_selections(&selections),
-            SpecialEvent::GotoColumn { display_col, modify_selection } => {
-                self.do_goto_column(display_col, modify_selection)
+            SpecialEvent::GotoColumn { display_col, tab_width, modify_selection } => {
+                self.do_goto_column(display_col, tab_width, modify_selection)
             }
             SpecialEvent::AddNewlineAbove => self.do_add_newline_above(),
             SpecialEvent::AddNewlineBelow => self.do_add_newline_below(),
@@ -456,6 +456,8 @@ impl<'a> EventContext<'a> {
     /// Flushes any changes in the views out to the frontend.
     pub(crate) fn render(&mut self) {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
+        #[cfg(test)]
+        let render_started = std::time::Instant::now();
         let ed = self.editor.borrow();
         if ed.is_vlf() {
             // Stage A Phase 2+: unified render through `RenderSource` — the
@@ -473,6 +475,11 @@ impl<'a> EventContext<'a> {
                     false,
                 );
             }
+            #[cfg(test)]
+            crate::open_probe::record(
+                crate::open_probe::OpenStage::Render,
+                render_started.elapsed(),
+            );
             return;
         }
         let file_path = self.info.map(|info| info.path.as_path());
@@ -489,6 +496,8 @@ impl<'a> EventContext<'a> {
             ed.is_pristine(),
             self.language.as_ref(),
             syntax_enabled,
-        )
+        );
+        #[cfg(test)]
+        crate::open_probe::record(crate::open_probe::OpenStage::Render, render_started.elapsed());
     }
 }

@@ -189,7 +189,7 @@ impl App {
                 let line_count = self.backend.line_count();
                 if row < line_count {
                     let byte_col = if let Some(line) = self.backend.get_line(row) {
-                        crate::text::display_col_to_byte(line, col)
+                        crate::text::display_col_to_byte(line, col, self.config.tab_width)
                     } else {
                         0
                     };
@@ -220,7 +220,7 @@ impl App {
                 let line_count = self.backend.line_count();
                 if row < line_count {
                     let byte_col = if let Some(line) = self.backend.get_line(row) {
-                        crate::text::display_col_to_byte(line, col)
+                        crate::text::display_col_to_byte(line, col, self.config.tab_width)
                     } else {
                         0
                     };

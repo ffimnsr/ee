@@ -138,7 +138,10 @@ pub(crate) fn previous_char_boundary(line: &str, col: usize) -> usize {
     col
 }
 
-pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
+/// Convert a byte column to its screen column, expanding tabs to the next
+/// `tab_width` stop (the editor's display tab width, not `indent_size`).
+pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize, tab_width: usize) -> usize {
+    let tab_width = tab_width.max(1);
     let safe = previous_char_boundary(line, byte_col.min(line.len()));
     let prefix = &line[..safe];
     if prefix.is_ascii() && !prefix.as_bytes().contains(&b'\t') {
@@ -148,8 +151,7 @@ pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     let mut col = 0usize;
     for ch in prefix.chars() {
         if ch == '\t' {
-            let tab_width = 4 - (col % 4);
-            col += tab_width;
+            col += tab_width - (col % tab_width);
         } else {
             col += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
@@ -157,7 +159,11 @@ pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     col
 }
 
-pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+/// Convert a screen column back to a byte column: the first glyph whose start
+/// column is at or after `display_col`, with tabs expanded to the next
+/// `tab_width` stop.  A column past the line end returns the line length.
+pub(crate) fn display_col_to_byte(line: &str, display_col: usize, tab_width: usize) -> usize {
+    let tab_width = tab_width.max(1);
     let prefix_len = display_col.min(line.len());
     let prefix = &line.as_bytes()[..prefix_len];
     if prefix.is_ascii() && !prefix.contains(&b'\t') {
@@ -170,7 +176,7 @@ pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
             return byte_idx;
         }
         if ch == '\t' {
-            col += 4 - (col % 4);
+            col += tab_width - (col % tab_width);
         } else {
             col += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
