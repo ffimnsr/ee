@@ -122,6 +122,52 @@ If `~/.local/bin` is not on your `PATH`, add it to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+### Requirements
+
+- Rust `1.95` or newer
+- Unix-like shell for `install.sh`
+- `cargo` toolchain for local development and builds
+
+## Build and run
+
+### Build the workspace
+
+```sh
+cargo build --workspace
+```
+
+### Build the release binary
+
+```sh
+cargo build --workspace --release
+```
+
+### Run `ee` directly from source
+
+```sh
+cargo run -p ee-cli -- <path/to/file>
+```
+
+## Usage
+
+Open a file for editing:
+
+```sh
+ee samples/sample.txt
+```
+
+Create or open a new file:
+
+```sh
+ee new-file.rs
+```
+
+Run the bundled terminal frontend from source:
+
+```sh
+cargo run -p ee-cli -- <path/to/file>
+```
+
 ## Runtime assets
 
 Runtime grammar lookup uses this precedence:
@@ -139,217 +185,69 @@ Bundled runtime is treated as read-only. Bundled and user/workspace overlays all
 
 Query overlays merge deterministically in bundled, then user, then workspace order for each language and query kind.
 
-## Language servers
+### Development runtime flow
 
-`ee` ships bundled LSP definitions for 49 servers covering the Zed-documented language catalog (Rust, JSON, YAML, TypeScript/JavaScript, Go, Python, Ruby, Terraform, Astro, Dart, Clojure, Elm, Erlang, Julia, Lua/Luau, Nix, OCaml, SML, XML, and more). Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`. The bundled set is generated from the Zed language docs by `scripts/language-catalog/sync.sh`; the full inventory lives in `references/language-catalog.json`.
-
-Enabled servers require `language_name` and `command`. `extensions` stays supported as legacy extension fallback and server metadata, but preferred routing now lives under `[languages.<id>].lsp`. Optional fields are `args`, `extensions`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
-
-```toml
-[lsp.servers.gleam]
-language_name = "Gleam"
-command = "gleam"
-args = ["lsp"]
-extensions = ["gleam"]
-supports_single_file = false
-workspace_identifier = "gleam.toml"
-env = { GLEAM_LOG = "info" }
-
-[lsp.servers.rust]
-command = "rust-analyzer"
-args = ["--stdio"]
-workspace_identifier = "Cargo.toml"
-
-[lsp.servers.typescript]
-enabled = false
-
-[lsp.servers.dockerfile]
-command = "docker-langserver"
-args = ["--stdio"]
-filenames = ["Dockerfile", "Containerfile"]
-
-[lsp.servers.json]
-initialization_options = { provideFormatter = true }
-
-[lsp.servers.eslint]
-language_name = "ESLint"
-command = "vscode-eslint-language-server"
-args = ["--stdio"]
-
-[languages.typescript]
-lsp = ["typescript", "eslint"]
-```
-
-Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
-
-### Agents mode
-
-Agents mode is an optional ACP v1 agent chat plus MCP integration. It is disabled at compile time and runtime by default: the `agents` cargo feature must be enabled at build time, and `agents.enabled = true` must be set in config. Agent and MCP subprocesses start lazily only after the mode is enabled and the agents pane opens or an agents command runs. Agent file writes route through existing buffer/edit/save semantics, and agent terminal executions and file writes require an approval path before execution.
-
-ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict v1-only version negotiation, absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
-
-Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, and `cwd` are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
-
-```toml
-[agents]
-enabled = true
-default_agent = "helper"
-
-[agents.servers.helper]
-label = "Local Helper"
-command = "ee-helper"
-args = ["serve"]
-
-[agents.servers.reviewer]
-label = "Review Agent"
-command = "review-agent"
-args = ["acp"]
-
-[mcp.servers.filesystem]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem"]
-
-[mcp.servers.remote]
-transport = "streamable_http"
-url = "https://example.com/mcp"
-timeout_ms = 5000
-```
-
-Bridge approvals reuse the user's decision on the agent's own ACP permission prompt when ee itself validated the same operation: writes match canonical path plus exact content, terminals match validated argv, and the prompt shows those `ee verified` facts (or an unverifiable-payload note). `[agents.approval] alignment` selects `"exact"` (default), `"heuristic"` (host-global config only; an opaque payload then covers the next matching operation of the same class), or `"off"`; alignment never overrides mandatory-confirm rules or safeguards, and `/permissions` reports the alignment counters.
-
-Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new [agent_id]`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, `/new [agent_id]` starts and focuses a fresh chat thread; `/quit` closes pane while keeping sessions running. Without agent id, configured default or sole server is used; otherwise picker opens. Unknown ids are rejected without starting any agent. `Ctrl-K` toggles between the editor and the agents pane from either side in any mode: from the editor it opens the pane (returning to the same mode), from the pane it returns to the editor, closing the full-screen pane or just dropping focus in split layouts (`:agents_layout right|bottom`).
-
-Distinct agent ids launch isolated connections/processes, including same ACP binary configured twice with different model args or env. Start exact ids with `:agents_new <agent_id>`; use no argument for default/sole server or picker. Active session may change only provider-advertised config through `:agents_config_set <config_id> <value>`.
-
-Providers supporting contrasting-model critique may advertise exact `/rubber-duck [question]`. A configured `[agents.rubber_duck] external_agent_id` also enables this command in production Agents UI: EE starts one isolated ephemeral ACP critic session, verifies its bounded report, closes it, then asks root for one synthesis. Manual internal critique remains rollout default; automatic internal mode remains replay-gated, and external ACP critique remains manual-only without host-owned sandbox proof. Critique adds call/cost/latency and receives bounded, revision-checked, redacted workspace evidence. Internal critics have enforced read-only tools; external forwarding is read-only but agent-native tools remain outside EE control, shown as visible warning. Critic output stays advisory and never counts as validation evidence; root alone decides and writes. See [parallel agent sessions and rubber duck policy](docs/upgrades/parallel-agent-sessions.md) plus [agent configuration examples](wiki/config.md#agent-process-examples).
-
-#### ee MCP proxy contract
-
-The editor proxy uses stable `ee_` tool names. Call `ee_tools_manifest` with no arguments first; its versioned, session-cacheable response lists only tools current host supports. Manifest is normative tool reference: each entry includes `inputSchema` (every argument, type, and required field), schema version, `read`/`write`/`execute` side-effect class, approval requirement, transport availability (`stdio` and/or ACP-native `acp`), required host capabilities, output cap kind and maximum, redaction rules, typed error classes, deprecation/replacement metadata, and minimal schema-valid arguments. Existing names and schemas stay compatible. Incompatible argument or result changes require a new tool name.
-
-Read tools do not require approval. Write and execute tools require editor approval unless an existing bounded trust rule permits exact operation. Tool calls with malformed arguments fail as MCP invalid-parameter errors; disabled or unsupported known tools return a tool-level `isError` result. Manifest error classes are `invalid_arguments`, `unsupported_tool`, `permission_denied`, `backend_failure`, `output_truncated`, plus `stale_revision` for writes and `terminal_not_owned` for terminal operations. Paths must be absolute and inside editor workspace roots. Results are bounded; callers must inspect truncation metadata where provided. Secret-like environment values and keys, credentials, and sensitive diagnostics are rejected or redacted. Keep arguments small and explicit: when an operation needs nested modes or many optional fields, add smaller focused tools instead of extending one complex schema.
-
-`stdio` intentionally omits ACP-only terminal lifecycle tools (`ee_terminal_output`, `ee_terminal_output_since`, `ee_terminal_wait`, `ee_terminal_wait_long`, `ee_terminal_kill`, and `ee_terminal_release`) instead of advertising unsupported behavior. `ee_terminal_create` remains available on both routes. Hosts with fewer capabilities must similarly omit unavailable tools from discovery while continuing to expose `ee_tools_manifest`.
-
-`crates/ee-mcp/tests/fixtures/ee_tools_manifest-v1.json` is generated directly from manifest data and snapshots tool names, schemas, and policy metadata. `cargo test --quiet -p ee-mcp manifest_snapshot_matches_versioned_contract` detects accidental compatibility changes. Intentionally regenerate only after version review with `cargo test --quiet -p ee-mcp regenerate_manifest_snapshot -- --ignored`. `fuzz/` also contains `ee_mcp_proxy_arguments`, which feeds arbitrary JSON objects into production argument-size validation; run it with `cargo fuzz run ee_mcp_proxy_arguments`.
-
-#### Replayable LLM evaluation
-
-`crates/ee-agent-orchestrator/tests/fixtures/replay/v1/tasks.json` contains hermetic, versioned task fixtures for bug fixes, features, refactors, reviews, investigations, multi-file work, stale/dirty/conflicted edits, interruption/recovery, approval/capability denials, and adversarial repository content. Fixtures never materialize a workspace, call a provider, use real time, read user-home state, execute validation commands, or access network. They run only scripted model/tool fakes.
-
-Each replay records a stable SHA-256 trace id, redacted relative workspace snapshot, JSONL event trace, task/validation/recovery/policy score, diff and approval counts, model/tool calls, deterministic latency, tokens, integer micro-USD cost estimate, and counter-only role delegation effectiveness (`useful_findings`, duplicate work, write conflicts, latency, cost). Candidate labels include provider/model, prompt, tool-manifest/schema, policy, routing, and `stdio` or ACP-native MCP transport so evidence cannot mix configurations.
-
-#### Privacy-safe harness observability
-
-`TelemetryRecorder` provides separate `telemetry-v1` records for local harness diagnostics. It is disabled by default and memory-only: no network delivery, automatic file persistence, raw prompts, workspace paths/content, session/task ids, tool arguments/output, terminal output, error text, or environment values are accepted by its API. Hosts explicitly call `start_turn`, `record_started`, `record_finished`, and `finish_turn` at model-routing/model-call, tool, approval, retry, recovery, and validation boundaries. Events contain only sequence, monotonic elapsed milliseconds, stage, host-local opaque operation id, safe outcome, optional typed tool failure, and bounded sanitized declared tool name.
-
-`TelemetryAttribution` snapshots validated opaque provider, model, prompt, manifest, schema, policy, routing, and transport version labels at turn start. Secret-like, empty, overlong, or non-identifier labels fail closed before retention. `TelemetrySummary` carries only quality score, latency, approval/tool/model counts, integer micro-USD cost, and a typed failure counter map: `invalid_input`, `policy_denial`, `stale_state`, `timeout`, `transport_failure`, `unavailable_capability`, or `internal_error`. Cancellation remains an outcome, not a failure bucket.
-
-`TelemetryConfig` is user control: `enabled`, `max_turns`, `max_events_per_turn`, and `max_bytes_per_turn`. Completed turns use deterministic bounded retention; event or byte overflow marks record `truncated` with `dropped_events`; `clear` removes all active and retained local records. `export_jsonl` returns stable redacted JSONL only—caller chooses whether and where to write it. Failed turns may link a versioned lowercase-snake-case `ReplayFixtureCandidate` and host-redacted opaque `RedactedEvidenceRef`s. Success records reject those links. This makes evidence useful for replay triage without claiming reproduction proof or retaining sensitive payloads.
-
-#### Subagent delegation quality controls
-
-Root agent owns delegation selection, final synthesis, and final write decisions. Call `DelegationPreflight::assess` before child dispatch with root-provided expected information gain, token and integer-cost budget, depth, work key, and intended absolute write scope. It rejects low-value work, duplicate work keys, recursion or aggregate-budget excess, definite conflict risk, relative scopes, and overlapping accepted scopes. Existing runtime policy still enforces delegate depth, per-turn subagent budget, cancellation propagation, scoped tools, and deterministic quarantine; preflight never bypasses those controls.
-
-Parallel children require independent work keys and one accepted write owner per file or module. Root must route all actual edits through existing approval and write-transaction gates; a child report is evidence, not permission to mutate workspace state.
-
-Verifier-capable roles return `SubagentReport` schema version `1`: each `SubagentFinding` has a key, claim, `observed` or `inference` kind, cited file/tool evidence, confidence, rejected alternatives, and recommended next action. `SubagentReportVerifier` rejects empty or uncited claims and citations absent from observed child execution; only its `VerifiedSubagentReport` proof can enter `reconcile_reports`. Reconciliation groups findings by key; contradictory claims keep `RootSynthesis.ready_for_plan` false until root adds explicit cited `RootResolution`. No automatic winner exists.
-
-`DelegationEffectiveness` stays counter-only and role-keyed. Evaluation/replay score output records useful findings, duplicate work, conflicts, latency, and estimated cost. `quality_impact(role)` reports `improved`, `neutral`, or `degraded` from those facts; it never stores prompts, paths, summaries, or hidden reasoning.
-
-`baseline.json` defines required-fixture regression thresholds. CI runs `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`; failures name fixture, score delta, and redacted trace reference. Before changing a default model, prompt, route, tool, or policy behavior, run this gate, review every failing fixture, then deliberately update versioned fixture/baseline evidence. No default change may rely on subjective comparison alone.
-
-#### Evidence-gated completion and validation
-
-`ee-agent-orchestrator` never treats model text or reflection prose as proof that work completed. `FinalResponse.completion` is one of `verified`, `partially_verified`, `blocked`, or `unverified`, derived only from `CompletionEvidence` and selected `ValidationRecord`s. A `verified` changed turn requires matching current-revision evidence IDs for changed-file inventory, post-write diagnostics, final diff review, and one selected passing validation result. Final summaries cite these IDs in `evidence:`; `can_finish` is false for every other state.
-
-`ValidationRecord` returns structured evidence: `evidence_id`, command, tool, outcome, exit status, elapsed milliseconds, affected tests, diagnostics delta, output-truncation flag, skip reason, revision, selection, denial status, detail, and source task. Validation that cannot run remains `partially_verified` with an exact blocker and safe next step. Failed, stale, or denied evidence is `blocked`; missing evidence is `unverified`.
-
-`ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
-
-#### Targeted validation and command intelligence
-
-Workspace-declared validation commands use schema version `1`: `DeclaredValidationCommand { task, metadata }`. `task` supplies registered `tool_name`, display `command`, JSON-object `arguments`, optional `file_extensions`, and optional resolved `symbols`. `metadata` requires stable `command_id` and declares `scope` (`targeted` or `workspace`), prerequisite command ids, approval class (`policy` or `host`), and bounded stable `test_ids`. Empty ids, self-prerequisites, unavailable tools, and `host` metadata paired with a tool lacking `host_approval` never enter a plan.
-
-Planner selects targeted file/symbol checks first. Workspace checks become `after_focused_pass` escalations whenever a focused command exists; they run only after every earlier focused command and every explicit prerequisite passes. Missing or failed prerequisites create bounded skipped evidence with `missing_dependency`; no broad command is dispatched. This makes escalation explicit, ordered, and bounded rather than a speculative full-suite fallback.
-
-`ValidationResult` is structured command evidence: stable command id, outcome, typed failure (`command_failed`, `timeout`, `cancelled`, `policy_denied`, `missing_dependency`, `unavailable_environment`, or `invalid_arguments`), exit status, elapsed milliseconds, test ids, diagnostics delta, attempt count, retry reasons, escalation, redaction flag, output-truncation flag, and bounded output. Output is secret-redacted then capped at `8192` bytes. Only explicitly classified transient tool failures (`backend` and `timeout`) retry, under `RetryPolicy.max_retries`; policy denial, malformed arguments, and cancellation never retry.
-
-Every generated validation command executes through `ToolExecutor`; schema validation, workspace/shell scope rules, policy allow-lists, host approval, cancellation, timeout, budget, and output caps therefore remain mandatory. Do not generate shell strings or bypass executor policy from validation metadata.
-
-#### Auditable write transactions
-
-Hosts record a `WriteTransaction` for each mutation sequence and pass it through `StrategicInput.write_transaction`. Transaction evidence is serializable and includes transaction id, absolute changed paths, expected source revisions, preview summaries, approval outcome, per-path apply result, post-write path and workspace revisions, diagnostics delta, final diff, selected `ValidationRecord`, terminal state, and rollback safety evidence.
-
-`WriteTransaction` enforces fixed order: `read revision → preview → approval → apply → diagnostics → final diff → selected validation → terminal state`. Every stage after apply must match post-write workspace revision. Stale, duplicate, missing, ambiguous, or conflicting revisions block sequence with structured error code such as `stale_revision`, `ambiguous_revision`, `partial_apply`, or `diagnostic_regression`. Dirty user or unknown-owned buffers fail closed before apply; no automatic repair or replay runs after conflict, denial, partial apply, interruption, or diagnostics regression.
-
-Only blocked or unverified transactions may request rollback. `prepare_rollback` requires explicit approval, exact current post-write workspace revision, proof no later user edits exist, and every applied path marked agent-owned. `record_rollback` rechecks revision before recording completion. When a transaction accompanies strategic completion, it can only constrain a pre-existing verified completion claim; incomplete, blocked, interrupted, or rolled-back transaction evidence changes that claim to `unverified` or `blocked` and adds `transaction:<id>` provenance.
-
-#### Task-aware context planning
-
-`ContextPlanner` accepts only bounded host-supplied `ContextCandidate`s. It selects fresh project instructions, active selections, dirty buffers, diagnostics, git diffs, symbol neighbors, tests, related config/docs, memory, terminal output, and external-tool output in that fixed priority order. It never performs broad repository reads. `ContextPlannerConfig` caps item count, excerpt characters, and estimated tokens; omitted candidates identify `stale_revision`, `token_budget`, `item_limit`, or `duplicate`, so caller can explicitly drill down later.
-
-Every `PlannedContextItem` records source, source-local canonical id, freshness revision, source-specific trust class, estimated token cost, selection reason, and truncation reason. `ContextTrustClass` keeps `repository_content`, `terminal_output`, `external_tool_output`, and `user_provided` separate. Only `system_policy` becomes a system message; repository, terminal, and external data always enter model requests as `ToolOutputUntrusted`, where injection guard labels and delimiters apply.
-
-`ContextPlanCache` only returns plans with identical task id, session, policy, workspace, buffer, diagnostics, graph, checkout, and candidate revisions. Call `invalidate(ContextInvalidation::Write | BufferRevision | DiagnosticsRevision | GraphRevision | CheckoutRevision | PolicyChanged | SessionEnded)` after matching host state changes. No stale plan may survive a write, editor revision, diagnostics refresh, graph refresh, checkout, policy change, or session end.
-
-#### Workspace agent trust
-
-Enable ee proxy when agent supports MCP:
-
-```toml
-[mcp.proxy]
-enabled = true
-```
-
-Then, from workspace root, grant every built-in safe profile:
+Development builds use fetched runtime assets, not vendored parser sources in this repository. Build the runtime package with:
 
 ```sh
-ee do agent trust grant
+scripts/build-runtime.sh --output-root target/runtime-package
 ```
 
-Or select built-in profiles explicitly:
+The lower-level commands stay available when you want to inspect each step explicitly:
 
 ```sh
-ee do agent trust grant --profile mcp_safe_read
-ee do agent trust grant --profile terminal_readonly
-ee do agent trust revoke --profile terminal_readonly
+ee do runtime fetch --all
+ee do runtime build --all
 ```
 
-Repeat `--profile` to select several. Profile names are application-owned; config cannot add commands or tools. Trust writes only host-local state under `$XDG_STATE_HOME/ee/trust/`, bound to canonical workspace identity. It never reads authority from `.ee.toml`, global config, or agent-provided files.
-
-Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
-
-#### OpenRouter root and rubber-duck models
-
-`OPENROUTER_MODEL` remains root/default model. Orchestrated mode can register independent critic adapter using explicit, non-secret identity metadata:
+For test-focused local setup, install runtime into user runtime directory
+(`~/.local/share/ee` or `XDG_DATA_HOME/ee`) with:
 
 ```sh
-export OPENROUTER_MODEL="anthropic/claude-sonnet-4"
-export OPENROUTER_MODEL_FAMILY="anthropic"
-export OPENROUTER_RUBBER_DUCK_MODEL="openai/gpt-5"
-export OPENROUTER_RUBBER_DUCK_MODEL_FAMILY="openai"
+scripts/install-tree-sitter-runtime.sh
 ```
 
-Known families: `openai`, `anthropic`, `google`, `deepseek`, `meta`, `mistral`, `qwen`, and `xai`. Custom families use `other:<identity>`. ee never infers family from model/display names. Critic id and family must both be configured and must differ from root id/family. Invalid, partial, same-id, or same-family critic configuration prints bounded warning and keeps root agent usable without critic. Root and critic share safe immutable OpenRouter HTTP configuration and account API key, so both models can incur provider billing; API key never enters registry metadata.
+Install bundled plugins into user config plugin directory
+(`~/.config/ee/plugins` or `XDG_CONFIG_HOME/ee/plugins`) with:
 
-#### LLM session compaction (`/compact`)
+```sh
+scripts/install-plugins.sh
+```
 
-Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
+To build runtime and run tests in one step:
 
-`/compact` asks the configured model for a continuation summary and shrinks long session context:
+```sh
+scripts/install-tree-sitter-runtime.sh -- cargo test -p ee-cli
+```
 
-- **`ee-openrouter-agent` (simple provider)** replaces its stored history with the summary plus a recent tail. Tunables (all also `--<flag>` CLI options):
-  - `OPENROUTER_COMPACT_MIN_MESSAGES` (default `16`) — stored messages below this make `/compact` a no-op without a model call.
-  - `OPENROUTER_COMPACT_RETAINED_TAIL` (default `8`) — messages kept verbatim at the tail after compaction; tool-call/tool-result pairs stay consistent.
-  - `OPENROUTER_COMPACT_MAX_INPUT_BYTES` (default `65536`) — serialized history bound for the compaction request; oldest messages drop first.
-  - `OPENROUTER_AUTO_COMPACT_THRESHOLD_PERCENT` (default `80`; `0` disables) — after OpenRouter reports input usage at this percentage of `OPENROUTER_CONTEXT_WINDOW` during a tool loop, provider compacts history before next model round. Completed user turns never auto-compact; use `/compact` between prompts. This applies to simple-provider mode; orchestrated mode already bounds each turn's transcript and compacts durable memory independently.
-- **`ee-agent-orchestrator`** runs deterministic memory compaction first (duplicate merging and low-value decay), builds a provenance-rich context from the task graph, memory, validation facts, and budget, then asks the model (no tools) and stores the summary as `summary:session` memory. Its knobs live under the orchestrator `compaction` config (`max_input_bytes`, default `65536`).
+Then point the editor at that runtime:
 
-Security limits: secret-like values are redacted from compaction requests and status text; protected memory (`decision:`, `constraint:`, `validation:` keys) is never deleted by LLM output; compaction input is byte-bounded; compaction calls never expose tools; and the per-turn timeout and cancellation still apply.
+```sh
+EE_RUNTIME_DIR="$PWD/target/runtime-package" cargo run -p ee-cli -- path/to/file.rs
+```
 
-Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+`scripts/build-runtime.sh` drives `ee do runtime fetch` and `ee do runtime build` against the merged ee language configuration, fetches grammar crate sources into a staging directory, then writes a runtime tree containing `grammars/` and `queries/`.
+
+That packaged query tree includes upstream standard queries plus ee-owned bundled runtime queries such as `runtime/queries/rust/indents.scm`, `runtime/queries/json/indents.scm`, and `runtime/queries/python/indents.scm`. `scripts/install-tree-sitter-runtime.sh` installs same built query assets because it delegates to `scripts/build-runtime.sh`.
+
+New runtime languages should be described in runtime language metadata with a grammar crate name and exact crate version. Runtime fetch now resolves those crates through a temporary cargo manifest, so adding a language no longer requires editing workspace `Cargo.toml` just to stage grammar sources.
+
+### Release runtime packaging
+
+Release artifacts should build runtime assets first:
+
+```sh
+scripts/build-runtime.sh --output-root target/runtime-package
+```
+
+Archive that runtime tree next to the release binary as:
+
+- `share/ee/` on Linux and macOS
+- `runtime/` on Windows
+
+The official installer copies that bundled runtime tree into the resolved bundled runtime root instead of downloading grammars on first launch.
+
+## Configuration
 
 ### Formatter config
 
@@ -442,113 +340,217 @@ Use `rev` for reproducible release builds and packaged runtimes. `branch` is bes
 
 Runtime grammar sources compile native code. Workspace `.ee.toml` runtime languages should only be trusted when workspace itself is trusted. Bundled runtime assets stay read-only, user runtime build output stays writable, and one effective runtime language still owns each file type after config merge. LSP server definitions stay canonical under `[lsp.servers.<id>]`, while language attachments live under `[languages.<id>].lsp`.
 
-### Development runtime flow
+## Language servers
 
-Development builds use fetched runtime assets, not vendored parser sources in this repository. Build the runtime package with:
+`ee` ships bundled LSP definitions for 49 servers covering the Zed-documented language catalog (Rust, JSON, YAML, TypeScript/JavaScript, Go, Python, Ruby, Terraform, Astro, Dart, Clojure, Elm, Erlang, Julia, Lua/Luau, Nix, OCaml, SML, XML, and more). Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`. The bundled set is generated from the Zed language docs by `scripts/language-catalog/sync.sh`; the full inventory lives in `references/language-catalog.json`.
 
-```sh
-scripts/build-runtime.sh --output-root target/runtime-package
+Enabled servers require `language_name` and `command`. `extensions` stays supported as legacy extension fallback and server metadata, but preferred routing now lives under `[languages.<id>].lsp`. Optional fields are `args`, `extensions`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
+
+```toml
+[lsp.servers.gleam]
+language_name = "Gleam"
+command = "gleam"
+args = ["lsp"]
+extensions = ["gleam"]
+supports_single_file = false
+workspace_identifier = "gleam.toml"
+env = { GLEAM_LOG = "info" }
+
+[lsp.servers.rust]
+command = "rust-analyzer"
+args = ["--stdio"]
+workspace_identifier = "Cargo.toml"
+
+[lsp.servers.typescript]
+enabled = false
+
+[lsp.servers.dockerfile]
+command = "docker-langserver"
+args = ["--stdio"]
+filenames = ["Dockerfile", "Containerfile"]
+
+[lsp.servers.json]
+initialization_options = { provideFormatter = true }
+
+[lsp.servers.eslint]
+language_name = "ESLint"
+command = "vscode-eslint-language-server"
+args = ["--stdio"]
+
+[languages.typescript]
+lsp = ["typescript", "eslint"]
 ```
 
-The lower-level commands stay available when you want to inspect each step explicitly:
+Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
 
-```sh
-ee do runtime fetch --all
-ee do runtime build --all
+Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+
+## Agents mode
+
+Agents mode is an optional ACP v1 agent chat plus MCP integration. It is disabled at compile time and runtime by default: the `agents` cargo feature must be enabled at build time, and `agents.enabled = true` must be set in config. Agent and MCP subprocesses start lazily only after the mode is enabled and the agents pane opens or an agents command runs. Agent file writes route through existing buffer/edit/save semantics, and agent terminal executions and file writes require an approval path before execution.
+
+ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict v1-only version negotiation, absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
+
+Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, and `cwd` are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
+
+```toml
+[agents]
+enabled = true
+default_agent = "helper"
+
+[agents.servers.helper]
+label = "Local Helper"
+command = "ee-helper"
+args = ["serve"]
+
+[agents.servers.reviewer]
+label = "Review Agent"
+command = "review-agent"
+args = ["acp"]
+
+[mcp.servers.filesystem]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+
+[mcp.servers.remote]
+transport = "streamable_http"
+url = "https://example.com/mcp"
+timeout_ms = 5000
 ```
 
-For test-focused local setup, install runtime into user runtime directory
-(`~/.local/share/ee` or `XDG_DATA_HOME/ee`) with:
+Bridge approvals reuse the user's decision on the agent's own ACP permission prompt when ee itself validated the same operation: writes match canonical path plus exact content, terminals match validated argv, and the prompt shows those `ee verified` facts (or an unverifiable-payload note). `[agents.approval] alignment` selects `"exact"` (default), `"heuristic"` (host-global config only; an opaque payload then covers the next matching operation of the same class), or `"off"`; alignment never overrides mandatory-confirm rules or safeguards, and `/permissions` reports the alignment counters.
 
-```sh
-scripts/install-tree-sitter-runtime.sh
+Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new [agent_id]`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, `/new [agent_id]` starts and focuses a fresh chat thread; `/quit` closes pane while keeping sessions running. Without agent id, configured default or sole server is used; otherwise picker opens. Unknown ids are rejected without starting any agent. `Ctrl-K` toggles between the editor and the agents pane from either side in any mode: from the editor it opens the pane (returning to the same mode), from the pane it returns to the editor, closing the full-screen pane or just dropping focus in split layouts (`:agents_layout right|bottom`).
+
+Distinct agent ids launch isolated connections/processes, including same ACP binary configured twice with different model args or env. Start exact ids with `:agents_new <agent_id>`; use no argument for default/sole server or picker. Active session may change only provider-advertised config through `:agents_config_set <config_id> <value>`.
+
+Providers supporting contrasting-model critique may advertise exact `/rubber-duck [question]`. A configured `[agents.rubber_duck] external_agent_id` also enables this command in production Agents UI: EE starts one isolated ephemeral ACP critic session, verifies its bounded report, closes it, then asks root for one synthesis. Manual internal critique remains rollout default; automatic internal mode remains replay-gated, and external ACP critique remains manual-only without host-owned sandbox proof. Critique adds call/cost/latency and receives bounded, revision-checked, redacted workspace evidence. Internal critics have enforced read-only tools; external forwarding is read-only but agent-native tools remain outside EE control, shown as visible warning. Critic output stays advisory and never counts as validation evidence; root alone decides and writes. See [parallel agent sessions and rubber duck policy](docs/upgrades/parallel-agent-sessions.md) plus [agent configuration examples](wiki/config.md#agent-process-examples).
+
+### ee MCP proxy contract
+
+The editor proxy uses stable `ee_` tool names. Call `ee_tools_manifest` with no arguments first; its versioned, session-cacheable response lists only tools current host supports. Manifest is normative tool reference: each entry includes `inputSchema` (every argument, type, and required field), schema version, `read`/`write`/`execute` side-effect class, approval requirement, transport availability (`stdio` and/or ACP-native `acp`), required host capabilities, output cap kind and maximum, redaction rules, typed error classes, deprecation/replacement metadata, and minimal schema-valid arguments. Existing names and schemas stay compatible. Incompatible argument or result changes require a new tool name.
+
+Read tools do not require approval. Write and execute tools require editor approval unless an existing bounded trust rule permits exact operation. Tool calls with malformed arguments fail as MCP invalid-parameter errors; disabled or unsupported known tools return a tool-level `isError` result. Manifest error classes are `invalid_arguments`, `unsupported_tool`, `permission_denied`, `backend_failure`, `output_truncated`, plus `stale_revision` for writes and `terminal_not_owned` for terminal operations. Paths must be absolute and inside editor workspace roots. Results are bounded; callers must inspect truncation metadata where provided. Secret-like environment values and keys, credentials, and sensitive diagnostics are rejected or redacted. Keep arguments small and explicit: when an operation needs nested modes or many optional fields, add smaller focused tools instead of extending one complex schema.
+
+`stdio` intentionally omits ACP-only terminal lifecycle tools (`ee_terminal_output`, `ee_terminal_output_since`, `ee_terminal_wait`, `ee_terminal_wait_long`, `ee_terminal_kill`, and `ee_terminal_release`) instead of advertising unsupported behavior. `ee_terminal_create` remains available on both routes. Hosts with fewer capabilities must similarly omit unavailable tools from discovery while continuing to expose `ee_tools_manifest`.
+
+`crates/ee-mcp/tests/fixtures/ee_tools_manifest-v1.json` is generated directly from manifest data and snapshots tool names, schemas, and policy metadata. `cargo test --quiet -p ee-mcp manifest_snapshot_matches_versioned_contract` detects accidental compatibility changes. Intentionally regenerate only after version review with `cargo test --quiet -p ee-mcp regenerate_manifest_snapshot -- --ignored`. `fuzz/` also contains `ee_mcp_proxy_arguments`, which feeds arbitrary JSON objects into production argument-size validation; run it with `cargo fuzz run ee_mcp_proxy_arguments`.
+
+### Replayable LLM evaluation
+
+`crates/ee-agent-orchestrator/tests/fixtures/replay/v1/tasks.json` contains hermetic, versioned task fixtures for bug fixes, features, refactors, reviews, investigations, multi-file work, stale/dirty/conflicted edits, interruption/recovery, approval/capability denials, and adversarial repository content. Fixtures never materialize a workspace, call a provider, use real time, read user-home state, execute validation commands, or access network. They run only scripted model/tool fakes.
+
+Each replay records a stable SHA-256 trace id, redacted relative workspace snapshot, JSONL event trace, task/validation/recovery/policy score, diff and approval counts, model/tool calls, deterministic latency, tokens, integer micro-USD cost estimate, and counter-only role delegation effectiveness (`useful_findings`, duplicate work, write conflicts, latency, cost). Candidate labels include provider/model, prompt, tool-manifest/schema, policy, routing, and `stdio` or ACP-native MCP transport so evidence cannot mix configurations.
+
+### Privacy-safe harness observability
+
+`TelemetryRecorder` provides separate `telemetry-v1` records for local harness diagnostics. It is disabled by default and memory-only: no network delivery, automatic file persistence, raw prompts, workspace paths/content, session/task ids, tool arguments/output, terminal output, error text, or environment values are accepted by its API. Hosts explicitly call `start_turn`, `record_started`, `record_finished`, and `finish_turn` at model-routing/model-call, tool, approval, retry, recovery, and validation boundaries. Events contain only sequence, monotonic elapsed milliseconds, stage, host-local opaque operation id, safe outcome, optional typed tool failure, and bounded sanitized declared tool name.
+
+`TelemetryAttribution` snapshots validated opaque provider, model, prompt, manifest, schema, policy, routing, and transport version labels at turn start. Secret-like, empty, overlong, or non-identifier labels fail closed before retention. `TelemetrySummary` carries only quality score, latency, approval/tool/model counts, integer micro-USD cost, and a typed failure counter map: `invalid_input`, `policy_denial`, `stale_state`, `timeout`, `transport_failure`, `unavailable_capability`, or `internal_error`. Cancellation remains an outcome, not a failure bucket.
+
+`TelemetryConfig` is user control: `enabled`, `max_turns`, `max_events_per_turn`, and `max_bytes_per_turn`. Completed turns use deterministic bounded retention; event or byte overflow marks record `truncated` with `dropped_events`; `clear` removes all active and retained local records. `export_jsonl` returns stable redacted JSONL only—caller chooses whether and where to write it. Failed turns may link a versioned lowercase-snake-case `ReplayFixtureCandidate` and host-redacted opaque `RedactedEvidenceRef`s. Success records reject those links. This makes evidence useful for replay triage without claiming reproduction proof or retaining sensitive payloads.
+
+### Subagent delegation quality controls
+
+Root agent owns delegation selection, final synthesis, and final write decisions. Call `DelegationPreflight::assess` before child dispatch with root-provided expected information gain, token and integer-cost budget, depth, work key, and intended absolute write scope. It rejects low-value work, duplicate work keys, recursion or aggregate-budget excess, definite conflict risk, relative scopes, and overlapping accepted scopes. Existing runtime policy still enforces delegate depth, per-turn subagent budget, cancellation propagation, scoped tools, and deterministic quarantine; preflight never bypasses those controls.
+
+Parallel children require independent work keys and one accepted write owner per file or module. Root must route all actual edits through existing approval and write-transaction gates; a child report is evidence, not permission to mutate workspace state.
+
+Verifier-capable roles return `SubagentReport` schema version `1`: each `SubagentFinding` has a key, claim, `observed` or `inference` kind, cited file/tool evidence, confidence, rejected alternatives, and recommended next action. `SubagentReportVerifier` rejects empty or uncited claims and citations absent from observed child execution; only its `VerifiedSubagentReport` proof can enter `reconcile_reports`. Reconciliation groups findings by key; contradictory claims keep `RootSynthesis.ready_for_plan` false until root adds explicit cited `RootResolution`. No automatic winner exists.
+
+`DelegationEffectiveness` stays counter-only and role-keyed. Evaluation/replay score output records useful findings, duplicate work, conflicts, latency, and estimated cost. `quality_impact(role)` reports `improved`, `neutral`, or `degraded` from those facts; it never stores prompts, paths, summaries, or hidden reasoning.
+
+`baseline.json` defines required-fixture regression thresholds. CI runs `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`; failures name fixture, score delta, and redacted trace reference. Before changing a default model, prompt, route, tool, or policy behavior, run this gate, review every failing fixture, then deliberately update versioned fixture/baseline evidence. No default change may rely on subjective comparison alone.
+
+### Evidence-gated completion and validation
+
+`ee-agent-orchestrator` never treats model text or reflection prose as proof that work completed. `FinalResponse.completion` is one of `verified`, `partially_verified`, `blocked`, or `unverified`, derived only from `CompletionEvidence` and selected `ValidationRecord`s. A `verified` changed turn requires matching current-revision evidence IDs for changed-file inventory, post-write diagnostics, final diff review, and one selected passing validation result. Final summaries cite these IDs in `evidence:`; `can_finish` is false for every other state.
+
+`ValidationRecord` returns structured evidence: `evidence_id`, command, tool, outcome, exit status, elapsed milliseconds, affected tests, diagnostics delta, output-truncation flag, skip reason, revision, selection, denial status, detail, and source task. Validation that cannot run remains `partially_verified` with an exact blocker and safe next step. Failed, stale, or denied evidence is `blocked`; missing evidence is `unverified`.
+
+`ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
+
+### Targeted validation and command intelligence
+
+Workspace-declared validation commands use schema version `1`: `DeclaredValidationCommand { task, metadata }`. `task` supplies registered `tool_name`, display `command`, JSON-object `arguments`, optional `file_extensions`, and optional resolved `symbols`. `metadata` requires stable `command_id` and declares `scope` (`targeted` or `workspace`), prerequisite command ids, approval class (`policy` or `host`), and bounded stable `test_ids`. Empty ids, self-prerequisites, unavailable tools, and `host` metadata paired with a tool lacking `host_approval` never enter a plan.
+
+Planner selects targeted file/symbol checks first. Workspace checks become `after_focused_pass` escalations whenever a focused command exists; they run only after every earlier focused command and every explicit prerequisite passes. Missing or failed prerequisites create bounded skipped evidence with `missing_dependency`; no broad command is dispatched. This makes escalation explicit, ordered, and bounded rather than a speculative full-suite fallback.
+
+`ValidationResult` is structured command evidence: stable command id, outcome, typed failure (`command_failed`, `timeout`, `cancelled`, `policy_denied`, `missing_dependency`, `unavailable_environment`, or `invalid_arguments`), exit status, elapsed milliseconds, test ids, diagnostics delta, attempt count, retry reasons, escalation, redaction flag, output-truncation flag, and bounded output. Output is secret-redacted then capped at `8192` bytes. Only explicitly classified transient tool failures (`backend` and `timeout`) retry, under `RetryPolicy.max_retries`; policy denial, malformed arguments, and cancellation never retry.
+
+Every generated validation command executes through `ToolExecutor`; schema validation, workspace/shell scope rules, policy allow-lists, host approval, cancellation, timeout, budget, and output caps therefore remain mandatory. Do not generate shell strings or bypass executor policy from validation metadata.
+
+### Auditable write transactions
+
+Hosts record a `WriteTransaction` for each mutation sequence and pass it through `StrategicInput.write_transaction`. Transaction evidence is serializable and includes transaction id, absolute changed paths, expected source revisions, preview summaries, approval outcome, per-path apply result, post-write path and workspace revisions, diagnostics delta, final diff, selected `ValidationRecord`, terminal state, and rollback safety evidence.
+
+`WriteTransaction` enforces fixed order: `read revision → preview → approval → apply → diagnostics → final diff → selected validation → terminal state`. Every stage after apply must match post-write workspace revision. Stale, duplicate, missing, ambiguous, or conflicting revisions block sequence with structured error code such as `stale_revision`, `ambiguous_revision`, `partial_apply`, or `diagnostic_regression`. Dirty user or unknown-owned buffers fail closed before apply; no automatic repair or replay runs after conflict, denial, partial apply, interruption, or diagnostics regression.
+
+Only blocked or unverified transactions may request rollback. `prepare_rollback` requires explicit approval, exact current post-write workspace revision, proof no later user edits exist, and every applied path marked agent-owned. `record_rollback` rechecks revision before recording completion. When a transaction accompanies strategic completion, it can only constrain a pre-existing verified completion claim; incomplete, blocked, interrupted, or rolled-back transaction evidence changes that claim to `unverified` or `blocked` and adds `transaction:<id>` provenance.
+
+### Task-aware context planning
+
+`ContextPlanner` accepts only bounded host-supplied `ContextCandidate`s. It selects fresh project instructions, active selections, dirty buffers, diagnostics, git diffs, symbol neighbors, tests, related config/docs, memory, terminal output, and external-tool output in that fixed priority order. It never performs broad repository reads. `ContextPlannerConfig` caps item count, excerpt characters, and estimated tokens; omitted candidates identify `stale_revision`, `token_budget`, `item_limit`, or `duplicate`, so caller can explicitly drill down later.
+
+Every `PlannedContextItem` records source, source-local canonical id, freshness revision, source-specific trust class, estimated token cost, selection reason, and truncation reason. `ContextTrustClass` keeps `repository_content`, `terminal_output`, `external_tool_output`, and `user_provided` separate. Only `system_policy` becomes a system message; repository, terminal, and external data always enter model requests as `ToolOutputUntrusted`, where injection guard labels and delimiters apply.
+
+`ContextPlanCache` only returns plans with identical task id, session, policy, workspace, buffer, diagnostics, graph, checkout, and candidate revisions. Call `invalidate(ContextInvalidation::Write | BufferRevision | DiagnosticsRevision | GraphRevision | CheckoutRevision | PolicyChanged | SessionEnded)` after matching host state changes. No stale plan may survive a write, editor revision, diagnostics refresh, graph refresh, checkout, policy change, or session end.
+
+### Workspace agent trust
+
+Enable ee proxy when agent supports MCP:
+
+```toml
+[mcp.proxy]
+enabled = true
 ```
 
-Install bundled plugins into user config plugin directory
-(`~/.config/ee/plugins` or `XDG_CONFIG_HOME/ee/plugins`) with:
+Then, from workspace root, grant every built-in safe profile:
 
 ```sh
-scripts/install-plugins.sh
+ee do agent trust grant
 ```
 
-To build runtime and run tests in one step:
+Or select built-in profiles explicitly:
 
 ```sh
-scripts/install-tree-sitter-runtime.sh -- cargo test -p ee-cli
+ee do agent trust grant --profile mcp_safe_read
+ee do agent trust grant --profile terminal_readonly
+ee do agent trust revoke --profile terminal_readonly
 ```
 
-Then point the editor at that runtime:
+Repeat `--profile` to select several. Profile names are application-owned; config cannot add commands or tools. Trust writes only host-local state under `$XDG_STATE_HOME/ee/trust/`, bound to canonical workspace identity. It never reads authority from `.ee.toml`, global config, or agent-provided files.
+
+Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
+
+### OpenRouter root and rubber-duck models
+
+`OPENROUTER_MODEL` remains root/default model. Orchestrated mode can register independent critic adapter using explicit, non-secret identity metadata:
 
 ```sh
-EE_RUNTIME_DIR="$PWD/target/runtime-package" cargo run -p ee-cli -- path/to/file.rs
+export OPENROUTER_MODEL="anthropic/claude-sonnet-4"
+export OPENROUTER_MODEL_FAMILY="anthropic"
+export OPENROUTER_RUBBER_DUCK_MODEL="openai/gpt-5"
+export OPENROUTER_RUBBER_DUCK_MODEL_FAMILY="openai"
 ```
 
-`scripts/build-runtime.sh` drives `ee do runtime fetch` and `ee do runtime build` against the merged ee language configuration, fetches grammar crate sources into a staging directory, then writes a runtime tree containing `grammars/` and `queries/`.
+Known families: `openai`, `anthropic`, `google`, `deepseek`, `meta`, `mistral`, `qwen`, and `xai`. Custom families use `other:<identity>`. ee never infers family from model/display names. Critic id and family must both be configured and must differ from root id/family. Invalid, partial, same-id, or same-family critic configuration prints bounded warning and keeps root agent usable without critic. Root and critic share safe immutable OpenRouter HTTP configuration and account API key, so both models can incur provider billing; API key never enters registry metadata.
 
-That packaged query tree includes upstream standard queries plus ee-owned bundled runtime queries such as `runtime/queries/rust/indents.scm`, `runtime/queries/json/indents.scm`, and `runtime/queries/python/indents.scm`. `scripts/install-tree-sitter-runtime.sh` installs same built query assets because it delegates to `scripts/build-runtime.sh`.
+### LLM session compaction (`/compact`)
 
-New runtime languages should be described in runtime language metadata with a grammar crate name and exact crate version. Runtime fetch now resolves those crates through a temporary cargo manifest, so adding a language no longer requires editing workspace `Cargo.toml` just to stage grammar sources.
+Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
 
-### Release runtime packaging
+`/compact` asks the configured model for a continuation summary and shrinks long session context:
 
-Release artifacts should build runtime assets first:
+- **`ee-openrouter-agent` (simple provider)** replaces its stored history with the summary plus a recent tail. Tunables (all also `--<flag>` CLI options):
+  - `OPENROUTER_COMPACT_MIN_MESSAGES` (default `16`) — stored messages below this make `/compact` a no-op without a model call.
+  - `OPENROUTER_COMPACT_RETAINED_TAIL` (default `8`) — messages kept verbatim at the tail after compaction; tool-call/tool-result pairs stay consistent.
+  - `OPENROUTER_COMPACT_MAX_INPUT_BYTES` (default `65536`) — serialized history bound for the compaction request; oldest messages drop first.
+  - `OPENROUTER_AUTO_COMPACT_THRESHOLD_PERCENT` (default `80`; `0` disables) — after OpenRouter reports input usage at this percentage of `OPENROUTER_CONTEXT_WINDOW` during a tool loop, provider compacts history before next model round. Completed user turns never auto-compact; use `/compact` between prompts. This applies to simple-provider mode; orchestrated mode already bounds each turn's transcript and compacts durable memory independently.
+- **`ee-agent-orchestrator`** runs deterministic memory compaction first (duplicate merging and low-value decay), builds a provenance-rich context from the task graph, memory, validation facts, and budget, then asks the model (no tools) and stores the summary as `summary:session` memory. Its knobs live under the orchestrator `compaction` config (`max_input_bytes`, default `65536`).
 
-```sh
-scripts/build-runtime.sh --output-root target/runtime-package
-```
-
-Archive that runtime tree next to the release binary as:
-
-- `share/ee/` on Linux and macOS
-- `runtime/` on Windows
-
-The official installer copies that bundled runtime tree into the resolved bundled runtime root instead of downloading grammars on first launch.
-
-### Requirements
-
-- Rust `1.95` or newer
-- Unix-like shell for `install.sh`
-- `cargo` toolchain for local development and builds
-
-## Build and run
-
-### Build the workspace
-
-```sh
-cargo build --workspace
-```
-
-### Build the release binary
-
-```sh
-cargo build --workspace --release
-```
-
-### Run `ee` directly from source
-
-```sh
-cargo run -p ee-cli -- <path/to/file>
-```
-
-## Usage
-
-Open a file for editing:
-
-```sh
-ee samples/sample.txt
-```
-
-Create or open a new file:
-
-```sh
-ee new-file.rs
-```
-
-Run the bundled terminal frontend from source:
-
-```sh
-cargo run -p ee-cli -- <path/to/file>
-```
+Security limits: secret-like values are redacted from compaction requests and status text; protected memory (`decision:`, `constraint:`, `validation:` keys) is never deleted by LLM output; compaction input is byte-bounded; compaction calls never expose tools; and the per-turn timeout and cancellation still apply.
 
 ## Development
 
@@ -561,7 +563,7 @@ cargo fmt --all
 ### Linting
 
 ```sh
-cargo clippy --all -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 For stable-toolchain checks:
@@ -572,24 +574,57 @@ cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
 
 ### Tests
 
+Run the full workspace suite quietly. This is the canonical command that also gates the pre-commit test cache, so it matches what CI runs:
+
 ```sh
-cargo test --workspace
+cargo test --quiet --workspace --all-features --locked
 ```
 
-For full workspace coverage with stable Rust:
+For full workspace coverage with the stable Rust toolchain:
 
 ```sh
 cargo +stable test --workspace --all-features
 ```
 
+Targeted runs stay quiet too:
+
+```sh
+cargo test --quiet -p ee-cli agent_bridge
+```
+
+### Git hooks
+
+Hooks live in `.githooks/` and install with `mk install-githooks`. The pre-commit hook runs on every staged Rust change:
+
+- `cargo fmt --all --check`
+- `cargo clippy` on the changed packages (default and `+stable` toolchains, `-D warnings`)
+- rustdoc with `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`, matching the CI docs job, so documentation problems surface before CI
+- the full workspace test suite, state-gated: it runs once per test-relevant tree change, then skips until file contents under `crates/` (plus `Cargo.toml` and `Cargo.lock`) change again. The state lives in `target/.githooks-state` (gitignored, so it is never committed; `cargo clean` wipes it and forces a fresh run)
+
+To run the whole gate outside a commit — before pushing, for example — and record the passed test run so the next pre-commit skips it:
+
+```sh
+mk ci
+```
+
+After a manual full-workspace test run, record the pass yourself:
+
+```sh
+./.githooks/record-tests-pass
+```
+
 ### Useful tasks
 
-This repository provides `tasks.yaml` for common development flows:
+This repository provides `tasks.yaml` (`mk`) for common development flows:
 
 - `format`: format source with `cargo fmt`
-- `lint`: run `cargo clippy --all -D warnings`
-- `test-stable`: run stable Rust tests
+- `lint`: run `cargo clippy` with `-D warnings`
+- `lint-stable`: run clippy with the stable Rust toolchain
+- `test-stable`: run tests with the stable Rust toolchain
+- `docs-check`: build docs with rustdoc `-D warnings` (CI docs gate)
+- `ci`: full gate (format, lint, docs, tests) and record the test pass
 - `install`: install `ee` locally from `crates/ee-cli`
+- `install-githooks` / `uninstall-githooks`: manage the git hooks
 
 ## Design and architecture
 

@@ -67,4 +67,33 @@ mixed_scope_args="$(capture_scope_args ee-cli xi-core-lib)"
     [[ "${CARGO_INCREMENTAL:-}" == "0" ]]
 )
 
+# State-gated test cache: canonical command + record/match roundtrip.
+(
+    set -euo pipefail
+    source "$hook_path"
+
+    state_file="$(mktemp)"
+    trap 'rm -f "$state_file"' EXIT
+    export EE_PRE_COMMIT_STATE_FILE="$state_file"
+
+    canonical="$(githooks_test_cmd)"
+    [[ "$canonical" == "cargo test --quiet --workspace --all-features --locked" ]]
+    [[ "$(githooks_state_file)" == "$state_file" ]]
+
+    key="$(githooks_compute_key)"
+    [[ -n "$key" ]]
+
+    # No state yet: mismatch, then record, then match.
+    ! githooks_state_matches "$canonical" "$key"
+    githooks_record_pass "$canonical" "$key"
+    githooks_state_matches "$canonical" "$key"
+
+    # A different command or key never matches the recorded pass.
+    ! githooks_state_matches "cargo test --quiet --workspace" "$key"
+    ! githooks_state_matches "$canonical" "$key"-
+
+    # Key is deterministic for the same tree.
+    [[ "$(githooks_compute_key)" == "$key" ]]
+)
+
 printf 'pre-commit hook test passed\n'

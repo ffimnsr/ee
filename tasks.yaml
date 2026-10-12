@@ -19,9 +19,17 @@ tasks:
     commands:
       - cargo +stable test --workspace --all-features
     description: Run tests using the stable Rust toolchain.
+  ci:
+    commands:
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - cargo test --quiet --workspace --all-features --locked
+      - ./.githooks/record-tests-pass
+    description: Full CI-equivalent gate (format, lint, docs, tests); records the test pass so the pre-commit hook skips its own run.
   docs-check:
     commands:
-      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
     description: Check that documentation builds without errors.
   install:
     commands:

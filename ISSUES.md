@@ -1654,7 +1654,7 @@ Rules:
 - [x] `cargo test --quiet -p ee-acp-agent-server` passes.
 - [x] `cargo test --quiet -p ee-openrouter-agent` passes.
 - [x] `cargo test --quiet -p ee-agent-protocol` passes when protocol facade exports changed.
-- [x] `./scripts/test-workspace-summary.sh` passes after focused crate validation.
+- [x] `cargo test --quiet --workspace --all-features --locked` passes after focused crate validation.
 
 ## Future General-Purpose Agent Orchestrator Framework
 
@@ -3032,7 +3032,7 @@ Rules:
 - [x] `cargo test --quiet -p ee-agent-orchestrator default_safety` passes.
 - [x] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
 - [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
-- [x] `./scripts/test-workspace-summary.sh` passes after focused validation.
+- [x] `cargo test --quiet --workspace --all-features --locked` passes after focused validation.
 
 ### Phase 11: Subagent model selection
 
@@ -4794,7 +4794,7 @@ Goal: prove route selection, codecs, agent integration, and extracted shared cod
   - [x] Test all recorded errors, checkpoints, update payloads, setup manifests, and diagnostics omit secret value. (`acp_flows.rs::a_live_turn_never_leaks_the_configured_key_into_frames_or_state`, `release_gate.rs`.)
   - [x] Test MCP tool policy, cancellation, stream ordering, retry-after-output prevention, recovery, and session close behavior through each dialect's scripted fixture. (Per-dialect matrix in `acp_flows.rs`; retry-after-output stays proven in the shared transport suite.)
   - [x] Run `git --no-pager diff --check`. (clean)
-  - [x] Run `./scripts/test-workspace-summary.sh` after focused package validation. (4652 passed, 0 failed, 7 ignored)
+  - [x] Run `cargo test --quiet --workspace --all-features --locked` after focused package validation. (4652 passed, 0 failed, 7 ignored)
 
 #### Exit criteria
 
@@ -4904,7 +4904,7 @@ Add exactly two opt-in MCP proxy tools. Keep remote content read-only and epheme
   - [x] Cover cache hit/miss, TTL expiry, conditional revalidation, cache eviction, config/policy invalidation, and no secret/body leakage.
   - [x] Cover MCP tool discovery/manifest, schema validation, proxy socket dispatch, ACP dispatch, orchestrator external-network classification, policy denial, host approval, cancellation, and agent-pane rendering.
 - [x] Document config, exact trust boundary, outbound data disclosure, approved host behavior, cache retention, supported MIME types, source citations, and why remote downloads never write files automatically.
-- [x] Run `cargo fmt --check`, focused quiet package tests, and clippy with `-D warnings` for changed crates. Run `./scripts/test-workspace-summary.sh` before release.
+- [x] Run `cargo fmt --check`, focused quiet package tests, and clippy with `-D warnings` for changed crates. Run `cargo test --quiet --workspace --all-features --locked` before release.
 
 ### Exit criteria
 
@@ -5048,7 +5048,7 @@ Goal: lock provider contracts, privacy boundaries, compatibility, and user confi
   - [x] Run `cargo test --quiet -p ee-agent-host web_context`.
   - [x] Run `cargo test --quiet -p ee-cli agent_web_context`.
   - [x] Run `cargo test --quiet -p ee-mcp`.
-  - [x] Run `./scripts/test-workspace-summary.sh` after focused package validation.
+  - [x] Run `cargo test --quiet --workspace --all-features --locked` after focused package validation.
   - [x] Run `git --no-pager diff --check`.
 
 #### Exit criteria
@@ -5471,7 +5471,7 @@ Prove critic quality before automatic enablement. Use existing replay harness an
 - [x] Run `cargo fmt --all -- --check`.
 - [x] Run `cargo clippy --workspace --all-targets --all-features`.
 - [x] Run targeted quiet tests for `ee-agent-protocol`, `ee-agent-host`, `ee-agent-orchestrator`, `ee-openrouter-agent`, and `ee-cli` agents UI.
-- [x] Run `./scripts/test-workspace-summary.sh`.
+- [x] Run `cargo test --quiet --workspace --all-features --locked`.
 
 #### Exit criteria
 
@@ -5680,7 +5680,7 @@ Expose concurrency state clearly and validate full change set.
 - [x] Run `cargo fmt --all -- --check`.
 - [x] Run targeted quiet tests for `ee-agent-host` and `ee-cli --features agents`.
 - [x] Run Clippy for touched crates with warnings denied.
-- [x] Run `./scripts/test-workspace-summary.sh` after targeted validation passes.
+- [x] Run `cargo test --quiet --workspace --all-features --locked` after targeted validation passes.
 
 #### Exit criteria
 

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Records a pass of the canonical full workspace test suite for the current
+# tree. Run this AFTER `cargo test --quiet --workspace --all-features --locked`
+# (or the mk `ci` task, which runs and records in one step) so the
+# state-gated pre-commit hook skips its own test run.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+# shellcheck source=.githooks/lib/githooks.sh
+. "$repo_root/.githooks/lib/githooks.sh"
+
+cmd="$(githooks_test_cmd)"
+key="$(githooks_compute_key)"
+githooks_record_pass "$cmd" "$key"
+printf 'recorded workspace test pass for this tree in %s\n' "$(githooks_state_file)"

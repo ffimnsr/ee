@@ -3,7 +3,8 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
-test_summary_script="./scripts/test-workspace-summary.sh"
+# shellcheck source=.githooks/lib/githooks.sh
+. "$repo_root/.githooks/lib/githooks.sh"
 
 # One-shot hook builds: disable incremental so stale caches cannot rot into
 # rust-lld "undefined hidden symbol" link failures or unbounded target/ growth.
@@ -183,11 +184,28 @@ main() {
 
         run_stable_clippy
 
-        echo "[pre-commit] test stable (${scope_args[*]})"
-        cargo test --quiet "${scope_args[@]}" --all-features
-        echo "[pre-commit] test passed"
+        echo "[pre-commit] docs check (${scope_args[*]})"
+        RUSTDOCFLAGS="-D warnings" cargo doc "${scope_args[@]}" --all-features --no-deps --locked
+
+        # State-gated full workspace test: tests run once per tree change —
+        # either here or outside the commit via `mk ci` / record-tests-pass —
+        # then skip until test-relevant file contents change again. State
+        # lives in target/.githooks-state (gitignored).
+        test_cmd="$(githooks_test_cmd)"
+        state_key="$(githooks_compute_key)"
+        if githooks_state_matches "$test_cmd" "$state_key"; then
+            echo "[pre-commit] tests skipped: workspace test suite already passed for this tree"
+        else
+            echo "[pre-commit] run workspace test suite ($test_cmd)"
+            # Intentional word splitting: the canonical command is stored and
+            # executed as separate arguments.
+            # shellcheck disable=SC2086
+            $test_cmd
+            githooks_record_pass "$test_cmd" "$state_key"
+            echo "[pre-commit] tests passed; state recorded in target/.githooks-state"
+        fi
     else
-        echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
+        echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/docs/test"
     fi
 
     # atlas-hook start

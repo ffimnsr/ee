@@ -158,7 +158,7 @@ Macro gains a `with_git_source` variant (or table form) mapping to `RuntimeGramm
 - Exit: `runtime health` per new language reports `Loaded` queries for all standard kinds.
 
 ### Phase 5 — Validation + docs
-- `cargo fmt`, `cargo clippy --workspace`, `cargo test --quiet`, `./scripts/test-workspace-summary.sh` (quiet variant).
+- `cargo fmt`, `cargo clippy --workspace`, `cargo test --quiet --workspace --all-features --locked`.
 - `./scripts/build-runtime.sh` full run.
 - Update README language list + CHANGELOG entry; tick ISSUES.md items.
 - Exit: CI-equivalent local pass; runtime package contains all new grammars + queries.
