@@ -566,12 +566,6 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-For stable-toolchain checks:
-
-```sh
-cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
-```
-
 ### Tests
 
 Run the full workspace suite quietly. This is the canonical command that also gates the pre-commit test cache, so it matches what CI runs:
@@ -594,11 +588,11 @@ cargo test --quiet -p ee-cli agent_bridge
 
 ### Git hooks
 
-Hooks live in `.githooks/` and install with `mk install-githooks`. The pre-commit hook runs on every staged Rust change:
+Hooks live in `.githooks/` and install with `mk install-githooks`. Every run, the pre-commit hook compares its installed copy (`.git/hooks/`) against `.githooks/` and warns when they drift apart, so a stale install is always called out with a reinstall hint. The hook runs on every staged Rust change:
 
 - `cargo fmt --all --check`
-- `cargo clippy` on the changed packages (default and `+stable` toolchains, `-D warnings`)
-- rustdoc with `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked`, matching the CI docs job, so documentation problems surface before CI
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the stable toolchain is the default, so no separate `+stable` pass is needed)
+- rustdoc over the full workspace (`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`, the exact CI docs command), so documentation problems surface before CI — including broken links in crates this commit does not touch
 - the full workspace test suite, state-gated: it runs once per test-relevant tree change, then skips until file contents under `crates/` (plus `Cargo.toml` and `Cargo.lock`) change again. The state lives in `target/.githooks-state` (gitignored, so it is never committed; `cargo clean` wipes it and forces a fresh run)
 
 To run the whole gate outside a commit — before pushing, for example — and record the passed test run so the next pre-commit skips it:
@@ -619,7 +613,6 @@ This repository provides `tasks.yaml` (`mk`) for common development flows:
 
 - `format`: format source with `cargo fmt`
 - `lint`: run `cargo clippy` with `-D warnings`
-- `lint-stable`: run clippy with the stable Rust toolchain
 - `test-stable`: run tests with the stable Rust toolchain
 - `docs-check`: build docs with rustdoc `-D warnings` (CI docs gate)
 - `ci`: full gate (format, lint, docs, tests) and record the test pass

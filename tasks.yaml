@@ -11,10 +11,6 @@ tasks:
     commands:
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
     description: Lint the code using clippy, treating warnings as errors.
-  lint-stable:
-    commands:
-      - cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
-    description: Lint the code using clippy with the stable Rust toolchain, treating warnings as errors.
   test-stable:
     commands:
       - cargo +stable test --workspace --all-features

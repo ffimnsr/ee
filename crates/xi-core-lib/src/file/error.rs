@@ -34,8 +34,8 @@ pub enum FileError {
     /// File exceeds the full-memory confirmation threshold for its location.
     ///
     /// The caller must surface `reason` to the user.  If the user accepts, retry
-    /// with [`FileManager::open_with_override`] passing the appropriate
-    /// [`ModeOverride`].
+    /// with [`crate::file::FileManager::open_with_override`] passing the appropriate
+    /// [`crate::open_policy::ModeOverride`].
     ConfirmationRequired {
         path: PathBuf,
         reason: &'static str,

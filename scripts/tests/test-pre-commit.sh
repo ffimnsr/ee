@@ -5,61 +5,91 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 hook_path="$repo_root/.githooks/pre-commit"
 
-capture_stable_clippy_calls() {
-    local package_dirs=("$@")
+shim_dir="$(mktemp -d)"
+trap 'rm -rf "$shim_dir"' EXIT
+printf '#!/usr/bin/env bash\nexit 0\n' >"$shim_dir/atlas"
+chmod +x "$shim_dir/atlas"
 
+capture_docs_check_call() {
     (
         set -euo pipefail
         source "$hook_path"
-
-        package_scope=()
-        scope_args=()
-        needs_rust_checks=1
-        needs_workspace_checks=0
-
-        local package_dir
-        for package_dir in "${package_dirs[@]}"; do
-            add_scoped_package "$package_dir"
-        done
-        build_scope_args
 
         cargo() {
             printf '%s\n' "$*"
         }
 
-        run_stable_clippy
+        run_docs_check
     )
 }
 
-capture_scope_args() {
-    local package_dirs=("$@")
+docs_output="$(capture_docs_check_call)"
+[[ "$docs_output" == "[pre-commit] docs check"* ]]
+[[ "$docs_output" == *"doc --workspace --all-features --no-deps --locked"* ]]
 
-    (
-        set -euo pipefail
-        source "$hook_path"
+# Full main flow with stubbed cargo and atlas: format, workspace-wide
+# clippy, workspace docs, then the state-gated workspace test — runs once,
+# records the pass, and is skipped on the second run.
+(
+    set -euo pipefail
+    source "$hook_path"
 
-        package_scope=()
-        scope_args=()
-        needs_workspace_checks=0
+    cargo() {
+        printf 'CALL: %s\n' "$*"
+    }
 
-        local package_dir
-        for package_dir in "${package_dirs[@]}"; do
-            add_scoped_package "$package_dir"
-        done
-        build_scope_args
+    state_file="$(mktemp)"
+    trap 'rm -f "$state_file"' EXIT
+    export EE_PRE_COMMIT_STATE_FILE="$state_file"
+    export PATH="$shim_dir:$PATH"
 
-        printf '%s\n' "${scope_args[*]}"
-    )
-}
+    first="$(ATLAS_PRE_COMMIT_FULL=1 main)"
+    [[ "$first" == *"CALL: fmt --all --check"* ]]
+    [[ "$first" == *"CALL: clippy --workspace --all-targets --all-features -- -D warnings"* ]]
+    [[ "$first" != *"+stable"* ]]
+    [[ "$first" == *"CALL: doc --workspace --all-features --no-deps --locked"* ]]
+    [[ "$first" == *"CALL: test --quiet --workspace --all-features --locked"* ]]
+    [[ "$first" == *"tests passed; state recorded in target/.githooks-state"* ]]
 
-ee_cli_output="$(capture_stable_clippy_calls ee-cli)"
-[[ "$ee_cli_output" == *"+stable clippy -p ee-cli --lib --bins --tests --examples --all-features -- -D warnings"* ]]
+    second="$(ATLAS_PRE_COMMIT_FULL=1 main)"
+    [[ "$second" == *"tests skipped: workspace test suite already passed for this tree"* ]]
+    [[ "$second" != *"CALL: test"* ]]
+)
 
-mixed_output="$(capture_stable_clippy_calls ee-cli xi-core-lib)"
-[[ "$mixed_output" == *"+stable clippy -p ee-cli -p ee-xi-core-lib --lib --bins --tests --examples --all-features -- -D warnings"* ]]
+# Drift check: silent when installed hooks are missing/synced, warning when
+# the installed copy is out of date.
+(
+    set -euo pipefail
+    source "$hook_path"
 
-mixed_scope_args="$(capture_scope_args ee-cli xi-core-lib)"
-[[ "$mixed_scope_args" == "-p ee-cli -p ee-xi-core-lib" ]]
+    fake_installed="$(mktemp -d)"
+    trap 'rm -rf "$fake_installed"' EXIT
+
+    # No installed-hooks dir at all: silent.
+    installed_dir="$fake_installed/none"
+    export EE_GITHOOKS_INSTALLED_DIR="$installed_dir"
+    [[ -z "$(check_hooks_drift)" ]]
+
+    # Empty installed dir: every hook file missing → warnings + hint.
+    mkdir -p "$installed_dir"
+    drift_out="$(check_hooks_drift)"
+    [[ "$drift_out" == *"warning: installed .git/hooks/pre-commit is out of date"* ]]
+    [[ "$drift_out" == *"warning: installed .git/hooks/lib/githooks.sh is out of date"* ]]
+    [[ "$drift_out" == *"hint: reinstall hooks with: mk install-githooks"* ]]
+
+    # Synced copy: silent.
+    cp "$repo_root/.githooks/pre-commit" "$installed_dir/pre-commit"
+    mkdir -p "$installed_dir/lib"
+    cp "$repo_root/.githooks/lib/githooks.sh" "$installed_dir/lib/githooks.sh"
+    cp "$repo_root/.githooks/record-tests-pass" "$installed_dir/record-tests-pass"
+    [[ -z "$(check_hooks_drift)" ]]
+
+    # One stale file after sync: warning again.
+    printf 'stale\n' >"$installed_dir/pre-commit"
+    drift_out="$(check_hooks_drift)"
+    [[ "$drift_out" == *"warning: installed .git/hooks/pre-commit is out of date"* ]]
+    [[ "$drift_out" != *"lib/githooks.sh is out of date"* ]]
+)
 
 (
     set -euo pipefail
