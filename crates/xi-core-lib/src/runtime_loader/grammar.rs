@@ -224,11 +224,10 @@ pub fn compile_parser_shared_library(
     }
 
     let compiler = cc_config.get_compiler();
-    let mut command = Command::new(compiler.path());
-    command.args(compiler.args());
-    for (key, value) in compiler.env() {
-        command.env(key, value);
-    }
+    // `Tool::to_command` wires up the compiler path, wrapper args, base args,
+    // and environment in one place. Assembling the command by hand would need
+    // the deprecated `Tool::env` accessor (removed in newer `cc` releases).
+    let mut command = compiler.to_command();
 
     if compiler.is_like_msvc() {
         command.arg(if cfg!(debug_assertions) { "-LDd" } else { "-LD" });
