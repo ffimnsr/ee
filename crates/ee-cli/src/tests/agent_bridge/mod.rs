@@ -21,11 +21,11 @@ use crate::app::{App, ThreadUiState};
 use crate::tests::helpers::*;
 use crate::ui::ui;
 
-// Event chain under test spans a dedicated host worker thread plus the fake
-// agent driver. The whole ee-cli suite runs in parallel (3-vCPU macOS CI
-// runners oversubscribe hard), so the budget must dominate scheduler
-// starvation: agent_pane uses 20s and its flaky-regression gate 30-45s.
-const WAIT: Duration = Duration::from_secs(30);
+// Generous wall-clock budget for the event chains under test: they span a
+// dedicated host worker thread plus the fake agent driver, and the whole
+// ee-cli suite runs in parallel on CI runners. Agent-pane tests use the same
+// budget for the same harness.
+const WAIT: Duration = Duration::from_secs(20);
 
 // ── Shared harness (mirrors tests/agent_pane.rs helpers) ─────────────────────
 

@@ -494,9 +494,6 @@ impl App {
 
     /// Presents a permission request as a prompt plus transcript notice.
     fn present_permission(&mut self, session_id: &SessionId, request: &PermissionRequestInfo) {
-        let Some(thread_index) = self.agents.thread_index(session_id.0.as_ref()) else {
-            return;
-        };
         let options = request.options.clone();
         let titles: Vec<String> = options.iter().map(|option| option.name.clone()).collect();
         let tool_title =
@@ -514,12 +511,20 @@ impl App {
             }
             None => AgentPermissionPreview::Unverifiable,
         };
-        self.agents.threads[thread_index].transcript.push(TranscriptItem::Permission {
-            title: tool_title.clone(),
-            options: titles.clone(),
-            preview: preview.clone(),
-            at: SystemTime::now(),
-        });
+        // The request can reach the pane before the new-session reply has
+        // registered its thread (the host emits it from its own task). Queue
+        // it regardless of registration order: dropping it would strand the
+        // agent waiting on an approval the user never sees.
+        if let Some(thread_index) = self.agents.thread_index(session_id.0.as_ref()) {
+            self.agents.threads[thread_index].transcript.push(TranscriptItem::Permission {
+                title: tool_title.clone(),
+                options: titles.clone(),
+                preview: preview.clone(),
+                at: SystemTime::now(),
+            });
+            self.agents.threads[thread_index].state = ThreadUiState::AwaitingPermission;
+            self.notify_unread(thread_index);
+        }
         self.agents.permissions.entry(session_id.0.to_string()).or_default().push_back(
             PermissionPrompt {
                 session_id: session_id.0.to_string(),
@@ -532,8 +537,6 @@ impl App {
                 preview,
             },
         );
-        self.agents.threads[thread_index].state = ThreadUiState::AwaitingPermission;
-        self.notify_unread(thread_index);
     }
 
     /// Presents an elicitation request as a prompt plus transcript notice.

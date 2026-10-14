@@ -226,6 +226,46 @@ fn agent_permission_allow_always_covers_repeated_bridge_writes() {
     assert_eq!(fs::read_to_string(&file).unwrap(), content);
 }
 
+#[test]
+fn agent_permission_arriving_before_session_registration_is_not_dropped() {
+    // The agent asks for permission right after `session/new` and answers
+    // `session/set_mode` only after a delay, so the pane drains the
+    // permission event while the new-session reply is still pending. The
+    // prompt must survive: dropping it would leave the agent waiting on an
+    // approval no one can ever give.
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("early.txt");
+    let path = file.to_string_lossy().to_string();
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .emit(permission_request(100, "s1", write_permission_tool_call(&path, "hello\n")))
+        .delay(400)
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for_response(100)
+        .emit(write_text_file(103, "s1", &path, "hello\n"));
+    let (mut app, fake) = agents_app_in(&temp, script);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "agent permission prompt", |app| app.agents.permission().is_some());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
+
+    wait_until(&mut app, "aligned write answered", |_| {
+        fake.agent().response_with_id(103).is_some()
+    });
+    let response = fake.agent().response_with_id(103).expect("write answered");
+    assert!(response.get("result").is_some(), "aligned write must succeed: {response}");
+    assert!(
+        app.agents.approvals.is_empty(),
+        "alignment must not queue a bridge approval: {:#?}",
+        app.agents.approvals
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
+}
+
 // ── Terminals ────────────────────────────────────────────────────────────────
 
 #[test]

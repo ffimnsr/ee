@@ -16,6 +16,13 @@ impl App {
         // requests first so completion events always find their UI state.
         self.pump_bridge_requests();
 
+        // New-session replies must register their thread before this pass
+        // applies host events for that session. The host emits `ThreadCreated`
+        // and can emit permission/elicitation/session-update events for a
+        // session before the pane has pumped its session reply; applying those
+        // events first loses state keyed by the missing thread.
+        self.pump_session_reply();
+
         let events = {
             let Some(host) = &mut self.agents.host else {
                 return;
@@ -30,7 +37,6 @@ impl App {
             self.handle_agent_event(event);
         }
 
-        self.pump_session_reply();
         self.pump_cancel_reply();
         self.pump_thread_action_reply();
         self.pump_external_critic_reply();
