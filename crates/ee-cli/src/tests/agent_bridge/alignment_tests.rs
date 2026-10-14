@@ -266,6 +266,65 @@ fn agent_permission_arriving_before_session_registration_is_not_dropped() {
     assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
 }
 
+/// Sleeps on the test thread (never pumping the pane) until the host has sent
+/// `session/set_mode` and the fake agent has had time to answer it and emit
+/// the next scripted line. The following single pump then observes the
+/// session reply and the permission request together, the ordering CI hits
+/// when scheduling stretches the pane's pump interval past the fake delay.
+fn wait_without_pumping(fake: &ScriptedFake) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fake.try_agent().is_some_and(|agent| agent.log_contains("session/set_mode")) {
+            // `set_mode` reached the fake; it answers and emits the
+            // permission request 25ms later (the script's trailing delay).
+            thread::sleep(Duration::from_millis(200));
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("host never sent session/set_mode");
+}
+
+#[test]
+fn immediate_permission_prompt_is_presented_in_the_registration_pump_pass() {
+    // The agent asks for permission right after `session/set_mode`, so one
+    // pump pass registers the thread and presents the prompt together. The
+    // pane must present the prompt (never drop it) and the ready gate must
+    // accept the resulting modal state.
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("same-pass.txt");
+    let path = file.to_string_lossy().to_string();
+    let script = base_script()
+        .emit(permission_request(100, "s1", write_permission_tool_call(&path, "hello\n")))
+        .wait_for_response(100)
+        .emit(write_text_file(103, "s1", &path, "hello\n"));
+    let (mut app, fake) = agents_app_in(&temp, script);
+    run_ex(&mut app, "agents");
+
+    wait_without_pumping(&fake);
+    app.pump_agents();
+
+    assert_eq!(app.agents.threads.len(), 1, "session thread registered");
+    assert_eq!(
+        app.agents.threads[0].state,
+        ThreadUiState::AwaitingPermission,
+        "an immediate permission request wins over Ready inside one pass"
+    );
+    assert!(
+        session_thread_established(app.agents.threads[0].state),
+        "the ready gate must accept the modal state"
+    );
+    assert!(app.agents.permission().is_some(), "prompt must survive one combined pass");
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
+    wait_until(&mut app, "aligned write answered", |_| {
+        fake.agent().response_with_id(103).is_some()
+    });
+    let response = fake.agent().response_with_id(103).expect("write answered");
+    assert!(response.get("result").is_some(), "aligned write must succeed: {response}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
+}
+
 // ── Terminals ────────────────────────────────────────────────────────────────
 
 #[test]

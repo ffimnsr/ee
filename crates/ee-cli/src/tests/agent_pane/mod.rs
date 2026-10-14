@@ -437,9 +437,19 @@ fn type_text(app: &mut App, text: &str) {
 
 fn open_pane_and_wait_ready(app: &mut App) {
     run_ex(app, "agents");
-    wait_until(app, "first agent thread ready", |app| {
-        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    wait_until(app, "first agent session established", |app| {
+        app.agents.threads.len() == 1 && session_thread_established(app.agents.threads[0].state)
     });
+}
+
+/// Whether a session thread is established.
+///
+/// A session can reach a modal state (`AwaitingPermission`, …) in the same
+/// pump pass that registers its thread: the agent can request permission
+/// immediately after `session/set_mode`, so the pane never observes `Ready`
+/// on its own. Only pre-session and terminal states mean "not established".
+fn session_thread_established(state: ThreadUiState) -> bool {
+    !matches!(state, ThreadUiState::Starting | ThreadUiState::Failed | ThreadUiState::Closed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
