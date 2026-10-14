@@ -1334,7 +1334,39 @@ async fn mcp_over_acp_inner_notification_does_not_break_the_connection() {
         .expect("session starts");
 
     let list = await_response(&fake, 202).await;
-    let tools = list["result"]["tools"].as_array().expect("tools still listed");
+    let Some(tools) = list["result"]["tools"].as_array() else {
+        panic!("tools still listed: list={list}\nhost log: {:?}", fake.log());
+    };
+    assert!(!tools.is_empty());
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn mcp_over_acp_notification_before_the_lifecycle_probe_does_not_break_the_connection() {
+    // rmcp's pre-initialize negotiation answers `server/discover` as a
+    // bootstrap probe without selecting the lifecycle, so a notification sent
+    // right after it is read by the still-negotiating loop.  The host must hold
+    // notifications back instead of letting rmcp fail the whole connection.
+    let script = acp_base_script()
+        .emit(emit_connect(200))
+        .capture(CaptureSource::Response { id: 200 }, "result.connectionId", "conn_id")
+        .emit(emit_notification("notifications/cancelled", json!({ "requestId": 999 })))
+        .emit(emit_message(201, "server/discover", Some(json!({}))))
+        .emit(emit_message(202, "tools/list", None))
+        .wait_for_response(202);
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    await_response(&fake, 201).await;
+    let list = await_response(&fake, 202).await;
+    let Some(tools) = list["result"]["tools"].as_array() else {
+        panic!("tools still listed: list={list}\nhost log: {:?}", fake.log());
+    };
     assert!(!tools.is_empty());
     host.connection.close().await;
     fake.join(TEST_TIMEOUT).await;

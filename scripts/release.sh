@@ -16,7 +16,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/release.sh [options] [<version>]
 
-Bump all workspace crate versions, refresh Cargo.lock, run release quality gates,
+Bump all workspace crate versions, refresh the Cargo.lock workspace entries, run release quality gates,
 create release commit, create v-prefixed git tag, and optionally push commit/tag.
 
 Release version source of truth: crates/ee-cli/Cargo.toml
@@ -391,7 +391,7 @@ publish_workspace() {
 
   for pkg in "${PUBLISH_ORDER[@]}"; do
     printf 'Publishing %s...\n' "$pkg"
-    cargo publish -p "$pkg"
+    cargo publish --locked -p "$pkg"
   done
 }
 
@@ -493,10 +493,15 @@ main() {
   update_fuzz_manifest_versions "$version"
   update_changelog "$version" "$release_date" "$previous_tag"
 
-  cargo generate-lockfile
+  # Refresh only the workspace member entries for the version bump above.  A
+  # full `cargo generate-lockfile` re-resolves every third-party dependency to
+  # its newest compatible version and silently drops the pinned releases; the
+  # lockfile stays authoritative everywhere else (CI, release workflow,
+  # pre-commit hook), so every build gate below runs with --locked.
+  cargo update --workspace
   bash scripts/build-runtime.sh --force --source-root target/release-runtime-sources --output-root target/release-runtime
 
-  cargo check --workspace --all-targets --quiet
+  cargo check --workspace --all-targets --quiet --locked
 
   git add Cargo.lock Cargo.toml "$CHANGELOG_FILE"
   [[ -f "$FUZZ_MANIFEST" ]] && git add "$FUZZ_MANIFEST"

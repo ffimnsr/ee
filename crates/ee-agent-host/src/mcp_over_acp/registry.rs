@@ -110,12 +110,7 @@ impl McpOverAcpRegistry {
         let pending =
             Arc::new(Mutex::new(HashMap::<RequestId, oneshot::Sender<PendingReply>>::new()));
         let shutdown = CancellationToken::new();
-        let connection = Arc::new(LogicalConnection {
-            rx_tx,
-            pending: pending.clone(),
-            shutdown: shutdown.clone(),
-            next_inner_id: AtomicI64::new(0),
-        });
+        let connection = Arc::new(LogicalConnection::new(rx_tx, pending.clone(), shutdown.clone()));
 
         // The serve thread runs its own current_thread runtime: proxy tool
         // calls block it synchronously while awaiting the host-side
@@ -142,6 +137,7 @@ impl McpOverAcpRegistry {
         let transport = McpOverAcpTransport { rx: rx_rx, pending: pending.clone() };
         let thread_connection = connection.clone();
         let thread_name = format!("ee-mcp-over-acp:{}", connection_id);
+        let log_connection_id = connection_id.to_string();
         let spawn_result = std::thread::Builder::new().name(thread_name).spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -152,10 +148,19 @@ impl McpOverAcpRegistry {
                 // `server/discover` negotiation and returns running service;
                 // await it so transport and rx channel stay alive until
                 // connection cancellation or closure.
-                if let Ok(running) =
-                    rmcp::service::serve_server_with_ct(proxy, transport, shutdown.clone()).await
+                match rmcp::service::serve_server_with_ct(proxy, transport, shutdown.clone()).await
                 {
-                    let _ = running.waiting().await;
+                    Ok(running) => {
+                        let _ = running.waiting().await;
+                    }
+                    // rmcp rejects any inner message it reads before the
+                    // lifecycle is selected (see `LifecycleGate`); surface it
+                    // instead of closing the connection silently.
+                    Err(error) => tracing::warn!(
+                        connection_id = %log_connection_id,
+                        ?error,
+                        "mcp-over-acp serve loop failed to negotiate the inner MCP lifecycle"
+                    ),
                 }
                 // Resolve any still-pending inner requests so awaiting
                 // mcp/message responders never hang.
@@ -247,7 +252,7 @@ impl McpOverAcpRegistry {
             .lock()
             .expect("pending map poisoned")
             .insert(RequestId::Number(inner_id), reply_tx);
-        if connection.rx_tx.send(message).is_err() {
+        if !connection.send_request(&request.method, message) {
             connection
                 .pending
                 .lock()
@@ -328,11 +333,7 @@ impl McpOverAcpRegistry {
             "params": notification.params,
         });
         match serde_json::from_value::<RxJsonRpcMessage<RoleServer>>(inner) {
-            Ok(message) => {
-                if connection.rx_tx.send(message).is_err() {
-                    tracing::debug!("dropping mcp/message notification: connection closed");
-                }
-            }
+            Ok(message) => connection.send_notification(message),
             Err(error) => {
                 tracing::warn!(?error, "dropping invalid inner MCP notification");
             }
