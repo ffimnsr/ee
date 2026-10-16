@@ -41,6 +41,65 @@
 - add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
+## 0.11.11 - 2026-10-16
+
+### Features
+
+- centralized the logs to proper userspace dir (`dd21d4fc`)
+- add support for markdown and yaml folds and extend engine (`25c5a854`)
+- update rope api (`12452154`)
+- update rope and xi-lib (`9c165ce0`)
+- hardening vlf path (`714d3576`)
+- unify vlf and rope store path (`c723b6d7`)
+- add opencode agent (`52a60bcf`)
+- opencode update for parity (`992a8fad`)
+- update the line payload to bytes (`67ab5f52`)
+- update vlf quick render (`9db46d60`)
+- fix warning on incomplete agent server (`124b74a2`)
+- update agents display (`c21c59c2`)
+- add install on completions and fixes (`c320eefb`)
+- add new agent editing features (`77d92981`)
+- add mcp config setup (`7a77fe2b`)
+- add formatter and proper setup of mcp (`3fd40624`)
+- add update to language catalog (`266a0d16`)
+- update language catalog and fixes for it (`464e39b6`)
+- enable memory recall for agents (`d017e325`)
+- add guidance to regex search (`a601eb63`)
+- add line wrap on prompt editor (`6116ef24`)
+- update agent composer key (`6172af02`)
+- update rubber duck mode setup (`2e1b75ae`)
+- add ACP v2 spec impl (`ec0e618a`)
+- add proper keymaps and fix undo list (`cf1c8949`)
+- update on agent trust settings and workspace trust (`42d8d37d`)
+- add safe command list for agents (`b910a0f9`)
+- update approval flow for external agents, reduce friction (`b6d6467b`)
+- optimize the loading and ingesting of texts (`4eae13ea`)
+- update githooks and fix ci problem (`18e87713`)
+- update pre commit and fix doc warning (`743fe89a`)
+- update macos pump pass (`ef357139`)
+- update the warnings and error (`b412bba6`)
+
+
+### Fixes
+
+- git diff on ee editor (`2676fbd8`)
+- failure due to the classic parallel-suite ETXTBSY race (`c45ebf10`)
+- add macos fix for test (`f4b4c54c`)
+- visual block delete (`0bef0e50`)
+- pump events for macos (`1f6a023f`)
+- keep mcp-over-acp logical connections alive across rmcp negotiation (`9d9ae635`)
+
+
+### Tests
+
+- add fixes to all ci tests + doc + fuzz (`ebc1700c`)
+
+
+### Maintenance
+
+- update githooks (`2ae70a0f`)
+
+
 ## 0.11.10 - 2026-09-22
 
 ### Features
