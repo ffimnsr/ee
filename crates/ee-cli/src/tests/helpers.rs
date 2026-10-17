@@ -3,13 +3,14 @@
 //! All items are `pub` so sibling test modules can reach them via
 //! `use super::helpers::*;` or `use crate::tests::helpers::*;`.
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -234,20 +235,68 @@ pub fn find_built_binary(dir: &Path, binary_name: &str) -> Option<PathBuf> {
 }
 
 pub fn fake_server_binary_path() -> PathBuf {
-    built_xi_lsp_binary("xi_lsp_fake_server")
+    cached_workspace_binary("xi_lsp_fake_server")
 }
 
 pub fn xi_lsp_plugin_binary_path() -> PathBuf {
-    built_xi_lsp_binary("xi-lsp-plugin")
+    cached_workspace_binary("xi-lsp-plugin")
+}
+
+/// Resolve a workspace test binary once per test process into a private path.
+///
+/// Every install would otherwise spawn its own `cargo build` and then `fs::copy`
+/// the shared `target/<profile>/<name>` artifact. Those copies are hundreds of
+/// megabytes and run from many parallel test threads, so a copy can overlap
+/// another thread's relink of the same artifact and install a corrupt or
+/// wrong-feature binary. The plugin binary carries the hermetic `test-grammars`
+/// preload, so a wrong variant silently yields empty tree-sitter results.
+///
+/// Build once, copy the artifact to a path nothing else writes, and hand that
+/// stable copy to every install.
+fn cached_workspace_binary(name: &str) -> PathBuf {
+    static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(path) = cache.get(name) {
+        return path.clone();
+    }
+
+    let built = built_xi_lsp_binary(name);
+    let stable = private_binary_path(&built, name);
+    fs::copy(&built, &stable).unwrap_or_else(|error| {
+        panic!("cache test binary {name} from {}: {error}", built.display())
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = fs::set_permissions(&stable, fs::Permissions::from_mode(0o755));
+    }
+    cache.insert(name.to_owned(), stable.clone());
+    stable
+}
+
+fn private_binary_path(built: &Path, name: &str) -> PathBuf {
+    let dir = built
+        .parent()
+        .map(|parent| parent.join("ee-test-bin"))
+        .unwrap_or_else(|| env::temp_dir().join("ee-test-bin"));
+    fs::create_dir_all(&dir).expect("create test binary cache dir");
+    dir.join(format!("{name}{}", env::consts::EXE_SUFFIX))
 }
 
 pub fn install_test_lsp_plugin(config_root: &Path) {
+    install_lsp_plugin_from(config_root, &xi_lsp_plugin_binary_path());
+}
+
+fn install_lsp_plugin_from(config_root: &Path, plugin_binary_source: &Path) {
     let plugin_dir = config_root.join("ee").join("plugins").join("xi-lsp-plugin");
     fs::create_dir_all(plugin_dir.join("bin")).unwrap();
     fs::copy(xi_lsp_crate_dir().join("manifest.toml"), plugin_dir.join("manifest.toml")).unwrap();
     let plugin_binary =
         plugin_dir.join("bin").join(format!("xi-lsp-plugin{}", env::consts::EXE_SUFFIX));
-    fs::copy(xi_lsp_plugin_binary_path(), &plugin_binary).unwrap();
+    fs::copy(plugin_binary_source, &plugin_binary).unwrap();
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

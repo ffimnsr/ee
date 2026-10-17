@@ -14,6 +14,7 @@ pub(crate) use xi_core_lib::rpc::LineReplacement;
 
 pub(crate) use crate::backend::{CompletionSuggestion, PendingUiAction};
 pub(crate) use crate::buffer::BufferManager;
+pub(crate) use crate::clipboard::{ClipboardBackendKind, ClipboardRouting};
 pub(crate) use crate::folds::FoldStore;
 pub(crate) use crate::git::{self, GitBufferCache, GitBufferStatus};
 pub(crate) use crate::keymap::{Action, BindingKey, SequenceNode};

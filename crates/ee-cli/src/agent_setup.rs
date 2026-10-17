@@ -366,13 +366,13 @@ fn select_agent(candidates: &[SetupCandidate]) -> Result<&SetupCandidate, String
 }
 
 fn read_manifest(path: &Path) -> Result<SetupManifest, String> {
-    let mut child = Command::new(path)
-        .arg("--ee-config")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("cannot run {} --ee-config: {error}", path.display()))?;
+    let mut command = Command::new(path);
+    command.arg("--ee-config").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // A just-written agent binary can be momentarily unexecutable while a
+    // concurrent `fork` in this process still holds its write descriptor.
+    let mut child = crate::agent_registry::spawn_retrying_text_busy(&mut command, |error| {
+        format!("cannot run {} --ee-config: {error}", path.display())
+    })?;
     let stdout = child
         .stdout
         .take()

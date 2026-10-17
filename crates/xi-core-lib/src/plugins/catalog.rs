@@ -922,7 +922,20 @@ requires = ["syntax-runtime>=0.2.0"]
         let errors = catalog.load_from_paths(&[plugin_dir]);
 
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        assert!(catalog.get_named("xi-lsp-plugin").is_some());
+        let plugin = catalog.get_named("xi-lsp-plugin").expect("lsp plugin registered");
+
+        // Agent tool commands are dispatched through the plugin command list,
+        // so a manifest that omits them makes every agent tool request wait out
+        // its proxy deadline instead of being served.
+        for method in [
+            "ee.agent.document_symbols",
+            "ee.agent.references",
+            "ee.agent.list_code_actions",
+            "ee.agent.format_preview",
+            "ee.agent.preview_rename",
+        ] {
+            assert!(plugin.supports_command(method), "lsp manifest must declare {method}");
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ use super::mcp::{McpPartialServer, McpServerSettings, McpSettings, merge_mcp_ser
 use super::raw::{AgentsToml, EeToml, KeymapToml, McpToml, McpTransportToml};
 use super::rubber_duck::merge_rubber_duck;
 use super::workspace_memory::merge_workspace_memory;
+use crate::clipboard::{ClipboardBackendKind, ClipboardRouting, DEFAULT_OSC52_MAX_BYTES};
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 #[cfg(any(feature = "agents", test))]
 use std::collections::BTreeSet;
@@ -110,6 +111,15 @@ pub(crate) struct EditorSettings {
     pub cursor_line: bool,
     /// Statusline layout variant.
     pub statusline_format: StatuslineFormat,
+    // ── Clipboard options (frontend only) ─────────────────────────────────
+    /// Vim-style `clipboard` routing for plain yank/delete/paste.
+    pub clipboard: ClipboardRouting,
+    /// Transport preference for the system clipboard.
+    pub clipboard_backend: ClipboardBackendKind,
+    /// Max raw bytes mirrored through OSC 52, measured before base64.
+    pub clipboard_osc52_max_bytes: usize,
+    /// Hold the selection briefly on exit so the last yank survives.
+    pub clipboard_wait_on_exit: bool,
     /// Effective LSP settings resolved from bundled defaults and ee TOML layers.
     pub lsp: LspSettings,
     /// Resolved keymap overrides layered from `.ee.toml` files.
@@ -143,6 +153,10 @@ impl Default for EditorSettings {
             sign_column: true,
             cursor_line: false,
             statusline_format: StatuslineFormat::Default,
+            clipboard: ClipboardRouting::default(),
+            clipboard_backend: ClipboardBackendKind::default(),
+            clipboard_osc52_max_bytes: DEFAULT_OSC52_MAX_BYTES,
+            clipboard_wait_on_exit: true,
             lsp: LspSettings::default(),
             keymap: KeymapSettings::default(),
             agents: AgentsSettings::default(),
@@ -217,6 +231,31 @@ fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiCon
             _ => Some((key.clone(), value.clone())),
         })
         .collect()
+}
+
+/// Apply `EE_CLIPBOARD` / `EE_CLIPBOARD_BACKEND` process-env overrides.
+///
+/// Env wins over every `.ee.toml` layer. `lookup` is injected so tests can
+/// exercise precedence without mutating process-global environment state.
+/// Unrecognised values are ignored, matching the tolerant `.ee.toml` parsing.
+pub(super) fn apply_clipboard_env(
+    settings: &mut EditorSettings,
+    lookup: impl Fn(&str) -> Option<String>,
+) {
+    if let Some(value) = lookup("EE_CLIPBOARD") {
+        let (parsed, unknown) = ClipboardRouting::parse(&value);
+        for token in unknown {
+            eprintln!("ee: warning: unknown EE_CLIPBOARD value `{token}`");
+        }
+        if let Some(routing) = parsed {
+            settings.clipboard = routing;
+        }
+    }
+    if let Some(value) = lookup("EE_CLIPBOARD_BACKEND")
+        && let Some(kind) = ClipboardBackendKind::parse(&value)
+    {
+        settings.clipboard_backend = kind;
+    }
 }
 
 impl EditorSettings {
@@ -302,6 +341,29 @@ impl EditorSettings {
                 "minimal" => self.statusline_format = StatuslineFormat::Minimal,
                 _ => {}
             }
+        }
+        if let Some(value) = &patch.clipboard {
+            let (parsed, unknown) = ClipboardRouting::parse(value);
+            for token in unknown {
+                eprintln!("ee: warning: unknown clipboard value `{token}`");
+            }
+            // An unrecognised value keeps the current routing instead of
+            // silently downgrading it to `off`.
+            if let Some(routing) = parsed {
+                self.clipboard = routing;
+            }
+        }
+        if let Some(value) = &patch.clipboard_backend {
+            match ClipboardBackendKind::parse(value) {
+                Some(kind) => self.clipboard_backend = kind,
+                None => eprintln!("ee: warning: unknown clipboard_backend `{value}`"),
+            }
+        }
+        if let Some(v) = patch.clipboard_osc52_max_bytes {
+            self.clipboard_osc52_max_bytes = v;
+        }
+        if let Some(v) = patch.clipboard_wait_on_exit {
+            self.clipboard_wait_on_exit = v;
         }
         if let Some(keymap) = &patch.keymap {
             self.merge_keymap_toml(keymap);

@@ -630,7 +630,8 @@ impl App {
             Action::PasteAfter => self.paste(false),
             Action::PasteBefore => self.paste(true),
             Action::PasteOverSelection => {
-                self.replace_selections_with_register(RegisterName::Unnamed);
+                let reg = self.registers.default_paste_register();
+                self.replace_selections_with_register(reg);
             }
             Action::PasteClipboardAfter => self.paste_from_register(RegisterName::Clipboard, false),
             Action::PasteClipboardBefore => self.paste_from_register(RegisterName::Clipboard, true),

@@ -1,9 +1,13 @@
-use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+//! Vim-style registers.
+//!
+//! Register storage is owned here. The system clipboard transport behind the
+//! `+` and `*` registers lives in [`crate::clipboard`].
 
-#[cfg(test)]
-use std::cell::RefCell;
+use std::collections::HashMap;
+
+use crate::clipboard::{ClipboardHandle, ClipboardRouting};
+
+pub(crate) use crate::clipboard::ClipboardSelection;
 
 /// Identifies a Vim-style register by its designator character.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,12 +28,6 @@ pub(crate) enum RegisterName {
     Clipboard,
     /// `*` — system primary clipboard.
     PrimaryClipboard,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ClipboardSelection {
-    Clipboard,
-    Primary,
 }
 
 impl RegisterName {
@@ -64,6 +62,10 @@ pub(crate) struct RegisterStore {
     numbered: Vec<String>,
     named: HashMap<char, String>,
     search: String,
+    /// Transport behind the `+` and `*` registers.
+    clipboard: ClipboardHandle,
+    /// How plain (prefix-less) yank/delete/paste reach the system clipboard.
+    routing: ClipboardRouting,
 }
 
 impl Default for RegisterStore {
@@ -74,13 +76,80 @@ impl Default for RegisterStore {
 
 impl RegisterStore {
     pub(crate) fn new() -> Self {
+        Self::with_routing(ClipboardRouting::default())
+    }
+
+    /// Build a store whose plain operations follow `routing`.
+    pub(crate) fn with_routing(routing: ClipboardRouting) -> Self {
+        Self::with_clipboard(routing, ClipboardHandle::new())
+    }
+
+    /// Build a store around an existing clipboard transport.
+    ///
+    /// `App` owns the same `Arc`-backed handle so `:set` and shutdown reach the
+    /// worker through one shared configuration.
+    pub(crate) fn with_clipboard(routing: ClipboardRouting, clipboard: ClipboardHandle) -> Self {
         Self {
             unnamed: String::new(),
             zero: String::new(),
             numbered: vec![String::new(); 9],
             named: HashMap::new(),
             search: String::new(),
+            clipboard,
+            routing,
         }
+    }
+
+    /// Shared clipboard transport behind `+` and `*`.
+    pub(crate) fn clipboard(&self) -> &ClipboardHandle {
+        &self.clipboard
+    }
+
+    /// Current clipboard routing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn routing(&self) -> ClipboardRouting {
+        self.routing
+    }
+
+    /// Update clipboard routing (`:set clipboard=...`).
+    pub(crate) fn set_routing(&mut self, routing: ClipboardRouting) {
+        self.routing = routing;
+    }
+
+    /// Register a plain (prefix-less) paste reads from.
+    ///
+    /// With `clipboard=unnamedplus` a plain `p` reads the system clipboard, so
+    /// the fallback follows the configured routing.
+    pub(crate) fn default_paste_register(&self) -> RegisterName {
+        match self.routing.mirror_selection() {
+            Some(ClipboardSelection::Clipboard) => RegisterName::Clipboard,
+            Some(ClipboardSelection::Primary) => RegisterName::PrimaryClipboard,
+            None => RegisterName::Unnamed,
+        }
+    }
+
+    /// Map a read of `reg` to the register it actually reads.
+    ///
+    /// The unnamed register is aliased to the routed selection under
+    /// `clipboard=unnamedplus`/`unnamed`, so an explicit `""` (`""p`,
+    /// `<C-r>"`) reads the system clipboard exactly like a plain `p`. Every
+    /// other register is returned unchanged.
+    pub(crate) fn read_register(&self, reg: RegisterName) -> RegisterName {
+        match reg {
+            RegisterName::Unnamed => self.default_paste_register(),
+            other => other,
+        }
+    }
+
+    /// Mirror the unnamed register to the system clipboard when routing is on.
+    ///
+    /// Called after every plain yank/delete so the OS clipboard tracks the
+    /// unnamed register without bypassing numbered-register shifting.
+    fn mirror_unnamed(&self) {
+        let Some(selection) = self.routing.mirror_selection() else {
+            return;
+        };
+        self.clipboard.write_text(selection, self.unnamed.clone());
     }
 
     /// Return the current content of `reg`.
@@ -95,8 +164,12 @@ impl RegisterStore {
             RegisterName::Named(c) => self.named.get(c).cloned().unwrap_or_default(),
             RegisterName::BlackHole => String::new(),
             RegisterName::Search => self.search.clone(),
-            RegisterName::Clipboard => read_clipboard(ClipboardSelection::Clipboard),
-            RegisterName::PrimaryClipboard => read_clipboard(ClipboardSelection::Primary),
+            RegisterName::Clipboard => {
+                self.clipboard.read_text(ClipboardSelection::Clipboard).unwrap_or_default()
+            }
+            RegisterName::PrimaryClipboard => {
+                self.clipboard.read_text(ClipboardSelection::Primary).unwrap_or_default()
+            }
         }
     }
 
@@ -113,15 +186,16 @@ impl RegisterStore {
                 self.named.insert(*c, text.clone());
             }
             self.unnamed = self.named[c].clone();
+            self.mirror_unnamed();
             return;
         }
         if *target == RegisterName::Clipboard {
-            write_clipboard(ClipboardSelection::Clipboard, &text);
+            self.clipboard.write_text(ClipboardSelection::Clipboard, text.clone());
             self.unnamed = text;
             return;
         }
         if *target == RegisterName::PrimaryClipboard {
-            write_clipboard(ClipboardSelection::Primary, &text);
+            self.clipboard.write_text(ClipboardSelection::Primary, text.clone());
             self.unnamed = text;
             return;
         }
@@ -132,6 +206,7 @@ impl RegisterStore {
         }
         self.zero = text.clone();
         self.unnamed = text;
+        self.mirror_unnamed();
     }
 
     /// Record a deletion.  Shifts numbered registers `1`←`2`←…←`9` like Vim.
@@ -146,15 +221,16 @@ impl RegisterStore {
                 self.named.insert(*c, text.clone());
             }
             self.unnamed = self.named[c].clone();
+            self.mirror_unnamed();
             return;
         }
         if *target == RegisterName::Clipboard {
-            write_clipboard(ClipboardSelection::Clipboard, &text);
+            self.clipboard.write_text(ClipboardSelection::Clipboard, text.clone());
             self.unnamed = text;
             return;
         }
         if *target == RegisterName::PrimaryClipboard {
-            write_clipboard(ClipboardSelection::Primary, &text);
+            self.clipboard.write_text(ClipboardSelection::Primary, text.clone());
             self.unnamed = text;
             return;
         }
@@ -165,6 +241,7 @@ impl RegisterStore {
         }
         self.numbered[0] = text.clone();
         self.unnamed = text;
+        self.mirror_unnamed();
     }
 
     /// Update the search register (`/`).  Does not touch unnamed.
@@ -175,7 +252,7 @@ impl RegisterStore {
 
     pub(crate) fn clear(&mut self, reg: Option<&RegisterName>) {
         match reg {
-            None => *self = Self::new(),
+            None => self.reset(),
             Some(RegisterName::Unnamed) => self.unnamed.clear(),
             Some(RegisterName::Zero) => self.zero.clear(),
             Some(RegisterName::Numbered(n)) => {
@@ -188,161 +265,27 @@ impl RegisterStore {
             Some(RegisterName::BlackHole) => {}
             Some(RegisterName::Search) => self.search.clear(),
             Some(RegisterName::Clipboard) => {
-                let _ = write_clipboard(ClipboardSelection::Clipboard, "");
+                self.clipboard.write_text(ClipboardSelection::Clipboard, String::new());
             }
             Some(RegisterName::PrimaryClipboard) => {
-                let _ = write_clipboard(ClipboardSelection::Primary, "");
+                self.clipboard.write_text(ClipboardSelection::Primary, String::new());
             }
         }
     }
-}
 
-// ── Clipboard helpers ────────────────────────────────────────────────────────
-
-fn read_clipboard(selection: ClipboardSelection) -> String {
-    #[cfg(test)]
-    if let Some(text) = test_clipboard_read(selection) {
-        return text;
+    /// Clear every register without replacing the clipboard transport.
+    ///
+    /// Dropping the transport would close the worker channel, and the worker
+    /// dropping its `arboard::Clipboard` releases this process's selection
+    /// ownership on X11 and Wayland — which wipes the system clipboard for every
+    /// other application. `:clear` must not do that.
+    fn reset(&mut self) {
+        self.unnamed.clear();
+        self.zero.clear();
+        self.numbered = vec![String::new(); 9];
+        self.named.clear();
+        self.search.clear();
     }
-
-    let selection_arg = clipboard_selection_arg(selection);
-    let try_read = |cmd: &str, args: &[&str]| -> Option<String> {
-        let out = Command::new(cmd).args(args).output().ok()?;
-        if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
-    };
-    try_read("xclip", &["-selection", selection_arg, "-o"])
-        .or_else(|| try_read("xsel", &[clipboard_xsel_arg(selection), "--output"]))
-        .unwrap_or_default()
-}
-
-fn write_clipboard(selection: ClipboardSelection, text: &str) -> bool {
-    #[cfg(test)]
-    if test_clipboard_write(selection, text) {
-        return true;
-    }
-
-    // OSC 52: write to the terminal emulator clipboard.  Works over SSH without
-    // needing xclip/xsel on the remote host.  Terminals that do not support
-    // OSC 52 simply ignore the escape sequence, so this is always safe to emit.
-    let mut written = if selection == ClipboardSelection::Clipboard {
-        write_clipboard_osc52(text)
-    } else {
-        false
-    };
-
-    // Also try xclip / xsel for X11/Wayland local sessions.
-    let selection_arg = clipboard_selection_arg(selection);
-    let try_write = |cmd: &str, args: &[&str]| -> bool {
-        let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() else {
-            return false;
-        };
-        let Some(stdin) = child.stdin.as_mut() else {
-            return false;
-        };
-        let _ = stdin.write_all(text.as_bytes());
-        child.wait().map(|s| s.success()).unwrap_or(false)
-    };
-    written |= try_write("xclip", &["-selection", selection_arg]);
-    if !written {
-        written = try_write("xsel", &[clipboard_xsel_arg(selection), "--input"]);
-    }
-    written
-}
-
-/// Writes to system clipboard for Agents TUI copy actions.
-///
-/// Only Agents builds use this public-in-crate wrapper; regular editor builds
-/// continue using register-backed clipboard writes directly.
-#[cfg(feature = "agents")]
-pub(crate) fn write_system_clipboard(text: &str) -> Result<(), String> {
-    write_clipboard(ClipboardSelection::Clipboard, text)
-        .then_some(())
-        .ok_or_else(|| String::from("system clipboard unavailable"))
-}
-
-fn clipboard_selection_arg(selection: ClipboardSelection) -> &'static str {
-    match selection {
-        ClipboardSelection::Clipboard => "clipboard",
-        ClipboardSelection::Primary => "primary",
-    }
-}
-
-fn clipboard_xsel_arg(selection: ClipboardSelection) -> &'static str {
-    match selection {
-        ClipboardSelection::Clipboard => "--clipboard",
-        ClipboardSelection::Primary => "--primary",
-    }
-}
-
-/// Write `text` to the terminal emulator clipboard via OSC 52.
-///
-/// The escape sequence is `ESC ] 52 ; c ; <base64> BEL`.  The `c` parameter
-/// selects the clipboard selection; most terminal emulators map it to the
-/// system clipboard.  Terminals that do not support OSC 52 silently ignore it.
-fn write_clipboard_osc52(text: &str) -> bool {
-    use std::io::Write as _;
-    let encoded = base64_encode(text.as_bytes());
-    // Write directly to /dev/tty when available so the sequence is not
-    // swallowed by ratatui's alternate-screen buffering.
-    let mut out: Box<dyn Write> =
-        if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-            Box::new(tty)
-        } else {
-            Box::new(std::io::stdout())
-        };
-    // ESC ] 52 ; c ; <base64> BEL
-    write!(out, "\x1b]52;c;{}\x07", encoded).is_ok() && out.flush().is_ok()
-}
-
-/// Minimal base64 encoder — avoids adding the `base64` crate dependency.
-fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[(n & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_CLIPBOARDS: RefCell<HashMap<ClipboardSelection, String>> =
-        RefCell::new(HashMap::new());
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_clipboard(selection: ClipboardSelection, text: impl Into<String>) {
-    TEST_CLIPBOARDS.with(|clipboards| {
-        clipboards.borrow_mut().insert(selection, text.into());
-    });
-}
-
-#[cfg(test)]
-fn test_clipboard_read(selection: ClipboardSelection) -> Option<String> {
-    TEST_CLIPBOARDS.with(|clipboards| clipboards.borrow().get(&selection).cloned())
-}
-
-#[cfg(test)]
-fn test_clipboard_write(selection: ClipboardSelection, text: &str) -> bool {
-    TEST_CLIPBOARDS.with(|clipboards| {
-        clipboards.borrow_mut().insert(selection, text.to_owned());
-    });
-    true
 }
 
 // ── LastChange ───────────────────────────────────────────────────────────────
@@ -451,5 +394,112 @@ mod tests {
 
         assert_eq!(store.get(&RegisterName::Clipboard), "clip");
         assert_eq!(store.get(&RegisterName::PrimaryClipboard), "primary");
+    }
+
+    #[test]
+    fn empty_clipboard_does_not_fall_back_to_the_cached_value() {
+        use crate::clipboard::set_test_clipboard;
+
+        let mut store = RegisterStore::new();
+        store.yank(&RegisterName::Clipboard, "cached".into(), false);
+
+        // An externally emptied clipboard is authoritative: the cached value
+        // must not be pasted in its place.
+        set_test_clipboard(ClipboardSelection::Clipboard, "");
+        assert_eq!(store.get(&RegisterName::Clipboard), "");
+    }
+
+    #[test]
+    fn unnamedplus_mirrors_plain_yank_to_system_clipboard() {
+        use crate::clipboard::set_test_clipboard;
+
+        set_test_clipboard(ClipboardSelection::Clipboard, "");
+        let mut store = RegisterStore::with_routing(ClipboardRouting::UnnamedPlus);
+        store.yank(&RegisterName::Unnamed, "hello".into(), false);
+
+        assert_eq!(store.get(&RegisterName::Clipboard), "hello");
+        assert_eq!(store.default_paste_register(), RegisterName::Clipboard);
+    }
+
+    #[test]
+    fn unnamedplus_mirrors_named_yank_and_delete_to_clipboard() {
+        use crate::clipboard::set_test_clipboard;
+
+        set_test_clipboard(ClipboardSelection::Clipboard, "");
+        let mut store = RegisterStore::with_routing(ClipboardRouting::UnnamedPlus);
+        store.yank(&RegisterName::Named('a'), "alpha".into(), false);
+        assert_eq!(store.get(&RegisterName::Clipboard), "alpha");
+
+        store.delete(&RegisterName::Unnamed, "deleted".into(), false);
+        assert_eq!(store.get(&RegisterName::Clipboard), "deleted");
+    }
+
+    #[test]
+    fn unnamed_routing_mirrors_to_primary_and_pastes_primary() {
+        use crate::clipboard::set_test_clipboard;
+
+        set_test_clipboard(ClipboardSelection::Primary, "");
+        let mut store = RegisterStore::with_routing(ClipboardRouting::Unnamed);
+        store.yank(&RegisterName::Unnamed, "hello".into(), false);
+
+        assert_eq!(store.get(&RegisterName::PrimaryClipboard), "hello");
+        assert_eq!(store.default_paste_register(), RegisterName::PrimaryClipboard);
+    }
+
+    #[test]
+    fn off_routing_keeps_operations_internal() {
+        use crate::clipboard::set_test_clipboard;
+
+        set_test_clipboard(ClipboardSelection::Clipboard, "");
+        let mut store = RegisterStore::with_routing(ClipboardRouting::Off);
+        store.yank(&RegisterName::Unnamed, "hello".into(), false);
+
+        // No OS write, and a plain paste stays on the internal register.
+        assert_eq!(store.get(&RegisterName::Clipboard), "");
+        assert_eq!(store.get(&RegisterName::Unnamed), "hello");
+        assert_eq!(store.default_paste_register(), RegisterName::Unnamed);
+    }
+
+    #[test]
+    fn routing_does_not_skip_numbered_shift_on_delete() {
+        use crate::clipboard::set_test_clipboard;
+
+        set_test_clipboard(ClipboardSelection::Clipboard, "");
+        let mut store = RegisterStore::with_routing(ClipboardRouting::UnnamedPlus);
+        store.delete(&RegisterName::Unnamed, "first".into(), false);
+        store.delete(&RegisterName::Unnamed, "second".into(), false);
+
+        assert_eq!(store.get(&RegisterName::Numbered(1)), "second");
+        assert_eq!(store.get(&RegisterName::Numbered(2)), "first");
+        assert_eq!(store.get(&RegisterName::Clipboard), "second");
+    }
+
+    #[test]
+    fn set_routing_switches_paste_default() {
+        let mut store = RegisterStore::new();
+        assert_eq!(store.routing(), ClipboardRouting::UnnamedPlus);
+        assert_eq!(store.default_paste_register(), RegisterName::Clipboard);
+
+        store.set_routing(ClipboardRouting::Off);
+        assert_eq!(store.routing(), ClipboardRouting::Off);
+        assert_eq!(store.default_paste_register(), RegisterName::Unnamed);
+    }
+
+    #[test]
+    fn read_register_aliases_only_the_unnamed_register() {
+        let mut store = RegisterStore::with_routing(ClipboardRouting::UnnamedPlus);
+        // Explicit `""` reads the routed selection, like a plain `p`.
+        assert_eq!(store.read_register(RegisterName::Unnamed), RegisterName::Clipboard);
+        // Every other register is untouched.
+        assert_eq!(store.read_register(RegisterName::Named('a')), RegisterName::Named('a'));
+        assert_eq!(store.read_register(RegisterName::Zero), RegisterName::Zero);
+        assert_eq!(store.read_register(RegisterName::Numbered(1)), RegisterName::Numbered(1));
+        assert_eq!(store.read_register(RegisterName::Search), RegisterName::Search);
+
+        store.set_routing(ClipboardRouting::Unnamed);
+        assert_eq!(store.read_register(RegisterName::Unnamed), RegisterName::PrimaryClipboard);
+
+        store.set_routing(ClipboardRouting::Off);
+        assert_eq!(store.read_register(RegisterName::Unnamed), RegisterName::Unnamed);
     }
 }

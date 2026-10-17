@@ -6,8 +6,9 @@ use xi_core_lib::plugin_rpc::SelectionRange;
 
 use crate::app::{App, Mode};
 use crate::buffer::BufferManager;
+use crate::clipboard::{ClipboardRouting, ClipboardSelection, set_test_clipboard};
 use crate::keymap::{Action, BindingKey};
-use crate::registers::{ClipboardSelection, RegisterName, set_test_clipboard};
+use crate::registers::RegisterName;
 use crate::tests::helpers::*;
 
 #[test]
@@ -553,4 +554,76 @@ fn move_parent_node_start_command_sends_backend_edit() {
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "move_parent_node_start");
+}
+
+// ── System clipboard routing (Vim `clipboard=unnamedplus` parity) ───────────────
+
+#[test]
+fn default_routing_mirrors_plain_yank_to_system_clipboard() {
+    let mut app = App::from_path(None).unwrap();
+    assert_eq!(
+        app.registers.routing().mirror_selection(),
+        Some(ClipboardSelection::Clipboard),
+        "default routing must be unnamedplus"
+    );
+    insert_text(&mut app, "alpha");
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed clipboard buffer",
+        std::time::Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("alpha")],
+    );
+    set_test_clipboard(ClipboardSelection::Clipboard, "");
+
+    // Plain `yy` (no `"+` prefix) mirrors into the system clipboard.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+
+    let mirrored = app.registers.get(&RegisterName::Clipboard);
+    assert!(
+        mirrored == "alpha" || mirrored == "alpha\n",
+        "plain yy must mirror to the system clipboard: {mirrored:?}"
+    );
+}
+
+#[test]
+fn plain_paste_reads_a_changed_system_clipboard() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    // Another application replaces the clipboard after ee started.
+    set_test_clipboard(ClipboardSelection::Clipboard, "external");
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "paste_register");
+    assert_eq!(value["params"]["params"]["chars"], "external");
+}
+
+#[test]
+fn off_routing_keeps_plain_yank_internal_but_explicit_register_works() {
+    let mut app = App::from_path(None).unwrap();
+    app.registers.set_routing(ClipboardRouting::Off);
+    insert_text(&mut app, "alpha");
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed clipboard buffer",
+        std::time::Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("alpha")],
+    );
+    set_test_clipboard(ClipboardSelection::Clipboard, "sentinel");
+
+    // Plain yank must not touch the system clipboard when routing is off.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    assert_eq!(app.registers.get(&RegisterName::Clipboard), "sentinel");
+
+    // Explicit `"+` still writes through under every routing value.
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 5 }]).unwrap();
+    run_ex(&mut app, "yank_to_clipboard");
+    assert_eq!(app.registers.get(&RegisterName::Clipboard), "alpha");
 }

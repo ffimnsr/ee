@@ -156,6 +156,46 @@ impl App {
                 }
                 _ => Err(()),
             },
+            // Clipboard routing is frontend-only: keep the register store in
+            // sync so plain `p`/`y` change behaviour immediately.
+            "clipboard" | "cb" => {
+                let (parsed, unknown) = ClipboardRouting::parse(value);
+                for token in unknown {
+                    eprintln!("ee: warning: unknown clipboard value `{token}`");
+                }
+                match parsed {
+                    Some(routing) => {
+                        self.config.clipboard = routing;
+                        self.registers.set_routing(routing);
+                        Ok(())
+                    }
+                    // No known token: report an error instead of silently
+                    // disabling routing.
+                    None => Err(()),
+                }
+            }
+            "clipboard_backend" => match ClipboardBackendKind::parse(value) {
+                Some(kind) => {
+                    self.config.clipboard_backend = kind;
+                    self.registers.clipboard().set_backend(kind);
+                    Ok(())
+                }
+                None => Err(()),
+            },
+            "clipboard_osc52_max_bytes" => value
+                .parse::<usize>()
+                .map(|n| {
+                    self.config.clipboard_osc52_max_bytes = n;
+                    self.registers.clipboard().set_osc52_max_bytes(n);
+                })
+                .map_err(|_| ()),
+            "clipboard_wait_on_exit" => {
+                let result = set_bool_value(&mut self.config.clipboard_wait_on_exit, value);
+                if result.is_ok() {
+                    self.registers.clipboard().set_wait_on_exit(self.config.clipboard_wait_on_exit);
+                }
+                result
+            }
             _ => {
                 self.backend.status_message = Some(format!("unknown option: {name}"));
                 return;
@@ -231,6 +271,10 @@ impl App {
                 crate::config::StatuslineFormat::Minimal => "minimal",
             }
             .to_owned(),
+            "clipboard" | "cb" => self.config.clipboard.as_str().to_owned(),
+            "clipboard_backend" => self.config.clipboard_backend.as_str().to_owned(),
+            "clipboard_osc52_max_bytes" => self.config.clipboard_osc52_max_bytes.to_string(),
+            "clipboard_wait_on_exit" => self.config.clipboard_wait_on_exit.to_string(),
             _ => return None,
         };
         Some(value)
@@ -260,6 +304,10 @@ impl App {
             "endofline",
             "charset",
             "statusline",
+            "clipboard",
+            "clipboard_backend",
+            "clipboard_osc52_max_bytes",
+            "clipboard_wait_on_exit",
         ];
         let defaults = crate::config::EditorSettings::default();
         let changed: Vec<String> = OPTIONS
@@ -326,6 +374,10 @@ impl App {
                 crate::config::StatuslineFormat::Minimal => "minimal",
             }
             .to_owned(),
+            "clipboard" => defaults.clipboard.as_str().to_owned(),
+            "clipboard_backend" => defaults.clipboard_backend.as_str().to_owned(),
+            "clipboard_osc52_max_bytes" => defaults.clipboard_osc52_max_bytes.to_string(),
+            "clipboard_wait_on_exit" => defaults.clipboard_wait_on_exit.to_string(),
             _ => return None,
         };
         Some(value)
@@ -682,6 +734,10 @@ fn is_value_option(name: &str) -> bool {
             | "charset"
             | "statusline"
             | "stl"
+            | "clipboard"
+            | "cb"
+            | "clipboard_backend"
+            | "clipboard_osc52_max_bytes"
     )
 }
 

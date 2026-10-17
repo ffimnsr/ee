@@ -46,7 +46,7 @@ fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     open_pane_and_wait_ready(&mut app);
@@ -164,7 +164,7 @@ fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let evidence_base = tempfile::tempdir().expect("evidence log base");
     app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
@@ -241,7 +241,7 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let evidence_base = tempfile::tempdir().expect("evidence log base");
     app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
@@ -322,7 +322,7 @@ fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evide
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let evidence_base = tempfile::tempdir().expect("evidence log base");
     app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
     let buffer_id = app.backend.open_buffer(Some(first.clone())).expect("open first buffer");
@@ -394,7 +394,7 @@ fn phase_six_live_openrouter_pane_unavailable_terminal_validation_is_blocked() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     open_pane_and_wait_ready(&mut app);

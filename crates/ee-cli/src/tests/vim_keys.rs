@@ -1117,6 +1117,30 @@ fn y_and_yy_yank_line_without_deleting() {
 }
 
 #[test]
+fn uppercase_register_prefix_appends_to_named_register() {
+    use crate::registers::RegisterName;
+    let (_temp, mut app) = open_text_file("a\nb");
+    // Seed register `a` so the append has prior content to grow.
+    app.registers.yank(&RegisterName::Named('a'), String::from("seed\n"), false);
+
+    // `"Ayy` — uppercase designator appends the yanked line instead of replacing.
+    for key in ['"', 'A', 'y', 'y'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)));
+    }
+    let appended = app.registers.get(&RegisterName::Named('a'));
+    assert!(appended.starts_with("seed\n"), "append must keep prior content: {appended:?}");
+    let yanked = &appended["seed\n".len()..];
+    assert!(yanked == "a" || yanked == "a\n", "appended content: {yanked:?}");
+
+    // `"ayy` — lowercase designator still replaces.
+    for key in ['"', 'a', 'y', 'y'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)));
+    }
+    let replaced = app.registers.get(&RegisterName::Named('a'));
+    assert!(replaced == "a" || replaced == "a\n", "lowercase must replace: {replaced:?}");
+}
+
+#[test]
 fn j_joins_lines_with_space() {
     let mut app = App::from_path(None).unwrap();
     // Seed by typing like the existing join ex-command test (manual pump in

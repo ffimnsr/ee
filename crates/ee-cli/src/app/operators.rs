@@ -339,18 +339,18 @@ impl App {
     pub(super) fn apply_operator(&mut self, op: Operator) {
         match op {
             Operator::Delete => {
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(false);
-                self.registers.delete(&reg, text, false);
+                self.registers.delete(&reg, text, append);
                 self.record_edit("delete_forward", json!([]));
                 self.push_change();
                 self.input_state.reset();
                 self.enter_normal_mode();
             }
             Operator::Change => {
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(false);
-                self.registers.delete(&reg, text, false);
+                self.registers.delete(&reg, text, append);
                 self.record_edit("delete_forward", json!([]));
                 self.push_change();
                 self.input_state.reset();
@@ -358,9 +358,9 @@ impl App {
                 self.mode = Mode::Insert;
             }
             Operator::Yank => {
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(false);
-                self.registers.yank(&reg, text, false);
+                self.registers.yank(&reg, text, append);
                 // Collapse selection without modifying buffer.
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.input_state.reset();
@@ -439,8 +439,8 @@ impl App {
                     .get_line(self.backend.cursor_line)
                     .map(|line| format!("{line}\n"))
                     .unwrap_or_default();
-                let reg = self.take_register();
-                self.registers.yank(&reg, text, false);
+                let (reg, append) = self.take_register();
+                self.registers.yank(&reg, text, append);
                 let _ = self.backend.send_edit("yank", json!([]));
             }
             Operator::Indent => {

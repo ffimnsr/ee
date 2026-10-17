@@ -522,20 +522,40 @@ fn command_extensions() -> Vec<String> {
 /// short retry is enough — and the same race can hit a real install whose
 /// probe runs while another agent process is spawning.
 fn spawn_version_probe(probe: &mut Command, command: &Path) -> Result<std::process::Child, String> {
+    spawn_retrying_text_busy(probe, |error| {
+        format!("cannot check {} version: {error}", command.display())
+    })
+}
+
+/// Spawn `probe`, retrying briefly while the kernel reports `ETXTBSY`.
+///
+/// On Linux, `exec` of a file that another thread still holds open for writing —
+/// including a descriptor a concurrent `fork` in this multithreaded process
+/// inherited — fails with `Text file busy` (os error 26). Writing an executable
+/// fixture and immediately running it therefore races with every other thread
+/// that spawns a process, which under parallel test execution is routine. Retry
+/// the narrow window instead of surfacing a spurious failure.
+pub(crate) fn spawn_retrying_text_busy(
+    probe: &mut Command,
+    describe: impl Fn(&io::Error) -> String,
+) -> Result<std::process::Child, String> {
     const RETRIES: usize = 20;
     const RETRY_DELAY: Duration = Duration::from_millis(5);
+    let mut busy = None;
     for attempt in 0..=RETRIES {
         match probe.spawn() {
             Ok(child) => return Ok(child),
             Err(error) if is_text_file_busy(&error) && attempt < RETRIES => {
+                busy = Some(error);
                 thread::sleep(RETRY_DELAY);
             }
-            Err(error) => {
-                return Err(format!("cannot check {} version: {error}", command.display()));
-            }
+            Err(error) => return Err(describe(&error)),
         }
     }
-    Err(format!("cannot check {} version: file stayed busy", command.display()))
+    Err(match busy {
+        Some(error) => format!("{} (file stayed busy)", describe(&error)),
+        None => String::from("spawn failed"),
+    })
 }
 
 fn is_text_file_busy(error: &io::Error) -> bool {

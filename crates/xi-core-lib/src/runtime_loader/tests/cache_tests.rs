@@ -142,6 +142,38 @@ fn compiled_query_cache_reuses_compiled_query_until_invalidation() {
 }
 
 #[test]
+fn unloadable_installed_grammar_falls_back_to_preloaded_grammar() {
+    let temp_dir = TempDir::new().unwrap();
+    let bundled_root = temp_dir.path().join("bundle");
+    let user_root = temp_dir.path().join("user");
+    let grammar_dir = user_root.join(GRAMMARS_DIR_NAME);
+    fs::create_dir_all(&grammar_dir).unwrap();
+    // A file that exists but is not a loadable shared library, mirroring a
+    // stale or toolchain-incompatible installed grammar.
+    fs::write(grammar_dir.join(shared_library_filename("tree-sitter-rust")), b"not-an-elf")
+        .unwrap();
+
+    let roots = RuntimeRoots::new(&bundled_root, &user_root, None);
+    let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+    let languages = Languages::new(&[language_definition("rust", &["rs"])]);
+    let mut overrides = RuntimeLanguageOverrides::new();
+    overrides.insert(
+        "rust".to_string(),
+        runtime_language_override("tree-sitter-rust", "tree_sitter_rust"),
+    );
+    loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+    loader.preload_language(
+        "rust",
+        GrammarHandle::from_loaded(test_grammars::rust(), "__test__/rust", "tree_sitter_rust"),
+    );
+
+    // The on-disk library cannot be loaded, so the preloaded grammar is used
+    // instead of failing and taking every tree-sitter test with it.
+    let handle = loader.load_language_for_name("rust").unwrap();
+    assert!(handle.canonical_library_path().ends_with(Path::new("__test__/rust")));
+}
+
+#[test]
 fn runtime_loader_bootstraps_builtin_runtime_metadata() {
     let loader = default_runtime_loader();
     let rust = loader.language_for_name("rust").unwrap();

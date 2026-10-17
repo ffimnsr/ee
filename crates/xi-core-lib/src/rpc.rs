@@ -658,6 +658,21 @@ pub enum EditNotification {
     RequestRename {
         new_name: String,
     },
+    // Agent-tool commands. These reuse the plugin command dispatch but are
+    // named `ee.agent.*` so the plugin can answer on the agent-tool channel
+    // (`show_agent_tool_result`) instead of the editor's result queue.
+    #[serde(rename = "ee.agent.document_symbols")]
+    AgentDocumentSymbols,
+    #[serde(rename = "ee.agent.references")]
+    AgentReferences,
+    #[serde(rename = "ee.agent.list_code_actions")]
+    AgentListCodeActions,
+    #[serde(rename = "ee.agent.format_preview")]
+    AgentFormatPreview,
+    #[serde(rename = "ee.agent.preview_rename")]
+    AgentPreviewRename {
+        new_name: String,
+    },
     DeleteLineRange {
         start_line: usize,
         end_line: usize,
@@ -919,6 +934,52 @@ mod tests {
         .unwrap();
 
         assert!(matches!(edit.cmd, EditNotification::RequestDocumentSymbols));
+    }
+
+    #[test]
+    fn agent_tool_edits_round_trip_and_dispatch_to_plugin_commands() {
+        use crate::edit_types::{EventDomain, SpecialEvent};
+
+        for (json, expected) in [
+            (
+                r#"{"view_id":"view-id-1","method":"ee.agent.document_symbols","params":{}}"#,
+                "ee.agent.document_symbols",
+            ),
+            (
+                r#"{"view_id":"view-id-1","method":"ee.agent.references","params":{}}"#,
+                "ee.agent.references",
+            ),
+            (
+                r#"{"view_id":"view-id-1","method":"ee.agent.list_code_actions","params":{}}"#,
+                "ee.agent.list_code_actions",
+            ),
+            (
+                r#"{"view_id":"view-id-1","method":"ee.agent.format_preview","params":{}}"#,
+                "ee.agent.format_preview",
+            ),
+        ] {
+            let edit: EditCommand<EditNotification> = serde_json::from_str(json).unwrap();
+            let domain: EventDomain = edit.cmd.into();
+            assert!(
+                matches!(
+                    domain,
+                    EventDomain::Special(SpecialEvent::DispatchPluginCommand { method, .. })
+                        if method == expected
+                ),
+                "agent edit {expected} must dispatch its plugin command"
+            );
+        }
+
+        let rename: EditCommand<EditNotification> = serde_json::from_str(
+            r#"{"view_id":"view-id-1","method":"ee.agent.preview_rename","params":{"new_name":"renamed"}}"#,
+        )
+        .unwrap();
+        let domain: EventDomain = rename.cmd.into();
+        assert!(matches!(
+            domain,
+            EventDomain::Special(SpecialEvent::DispatchPluginCommand { method, params, .. })
+                if method == "ee.agent.preview_rename" && params["new_name"] == "renamed"
+        ));
     }
 
     #[test]

@@ -281,6 +281,24 @@ code_actions_on_save = ["source.fixAll"]
 
 With `format_on_save`, saving runs the language's formatter (external or LSP) first and writes once the edits settle; a bounded wait falls back to saving unformatted with a status warning. `code_actions_on_save` auto-applies the given LSP code-action kinds (`source.fixAll`, `source.organizeImports`, …) before formatting; the plugin sends `CodeActionParams.context.only` so servers only return matching fixes. `trim_trailing_whitespace` / `insert_final_newline` are applied to the on-disk snapshot, and LSP servers still receive `didSave` (their own on-save checks keep working).
 
+### Clipboard
+
+Plain (prefix-less) `y`/`d`/`Y`, operators, and visual yanks mirror to the OS clipboard like Vim's `clipboard=unnamedplus`, and `p` reads it back. `arboard` is the transport (X11, Wayland with `data-control`, macOS, Windows) with OSC 52 as the SSH/container fallback. Explicit `"+` (system clipboard) and `"*` (primary selection on Linux, system clipboard on macOS/Windows) always work regardless of the setting.
+
+```toml
+clipboard = "unnamedplus"          # unnamedplus (default) | unnamed | off
+clipboard_backend = "auto"         # auto (default) | arboard | osc52
+clipboard_osc52_max_bytes = 16384  # raw pre-base64 cap; larger writes skip + warn
+clipboard_wait_on_exit = true      # bounded 2 s wait so a clipboard manager can take ownership
+```
+
+- `unnamedplus` mirrors plain operations to the system clipboard; `unnamed` mirrors to the primary selection (`*`); `off` disables mirroring for plain operations only — explicit `"+`/`"*` keep working under every value.
+- `auto` uses OSC 52 first over SSH (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`) and otherwise `arboard` first with an OSC 52 fallback.
+- `EE_CLIPBOARD` and `EE_CLIPBOARD_BACKEND` override the TOML values.
+- OSC 52 writes are wrapped for tmux (`TMUX`) and screen (`STY`) and only go to `/dev/tty`, so a headless run never corrupts a frame. Failures surface one status message per failure streak instead of a silent no-op.
+
+`:set clipboard`, `:set clipboard_backend`, `:set clipboard_osc52_max_bytes`, and `:set clipboard_wait_on_exit` change these at runtime (`:set clipboard?` reports the active value).
+
 ### Runtime language config
 
 Runtime language configuration lives under `[languages.<id>]`, where `<id>` is the stable runtime language id. Enabled entries need `name`, `file_types`, and a nested `[languages.<id>.grammar]` table with `library`, `symbol`, and exactly one source definition.

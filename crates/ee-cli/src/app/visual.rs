@@ -117,9 +117,9 @@ impl App {
                 if self.mode == Mode::VisualLine {
                     self.apply_visual_line_delete();
                 } else {
-                    let reg = self.take_register();
+                    let (reg, append) = self.take_register();
                     let text = self.selected_text_preview(false);
-                    self.registers.delete(&reg, text, false);
+                    self.registers.delete(&reg, text, append);
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
                 }
@@ -130,9 +130,9 @@ impl App {
                 if self.mode == Mode::VisualLine {
                     self.apply_visual_line_yank();
                 } else {
-                    let reg = self.take_register();
+                    let (reg, append) = self.take_register();
                     let text = self.selected_text_preview(false);
-                    self.registers.yank(&reg, text, false);
+                    self.registers.yank(&reg, text, append);
                     let _ = self.backend.send_edit("collapse_selections", json!([]));
                     self.enter_normal_mode();
                 }
@@ -141,17 +141,17 @@ impl App {
             'c' => {
                 self.begin_record();
                 if self.mode == Mode::VisualLine {
-                    let reg = self.take_register();
+                    let (reg, append) = self.take_register();
                     let text = self.selected_text_preview(true);
-                    self.registers.delete(&reg, text, false);
+                    self.registers.delete(&reg, text, append);
                     self.sync_linewise_selection_if_needed();
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
                     self.mode = Mode::Insert;
                 } else {
-                    let reg = self.take_register();
+                    let (reg, append) = self.take_register();
                     let text = self.selected_text_preview(false);
-                    self.registers.delete(&reg, text, false);
+                    self.registers.delete(&reg, text, append);
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
                     self.mode = Mode::Insert;
@@ -169,9 +169,9 @@ impl App {
                 } else {
                     let _ = self.backend.send_edit("extend_to_line_bounds", json!([]));
                 }
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(true);
-                self.registers.delete(&reg, text, false);
+                self.registers.delete(&reg, text, append);
                 self.record_edit("delete_forward", json!([]));
                 self.end_record();
                 self.enter_normal_mode();
@@ -183,9 +183,9 @@ impl App {
                 let _ = self
                     .backend
                     .send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(false);
-                self.registers.delete(&reg, text, false);
+                self.registers.delete(&reg, text, append);
                 self.record_edit("delete_forward", json!([]));
                 self.end_record();
                 self.enter_normal_mode();
@@ -195,9 +195,9 @@ impl App {
                 let _ = self
                     .backend
                     .send_edit("move_to_left_end_of_line_and_modify_selection", json!([]));
-                let reg = self.take_register();
+                let (reg, append) = self.take_register();
                 let text = self.selected_text_preview(false);
-                self.registers.delete(&reg, text, false);
+                self.registers.delete(&reg, text, append);
                 self.record_edit("delete_forward", json!([]));
                 self.end_record();
                 self.enter_normal_mode();
@@ -411,17 +411,17 @@ impl App {
         }
     }
     pub(super) fn apply_visual_line_delete(&mut self) {
-        let reg = self.take_register();
+        let (reg, append) = self.take_register();
         let text = self.selected_text_preview(true);
-        self.registers.delete(&reg, text, false);
+        self.registers.delete(&reg, text, append);
         self.sync_visual_line_selection();
         self.record_edit("delete_forward", json!([]));
         self.enter_normal_mode();
     }
     pub(super) fn apply_visual_line_yank(&mut self) {
-        let reg = self.take_register();
+        let (reg, append) = self.take_register();
         let text = self.selected_text_preview(true);
-        self.registers.yank(&reg, text, false);
+        self.registers.yank(&reg, text, append);
         // Collapse without deleting.
         let _ = self.backend.send_edit("collapse_selections", json!([]));
         self.enter_normal_mode();
@@ -437,8 +437,8 @@ impl App {
         let extracted =
             self.backend.block_text_preview(top, bottom, left_col, right_col).unwrap_or_default();
         if op == Operator::Yank {
-            let reg = self.take_register();
-            self.registers.yank(&reg, extracted, false);
+            let (reg, append) = self.take_register();
+            self.registers.yank(&reg, extracted, append);
             let _ = self.backend.send_edit("collapse_selections", json!([]));
             self.enter_normal_mode();
             return;
@@ -446,8 +446,8 @@ impl App {
         // For delete/change: iterate lines from bottom to top to preserve offsets.
         let _ = self.backend.delete_block(top, bottom, left_col, right_col);
         self.push_change();
-        let reg = self.take_register();
-        self.registers.delete(&reg, extracted, false);
+        let (reg, append) = self.take_register();
+        self.registers.delete(&reg, extracted, append);
         self.enter_normal_mode();
         if op == Operator::Change {
             self.mode = Mode::Insert;

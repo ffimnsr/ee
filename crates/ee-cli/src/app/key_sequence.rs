@@ -147,11 +147,10 @@ impl App {
                 return;
             }
             if let KeyCode::Char(c) = key.code {
-                let append = RegisterName::is_append_char(c);
+                // Uppercase designator (`"A`) appends to the lowercase register
+                // on the next yank/delete; remember it for `take_register`.
+                self.input_state.pending_register_append = RegisterName::is_append_char(c);
                 self.input_state.pending_register = RegisterName::from_char(c);
-                if append {
-                    let _ = append;
-                }
             }
             return;
         }

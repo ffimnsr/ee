@@ -19,6 +19,7 @@ use super::format::{
 };
 use super::state::PendingExternalCritic;
 use super::thread_ui::{MessageRenderKind, ThreadUiState, TranscriptItem};
+use crate::clipboard::ClipboardSelection;
 impl App {
     pub(super) fn agents_show_help(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
@@ -540,11 +541,10 @@ impl App {
             return;
         }
         let text = ee_agent_host::redact::redact_secret_values(&text, &self.agents_secret_values());
-        match crate::registers::write_system_clipboard(&text) {
-            Ok(()) => {
-                self.backend.status_message = Some(format!("copied assistant response {position}"));
-            }
-            Err(error) => self.backend.status_message = Some(error),
+        if self.registers.clipboard().write_text(ClipboardSelection::Clipboard, text) {
+            self.backend.status_message = Some(format!("copied assistant response {position}"));
+        } else {
+            self.backend.status_message = Some(String::from("system clipboard unavailable"));
         }
     }
 }

@@ -23,8 +23,8 @@ impl App {
                 line[from..].chars().take(count).collect::<String>()
             })
             .unwrap_or_default();
-        let reg = self.take_register();
-        self.registers.delete(&reg, text, false);
+        let (reg, append) = self.take_register();
+        self.registers.delete(&reg, text, append);
         if self.backend.active().is_vlf {
             self.try_vlf_delete_forward(count);
         } else {
@@ -64,8 +64,8 @@ impl App {
                 chars.into_iter().rev().collect::<String>()
             })
             .unwrap_or_default();
-        let reg = self.take_register();
-        self.registers.delete(&reg, text, false);
+        let (reg, append) = self.take_register();
+        self.registers.delete(&reg, text, append);
         if self.backend.active().is_vlf {
             self.try_vlf_delete_backward(count);
         } else {

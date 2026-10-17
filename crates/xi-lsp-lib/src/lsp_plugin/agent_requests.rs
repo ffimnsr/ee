@@ -2,6 +2,28 @@
 use super::*;
 
 impl LspPlugin {
+    /// Answer an agent-tool request with an empty payload when the view has no
+    /// language server.
+    ///
+    /// The proxy/tool contract is exactly one reply per request. Returning
+    /// early without a reply leaves the caller blocked until its deadline
+    /// expires (5 s today), even though "no language server" simply means the
+    /// result is empty. The payload shape must match the populated reply for
+    /// `kind`.
+    fn publish_empty_agent_tool_result(&self, view_id: ViewId, kind: &str) {
+        let Some(core) = self.core.as_ref() else {
+            return;
+        };
+        let payload = match kind {
+            "document_symbols" => json!({ "symbols": [] }),
+            "references" => json!({ "references": [] }),
+            "list_code_actions" => json!({ "actions": [] }),
+            "format_preview" => json!({ "edits": [] }),
+            "preview_rename" => json!({ "files": [] }),
+            _ => return,
+        };
+        core.show_agent_tool_result(view_id, kind, payload);
+    }
     pub(super) fn request_agent_document_symbols(&mut self, view: &mut View<ChunkCache>) {
         let view_id = view.get_id();
         let file_path = match view.get_path() {
@@ -15,6 +37,7 @@ impl LspPlugin {
             }
         };
         let Ok(ls_client_arc) = self.client_for_view(view) else {
+            self.publish_empty_agent_tool_result(view_id, "document_symbols");
             return;
         };
         let request = ls_client_arc
@@ -86,6 +109,7 @@ impl LspPlugin {
             }
         };
         let Ok(ls_client_arc) = self.client_for_view(view) else {
+            self.publish_empty_agent_tool_result(view_id, "references");
             return;
         };
         let request = ls_client_arc
@@ -145,6 +169,7 @@ impl LspPlugin {
             }
         };
         let Ok(ls_client_arc) = self.client_for_view(view) else {
+            self.publish_empty_agent_tool_result(view_id, "list_code_actions");
             return;
         };
         let request = ls_client_arc
@@ -234,6 +259,7 @@ impl LspPlugin {
             insert_spaces: view.get_config().translate_tabs_to_spaces,
         });
         let Ok(ls_client_arc) = self.client_for_view(view) else {
+            self.publish_empty_agent_tool_result(view_id, "format_preview");
             return;
         };
         let request = ls_client_arc
@@ -292,6 +318,7 @@ impl LspPlugin {
             }
         };
         let Ok(ls_client_arc) = self.client_for_view(view) else {
+            self.publish_empty_agent_tool_result(view_id, "preview_rename");
             return;
         };
         let request = ls_client_arc

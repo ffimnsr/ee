@@ -40,6 +40,7 @@ mod agent_setup;
 mod app;
 mod backend;
 mod buffer;
+mod clipboard;
 mod config;
 mod folds;
 mod git;
@@ -471,6 +472,13 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     )?;
     terminal.show_cursor()?;
 
+    // Stop the clipboard worker last, after the terminal is restored: with
+    // `clipboard_wait_on_exit` the worker re-asserts the last value and can
+    // block for its bounded window, and that must not freeze the alternate
+    // screen. Dropping the `arboard` handle here also runs its clipboard-manager
+    // handover, which is what saves the selection on X11.
+    app.registers.clipboard().shutdown();
+
     if let Err(err) = &result {
         let _ = logs::append_editor_log_line(&format!("io error: {err}"));
     } else {
@@ -690,6 +698,8 @@ fn run_app(
         app.backend.drain_events()?;
         // Complete deferred saves after format/code-action results settled.
         app.pump_format_on_save();
+        // Surface any clipboard failure the worker reported this frame.
+        app.poll_clipboard_status();
         app.sync_status_toast();
 
         if app.redraw_requested {

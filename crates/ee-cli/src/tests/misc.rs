@@ -815,6 +815,12 @@ fn register_prefix_sets_pending_register() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE)));
     assert_eq!(app.input_state.pending_register, Some(RegisterName::PrimaryClipboard));
+
+    // An uppercase designator records the append flag alongside the register.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE)));
+    assert_eq!(app.input_state.pending_register, Some(RegisterName::Named('a')));
+    assert!(app.input_state.pending_register_append);
 }
 
 // ── Marks ─────────────────────────────────────────────────────────────────

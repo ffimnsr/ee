@@ -608,6 +608,36 @@ impl From<EditNotification> for EventDomain {
                     method: "request_rename",
                     params: serde_json::json!({ "new_name": new_name }),
                 }.into(),
+            AgentDocumentSymbols =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "ee.agent.document_symbols",
+                    params: serde_json::json!({}),
+                }.into(),
+            AgentReferences =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "ee.agent.references",
+                    params: serde_json::json!({}),
+                }.into(),
+            AgentListCodeActions =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "ee.agent.list_code_actions",
+                    params: serde_json::json!({}),
+                }.into(),
+            AgentFormatPreview =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "ee.agent.format_preview",
+                    params: serde_json::json!({}),
+                }.into(),
+            AgentPreviewRename { new_name } =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "ee.agent.preview_rename",
+                    params: serde_json::json!({ "new_name": new_name }),
+                }.into(),
             RequestHover { request_id, position } =>
                 SpecialEvent::RequestHover { request_id, position }.into(),
             DeleteLineRange { start_line, end_line } =>

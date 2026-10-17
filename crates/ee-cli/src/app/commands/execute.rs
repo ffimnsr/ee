@@ -161,7 +161,7 @@ impl App {
             }
             "yank_to_clipboard" => {
                 if let Some((start, end)) = range {
-                    self.yank_line_range_into_register(start, end, RegisterName::Clipboard);
+                    self.yank_line_range_into_register(start, end, RegisterName::Clipboard, false);
                 } else {
                     self.yank_selection_to_register(RegisterName::Clipboard);
                 }
@@ -180,7 +180,12 @@ impl App {
             }
             "yank_to_primary_clipboard" => {
                 if let Some((start, end)) = range {
-                    self.yank_line_range_into_register(start, end, RegisterName::PrimaryClipboard);
+                    self.yank_line_range_into_register(
+                        start,
+                        end,
+                        RegisterName::PrimaryClipboard,
+                        false,
+                    );
                 } else {
                     self.yank_selection_to_register(RegisterName::PrimaryClipboard);
                 }

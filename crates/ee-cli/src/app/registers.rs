@@ -53,10 +53,28 @@ impl App {
         self.macro_replaying = false;
     }
     /// Consume the pending register, falling back to `Unnamed`.
-    pub(super) fn take_register(&mut self) -> RegisterName {
-        self.input_state.pending_register.take().unwrap_or(RegisterName::Unnamed)
+    ///
+    /// Returns `(register, append)`: `append` is `true` when the prefix was an
+    /// uppercase designator (`"Ayy`), which appends to the lowercase register.
+    /// The flag is cleared on read so it never leaks into a later operation.
+    pub(super) fn take_register(&mut self) -> (RegisterName, bool) {
+        let append = std::mem::take(&mut self.input_state.pending_register_append);
+        (self.input_state.pending_register.take().unwrap_or(RegisterName::Unnamed), append)
+    }
+    /// Consume the pending register for a paste.
+    ///
+    /// With `clipboard=unnamedplus` a plain `p` reads the system clipboard, so
+    /// both the fallback and an explicit `""` follow the configured routing;
+    /// any other `"x` prefix wins.
+    pub(super) fn take_paste_register(&mut self) -> RegisterName {
+        // An uppercase prefix (`"Ap`) pastes from the lowercase register; the
+        // append flag is meaningless here and must not leak into the next yank.
+        self.input_state.pending_register_append = false;
+        let reg = self.input_state.pending_register.take().unwrap_or(RegisterName::Unnamed);
+        self.registers.read_register(reg)
     }
     pub(super) fn insert_register_for_current_mode(&mut self, reg: RegisterName) {
+        let reg = self.registers.read_register(reg);
         let text = self.registers.get(&reg);
         if text.is_empty() {
             return;
@@ -108,7 +126,7 @@ impl App {
     }
     /// Paste register content.  `before` = `P` (before cursor), else `p`.
     pub(super) fn paste(&mut self, before: bool) {
-        let reg = self.take_register();
+        let reg = self.take_paste_register();
         let text = self.registers.get(&reg);
         if text.is_empty() {
             return;

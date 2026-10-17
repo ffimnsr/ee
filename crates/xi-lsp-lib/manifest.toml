@@ -81,3 +81,51 @@ arg_type = "String"
 rpc_type = "notification"
 method = "request_workspace_symbols"
 params = { query = "" }
+
+# Agent-tool commands. The editor sends these on behalf of the agent tool
+# surface; the plugin answers on the agent-tool channel rather than the
+# editor result queue.
+[[commands]]
+title = "Agent: Document Symbols"
+description = "Answer an agent document-symbols request"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "ee.agent.document_symbols"
+params = {}
+
+[[commands]]
+title = "Agent: References"
+description = "Answer an agent references request"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "ee.agent.references"
+params = {}
+
+[[commands]]
+title = "Agent: Code Actions"
+description = "Answer an agent code-actions request"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "ee.agent.list_code_actions"
+params = {}
+
+[[commands]]
+title = "Agent: Format Preview"
+description = "Answer an agent format-preview request"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "ee.agent.format_preview"
+params = {}
+
+[[commands]]
+title = "Agent: Rename Preview"
+description = "Answer an agent rename-preview request"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "ee.agent.preview_rename"
+params = {}

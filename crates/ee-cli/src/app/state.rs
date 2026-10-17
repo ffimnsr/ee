@@ -1,6 +1,7 @@
 use super::*;
 
 use super::commands::PendingSavePipeline;
+use crate::clipboard::{ClipboardConfig, ClipboardEnvironment, ClipboardHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Operator {
@@ -186,6 +187,9 @@ pub(crate) struct InputState {
     pub(crate) awaiting_register_insert: bool,
     /// Register selected via `"<char>` prefix; `None` = unnamed.
     pub(crate) pending_register: Option<RegisterName>,
+    /// Set when the register prefix was an uppercase designator (`"A`), which
+    /// appends to the lowercase register on the next yank/delete.
+    pub(crate) pending_register_append: bool,
     /// Set when `m` is pressed in Normal mode; next char sets a mark.
     pub(crate) awaiting_mark_set: bool,
     /// Set when `'` (line_start=true) or `` ` `` (line_start=false) is pressed.
@@ -224,6 +228,7 @@ impl InputState {
         self.awaiting_register = false;
         self.awaiting_register_insert = false;
         self.pending_register = None;
+        self.pending_register_append = false;
         self.awaiting_mark_set = false;
         self.awaiting_mark_jump = None;
         self.awaiting_macro_record = false;
@@ -443,6 +448,18 @@ impl App {
             config.agents.workspace_memory.persist_notes,
         );
 
+        // Plain yank/delete/paste follow the resolved `clipboard` routing, and
+        // the transport follows the resolved backend/OSC 52 settings.
+        let clipboard = ClipboardHandle::with_settings(
+            ClipboardConfig {
+                backend: config.clipboard_backend,
+                osc52_max_bytes: config.clipboard_osc52_max_bytes,
+                wait_on_exit: config.clipboard_wait_on_exit,
+            },
+            ClipboardEnvironment::detect(),
+        );
+        let registers = RegisterStore::with_clipboard(config.clipboard, clipboard);
+
         Ok(Self {
             config,
             key_bindings,
@@ -462,7 +479,7 @@ impl App {
             visual_anchor: None,
             visual_restore_cursor: None,
             last_visual: None,
-            registers: RegisterStore::new(),
+            registers,
             last_change: None,
             insert_buffer: String::new(),
             recording: false,
@@ -520,6 +537,16 @@ impl App {
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })
+    }
+
+    /// Surfaces a pending clipboard failure as a status message.
+    ///
+    /// Writes and reads are asynchronous, so failures are reported by the
+    /// worker and drained here once per frame (and once per failure streak).
+    pub(crate) fn poll_clipboard_status(&mut self) {
+        if let Some(message) = self.registers.clipboard().take_error() {
+            self.backend.status_message = Some(message);
+        }
     }
 
     /// Mirrors newly reported backend status into a time-limited toast.

@@ -6228,3 +6228,152 @@ fast path must not change semantics — see `compute_info_mixed_utf8_keeps_gener
 - [x] `cargo fmt --all -- --check` and clippy clean on touched crates.
 - [x] Bench and probe runtimes stay small enough to run on a 16 GiB box
       (no 32 MiB+ default sweeps).
+
+## System Clipboard Integration: arboard + OSC 52
+
+Editor-side clipboard parity with Vim's `clipboard=unnamedplus`, backed by `arboard` (X11, Wayland, macOS, Windows) with OSC 52 as the SSH/container fallback. Frontend-only: `RULE.md` places clipboard, registers, and OSC 52 in `ee-cli`. No backend, xi edit protocol, or schema change. Design: `docs/upgrades/system-clipboard.md`.
+
+Locked decisions: default routing `unnamedplus`; OSC 52 cap 16 KiB (tmux-safe); `wayland-data-control` always on; `*` maps to the system clipboard on macOS/Windows; `clipboard_wait_on_exit` defaults true with a bounded 2 s wait.
+
+### Phase 1: Transport swap, no behaviour change
+
+- [x] Add workspace dependency `arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }` and `arboard.workspace = true` in `crates/ee-cli/Cargo.toml`; commit `Cargo.lock`.
+- [x] Create `crates/ee-cli/src/clipboard/{mod,backend,osc52,policy,test_backend}.rs`; register `mod clipboard;` in `lib.rs` and `main.rs`.
+- [x] Move `read_clipboard`, `write_clipboard`, selection helpers, OSC 52 writer, and `base64_encode` out of `registers.rs` into the new module.
+- [x] Keep the thread-local test backend so tests never touch a real clipboard.
+- [x] Keep `+`/`*` behaviour byte-for-byte identical; no config or routing change yet.
+- [ ] Validate: `cargo test --quiet -p ee-cli`, clippy `--all-features --locked -- -D warnings`, musl release build.
+  - [x] `cargo check`/`cargo clippy -p ee-cli --all-targets --all-features --locked -- -D warnings` clean; `cargo fmt --all -- --check` clean.
+  - [x] Clipboard, register, and paste tests pass (`registers`, `clipboard`, `edit_paste` filters).
+  - [ ] musl release build: not run locally (target and `musl-gcc` absent). Dependency analysis says it is safe — the resolved graph enables only wayland's pure-Rust backend (`wayland-client`/`wayland-backend`/`wayland-sys` request just `default`, which those crates do not define), so `wayland-sys/build.rs` never probes `wayland-client` through pkg-config and nothing links a system Wayland library.
+
+#### Exit criteria
+
+- [x] `registers.rs` no longer shells out to `xclip`/`xsel` directly.
+- [x] Existing `tests/edit_paste.rs` clipboard tests pass unchanged.
+- [ ] musl release build passes with `wayland-data-control` enabled (see note above).
+
+#### Phase 1 notes
+
+- The full `cargo test --quiet -p ee-cli --all-features --locked` run reports 8 failures, all tree-sitter/fold/plugin tests (`tests::folding::*`, `tests::edit_buffer::fold_*`, `tests::misc::markdown_symbols_use_tree_sitter_when_lsp_is_disabled`, `tests::notifications::opening_yaml_after_scratch_buffer_emits_syntax_spans`). They reproduce on a clean tree with the phase 1 changes stashed, so they are pre-existing in this environment and unrelated to the clipboard work.
+- Implementation details worth carrying forward: reads and writes switch on `cfg(test)` rather than a runtime-selected backend, so the worker thread and the OSC 52 writer are not compiled into test builds; the OSC 52 sequence builder is compiled in every build and covered by golden-byte tests. OSC 52 emission still happens inline on the calling thread (policy gating and the tmux wrapper land in phase 3); `write_text` returns whether any transport accepted the write, and register yanks ignore that value exactly as before.
+- Review pass fixes: reads use a 100 ms deadline when a cached value can cover a timeout and 500 ms when nothing is cached, because the first read also pays for worker spawn and display-server connection and a 100 ms fallback would silently paste nothing; the worker reports an empty clipboard as authoritative content rather than a failure so a stale cached value is never substituted; `:clear` resets register fields without replacing the clipboard transport, because dropping it closes the worker channel and releases selection ownership, which wipes the system clipboard for other applications.
+
+### Phase 2: Vim routing and config
+
+- [x] Add `ClipboardRouting` and `ClipboardBackendKind` in `clipboard/policy.rs`.
+- [x] Add `clipboard`, `clipboard_backend`, `clipboard_osc52_max_bytes`, `clipboard_wait_on_exit` to `EeToml` (`config/raw.rs`).
+- [x] Resolve them in `EditorSettings` (`Default`, `merge_toml`) with comma-tolerant `clipboard` parsing and unknown-token warnings.
+- [x] Add `EE_CLIPBOARD` and `EE_CLIPBOARD_BACKEND` env overrides that win over `.ee.toml`.
+- [x] Mirror `yank`/`delete` to `+` (`unnamedplus`) or `*` (`unnamed`); `p` with no register reads the mirrored selection; `off` disables plain-operation OS calls.
+- [x] Wire `:set clipboard` (`cb`), `:set clipboard?`, `:set clipboard_backend`, `:set clipboard_osc52_max_bytes`, `:set clipboard_wait_on_exit` into `app/commands/settings.rs`.
+- [x] Construct the store from resolved settings in `App::from_path` (`app/state.rs`).
+- [x] Regenerate `schemas/ee-config.schema.json` and render the new keys in `config/init.rs`.
+
+#### Exit criteria
+
+- [x] Default `unnamedplus`: plain `y`, `d`, `Y`, operators, and visual yanks reach the OS clipboard; `p` reads it back.
+- [x] `off` and `unnamed` behave as documented; explicit `+`/`*` remain unchanged under all values.
+- [x] `:set clipboard?` reports the active value; invalid values report an error instead of silently applying.
+
+#### Phase 2 notes
+
+- Deltas from the sketch: reads resolve through `RegisterStore::read_register`, which aliases only the unnamed register to the routed selection; consumers are `App::take_paste_register` (`p`/`P`, `R`-paste, visual `p`) and `insert_register_for_current_mode` (`<C-r>x`), not `take_register`. `yank`/`delete` still take the explicit/`Unnamed` register so the numbered shift and the `0` register are not skipped when mirroring. `RegisterStore::get(&Unnamed)` stays internal-only — routing affects write mirroring and read resolution, not the getter, so no hidden OS read appears in unrelated paths.
+- Second pass: an explicit `""` (`""p`, `<C-r>"`) now follows the routing instead of reading the internal unnamed register, matching Vim where `""` *is* the routed selection. A `clipboard` value that names no known token is no longer treated as `off`: config keeps the current/default routing and `:set` reports `invalid value`, so a typo cannot silently disable mirroring. Also confirmed `:set` needs no `is_plausible_value` additions — `clipboard`/`clipboard_backend` are value options and `off` already parses as a bool.
+- `off` disables mirroring for *plain* `y`/`d`; explicit `"+`/`"*` keep working under every value (Vim semantics). No status message is emitted on a successful yank; only failures surface, and that is phase 3.
+- Env override lookup is injected (`apply_clipboard_env`), so precedence is unit-tested without mutating process-global environment state.
+- Test coverage landed: routing/backend parse matrix and `mirror_selection` (`clipboard/policy.rs`); mirror on plain/named yank and delete with numbered shift preserved, per-routing `default_paste_register`, `set_routing` (`registers.rs`); defaults, per-key parse, comma list, empty→off, env precedence/unknown (`config/tests/editor.rs`); `:set` each option, `:set clipboard?`, invalid value (`tests/edit_commands.rs`).
+
+### Phase 3: Backend policy, OSC 52 hardening, agent unification
+
+- [x] Implement `auto`: OSC 52 first when `SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT` is set, otherwise arboard first with OSC 52 fallback.
+- [x] Map `arboard::Error` variants: retry once on `ClipboardOccupied`, fall back on `ClipboardNotSupported`, suppress `ContentNotAvailable`, surface the rest once.
+- [x] OSC 52: tmux DCS passthrough when `TMUX` is set, screen wrap when `STY` is set, tty-only write, 16 KiB cap with a single status message on skip.
+- [x] Move reads off the UI thread: worker round-trip with a bounded 100 ms wait only for explicit `+p`/`*p`, cached value everywhere else.
+- [x] Implement `ClipboardHandle::shutdown()` and the bounded `wait_until` honouring `clipboard_wait_on_exit`.
+- [x] Replace `registers::write_system_clipboard` with the handle; update `app/agent_pane/app_workflow.rs` and drop the `cfg(feature = "agents")` special case.
+
+#### Exit criteria
+
+- [x] No clipboard operation blocks the UI thread unbounded; writes are channel sends.
+- [x] SSH sessions copy to the local terminal clipboard via OSC 52.
+- [x] Clipboard failures surface one actionable status message instead of a silent no-op.
+- [x] Agents `/copy` uses the shared transport in both feature configurations.
+
+#### Phase 3 notes
+
+- Pure decisions live in `clipboard/policy.rs` (`Transport`, `TransportPlan`, `TerminalWrap`, `ClipboardConfig`, `ClipboardEnvironment`, `write_plan`/`read_transport`, `classify_write_error`/`classify_read_error`) so the `auto` chain and the error table are unit-tested with no display server; the `arboard`-only worker stays under `cfg(not(test))`.
+- The transport policy runs on the worker, not the UI thread: `write_text` is a channel send, so a failed arboard write falls back to OSC 52 without the UI thread ever waiting on a display server. This keeps the "writes are channel sends" exit criterion while still allowing the `auto` fallback.
+- `ContentNotAvailable` on a write maps to `Ignore` (nothing to report); `Unknown` maps to `Fallback` in `auto` and surfaces otherwise. OSC 52 over-cap skips and reports instead of falling back, because the fallback would target the wrong clipboard over SSH.
+- Failures are queued once per streak through `ErrorSlot` (identical repeats dropped, any success clears the streak) and drained by `App::poll_clipboard_status` each frame.
+- `osc52.rs` no longer falls back to stdout: a missing `/dev/tty` reports `NoTerminal`, so a headless run cannot corrupt a ratatui frame.
+- On shutdown the worker re-asserts the last value *it* placed on the platform clipboard with `wait_until(now + 2 s)` (Linux only) so a clipboard manager can take ownership; `clipboard_wait_on_exit=false` skips it. macOS/Windows keep the clipboard after exit and ignore the wait. `shutdown()` is called after the terminal is restored, so the bounded wait never freezes the alternate screen, and dropping the `arboard` handle still runs its clipboard-manager handover (up to 100 ms) in both configurations.
+- Cost of the exit wait, from the `arboard` source: on Wayland `wait_until` is effectively ignored (`wl-clipboard-rs` backgrounds the copy), so shutdown is immediate. On X11 `wait_until` blocks the full window unless another client takes the clipboard, so an X11 exit can pause up to 2 s. Flagged as an open point in `docs/upgrades/system-clipboard.md` §8; users can set `clipboard_wait_on_exit=false` for a snappy exit.
+- `:set clipboard_backend|clipboard_osc52_max_bytes|clipboard_wait_on_exit` now update the handle live via `RegisterStore::clipboard()`.
+- Test coverage added: transport plan per backend/remote, read transport per backend, environment detection (SSH variants, empty-var handling, tmux/screen precedence), write/read error classification, OSC 52 tmux/screen golden bytes and cap boundary, `ErrorSlot` once-per-streak, live settings updates, and `shutdown` no-op without a worker.
+- Second pass: `shutdown()` now runs *after* the terminal is restored, so the bounded exit wait cannot freeze the alternate screen (dropping the `arboard` handle still runs its clipboard-manager handover in both configurations); the worker only re-asserts a value it actually wrote rather than one it silently ignored; `DEFAULT_OSC52_MAX_BYTES` replaces the duplicated literal in `EditorSettings::default`; and a `#[cfg(test)] ClipboardHandle::test_config` seam lets `tests/edit_commands.rs` assert that `:set clipboard_backend|clipboard_osc52_max_bytes|clipboard_wait_on_exit` reach the live handle.
+
+### Phase 4: Docs and polish
+
+- [x] Document the config block in `README.md`; note `clipboard=unnamedplus` parity in `VIM.md`; record the default change in `CHANGELOG.md`.
+- [x] Fix the dropped uppercase append at `app/key_sequence.rs:150-154` by propagating the append flag into `RegisterStore::yank`/`delete`.
+- [x] Prefetch evaluation (deferred, not implemented): a tick prefetch would poll the OS clipboard on every interval forever — an X11 round-trip to the owning application and a Wayland `data-control` transfer each time — and `read_text`'s cold path is a *timeout*, not a sleep, so a healthy read already returns in milliseconds and the win is marginal. The polite trigger would be terminal focus-gain, but ee does not enable crossterm focus reporting; revisit only if a focus hook lands.
+
+#### Exit criteria
+
+- [x] Docs describe all four options with the locked defaults.
+- [x] `"Ayy` appends to register `a`.
+
+#### Phase 4 notes
+
+- Append propagation: `InputState` gained `pending_register_append`; `App::take_register` now returns `(RegisterName, bool)` and all 20 yank/delete call sites pass the flag into `RegisterStore::yank`/`delete`. `take_paste_register` clears the flag so `"Ap` cannot leak an append into the next operation. `yank_line_range_into_register` takes the flag as a parameter (explicit `+`/`*` command callers pass `false`).
+- Docs: README gained a `### Clipboard` block with the four options and the locked defaults; `VIM.md` notes the `space`/`K` conflicts are unaffected by routing; `CHANGELOG.md` records the default-behaviour change for existing users.
+
+### Phase 5: Validation and compatibility matrix
+
+- [x] Unit coverage: routing matrix, test-backend roundtrip, OSC 52 golden bytes plus tmux/screen wrappers and cap skip, selection mapping, config parse and precedence, `:set` query and validation.
+- [x] E2E coverage in `tests/edit_paste.rs`: default mirroring on `y`/`d`, `p` after an external clipboard change, explicit `+`/`*` unchanged.
+- [x] `cargo test --quiet --workspace --all-features --locked` and clippy `--all-targets --all-features --locked -- -D warnings` pass.
+- [ ] musl and macOS release targets build.
+- [ ] Manual matrix: X11, Wayland with and without data-control, tmux, SSH, macOS.
+- [x] No test spawns `xclip`, `xsel`, `wl-copy`, or a real `arboard::Clipboard`.
+
+#### Exit criteria
+
+- [ ] Platform matrix verified or explicitly recorded as untested for any environment not available locally.
+- [x] New dependency tree audited (`cargo tree -d`); no duplicate or unlicensed additions.
+
+#### Phase 5 notes
+
+- Full run: `ee` bin 1586 passed / 0 failed / 5 ignored (43 s); workspace green; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` and `cargo fmt --all -- --check` clean.
+- New E2E tests: `default_routing_mirrors_plain_yank_to_system_clipboard`, `plain_paste_reads_a_changed_system_clipboard`, `off_routing_keeps_plain_yank_internal_but_explicit_register_works`.
+- `cargo tree -d`: arboard 3.7 adds no new duplicate version and no `image` crate (`default-features = false`); its `rustix 1.1.5` and `wayland-*` are reused. The only `rustix` split (`0.38.44` vs `1.1.5`) is pre-existing (crossterm/fs4 vs agent-client-protocol).
+- Recorded as untested locally (no target/toolchain present): the musl release build (`x86_64-unknown-linux-musl`) and the macOS release target. The phase-1 dependency analysis stands — the resolved graph enables only wayland's pure-Rust backend, so `wayland-sys/build.rs` never probes a system library.
+- Manual platform matrix (X11, Wayland with/without data-control, tmux, SSH, macOS) not run in this environment; the transport decisions are unit-tested with an injected environment, but live display-server behaviour is unverified here.
+
+## Test Hygiene: ETXTBSY and the Markdown Symbols Flake [2026-10-18]
+
+Follow-up from the clipboard phase 3 validation. Two pre-existing flakes surfaced under the full parallel workspace run; both are now fixed.
+
+### Fixed: ETXTBSY when running a just-written agent binary
+
+- [x] `agent_setup::read_manifest` and `agent_registry::command_reports_version` both `exec` a binary the test (or installer) just wrote. On Linux, `exec` of a file another thread still holds open for writing — including a descriptor a concurrent `fork` in this multithreaded process inherited — fails with `Text file busy` (os error 26). Under parallel test execution this is routine; the observed failure was `agent_setup::tests::manifest_is_read_from_agent_ee_config_command`.
+- [x] Extracted `agent_registry::spawn_retrying_text_busy` (20 × 5 ms) out of `spawn_version_probe` and reused it in `read_manifest`, so both spawn sites share one retry policy.
+
+### Fixed: `tests::misc::markdown_symbols_use_tree_sitter_when_lsp_is_disabled` (env race, not the grammar)
+
+- [x] Root cause: a **process-global environment race**, not the markdown grammar and not the tree-sitter/query impl. `agent_pane::live_config_home()` set `XDG_CONFIG_HOME` to its own temp root *without* holding the shared `test_cwd_lock`, while it (and the markdown test) ran in parallel. The markdown test reads `XDG_CONFIG_HOME` throughout (core plugin discovery + plugin spawn), so a concurrent `live_config_home()`/`EnvVarGuard` drop clobbered it mid-run. The core then resolved a *different* config dir — sometimes the developer's real `~/.config` — so it started the real (stale, un-instrumented) `xi-lsp-plugin` instead of the isolated test one, and document symbols came back empty for the whole retry window.
+- [x] Evidence: `cargo test --quiet -p ee-cli --all-features --locked --bin ee -- --skip agent_pane` → 6/6 green; the flake only returns when `agent_pane` runs. Env-gated logging showed the failing plugin/frontend observed a bare `XDG_CONFIG_HOME` (`/tmp/.tmpXXXX`) or `/home/pastel/.config` instead of the test's `.../xdg-config`, and the plugin logged `path=None lang=Plain Text` (no view metadata because it was the wrong plugin).
+- [x] Fix: `live_config_home()` now acquires `crate::config::test_cwd_lock()` and holds it for the fixture's lifetime (`LiveConfigHome._cwd_lock`), so `XDG_CONFIG_HOME` stays isolated exactly like every other env-mutating test. Lock order is consistent (`phase_six_live_lock` → `test_cwd_lock` everywhere), no background thread takes the lock, and wall-clock is unchanged (~43 s for the `ee` bin). Verified 8/8 (instrumented) and 4/4 (final tree) plus a green full-workspace run.
+- [x] Ruled out: the grammar/query impl. `document_symbols_for_text` is correct — the same call logged `done lang=Some("markdown") symbols=2` on passing runs; failures never reached the fallback at all because the wrong plugin was running.
+- [x] Ruled out: the installed plugin binary is hermetic — `strings target/debug/xi-lsp-plugin` still shows `ee_ts_test_grammars` / `tree-sitter-md`, so the `test-grammars` preload is present. (An earlier check grepped `tree_sitter_md` with an underscore and produced a false negative.)
+- [x] Ruled out: the shared-artifact relink race. Serialising plugin-binary resolution (below) did not change the flake rate.
+- [x] Ruled out: view-metadata delivery and the tags-query artifact — both were red herrings produced by the wrong plugin being spawned.
+- Note for future env-mutating tests: any `EnvVarGuard::set`/`remove_var` that another test can observe must run inside a `test_cwd_lock()` critical section. `live_config_home` was the only XDG setter missing it.
+- [x] Guard test: `agent_pane::flaky_regressions::live_config_home_holds_cwd_lock_for_its_lifetime` pins the invariant. A worker thread that calls `test_cwd_lock().lock()` must stay blocked while a `LiveConfigHome` is alive — deterministic, because the fixture owns the lock, so the assertion never depends on wall-clock timing — and must acquire it once the fixture drops. This fails if the lock is ever moved out of the fixture again.
+
+### Harness: plugin binary resolution
+
+- [x] `tests/helpers.rs` resolves each workspace test binary once per process (`cached_workspace_binary`) into a private copy under `target/debug/ee-test-bin/`, and drops the now-duplicate `install_cached_test_lsp_plugin`. Previously every install spawned its own `cargo build` and then `fs::copy`-ed the shared 469 MB artifact from many parallel threads, which could overlap another thread's relink.
+- Note: this is a speed and robustness change, not the markdown fix.
+- Note: the `install_lsp_plugin_from` copy is still ~470 MB per install; a hardlink with a copy fallback would help if test wall-clock regresses.

@@ -318,7 +318,37 @@ fn commit_git_baseline(workspace: &std::path::Path) {
         .expect("commit fixture baseline");
 }
 
-fn live_openrouter_app_in(workspace: &std::path::Path, factory: LiveOpenRouterTransport) -> App {
+/// Isolated config home for a live fixture.
+///
+/// Live fixtures must not read the plugin tree installed on the developer
+/// machine: a stale tree never registers the `ee.agent.*` commands, so every
+/// agent tool request waits out its proxy deadline instead of exercising the
+/// code under test. Installing the current plugin keeps these tests hermetic.
+struct LiveConfigHome {
+    _dir: tempfile::TempDir,
+    _guard: EnvVarGuard,
+    _cwd_lock: crate::config::TestCwdGuard,
+}
+
+fn live_config_home() -> LiveConfigHome {
+    let dir = tempfile::tempdir().expect("live config home");
+    install_test_lsp_plugin(dir.path());
+    // Hold the shared cwd/env lock for the fixture's lifetime. `XDG_CONFIG_HOME`
+    // is process-global, so a concurrent test that sets it (even to its own
+    // temp dir) clobbers this one mid-run; tests that depend on a stable XDG
+    // config -- e.g. the isolated LSP plugin -- then resolve the wrong config
+    // or the developer's real one. Serialising on the same lock every
+    // env-mutating test already uses keeps the variable isolated.
+    let cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let guard = EnvVarGuard::set("XDG_CONFIG_HOME", dir.path());
+    LiveConfigHome { _dir: dir, _guard: guard, _cwd_lock: cwd_lock }
+}
+
+fn live_openrouter_app_in(
+    workspace: &std::path::Path,
+    factory: LiveOpenRouterTransport,
+) -> (App, LiveConfigHome) {
+    let home = live_config_home();
     let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
     let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(workspace).unwrap();
@@ -326,7 +356,7 @@ fn live_openrouter_app_in(workspace: &std::path::Path, factory: LiveOpenRouterTr
     drop(_cwd_restore);
     drop(_cwd_lock);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(factory));
-    app
+    (app, home)
 }
 
 /// Builds an `App` in an existing workspace and installs the fake agent for

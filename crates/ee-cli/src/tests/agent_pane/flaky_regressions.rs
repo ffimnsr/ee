@@ -82,7 +82,7 @@ fn phase_six_live_openrouter_pane_repeated_selected_validation_stops_repair() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     wait_until(&mut app, "target buffer loaded", |app| {
@@ -194,7 +194,7 @@ fn phase_six_live_openrouter_pane_diagnostics_regression_reports_blocked_evidenc
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     wait_until(&mut app, "target buffer loaded", |app| {
@@ -263,7 +263,7 @@ fn phase_six_live_openrouter_pane_stale_revision_after_evidence_is_blocked() {
         state.path().join("agent-sessions"),
         scripted.clone(),
     );
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     wait_until(&mut app, "target buffer loaded", |app| {
@@ -337,7 +337,7 @@ pub(super) fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
     )
     .with_turn_timeout(turn_timeout)
     .with_auto_resume_max(0);
-    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let (mut app, _home) = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
     open_pane_and_wait_ready(&mut app);
@@ -417,4 +417,57 @@ pub(super) fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
 
     app.shutdown_agents();
     factory.shutdown();
+}
+
+/// Guard for the markdown-symbols flake (see `ISSUES.md` "Test Hygiene").
+///
+/// `live_config_home()` mutates the process-global `XDG_CONFIG_HOME`, so it must
+/// hold the shared `test_cwd_lock` for the fixture's whole lifetime. If the lock
+/// is dropped early, a concurrent env-mutating test clobbers the variable, the
+/// isolated LSP plugin resolves the wrong config dir, and document symbols come
+/// back empty for the whole retry window.
+///
+/// Deterministic: while the fixture is alive the worker cannot acquire the lock,
+/// so the "still blocked" assertion never depends on wall-clock timing.
+#[test]
+fn live_config_home_holds_cwd_lock_for_its_lifetime() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+
+    // Same lock order as every live fixture: live lock first, then the cwd/env lock.
+    let _live_lock = phase_six_live_lock();
+    let home = live_config_home();
+
+    let attempting = Arc::new(AtomicBool::new(false));
+    let acquired = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel();
+
+    let worker_attempting = Arc::clone(&attempting);
+    let worker_acquired = Arc::clone(&acquired);
+    let worker = thread::spawn(move || {
+        worker_attempting.store(true, Ordering::SeqCst);
+        let _guard = crate::config::test_cwd_lock().lock().unwrap();
+        worker_acquired.store(true, Ordering::SeqCst);
+        let _ = done_tx.send(());
+    });
+
+    // Bounded wait until the worker has actually reached the lock attempt.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !attempting.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "worker thread never started");
+        thread::yield_now();
+    }
+    // The fixture holds the lock, so the worker must still be blocked.
+    assert!(
+        !acquired.load(Ordering::SeqCst),
+        "live_config_home did not hold test_cwd_lock: another thread acquired it while the fixture was alive"
+    );
+
+    drop(home);
+
+    done_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("worker never acquired test_cwd_lock after the fixture was dropped");
+    worker.join().unwrap();
+    assert!(acquired.load(Ordering::SeqCst));
 }

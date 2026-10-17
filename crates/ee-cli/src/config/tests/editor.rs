@@ -1,5 +1,6 @@
 use super::super::*;
 
+use crate::clipboard::{ClipboardBackendKind, ClipboardRouting};
 use serde_json::Value;
 #[test]
 fn ee_toml_parses_indent_style() {
@@ -161,4 +162,97 @@ fn ee_toml_parses_indent_guides_with_defaults_and_safety_cap() {
     let raw: EeToml = toml::from_str("indent_guides_max_lines = 0\n").unwrap();
     settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
     assert_eq!(settings.indent_guides_max_lines, 0);
+}
+
+#[test]
+fn clipboard_defaults_are_vim_unnamedplus() {
+    let settings = EditorSettings::default();
+    assert_eq!(settings.clipboard, ClipboardRouting::UnnamedPlus);
+    assert_eq!(settings.clipboard_backend, ClipboardBackendKind::Auto);
+    assert_eq!(settings.clipboard_osc52_max_bytes, 16_384);
+    assert!(settings.clipboard_wait_on_exit);
+}
+
+#[test]
+fn ee_toml_parses_clipboard_options() {
+    let raw: EeToml = toml::from_str(
+        "clipboard = \"unnamed\"\nclipboard_backend = \"osc52\"\nclipboard_osc52_max_bytes = 4096\nclipboard_wait_on_exit = false\n",
+    )
+    .unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+
+    assert_eq!(settings.clipboard, ClipboardRouting::Unnamed);
+    assert_eq!(settings.clipboard_backend, ClipboardBackendKind::Osc52);
+    assert_eq!(settings.clipboard_osc52_max_bytes, 4096);
+    assert!(!settings.clipboard_wait_on_exit);
+}
+
+#[test]
+fn clipboard_list_value_prefers_unnamedplus() {
+    let raw: EeToml = toml::from_str("clipboard = \"unnamed,unnamedplus\"\n").unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.clipboard, ClipboardRouting::UnnamedPlus);
+}
+
+#[test]
+fn empty_clipboard_value_disables_routing() {
+    let raw: EeToml = toml::from_str("clipboard = \"\"\n").unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.clipboard, ClipboardRouting::Off);
+}
+
+#[test]
+fn unknown_clipboard_value_keeps_the_previous_routing() {
+    let raw: EeToml = toml::from_str("clipboard = \"unnamedpluss\"\n").unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    // A typo must not silently downgrade routing to `off`.
+    assert_eq!(settings.clipboard, ClipboardRouting::UnnamedPlus);
+
+    // A recognised token still wins over an unknown one in the same list.
+    let raw: EeToml = toml::from_str("clipboard = \"unnamed,typo\"\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.clipboard, ClipboardRouting::Unnamed);
+}
+
+#[test]
+fn clipboard_env_overrides_beat_config() {
+    let mut settings = EditorSettings {
+        clipboard: ClipboardRouting::Off,
+        clipboard_backend: ClipboardBackendKind::Arboard,
+        ..Default::default()
+    };
+
+    apply_clipboard_env(&mut settings, |key| match key {
+        "EE_CLIPBOARD" => Some(String::from("unnamedplus")),
+        "EE_CLIPBOARD_BACKEND" => Some(String::from("osc52")),
+        _ => None,
+    });
+
+    assert_eq!(settings.clipboard, ClipboardRouting::UnnamedPlus);
+    assert_eq!(settings.clipboard_backend, ClipboardBackendKind::Osc52);
+}
+
+#[test]
+fn clipboard_env_ignores_unknown_values() {
+    let mut settings = EditorSettings::default();
+    apply_clipboard_env(&mut settings, |key| match key {
+        "EE_CLIPBOARD_BACKEND" => Some(String::from("bogus")),
+        _ => None,
+    });
+    assert_eq!(settings.clipboard_backend, ClipboardBackendKind::Auto);
+}
+
+#[test]
+fn clipboard_env_keeps_routing_on_unknown_value() {
+    let mut settings =
+        EditorSettings { clipboard: ClipboardRouting::Unnamed, ..Default::default() };
+    apply_clipboard_env(&mut settings, |key| match key {
+        "EE_CLIPBOARD" => Some(String::from("bogus")),
+        _ => None,
+    });
+    assert_eq!(settings.clipboard, ClipboardRouting::Unnamed);
 }

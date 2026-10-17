@@ -21,9 +21,9 @@ impl App {
         if !had_visual && !self.select_chars_from_cursor(count) {
             return;
         }
-        let reg = self.take_register();
+        let (reg, append) = self.take_register();
         let text = self.selected_text_preview(false);
-        self.registers.yank(&reg, text, false);
+        self.registers.yank(&reg, text, append);
         let _ = self.backend.send_edit("collapse_selections", json!([]));
         if had_visual {
             self.enter_normal_mode();
@@ -154,9 +154,9 @@ impl App {
             return;
         }
         if yank {
-            let reg = self.take_register();
+            let (reg, append) = self.take_register();
             let text = self.selected_text_preview(false);
-            self.registers.delete(&reg, text, false);
+            self.registers.delete(&reg, text, append);
         }
         self.record_edit("delete_forward", json!([]));
         self.push_change();
@@ -199,7 +199,7 @@ impl App {
         self.push_change();
     }
     pub(super) fn replace_with_yanked(&mut self) {
-        let reg = self.take_register();
+        let reg = self.take_paste_register();
         let text = self.registers.get(&reg);
         if text.is_empty() {
             return;
@@ -505,14 +505,15 @@ impl App {
     }
     /// Yank lines `start..=end` (0-based, inclusive) into the active register.
     pub(super) fn yank_line_range(&mut self, start: usize, end: usize) {
-        let reg = self.take_register();
-        self.yank_line_range_into_register(start, end, reg);
+        let (reg, append) = self.take_register();
+        self.yank_line_range_into_register(start, end, reg, append);
     }
     pub(super) fn yank_line_range_into_register(
         &mut self,
         start: usize,
         end: usize,
         reg: RegisterName,
+        append: bool,
     ) {
         let line_count = self.backend.line_count();
         if line_count == 0 {
@@ -528,7 +529,7 @@ impl App {
             text.push_str(&line);
             text.push('\n');
         }
-        self.registers.yank(&reg, text, false);
+        self.registers.yank(&reg, text, append);
         let count = end.saturating_sub(start) + 1;
         self.backend.status_message = Some(format!("{count} line(s) yanked"));
     }

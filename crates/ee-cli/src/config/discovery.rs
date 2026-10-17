@@ -11,7 +11,7 @@
 //! Later layers override earlier ones for any key that is explicitly set.
 
 use super::constants::SYSTEM_CONFIG_PATH;
-use super::editor_settings::EditorSettings;
+use super::editor_settings::{EditorSettings, apply_clipboard_env};
 use super::editorconfig::apply_editorconfig;
 use super::lsp::LspSettingsBuilder;
 use super::raw::{EeToml, parse_ee_toml};
@@ -293,6 +293,9 @@ pub(super) fn load_config_with_env(
     if let Some(file_path) = file_path {
         apply_editorconfig(&mut settings, file_path);
     }
+
+    // Process-env overrides win over every file layer.
+    apply_clipboard_env(&mut settings, |key| std::env::var(key).ok());
 
     settings.lsp = lsp.finalize();
     #[cfg(any(feature = "agents", test))]

@@ -335,6 +335,57 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
 }
 
 #[test]
+fn set_clipboard_options_update_config_and_routing() {
+    let mut app = App::from_path(None).unwrap();
+    assert_eq!(app.registers.routing(), crate::clipboard::ClipboardRouting::UnnamedPlus);
+
+    run_ex(&mut app, "set clipboard=off");
+    assert_eq!(app.config.clipboard, crate::clipboard::ClipboardRouting::Off);
+    assert_eq!(app.registers.routing(), crate::clipboard::ClipboardRouting::Off);
+    assert_eq!(app.backend.status_message.as_deref(), Some("set: clipboard=off"));
+
+    run_ex(&mut app, "set clipboard?");
+    assert_eq!(app.backend.status_message.as_deref(), Some("clipboard=off"));
+
+    run_ex(&mut app, "set clipboard=unnamedplus");
+    assert_eq!(app.registers.routing(), crate::clipboard::ClipboardRouting::UnnamedPlus);
+
+    run_ex(&mut app, "set clipboard_backend=osc52");
+    assert_eq!(app.config.clipboard_backend, crate::clipboard::ClipboardBackendKind::Osc52);
+    assert_eq!(
+        app.registers.clipboard().test_config().backend,
+        crate::clipboard::ClipboardBackendKind::Osc52
+    );
+    assert_eq!(app.backend.status_message.as_deref(), Some("set: clipboard_backend=osc52"));
+
+    run_ex(&mut app, "set clipboard_osc52_max_bytes=4096");
+    assert_eq!(app.config.clipboard_osc52_max_bytes, 4096);
+    assert_eq!(app.registers.clipboard().test_config().osc52_max_bytes, 4096);
+
+    run_ex(&mut app, "set clipboard_wait_on_exit=false");
+    assert!(!app.config.clipboard_wait_on_exit);
+    assert!(!app.registers.clipboard().test_config().wait_on_exit);
+
+    run_ex(&mut app, "set clipboard=bogus");
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("set: invalid value"))
+    );
+    // An invalid value must not silently change routing.
+    assert_eq!(app.registers.routing(), crate::clipboard::ClipboardRouting::UnnamedPlus);
+
+    run_ex(&mut app, "set clipboard_backend=bogus");
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("set: invalid value"))
+    );
+}
+
+#[test]
 fn global_search_and_command_palette_commands_open_expected_pickers() {
     let _cwd_lock = cwd_test_lock().lock().unwrap();
     let _cwd_guard = CurrentDirGuard::capture();

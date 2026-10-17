@@ -619,7 +619,22 @@ impl RuntimeLoader {
                     .grammar_symbol_name()
                     .map(str::to_owned)
                     .unwrap_or_else(|| default_symbol_name(language.grammar_id()));
-                let loaded = Loader::load_language(&canonical_library_path, &symbol_name)?;
+                let loaded = match Loader::load_language(&canonical_library_path, &symbol_name) {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        // An installed grammar the host cannot load (stale, or
+                        // built by an incompatible toolchain) must not shadow the
+                        // in-process grammar that test and `test-grammars` builds
+                        // preload, or tree-sitter tests would depend on whatever
+                        // grammar artifacts happen to be present on the host.
+                        // Outside those builds the preload map is empty, so the
+                        // original error still surfaces.
+                        if let Some(handle) = self.preloaded_grammars.get(&normalized) {
+                            return Ok(handle.clone());
+                        }
+                        return Err(error.into());
+                    }
+                };
                 let handle =
                     GrammarHandle::from_loaded(loaded, canonical_library_path.clone(), symbol_name);
                 self.grammar_cache.insert(canonical_library_path, handle.clone());

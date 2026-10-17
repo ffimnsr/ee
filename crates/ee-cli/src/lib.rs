@@ -11,6 +11,8 @@ mod bench_alloc;
 #[allow(dead_code)]
 mod buffer;
 #[allow(dead_code)]
+mod clipboard;
+#[allow(dead_code)]
 mod config;
 #[allow(dead_code)]
 mod folds;

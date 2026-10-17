@@ -65,6 +65,16 @@ pub(crate) struct EeToml {
     pub cursor_line: Option<bool>,
     /// `"default"` or `"minimal"`.
     pub statusline_format: Option<String>,
+    // ── Clipboard options (frontend only) ─────────────────────────────────
+    /// Vim-style `clipboard` option: `"unnamedplus"`, `"unnamed"`, `"off"`,
+    /// or empty. A comma-separated list is accepted; `unnamedplus` wins.
+    pub clipboard: Option<String>,
+    /// `"auto"`, `"arboard"`, or `"osc52"`.
+    pub clipboard_backend: Option<String>,
+    /// Max raw bytes mirrored through OSC 52, measured before base64.
+    pub clipboard_osc52_max_bytes: Option<usize>,
+    /// Hold the selection briefly on exit so the last yank survives.
+    pub clipboard_wait_on_exit: Option<bool>,
     pub lsp: Option<LspToml>,
     #[serde(default)]
     pub formatters: BTreeMap<String, FormatterToml>,
