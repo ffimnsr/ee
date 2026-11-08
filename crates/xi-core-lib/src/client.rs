@@ -88,6 +88,54 @@ impl Client {
         );
     }
 
+    /// Publish one atomic v2 contribution batch.
+    pub fn plugin_contributions(
+        &self,
+        revision: u64,
+        upsert: &[ee_plugin_api::contribution::Contribution],
+        remove: &[ee_plugin_api::ids::ContributionId],
+    ) {
+        self.0.send_rpc_notification(
+            "plugin_contributions",
+            &json!({
+                "revision": revision,
+                "upsert": upsert,
+                "remove": remove,
+            }),
+        );
+    }
+
+    /// Publish the full plugin status snapshot.
+    pub fn plugin_status(&self, status: &impl Serialize) {
+        match serde_json::to_value(status) {
+            Ok(value) => self.0.send_rpc_notification("plugin_status", &value),
+            Err(error) => log::error!("failed to serialize plugin status: {error}"),
+        }
+    }
+
+    /// Publish one plugin health transition.
+    pub fn plugin_health(&self, plugin: &str, state: &str, reason: Option<&str>) {
+        self.0.send_rpc_notification(
+            "plugin_health",
+            &json!({
+                "plugin": plugin,
+                "state": state,
+                "reason": reason,
+            }),
+        );
+    }
+
+    /// Publish a validated decoration patch for one view.
+    pub fn plugin_decorations(&self, view_id: ViewId, payload: &serde_json::Value) {
+        self.0.send_rpc_notification(
+            "plugin_decorations",
+            &json!({
+                "view_id": view_id,
+                "patch": payload,
+            }),
+        );
+    }
+
     /// Notify the client that a plugin has started.
     pub fn plugin_started(&self, view_id: ViewId, plugin: &str) {
         self.0.send_rpc_notification(

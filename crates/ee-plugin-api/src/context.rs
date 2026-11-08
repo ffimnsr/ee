@@ -483,6 +483,7 @@ mod tests {
             title: "Run".to_owned(),
             description: String::new(),
             category: None,
+            mutates_document: false,
             args_schema: None,
         };
         assert!(matches!(
@@ -504,6 +505,7 @@ mod tests {
             title: "Run".to_owned(),
             description: String::new(),
             category: None,
+            mutates_document: false,
             args_schema: None,
         };
         ctx.command(spec, Arc::new(NoopHandler)).unwrap();

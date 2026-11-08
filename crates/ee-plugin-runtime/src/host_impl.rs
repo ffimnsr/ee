@@ -163,6 +163,7 @@ mod tests {
             title: name.to_owned(),
             description: String::new(),
             category: None,
+            mutates_document: false,
             args_schema: None,
         }
     }

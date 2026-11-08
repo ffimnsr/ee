@@ -371,6 +371,15 @@ impl<'a> EventContext<'a> {
     pub(crate) fn after_edit(&mut self, author: &str) {
         let _t = tracing::trace_span!("EventContext::after_edit", categories = "core").entered();
 
+        let before_rev = self.editor.borrow().get_head_rev_token();
+        let edit_type = super::edit_type_to_string(self.editor.borrow().get_edit_type());
+        crate::plugin_runtime::bridge::document_changed_before(
+            self.plugin_host,
+            self.view_id,
+            before_rev,
+            &edit_type,
+        );
+
         let edit_info = self.editor.borrow_mut().commit_delta();
         let (delta, last_text, drift) = match edit_info {
             Some(edit_info) => edit_info,
@@ -378,7 +387,39 @@ impl<'a> EventContext<'a> {
         };
 
         self.update_views(&self.editor.borrow(), &delta, &last_text, drift);
+
+        let (rev, new_len, new_line_count, undo_group) = {
+            let editor = self.editor.borrow();
+            (
+                editor.get_head_rev_token(),
+                delta.new_document_len(),
+                editor.get_buffer().measure::<LinesMetric>() + 1,
+                editor.get_active_undo_group(),
+            )
+        };
+        let model_delta = if delta.inserts_len() + (delta.els.len() * 10) > super::MAX_SIZE_LIMIT {
+            None
+        } else {
+            Some(crate::plugin_runtime::bridge::rope_delta_to_model(&delta))
+        };
+
         self.update_plugins(&mut self.editor.borrow_mut(), delta, author);
+
+        crate::plugin_runtime::bridge::document_changed(
+            self.plugin_host,
+            &crate::plugin_runtime::events::DocumentChanged {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+                buffer_id: crate::plugin_runtime::bridge::api_buffer(self.buffer_id),
+                rev,
+                new_len,
+                new_line_count,
+                undo_group: Some(undo_group),
+                author: author.to_owned(),
+                edit_type,
+                delta: model_delta,
+            },
+        );
+        self.selection_changed();
 
         // if we have no plugins we always render immediately.
         if !self.plugins.is_empty() {
@@ -438,6 +479,27 @@ impl<'a> EventContext<'a> {
         });
         ed.dec_revs_in_flight();
         ed.update_edit_type();
+    }
+
+    /// Emits `editor.selection.changed` for the current view.
+    pub(crate) fn selection_changed(&mut self) {
+        let selections = self
+            .view
+            .borrow()
+            .sel_regions()
+            .iter()
+            .map(|region| ee_plugin_api::model::SelectionRange {
+                start: region.start,
+                end: region.end,
+            })
+            .collect::<Vec<_>>();
+        crate::plugin_runtime::bridge::selection_changed(
+            self.plugin_host,
+            &crate::plugin_runtime::events::SelectionChanged {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+                selections,
+            },
+        );
     }
 
     /// Renders the view, if a render has not already been scheduled.

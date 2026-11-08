@@ -298,6 +298,32 @@
     "title": "DocumentDelta",
     "type": "object"
   },
+  "edit_ack": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result of applying a plugin edit.",
+    "properties": {
+      "applied": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "applied",
+      "rev"
+    ],
+    "title": "EditAck",
+    "type": "object"
+  },
   "edit_request": {
     "$defs": {
       "Range": {
@@ -335,10 +361,16 @@
           "new_text"
         ],
         "type": "object"
+      },
+      "ViewId": {
+        "description": "Opaque view handle owned by the frontend.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Revision-checked edit request produced by a plugin command or listener.",
+    "description": "Revision-checked edit request produced by a plugin command or listener.\n\n`view_id` identifies both the target buffer (through the view) and the\nselection truth the edit is anchored to. A request without a target cannot\nbe applied deterministically, so the field is mandatory in the v2 contract.",
     "properties": {
       "after_cursor": {
         "type": "boolean"
@@ -369,9 +401,13 @@
           "integer",
           "null"
         ]
+      },
+      "view_id": {
+        "$ref": "#/$defs/ViewId"
       }
     },
     "required": [
+      "view_id",
       "rev",
       "edits",
       "priority",

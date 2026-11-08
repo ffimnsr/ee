@@ -31,6 +31,7 @@ impl HostAdapter for TestAdapter {
 
     fn submit_effects(
         &self,
+        _plugin: Option<&ee_plugin_api::ids::PluginId>,
         _effects: Vec<ee_plugin_api::effect::Effect>,
     ) -> Result<(), PluginError> {
         Ok(())

@@ -81,6 +81,7 @@ pub struct EventContext<'a> {
     pub(crate) width_cache: &'a RefCell<WidthCache>,
     pub(crate) kill_ring: &'a RefCell<Rope>,
     pub(crate) weak_core: &'a WeakXiCore,
+    pub(crate) plugin_host: Option<&'a crate::plugin_runtime::host::EditorPluginHost>,
 }
 
 fn edit_type_to_string(edit_type: EditType) -> String {

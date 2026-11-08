@@ -166,6 +166,10 @@ pub struct CommandSpec {
     pub description: String,
     #[serde(default)]
     pub category: Option<String>,
+    /// Whether the command may mutate document state. The host rejects such a
+    /// command before dispatch when the target view is a VLF buffer.
+    #[serde(default)]
+    pub mutates_document: bool,
     #[serde(default)]
     #[schemars(skip)]
     pub args_schema: Option<Value>,
@@ -175,6 +179,7 @@ pub struct CommandSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CommandRequest {
     pub id: CommandId,
+    pub view_id: ViewId,
     pub request_id: u64,
     #[schemars(skip)]
     pub args: Value,
@@ -191,6 +196,7 @@ mod tests {
 
     fn edit_request() -> EditRequest {
         EditRequest {
+            view_id: ViewId(1),
             rev: 1,
             edits: Vec::new(),
             priority: 0,
@@ -286,6 +292,7 @@ mod tests {
     fn command_request_round_trips() {
         let request = CommandRequest {
             id: CommandId::new("demo.run").unwrap(),
+            view_id: ViewId(2),
             request_id: 9,
             args: serde_json::json!({"value": 1}),
         };

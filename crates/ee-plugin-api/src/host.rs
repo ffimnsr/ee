@@ -32,5 +32,25 @@ pub trait HostAdapter: Send + Sync + 'static {
     fn host_kind(&self) -> HostKind;
 
     /// Apply effects produced by a command or listener.
-    fn submit_effects(&self, effects: Vec<Effect>) -> Result<(), PluginError>;
+    ///
+    /// `plugin` is the originating plugin when the runtime knows it (native
+    /// transports always do). In-process callers may pass `None`.
+    fn submit_effects(
+        &self,
+        plugin: Option<&crate::ids::PluginId>,
+        effects: Vec<Effect>,
+    ) -> Result<(), PluginError>;
+
+    /// Answer a service call initiated by a plugin.
+    ///
+    /// Hosts that expose services override this; the default fails closed with a
+    /// typed unsupported error so a runtime test host cannot silently drop a
+    /// plugin request.
+    fn handle_service_request(
+        &self,
+        _plugin: &crate::ids::PluginId,
+        _request: &crate::wire::ServiceRequestParams,
+    ) -> Result<serde_json::Value, PluginError> {
+        Err(PluginError::Unsupported { feature: "service requests" })
+    }
 }

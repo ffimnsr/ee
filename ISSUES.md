@@ -216,62 +216,62 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Add `crates/xi-core-lib/src/plugin_runtime/mod.rs` and `host.rs`.
-  - [ ] Add `EditorPluginHost` owning `PluginManager`, builtin service registry, contribution registry, and diagnostics.
-  - [ ] Add `EditorPluginHost::start(config, client, weak_core)` and `stop`.
-  - [ ] Add `EditorPluginHost::reload_paths(paths)` and `status_snapshot()`.
-  - [ ] Add tests for start/stop/reload with a fake plugin manager.
-- [ ] Implement `services/document.rs`.
-  - [ ] Add `DocumentService` read methods: snapshot, revision, length, line count, line/range text cap, document text cap.
-  - [ ] Add `DocumentEditService::apply(EditRequest) -> Result<EditAck>` that routes through the existing plugin edit path.
-  - [ ] Reject stale revisions, oversized edits, and VLF mutations with typed errors.
-  - [ ] Add tests for snapshot, range caps, stale revision, undo group propagation, and VLF rejection.
-- [ ] Implement `services/views.rs` and `services/selection.rs`.
-  - [ ] Add view lookup, active view, viewport, scroll request, and reveal request.
-  - [ ] Add selection read and selection-set effects through existing `View` APIs.
-  - [ ] Add tests for multiple views on one buffer, sibling views, scroll request, and selection clamping.
-- [ ] Implement `services/commands.rs`.
-  - [ ] Add command registry with unique ids, builtin commands, plugin commands, and aliases.
-  - [ ] Add deterministic dispatch, argument schema validation, timeout, cancellation, and effect collection.
-  - [ ] Add tests for duplicate id, missing command, schema rejection, timeout, cancellation, and VLF gate.
-- [ ] Implement `services/syntax.rs`.
-  - [ ] Expose read-only scopes, folds, symbols, and grammar availability through existing core APIs.
-  - [ ] Add tests for scope extraction, fold ranges, symbols, and VLF read-only behavior.
-- [ ] Implement `services/lsp.rs`.
-  - [ ] Add typed methods for hover, completion, definition, references, formatting, code actions, and rename preview.
-  - [ ] Keep protocol handling inside `xi-lsp-lib`; core only routes service calls.
-  - [ ] Add tests with a fake LSP service for request/response and timeout.
-- [ ] Implement `services/decorations.rs`.
-  - [ ] Add decoration provider registration and collection through `editor.decorations.collect`.
-  - [ ] Validate revision, range order/bounds, declared kind, style role, count, and byte cap.
-  - [ ] Merge providers by priority and store merged view state.
-  - [ ] Add tests for valid patch, stale revision, invalid range, unknown style, quota breach, and LIFO removal.
-- [ ] Implement `services/ui.rs`.
-  - [ ] Add contribution registry for status items, panels, overlays, pickers, menu items, keybindings, and ex commands.
-  - [ ] Add `editor.ui.render` handling with provider deadline and last-good content.
-  - [ ] Add tests for unique ids, unsupported renderer, provider timeout, last-good retention, and dynamic update.
-- [ ] Implement `services/tasks.rs` and `services/fs.rs`.
-  - [ ] Add cancellable plugin tasks with timeout and bounded output.
-  - [ ] Add scoped file read/write/stat/list with workspace root and glob checks.
-  - [ ] Add tests for task cancellation, timeout, path escape rejection, and permission denial.
-- [ ] Implement `events.rs`, `effects.rs`, and `bridge.rs`.
-  - [ ] Define typed editor events from `docs/upgrades/plugin-system-cordis.md` §7.1.
-  - [ ] Implement effect application for edit, selection, scroll, status, decorations, panel, overlay, picker, task, and noop.
-  - [ ] Hook `after_edit`, save, view open/close, config change, language change, and shutdown.
-  - [ ] Add tests for event order, effect batch application, no core borrow across callback, and panic isolation.
-- [ ] Wire editor language contributions.
-  - [ ] Apply `contributes.languages` and `contributes.lsp_servers` before dependent views initialize.
-  - [ ] Rebuild language map on plugin reload and notify the frontend.
-  - [ ] Add tests for language contribution, override precedence, and reload notification.
-- [ ] Add editor host status/health notifications.
-  - [ ] Emit `plugin_status` and `plugin_health` through `Client`.
-  - [ ] Include blocked workspace plugins and permission diagnostics.
-  - [ ] Add tests for loaded, blocked, degraded, crashed, and reloaded states.
-- [ ] Add editor host integration tests.
-  - [ ] Fake in-process plugin registers a command, reads a snapshot, applies a safe edit, and publishes status/decoration contributions.
-  - [ ] Fake plugin attempts a VLF edit and receives a typed rejection.
-  - [ ] Fake plugin panics in an event listener; core continues and reports health.
-  - [ ] Two plugins provide/consume `editor.document@1`; activation order is deterministic.
+- [x] Add `crates/xi-core-lib/src/plugin_runtime/mod.rs` and `host.rs`.
+  - [x] Add `EditorPluginHost` owning `PluginManager`, builtin service registry, contribution registry, and diagnostics.
+  - [x] Add `EditorPluginHost::start(config, client, weak_core)` and `stop`.
+  - [x] Add `EditorPluginHost::reload_paths(paths)` and `status_snapshot()`.
+  - [x] Add tests for start/stop/reload with a fake plugin manager.
+- [x] Implement `services/document.rs`.
+  - [x] Add `DocumentService` read methods: snapshot, revision, length, line count, line/range text cap, document text cap.
+  - [x] Add `DocumentEditService::apply(EditRequest) -> Result<EditAck>` that routes through the existing plugin edit path.
+  - [x] Reject stale revisions, oversized edits, and VLF mutations with typed errors.
+  - [x] Add tests for snapshot, range caps, stale revision, undo group propagation, and VLF rejection.
+- [x] Implement `services/views.rs` and `services/selection.rs`.
+  - [x] Add view lookup, active view, viewport, scroll request, and reveal request.
+  - [x] Add selection read and selection-set effects through existing `View` APIs.
+  - [x] Add tests for multiple views on one buffer, sibling views, scroll request, and selection clamping.
+- [x] Implement `services/commands.rs`.
+  - [x] Add command registry with unique ids, builtin commands, plugin commands, and aliases.
+  - [x] Add deterministic dispatch, argument schema validation, timeout, cancellation, and effect collection.
+  - [x] Add tests for duplicate id, missing command, schema rejection, timeout, cancellation, and VLF gate.
+- [x] Implement `services/syntax.rs`.
+  - [x] Expose read-only scopes, folds, symbols, and grammar availability through existing core APIs.
+  - [x] Add tests for scope extraction, fold ranges, symbols, and VLF read-only behavior.
+- [x] Implement `services/lsp.rs`.
+  - [x] Add typed methods for hover, completion, definition, references, formatting, code actions, and rename preview.
+  - [x] Keep protocol handling inside `xi-lsp-lib`; core only routes service calls.
+  - [x] Add tests with a fake LSP service for request/response and timeout.
+- [x] Implement `services/decorations.rs`.
+  - [x] Add decoration provider registration and collection through `editor.decorations.collect`.
+  - [x] Validate revision, range order/bounds, declared kind, style role, count, and byte cap.
+  - [x] Merge providers by priority and store merged view state.
+  - [x] Add tests for valid patch, stale revision, invalid range, unknown style, quota breach, and LIFO removal.
+- [x] Implement `services/ui.rs`.
+  - [x] Add contribution registry for status items, panels, overlays, pickers, menu items, keybindings, and ex commands.
+  - [x] Add `editor.ui.render` handling with provider deadline and last-good content.
+  - [x] Add tests for unique ids, unsupported renderer, provider timeout, last-good retention, and dynamic update.
+- [x] Implement `services/tasks.rs` and `services/fs.rs`.
+  - [x] Add cancellable plugin tasks with timeout and bounded output.
+  - [x] Add scoped file read/write/stat/list with workspace root and glob checks.
+  - [x] Add tests for task cancellation, timeout, path escape rejection, and permission denial.
+- [x] Implement `events.rs`, `effects.rs`, and `bridge.rs`.
+  - [x] Define typed editor events from `docs/upgrades/plugin-system-cordis.md` §7.1.
+  - [x] Implement effect application for edit, selection, scroll, status, decorations, panel, overlay, picker, task, and noop.
+  - [x] Hook `after_edit`, save, view open/close, config change, language change, and shutdown.
+  - [x] Add tests for event order, effect batch application, no core borrow across callback, and panic isolation.
+- [x] Wire editor language contributions.
+  - [x] Apply `contributes.languages` and `contributes.lsp_servers` before dependent views initialize.
+  - [x] Rebuild language map on plugin reload and notify the frontend.
+  - [x] Add tests for language contribution, override precedence, and reload notification.
+- [x] Add editor host status/health notifications.
+  - [x] Emit `plugin_status` and `plugin_health` through `Client`.
+  - [x] Include blocked workspace plugins and permission diagnostics.
+  - [x] Add tests for loaded, blocked, degraded, crashed, and reloaded states.
+- [x] Add editor host integration tests.
+  - [x] Fake in-process plugin registers a command, reads a snapshot, applies a safe edit, and publishes status/decoration contributions.
+  - [x] Fake plugin attempts a VLF edit and receives a typed rejection.
+  - [x] Fake plugin panics in an event listener; core continues and reports health.
+  - [x] Two plugins provide/consume `editor.document@1`; activation order is deterministic.
 
 **Acceptance criteria:**
 

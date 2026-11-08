@@ -57,6 +57,7 @@ pub mod open_policy;
 #[cfg(test)]
 pub(crate) mod open_probe;
 pub(crate) mod paths;
+pub mod plugin_runtime;
 pub mod plugins;
 #[cfg(test)]
 pub mod recorder;

@@ -34,6 +34,7 @@ impl CoreState {
                 width_cache: &self.width_cache,
                 kill_ring: &self.kill_ring,
                 weak_core: self.self_ref.as_ref().unwrap(),
+                plugin_host: self.plugin_host.as_deref(),
             }
         })
     }

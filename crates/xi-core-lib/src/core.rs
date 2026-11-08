@@ -49,6 +49,16 @@ impl XiCore {
         XiCore::Waiting
     }
 
+    /// Run one plugin host cycle outside the core lock.
+    ///
+    /// Native transports may issue service calls while pumping; those services
+    /// lock the core mutex, so the pump must not happen with the guard held.
+    fn plugin_cycle(&self) {
+        if let Some(weak) = self.weak_self() {
+            weak.plugin_cycle();
+        }
+    }
+
     /// Returns `true` if the `client_started` has not been received.
     fn is_waiting(&self) -> bool {
         matches!(*self, XiCore::Waiting)
@@ -98,6 +108,7 @@ impl Handler for XiCore {
         }
 
         self.inner().client_notification(rpc);
+        self.plugin_cycle();
     }
 
     fn handle_request(
@@ -106,15 +117,62 @@ impl Handler for XiCore {
         rpc: Self::Request,
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Value, RemoteError> {
-        self.inner().client_request(rpc)
+        let result = self.inner().client_request(rpc);
+        self.plugin_cycle();
+        result
     }
 
     fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
         self.inner().handle_idle(token);
+        self.plugin_cycle();
     }
 }
 
 impl WeakXiCore {
+    /// Run a closure with core state locked without blocking.
+    ///
+    /// Plugin services must fail closed rather than deadlock when the core
+    /// mutex is already held by the current event.
+    pub(crate) fn with_state<R>(&self, operation: impl FnOnce(&mut CoreState) -> R) -> Option<R> {
+        let core = self.0.upgrade()?;
+        let mut guard = core.try_lock().ok()?;
+        Some(operation(&mut guard))
+    }
+
+    /// Attempts to upgrade the weak reference. Essentially a wrapper
+    /// for `Arc::upgrade`.
+    /// Pump native plugin transports and apply queued effects.
+    pub(crate) fn plugin_cycle(&self) {
+        let host = self.with_state(|core| core.plugin_host.clone()).flatten();
+        let Some(host) = host else {
+            return;
+        };
+        if !host.is_started()
+            && !host.is_shutdown()
+            && let Err(error) = host.start()
+        {
+            tracing::warn!("failed to start plugin host: {error}");
+        }
+        if host.take_reload_request()
+            && let Err(error) = host.reload_paths(&[])
+        {
+            tracing::warn!("failed to reload plugins: {error}");
+        }
+        let _ = host.pump();
+        let effects = host.take_effects();
+        let generation = host.generation();
+        self.with_state(|core| {
+            if !effects.is_empty() {
+                core.apply_plugin_effects(effects);
+            }
+            if core.plugin_generation != generation {
+                core.plugin_generation = generation;
+                core.plugin_refresh_languages();
+            }
+            core.plugin_send_notifications();
+        });
+    }
+
     /// Attempts to upgrade the weak reference. Essentially a wrapper
     /// for `Arc::upgrade`.
     fn upgrade(&self) -> Option<XiCore> {

@@ -5,7 +5,7 @@
 //! in-process registries supplied through [`PluginManagerConfig`] builders.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -19,6 +19,9 @@ use ee_plugin_api::manifest::{HostTarget, ManifestV2, PluginKind};
 use ee_plugin_api::service::ServiceRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Maximum queued events per native plugin between pumps.
+pub const MAX_PENDING_EVENTS: usize = 256;
 
 use crate::activation::{self, ActivationTrigger};
 use crate::builtin::BuiltinCatalog;
@@ -156,6 +159,9 @@ pub struct PluginManager {
     health: BTreeMap<String, HealthTracker>,
     blocked: BTreeMap<String, Diagnostic>,
     diagnostics: Vec<Diagnostic>,
+    /// Pending events per native plugin. Document changes coalesce to the newest
+    /// payload; other event kinds are queued in order.
+    pending_events: BTreeMap<String, VecDeque<(String, u64, Value)>>,
     generation: u64,
 }
 
@@ -177,6 +183,7 @@ impl PluginManager {
             health: BTreeMap::new(),
             blocked: BTreeMap::new(),
             diagnostics: Vec::new(),
+            pending_events: BTreeMap::new(),
             generation: 0,
         }
     }
@@ -232,6 +239,54 @@ impl PluginManager {
 
     pub fn manifests(&self) -> &BTreeMap<String, ManifestV2> {
         &self.manifests
+    }
+
+    /// Queue one event for every active native plugin.
+    ///
+    /// Delivery is coalesced: only the newest payload per plugin is sent on the
+    /// next [`PluginManager::pump`], so external plugins cannot build unbounded
+    /// latency or block the core on stdin. In-process builtins receive the
+    /// typed event through the shared [`EventBus`], which the host owns.
+    pub fn emit_event(&mut self, name: &str, revision: u64, payload: Value) {
+        for plugin in &self.running {
+            if !matches!(plugin.instance, PluginInstance::Native(_)) {
+                continue;
+            }
+            let queue = self.pending_events.entry(plugin.manifest.name.clone()).or_default();
+            if name == "editor.document.changed" {
+                queue.retain(|(queued, _, _)| queued != name);
+            }
+            queue.push_back((name.to_owned(), revision, payload.clone()));
+            while queue.len() > MAX_PENDING_EVENTS {
+                queue.pop_front();
+            }
+        }
+    }
+
+    /// Drain pending native-plugin messages without blocking.
+    ///
+    /// Effects and service requests are applied through the host adapter on the
+    /// calling thread, matching command dispatch ordering.
+    pub fn pump(&mut self) -> Vec<(String, PluginError)> {
+        let mut failures = Vec::new();
+        let pending = std::mem::take(&mut self.pending_events);
+        for plugin in &mut self.running {
+            let PluginInstance::Native(client) = &mut plugin.instance else {
+                continue;
+            };
+            if let Some(queue) = pending.get(&plugin.manifest.name) {
+                for (name, revision, payload) in queue {
+                    if let Err(error) = client.send_event(name, *revision, payload.clone()) {
+                        failures.push((plugin.manifest.name.clone(), error));
+                        break;
+                    }
+                }
+            }
+            if let Err(error) = client.pump() {
+                failures.push((plugin.manifest.name.clone(), error));
+            }
+        }
+        failures
     }
 
     /// Discover, resolve, and activate startup plugins.
@@ -474,6 +529,7 @@ impl PluginManager {
         }
         self.deferred.clear();
         self.activating.clear();
+        self.pending_events.clear();
     }
 
     /// Reload one plugin. A failed candidate keeps the old instance live.

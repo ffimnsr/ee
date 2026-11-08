@@ -169,6 +169,7 @@ impl ContextHarness {
             kill_ring: &self.kill_ring,
             width_cache: &self.width_cache,
             weak_core: &self.core_ref,
+            plugin_host: None,
         }
     }
 }

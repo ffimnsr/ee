@@ -40,6 +40,9 @@ impl CoreState {
             plugin_restart_state: HashMap::new(),
             pending_plugin_commands: Vec::new(),
             running_plugins: Vec::new(),
+            plugin_host: None,
+            plugin_notifier: None,
+            plugin_generation: 0,
         }
     }
 
@@ -78,6 +81,7 @@ impl CoreState {
         self.handle_config_changes(lang_config_changes);
 
         self.ensure_manifest_plugins_started();
+        self.plugin_host_start();
     }
 
     /// Sets (overwriting) the config for a given domain.

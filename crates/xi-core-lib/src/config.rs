@@ -284,6 +284,11 @@ impl ConfigManager {
             .collect()
     }
 
+    /// Root configuration directory supplied by the client.
+    pub(crate) fn config_root(&self) -> Option<&Path> {
+        self.config_dir.as_deref()
+    }
+
     /// Adds a new buffer to the config manager, and returns the initial config
     /// `Table` for that buffer. The `path` argument is used to determine
     /// the buffer's default language.

@@ -1750,6 +1750,8 @@ dependencies = [
  "cc",
  "criterion",
  "dirs",
+ "ee-plugin-api",
+ "ee-plugin-runtime",
  "ee-ts-test-grammars",
  "ee-xi-rope",
  "ee-xi-rpc",

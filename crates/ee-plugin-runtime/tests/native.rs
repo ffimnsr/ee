@@ -26,9 +26,24 @@ impl HostAdapter for RecordingAdapter {
         HostKind::Editor
     }
 
-    fn submit_effects(&self, effects: Vec<Effect>) -> Result<(), PluginError> {
+    fn submit_effects(
+        &self,
+        _plugin: Option<&PluginId>,
+        effects: Vec<Effect>,
+    ) -> Result<(), PluginError> {
         self.effects.lock().unwrap().extend(effects);
         Ok(())
+    }
+
+    fn handle_service_request(
+        &self,
+        _plugin: &PluginId,
+        request: &ee_plugin_api::wire::ServiceRequestParams,
+    ) -> Result<serde_json::Value, PluginError> {
+        if request.service.as_str() == "editor.document@1" && request.method == "snapshot" {
+            return Ok(serde_json::json!({"rev": 1, "len": 5}));
+        }
+        Err(PluginError::Unsupported { feature: "service method" })
     }
 }
 
@@ -99,12 +114,11 @@ fn content_length_transport_round_trips() {
 }
 
 #[test]
-fn service_request_is_answered_with_typed_error() {
+fn service_request_is_dispatched_through_adapter() {
     let (mut client, _adapter, _sink) = spawn(BTreeMap::new(), 2_000);
-    let error =
-        client.invoke(&CommandId::new("echo.request").unwrap(), serde_json::json!({})).unwrap_err();
-    assert_eq!(error.class(), ErrorClass::Transport);
-    assert!(error.to_string().contains("not available"));
+    let result =
+        client.invoke(&CommandId::new("echo.request").unwrap(), serde_json::json!({})).unwrap();
+    assert_eq!(result, serde_json::json!({"rev": 1, "len": 5}));
 }
 
 #[test]

@@ -34,6 +34,8 @@ tracing-subscriber.workspace = true
 tokio-util = { workspace = true }
 wasmtime = { workspace = true }
 
+ee-plugin-api.workspace = true
+ee-plugin-runtime.workspace = true
 xi-rope = { workspace = true, features = ["serde"] }
 xi-unicode.workspace = true
 xi-rpc.workspace = true

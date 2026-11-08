@@ -298,6 +298,10 @@ impl CoreState {
     /// Handles changes in plugin files.
     #[cfg(feature = "notify")]
     pub(super) fn handle_plugin_fs_event(&mut self, event: Event) {
+        // The v2 host reloads outside the core lock on the next plugin cycle.
+        if let Some(host) = self.plugin_host.as_ref() {
+            host.request_reload();
+        }
         use notify::event::*;
         match event.kind {
             EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {

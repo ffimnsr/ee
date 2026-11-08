@@ -134,14 +134,28 @@ pub struct PluginUpdate {
 }
 
 /// Revision-checked edit request produced by a plugin command or listener.
+///
+/// `view_id` identifies both the target buffer (through the view) and the
+/// selection truth the edit is anchored to. A request without a target cannot
+/// be applied deterministically, so the field is mandatory in the v2 contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EditRequest {
+    pub view_id: ViewId,
     pub rev: u64,
     pub edits: Vec<TextEdit>,
     pub priority: u64,
     pub after_cursor: bool,
     pub undo_group: Option<usize>,
     pub author: String,
+}
+
+/// Result of applying a plugin edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EditAck {
+    pub applied: bool,
+    pub rev: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Diagnostic severity.
@@ -248,6 +262,7 @@ pub fn model_schema() -> Value {
     schemas.insert("plugin_buffer_info", schema_of::<PluginBufferInfo>());
     schemas.insert("plugin_update", schema_of::<PluginUpdate>());
     schemas.insert("edit_request", schema_of::<EditRequest>());
+    schemas.insert("edit_ack", schema_of::<EditAck>());
     schemas.insert("diagnostic_severity", schema_of::<DiagnosticSeverity>());
     schemas.insert("diagnostic", schema_of::<Diagnostic>());
     schemas.insert("hover", schema_of::<Hover>());
@@ -322,6 +337,7 @@ mod tests {
     #[test]
     fn edit_request_round_trips_fixture() {
         let fixture = json!({
+            "view_id": 3,
             "rev": 9,
             "edits": [{ "range": { "start": 1, "end": 1 }, "new_text": "x" }],
             "priority": 0,

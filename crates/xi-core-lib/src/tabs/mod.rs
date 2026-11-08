@@ -72,6 +72,7 @@ pub(crate) use crate::watcher::{FileWatcher, WatchToken};
 #[cfg(feature = "notify")]
 pub(crate) use notify::Event;
 
+mod plugin_host;
 mod plugin_lifecycle;
 
 /// ViewIds are the primary means of routing messages between
@@ -182,6 +183,11 @@ pub struct CoreState {
     plugin_restart_state: HashMap<String, PluginRestartState>,
     pending_plugin_commands: Vec<PendingPluginCommand>,
     running_plugins: Vec<Plugin>,
+    /// Cordis-style v2 plugin host. The old plugin fields above remain until the
+    /// final cutover phase.
+    pub(crate) plugin_host: Option<Arc<crate::plugin_runtime::host::EditorPluginHost>>,
+    pub(crate) plugin_notifier: Option<Arc<crate::plugin_runtime::host::QueuedNotifier>>,
+    pub(crate) plugin_generation: u64,
 }
 
 #[derive(Debug, Clone)]

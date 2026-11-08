@@ -335,6 +335,38 @@ impl NativeClient {
         }
     }
 
+    /// Drain pending messages without blocking.
+    ///
+    /// Side messages (effects, contributions, health, service requests) are
+    /// applied on the caller thread. Command responses are ignored here; call
+    /// [`NativeClient::invoke`] when a response is expected.
+    pub fn pump(&mut self) -> Result<usize, PluginError> {
+        let mut processed = 0;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(Ok(message)) => {
+                    processed += 1;
+                    match message {
+                        PluginToHost::Response(_) => {}
+                        other => self.handle_side_message(other)?,
+                    }
+                }
+                Ok(Err(error)) => return Err(PluginError::Transport { message: error }),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(PluginError::Transport {
+                        message: format!(
+                            "plugin `{}` closed stdout{}",
+                            self.plugin_id,
+                            self.stderr_suffix()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(processed)
+    }
+
     pub fn plugin_id(&self) -> &PluginId {
         &self.plugin_id
     }
@@ -389,19 +421,25 @@ impl NativeClient {
     fn handle_side_message(&mut self, message: PluginToHost) -> Result<(), PluginError> {
         match message {
             PluginToHost::Effect(EffectEnvelope { effects, .. }) => {
-                self.adapter.submit_effects(effects)
+                self.adapter.submit_effects(Some(&self.plugin_id), effects)
             }
             PluginToHost::Contribution(envelope) => self.apply_contributions(envelope),
             PluginToHost::Health(report) => {
                 self.health = Some(report);
                 Ok(())
             }
-            PluginToHost::Request(request) => self.respond_error(
-                request.request_id,
-                "runtime",
-                "plugin.unsupported",
-                "service calls are not available in this host",
-            ),
+            PluginToHost::Request(request) => {
+                let response = self.adapter.handle_service_request(&self.plugin_id, &request);
+                match response {
+                    Ok(result) => self.respond_ok(request.request_id, result),
+                    Err(error) => self.respond_error(
+                        request.request_id,
+                        error.class().as_str(),
+                        error.code(),
+                        &error.to_string(),
+                    ),
+                }
+            }
             PluginToHost::Response(_) => Ok(()),
         }
     }
@@ -441,6 +479,14 @@ impl NativeClient {
                 message: message.to_owned(),
                 retryable: false,
             }),
+        }))
+    }
+
+    fn respond_ok(&mut self, request_id: u64, result: Value) -> Result<(), PluginError> {
+        self.send(&HostToPlugin::Response(PluginResponse {
+            request_id,
+            result: Some(result),
+            error: None,
         }))
     }
 

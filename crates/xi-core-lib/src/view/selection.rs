@@ -113,6 +113,11 @@ impl View {
         self.height
     }
 
+    /// First visible logical line and visible height.
+    pub(crate) fn scroll_position(&self) -> (usize, usize) {
+        (self.first_line, self.height)
+    }
+
     pub(super) fn scroll_to_cursor(&mut self, text: &Rope) {
         let end = match self.primary_sel_region() {
             Some(region) => region.end,

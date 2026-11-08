@@ -47,6 +47,16 @@ impl<'a> EventContext<'a> {
         let is_vlf = self.editor.borrow().is_vlf();
         self.client.document_mode_changed(self.view_id, is_vlf);
 
+        crate::plugin_runtime::bridge::view_opened(
+            self.plugin_host,
+            &crate::plugin_runtime::events::ViewOpened {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+                buffer_id: crate::plugin_runtime::bridge::api_buffer(self.buffer_id),
+                language: ee_plugin_api::model::LanguageId::new(self.language.as_ref()),
+                config: serde_json::to_value(self.config).unwrap_or(serde_json::Value::Null),
+            },
+        );
+
         self.rewrap();
 
         if self.view.borrow().needs_more_wrap() {
@@ -65,6 +75,17 @@ impl<'a> EventContext<'a> {
     ) {
         self.plugins.iter().for_each(|plugin| plugin.did_save(self.view_id, path));
 
+        let rev = self.editor.borrow().get_head_rev_token();
+        crate::plugin_runtime::bridge::document_saved(
+            self.plugin_host,
+            &crate::plugin_runtime::events::DocumentSaved {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+                buffer_id: crate::plugin_runtime::bridge::api_buffer(self.buffer_id),
+                path: path.display().to_string(),
+                rev,
+            },
+        );
+
         self.editor.borrow_mut().set_pristine_if_equivalent_revision(saved_rev_id);
         self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         self.render()
@@ -73,6 +94,12 @@ impl<'a> EventContext<'a> {
     /// Returns `true` if this was the last view
     pub(crate) fn close_view(&self) -> bool {
         self.plugins.iter().for_each(|plug| plug.close_view(self.view_id));
+        crate::plugin_runtime::bridge::view_closed(
+            self.plugin_host,
+            &crate::plugin_runtime::events::ViewClosed {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+            },
+        );
         self.siblings.is_empty()
     }
 
@@ -88,14 +115,30 @@ impl<'a> EventContext<'a> {
         }
 
         self.plugins.iter().for_each(|plug| plug.config_changed(self.view_id, changes));
+        crate::plugin_runtime::bridge::config_changed(
+            self.plugin_host,
+            &crate::plugin_runtime::events::ConfigChanged {
+                scope: format!("buffer:{}", self.buffer_id.0),
+                changes: serde_json::to_value(changes).unwrap_or(serde_json::Value::Null),
+            },
+        );
         self.render()
     }
 
     /// Notifies all plugins and the client that the active language has changed.
     pub(crate) fn language_changed(&mut self, new_language_id: &super::LanguageId) {
+        let old = self.language.clone();
         self.language = new_language_id.clone();
         self.client.language_changed(self.view_id, new_language_id);
         self.plugins.iter().for_each(|plug| plug.language_changed(self.view_id, new_language_id));
+        crate::plugin_runtime::bridge::language_changed(
+            self.plugin_host,
+            &crate::plugin_runtime::events::LanguageChanged {
+                view_id: crate::plugin_runtime::bridge::api_view(self.view_id),
+                old: ee_plugin_api::model::LanguageId::new(old.as_ref()),
+                new: ee_plugin_api::model::LanguageId::new(new_language_id.as_ref()),
+            },
+        );
         self.with_view(|view, text| view.set_dirty(&rope_render_source(text)));
         self.render();
     }
