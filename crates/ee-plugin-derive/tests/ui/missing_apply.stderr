@@ -1,0 +1,5 @@
+error: #[plugin] impl block must define an `apply` method
+ --> tests/ui/missing_apply.rs:6:6
+  |
+6 | impl MissingApply {}
+  |      ^^^^^^^^^^^^

@@ -1,0 +1,22 @@
+[package]
+name = "ee-plugin-sdk"
+version = "0.11.11"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
+description = "Rust SDK for native ee editor and agent plugins."
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ee_plugin_sdk"
+
+[dependencies]
+ee-plugin-api.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+xi-rpc.workspace = true
+
+[dev-dependencies]
+ee-plugin-derive.workspace = true

@@ -52,68 +52,68 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Add the four workspace crates and dependencies.
-  - [ ] Add `crates/ee-plugin-api/Cargo.toml` with `serde`, `serde_json`, `schemars`, `semver`, `thiserror`, `futures` (optional `async` feature).
-  - [ ] Add `crates/ee-plugin-runtime/Cargo.toml` with `ee-plugin-api`, `serde`, `serde_json`, `toml`, `jsonschema`, `semver`, `sha2`, `tempfile` (dev), and later optional `wasmtime`.
-  - [ ] Add `crates/ee-plugin-sdk/Cargo.toml` with `ee-plugin-api`, `xi-rpc`, `serde`, `serde_json`, `tokio-util` (wasm target gated later).
-  - [ ] Add `crates/ee-plugin-derive/Cargo.toml` with `proc-macro2`, `quote`, `syn` full features.
-  - [ ] Add all four under `[workspace].members` and `[workspace.dependencies]` in `Cargo.toml`.
-  - [ ] Add `ee-plugin-api` tests to the crate root with `#![forbid(unsafe_code)]`.
-- [ ] Implement `ee-plugin-api/src/ids.rs`.
-  - [ ] Add `ServiceId`, `CommandId`, `PluginId`, `PluginInstanceId`, `ScopeId`, and `ContributionId` newtypes.
-  - [ ] Implement `FromStr`, `Display`, `Serialize`, `Deserialize`, `JsonSchema`, and ordering for each newtype.
-  - [ ] Add `ServiceId::new("editor.document", 1)` that renders `editor.document@1`.
-  - [ ] Add tests for invalid empty ids, invalid version handling, display/parse round trips, and JSON round trips.
-- [ ] Implement `ee-plugin-api/src/model.rs` with neutral editor types.
-  - [ ] Add `Range`, `SelectionRange`, `Diagnostic`, `DiagnosticSeverity`, `Hover`, `TextEdit`, `FormattingOptions`, `CompletionSuggestion`, `CodeAction`, `SymbolItem`, `NavigationTarget`, `PluginBufferInfo`, `PluginUpdate`, and `EditRequest`.
-  - [ ] Copy the field shapes used by `xi_core_lib::plugin_rpc` so editor semantics are preserved, but rename no fields.
-  - [ ] Add `serde`/`schemars` derives and `#[serde(rename_all = "snake_case")]` where the old wire shape used it.
-  - [ ] Add tests for every model type with a JSON fixture and a schema snapshot.
-- [ ] Implement `ee-plugin-api/src/service.rs`.
-  - [ ] Add `Service` trait with `const ID: &'static str` and `ServiceKey<T>`.
-  - [ ] Add `ServiceRegistry::register`, `get`, `require`, `remove`, and `contains`.
-  - [ ] Reject duplicate `ServiceId` with a typed error.
-  - [ ] Reject `ServiceKey<T>` lookup when the registered `TypeId` does not match `T`.
-  - [ ] Add tests for duplicate registration, type mismatch, missing service, and removal.
-- [ ] Implement `ee-plugin-api/src/disposer.rs`.
-  - [ ] Add `Disposer` as a `Box<dyn FnOnce() + Send + 'static>` wrapper with `new`, `dispose`, and `is_disposed`.
-  - [ ] Add `DisposerStack` that runs disposers in reverse registration order.
-  - [ ] Add `#[must_use]` on `Disposer` and tests for LIFO order, double-dispose, and panic isolation.
-- [ ] Implement `ee-plugin-api/src/event.rs`.
-  - [ ] Add `Event` trait with `const NAME: &'static str` and `TypeId` lookup.
-  - [ ] Add `EventBus` methods `on`, `emit`, `waterfall`, `serial`, and `bail`.
-  - [ ] Add `AsyncEventBus` behind `async` with `emit`, `waterfall`, `parallel`, `serial`, and `bail`.
-  - [ ] Implement registration order, `prepend`, listener caps, dispatch depth cap, and panic isolation.
-  - [ ] Add tests for order, prepend, waterfall short-circuit, bail winner, serial last value, parallel completion, and cancellation.
-- [ ] Implement `ee-plugin-api/src/context.rs`.
-  - [ ] Add `PluginContext` with `service`, `require`, `on`, `effect`, `command`, `contribute`, and child scope creation.
-  - [ ] Add `scope()` and `with_config()` accessors.
-  - [ ] Add tests that child scopes inherit parent services and dispose children LIFO on scope drop.
-- [ ] Implement `ee-plugin-api/src/manifest.rs`.
-  - [ ] Add `ManifestV2`, `PluginKind`, `HostTarget`, `Activation`, `Requires`, `Provides`, `Permissions`, `Limits`, `LaunchConfig`, `ConfigSchema`, and contribution tables.
-  - [ ] Implement validation for `manifest_version == 2`, `api == "ee-plugin/2"`, non-empty name/version, known targets/kinds, unique contribution ids, and required service syntax.
-  - [ ] Implement `manifest_schema() -> serde_json::Value` using `schemars`.
-  - [ ] Add a test that writes `schemas/plugin-manifest-v2.json` and compares it byte-for-byte with the checked-in file.
-  - [ ] Add tests for valid native, valid Wasm, valid builtin, invalid version, invalid api, duplicate command id, and invalid permission name.
-- [ ] Implement `ee-plugin-api/src/contribution.rs`, `effect.rs`, `wire.rs`, `host.rs`, and `error.rs`.
-  - [ ] Add `Contribution` variants: command, ex command, keybinding, status item, decoration provider, panel, overlay, picker, menu item, language, formatter, LSP server, agent tool, model provider, policy rule, context provider, config schema.
-  - [ ] Add `Effect` variants: apply edit, selection, scroll, status, remove status, decorations, panel, overlay, picker, task, agent tool result, noop.
-  - [ ] Add wire enums for `plugin/initialize`, `plugin/event`, `plugin/command`, `plugin/contribution`, `plugin/request`, `plugin/effect`, `plugin/health`, `plugin/response`, and `plugin/shutdown`.
-  - [ ] Add `PluginError` with stable diagnostic classes and `HostKind` / `HostAdapter` trait.
-  - [ ] Add serde tests for every wire variant and contribution variant.
-- [ ] Implement `ee-plugin-derive`.
-  - [ ] Replace `#[xi_plugin]` with `#[plugin]` generating an `ee_plugin_api::Plugin` impl from an `apply` method.
-  - [ ] Add a compile test for a plugin with `apply(&mut self, ctx: &PluginContext)`.
-  - [ ] Add a compile-fail test for a missing `apply` method.
-- [ ] Implement the initial `ee-plugin-sdk` surface.
-  - [ ] Add `run(plugin: impl Plugin)` entry point for native plugins.
-  - [ ] Add `PluginConfig`, `CommandRequest`, `CommandResponse`, and `ServiceCall` helper types.
-  - [ ] Add `DocumentCache` and `ViewState` skeletons with tests for delta application and revision rejection.
-  - [ ] Add a fake transport used only by SDK tests; do not add a host dependency.
-- [ ] Add schema and contract tests.
-  - [ ] Add `schemas/plugin-manifest-v2.json` generated from `ManifestV2`.
-  - [ ] Add a test that `manifest_schema()` equals the checked-in schema.
-  - [ ] Add a test that service ids in the reference catalog parse and are unique.
+- [x] Add the four workspace crates and dependencies.
+  - [x] Add `crates/ee-plugin-api/Cargo.toml` with `serde`, `serde_json`, `schemars`, `semver`, `thiserror`, `futures` (optional `async` feature).
+  - [x] Add `crates/ee-plugin-runtime/Cargo.toml` with `ee-plugin-api`, `serde`, `serde_json`, `toml`, `jsonschema`, `semver`, `sha2`, `tempfile` (dev), and later optional `wasmtime`.
+  - [x] Add `crates/ee-plugin-sdk/Cargo.toml` with `ee-plugin-api`, `xi-rpc`, `serde`, `serde_json`, `tokio-util` (wasm target gated later).
+  - [x] Add `crates/ee-plugin-derive/Cargo.toml` with `proc-macro2`, `quote`, `syn` full features.
+  - [x] Add all four under `[workspace].members` and `[workspace.dependencies]` in `Cargo.toml`.
+  - [x] Add `ee-plugin-api` tests to the crate root with `#![forbid(unsafe_code)]`.
+- [x] Implement `ee-plugin-api/src/ids.rs`.
+  - [x] Add `ServiceId`, `CommandId`, `PluginId`, `PluginInstanceId`, `ScopeId`, and `ContributionId` newtypes.
+  - [x] Implement `FromStr`, `Display`, `Serialize`, `Deserialize`, `JsonSchema`, and ordering for each newtype.
+  - [x] Add `ServiceId::new("editor.document", 1)` that renders `editor.document@1`.
+  - [x] Add tests for invalid empty ids, invalid version handling, display/parse round trips, and JSON round trips.
+- [x] Implement `ee-plugin-api/src/model.rs` with neutral editor types.
+  - [x] Add `Range`, `SelectionRange`, `Diagnostic`, `DiagnosticSeverity`, `Hover`, `TextEdit`, `FormattingOptions`, `CompletionSuggestion`, `CodeAction`, `SymbolItem`, `NavigationTarget`, `PluginBufferInfo`, `PluginUpdate`, and `EditRequest`.
+  - [x] Copy the field shapes used by `xi_core_lib::plugin_rpc` so editor semantics are preserved, but rename no fields.
+  - [x] Add `serde`/`schemars` derives and `#[serde(rename_all = "snake_case")]` where the old wire shape used it.
+  - [x] Add tests for every model type with a JSON fixture and a schema snapshot.
+- [x] Implement `ee-plugin-api/src/service.rs`.
+  - [x] Add `Service` trait with `const ID: &'static str` and `ServiceKey<T>`.
+  - [x] Add `ServiceRegistry::register`, `get`, `require`, `remove`, and `contains`.
+  - [x] Reject duplicate `ServiceId` with a typed error.
+  - [x] Reject `ServiceKey<T>` lookup when the registered `TypeId` does not match `T`.
+  - [x] Add tests for duplicate registration, type mismatch, missing service, and removal.
+- [x] Implement `ee-plugin-api/src/disposer.rs`.
+  - [x] Add `Disposer` as a `Box<dyn FnOnce() + Send + 'static>` wrapper with `new`, `dispose`, and `is_disposed`.
+  - [x] Add `DisposerStack` that runs disposers in reverse registration order.
+  - [x] Add `#[must_use]` on `Disposer` and tests for LIFO order, double-dispose, and panic isolation.
+- [x] Implement `ee-plugin-api/src/event.rs`.
+  - [x] Add `Event` trait with `const NAME: &'static str` and `TypeId` lookup.
+  - [x] Add `EventBus` methods `on`, `emit`, `waterfall`, `serial`, and `bail`.
+  - [x] Add `AsyncEventBus` behind `async` with `emit`, `waterfall`, `parallel`, `serial`, and `bail`.
+  - [x] Implement registration order, `prepend`, listener caps, dispatch depth cap, and panic isolation.
+  - [x] Add tests for order, prepend, waterfall short-circuit, bail winner, serial last value, parallel completion, and cancellation.
+- [x] Implement `ee-plugin-api/src/context.rs`.
+  - [x] Add `PluginContext` with `service`, `require`, `on`, `effect`, `command`, `contribute`, and child scope creation.
+  - [x] Add `scope()` and `with_config()` accessors.
+  - [x] Add tests that child scopes inherit parent services and dispose children LIFO on scope drop.
+- [x] Implement `ee-plugin-api/src/manifest.rs`.
+  - [x] Add `ManifestV2`, `PluginKind`, `HostTarget`, `Activation`, `Requires`, `Provides`, `Permissions`, `Limits`, `LaunchConfig`, `ConfigSchema`, and contribution tables.
+  - [x] Implement validation for `manifest_version == 2`, `api == "ee-plugin/2"`, non-empty name/version, known targets/kinds, unique contribution ids, and required service syntax.
+  - [x] Implement `manifest_schema() -> serde_json::Value` using `schemars`.
+  - [x] Add a test that writes `schemas/plugin-manifest-v2.json` and compares it byte-for-byte with the checked-in file.
+  - [x] Add tests for valid native, valid Wasm, valid builtin, invalid version, invalid api, duplicate command id, and invalid permission name.
+- [x] Implement `ee-plugin-api/src/contribution.rs`, `effect.rs`, `wire.rs`, `host.rs`, and `error.rs`.
+  - [x] Add `Contribution` variants: command, ex command, keybinding, status item, decoration provider, panel, overlay, picker, menu item, language, formatter, LSP server, agent tool, model provider, policy rule, context provider, config schema.
+  - [x] Add `Effect` variants: apply edit, selection, scroll, status, remove status, decorations, panel, overlay, picker, task, agent tool result, noop.
+  - [x] Add wire enums for `plugin/initialize`, `plugin/event`, `plugin/command`, `plugin/contribution`, `plugin/request`, `plugin/effect`, `plugin/health`, `plugin/response`, and `plugin/shutdown`.
+  - [x] Add `PluginError` with stable diagnostic classes and `HostKind` / `HostAdapter` trait.
+  - [x] Add serde tests for every wire variant and contribution variant.
+- [x] Implement `ee-plugin-derive`.
+  - [x] Replace `#[xi_plugin]` with `#[plugin]` generating an `ee_plugin_api::Plugin` impl from an `apply` method.
+  - [x] Add a compile test for a plugin with `apply(&mut self, ctx: &PluginContext)`.
+  - [x] Add a compile-fail test for a missing `apply` method.
+- [x] Implement the initial `ee-plugin-sdk` surface.
+  - [x] Add `run(plugin: impl Plugin)` entry point for native plugins.
+  - [x] Add `PluginConfig`, `CommandRequest`, `CommandResponse`, and `ServiceCall` helper types.
+  - [x] Add `DocumentCache` and `ViewState` skeletons with tests for delta application and revision rejection.
+  - [x] Add a fake transport used only by SDK tests; do not add a host dependency.
+- [x] Add schema and contract tests.
+  - [x] Add `schemas/plugin-manifest-v2.json` generated from `ManifestV2`.
+  - [x] Add a test that `manifest_schema()` equals the checked-in schema.
+  - [x] Add a test that service ids in the reference catalog parse and are unique.
 
 **Acceptance criteria:**
 

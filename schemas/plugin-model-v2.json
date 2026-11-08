@@ -1,0 +1,831 @@
+{
+  "buffer_id": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Opaque buffer handle owned by the editor host.",
+    "format": "uint64",
+    "minimum": 0,
+    "title": "BufferId",
+    "type": "integer"
+  },
+  "code_action": {
+    "$defs": {
+      "Range": {
+        "description": "Byte range within a document snapshot.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "TextEdit": {
+        "description": "One textual replacement.",
+        "properties": {
+          "new_text": {
+            "type": "string"
+          },
+          "range": {
+            "$ref": "#/$defs/Range"
+          }
+        },
+        "required": [
+          "range",
+          "new_text"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Code action proposal.",
+    "properties": {
+      "command": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "edits": {
+        "items": {
+          "$ref": "#/$defs/TextEdit"
+        },
+        "type": "array"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title"
+    ],
+    "title": "CodeAction",
+    "type": "object"
+  },
+  "completion_suggestion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Completion entry.",
+    "properties": {
+      "detail": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "insert_text": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "label": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "label"
+    ],
+    "title": "CompletionSuggestion",
+    "type": "object"
+  },
+  "delta_op": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One splice operation in a document delta.\n\nOffsets are interpreted against the document state produced by the previous\noperation in the same delta.",
+    "oneOf": [
+      {
+        "properties": {
+          "offset": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "const": "insert",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "offset",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "op": {
+            "const": "delete",
+            "type": "string"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op",
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DeltaOp"
+  },
+  "diagnostic": {
+    "$defs": {
+      "DiagnosticSeverity": {
+        "description": "Diagnostic severity.",
+        "enum": [
+          "error",
+          "warning",
+          "information",
+          "hint"
+        ],
+        "type": "string"
+      },
+      "Range": {
+        "description": "Byte range within a document snapshot.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Diagnostic anchored to a byte range.",
+    "properties": {
+      "code": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "message": {
+        "type": "string"
+      },
+      "range": {
+        "$ref": "#/$defs/Range"
+      },
+      "severity": {
+        "$ref": "#/$defs/DiagnosticSeverity"
+      },
+      "source": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "range",
+      "severity",
+      "message"
+    ],
+    "title": "Diagnostic",
+    "type": "object"
+  },
+  "diagnostic_severity": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Diagnostic severity.",
+    "enum": [
+      "error",
+      "warning",
+      "information",
+      "hint"
+    ],
+    "title": "DiagnosticSeverity",
+    "type": "string"
+  },
+  "document_delta": {
+    "$defs": {
+      "DeltaOp": {
+        "description": "One splice operation in a document delta.\n\nOffsets are interpreted against the document state produced by the previous\noperation in the same delta.",
+        "oneOf": [
+          {
+            "properties": {
+              "offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "insert",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "offset",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "delete",
+                "type": "string"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "op",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Bounded document delta used by the neutral wire model.",
+    "properties": {
+      "ops": {
+        "items": {
+          "$ref": "#/$defs/DeltaOp"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "ops"
+    ],
+    "title": "DocumentDelta",
+    "type": "object"
+  },
+  "edit_request": {
+    "$defs": {
+      "Range": {
+        "description": "Byte range within a document snapshot.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "TextEdit": {
+        "description": "One textual replacement.",
+        "properties": {
+          "new_text": {
+            "type": "string"
+          },
+          "range": {
+            "$ref": "#/$defs/Range"
+          }
+        },
+        "required": [
+          "range",
+          "new_text"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Revision-checked edit request produced by a plugin command or listener.",
+    "properties": {
+      "after_cursor": {
+        "type": "boolean"
+      },
+      "author": {
+        "type": "string"
+      },
+      "edits": {
+        "items": {
+          "$ref": "#/$defs/TextEdit"
+        },
+        "type": "array"
+      },
+      "priority": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "undo_group": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "rev",
+      "edits",
+      "priority",
+      "after_cursor",
+      "author"
+    ],
+    "title": "EditRequest",
+    "type": "object"
+  },
+  "formatting_options": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Formatting parameters supplied by the host.",
+    "properties": {
+      "insert_spaces": {
+        "type": "boolean"
+      },
+      "tab_size": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "tab_size",
+      "insert_spaces"
+    ],
+    "title": "FormattingOptions",
+    "type": "object"
+  },
+  "hover": {
+    "$defs": {
+      "Range": {
+        "description": "Byte range within a document snapshot.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Hover content and its optional anchor range.",
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "range": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Range"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "title": "Hover",
+    "type": "object"
+  },
+  "language_id": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical language identifier.",
+    "title": "LanguageId",
+    "type": "string"
+  },
+  "navigation_target": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Navigation target for definitions, references, and locations.",
+    "properties": {
+      "column": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "end_column": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "end_line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "line",
+      "column",
+      "end_line",
+      "end_column"
+    ],
+    "title": "NavigationTarget",
+    "type": "object"
+  },
+  "plugin_buffer_info": {
+    "$defs": {
+      "BufferId": {
+        "description": "Opaque buffer handle owned by the editor host.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "LanguageId": {
+        "description": "Canonical language identifier.",
+        "type": "string"
+      },
+      "ViewId": {
+        "description": "Opaque view handle owned by the frontend.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Buffer information sent when a plugin initializes or a buffer opens.",
+    "properties": {
+      "buf_size": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "buffer_id": {
+        "$ref": "#/$defs/BufferId"
+      },
+      "config": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "nb_lines": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "path": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "syntax": {
+        "$ref": "#/$defs/LanguageId"
+      },
+      "views": {
+        "items": {
+          "$ref": "#/$defs/ViewId"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "buffer_id",
+      "views",
+      "rev",
+      "buf_size",
+      "nb_lines",
+      "syntax",
+      "config"
+    ],
+    "title": "PluginBufferInfo",
+    "type": "object"
+  },
+  "plugin_update": {
+    "$defs": {
+      "DeltaOp": {
+        "description": "One splice operation in a document delta.\n\nOffsets are interpreted against the document state produced by the previous\noperation in the same delta.",
+        "oneOf": [
+          {
+            "properties": {
+              "offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "insert",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "offset",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "end": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "const": "delete",
+                "type": "string"
+              },
+              "start": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "op",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DocumentDelta": {
+        "description": "Bounded document delta used by the neutral wire model.",
+        "properties": {
+          "ops": {
+            "items": {
+              "$ref": "#/$defs/DeltaOp"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      },
+      "ViewId": {
+        "description": "Opaque view handle owned by the frontend.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Document update delivered to a plugin.",
+    "properties": {
+      "author": {
+        "type": "string"
+      },
+      "delta": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DocumentDelta"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "`None` means the change was too large to stream; the plugin must fetch a\nfresh snapshot."
+      },
+      "edit_type": {
+        "type": "string"
+      },
+      "new_len": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "new_line_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "undo_group": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "view_id": {
+        "$ref": "#/$defs/ViewId"
+      }
+    },
+    "required": [
+      "view_id",
+      "new_len",
+      "new_line_count",
+      "rev",
+      "edit_type",
+      "author"
+    ],
+    "title": "PluginUpdate",
+    "type": "object"
+  },
+  "range": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Byte range within a document snapshot.",
+    "properties": {
+      "end": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "start": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "start",
+      "end"
+    ],
+    "title": "Range",
+    "type": "object"
+  },
+  "selection_range": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A selection range expressed in byte offsets.",
+    "properties": {
+      "end": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "start": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "start",
+      "end"
+    ],
+    "title": "SelectionRange",
+    "type": "object"
+  },
+  "symbol_item": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Symbol entry returned by document or workspace symbol queries.",
+    "properties": {
+      "children": {
+        "items": {
+          "$ref": "#"
+        },
+        "type": "array"
+      },
+      "column": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string"
+      },
+      "line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "name": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "kind",
+      "path",
+      "line",
+      "column"
+    ],
+    "title": "SymbolItem",
+    "type": "object"
+  },
+  "text_edit": {
+    "$defs": {
+      "Range": {
+        "description": "Byte range within a document snapshot.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One textual replacement.",
+    "properties": {
+      "new_text": {
+        "type": "string"
+      },
+      "range": {
+        "$ref": "#/$defs/Range"
+      }
+    },
+    "required": [
+      "range",
+      "new_text"
+    ],
+    "title": "TextEdit",
+    "type": "object"
+  },
+  "view_id": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Opaque view handle owned by the frontend.",
+    "format": "uint64",
+    "minimum": 0,
+    "title": "ViewId",
+    "type": "integer"
+  }
+}

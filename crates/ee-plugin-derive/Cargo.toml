@@ -1,0 +1,22 @@
+[package]
+name = "ee-plugin-derive"
+version = "0.11.11"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
+description = "Proc macros for the ee plugin SDK."
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ee_plugin_derive"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+
+[dev-dependencies]
+ee-plugin-api.workspace = true
+trybuild.workspace = true

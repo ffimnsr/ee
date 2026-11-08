@@ -1,0 +1,474 @@
+//! Plugin context and the `Plugin` entry point.
+//!
+//! A context is the only capability a plugin receives. Registration methods
+//! return disposers that are also tracked by the owning scope, so dropping a
+//! scope tears down every listener, command, contribution, and effect it
+//! created.
+
+use std::sync::{Arc, Mutex, RwLock};
+
+use serde_json::Value;
+
+use crate::contribution::Contribution;
+use crate::disposer::{Disposer, DisposerStack};
+use crate::effect::{CommandHandler, CommandSpec};
+use crate::error::PluginError;
+use crate::event::{Event, EventBus};
+use crate::ids::{PluginId, ScopeId, ServiceId};
+use crate::service::{Service, ServiceKey, ServiceRegistry};
+
+/// Registry boundary implemented by the editor and agent hosts.
+pub trait CommandRegistry: Send + Sync + 'static {
+    /// Register a command and return a disposer that unregisters it.
+    fn register_command(
+        &self,
+        spec: CommandSpec,
+        handler: Arc<dyn CommandHandler>,
+    ) -> Result<Disposer, PluginError>;
+}
+
+/// Contribution boundary implemented by the editor and agent hosts.
+pub trait ContributionSink: Send + Sync + 'static {
+    /// Publish a contribution and return a disposer that removes it.
+    fn contribute(&self, contribution: Contribution) -> Result<Disposer, PluginError>;
+}
+
+struct ContextInner {
+    plugin_id: PluginId,
+    scope: ScopeId,
+    services: Arc<RwLock<ServiceRegistry>>,
+    events: EventBus,
+    commands: Option<Arc<dyn CommandRegistry>>,
+    contributions: Option<Arc<dyn ContributionSink>>,
+    config: RwLock<Value>,
+    disposers: Mutex<DisposerStack>,
+    children: Mutex<Vec<PluginContext>>,
+}
+
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        if let Ok(children) = self.children.get_mut() {
+            // Children dispose in reverse creation order, before parent cleanup.
+            while let Some(child) = children.pop() {
+                drop(child);
+            }
+        }
+        if let Ok(disposers) = self.disposers.get_mut() {
+            disposers.dispose_all();
+        }
+    }
+}
+
+/// Handle to a plugin scope.
+#[derive(Clone)]
+pub struct PluginContext {
+    inner: Arc<ContextInner>,
+}
+
+impl PluginContext {
+    /// Create a context with an empty service registry and no host sinks.
+    ///
+    /// This is the constructor used by SDK tests and builtin plugins. Hosts add
+    /// their registries through the builder methods.
+    pub fn new(plugin_id: impl Into<String>) -> Self {
+        let plugin_id = PluginId::new(plugin_id).expect("plugin id must be a valid identifier");
+        let scope = ScopeId::new("host").expect("static scope id");
+        Self {
+            inner: Arc::new(ContextInner {
+                plugin_id,
+                scope,
+                services: Arc::new(RwLock::new(ServiceRegistry::new())),
+                events: EventBus::new(),
+                commands: None,
+                contributions: None,
+                config: RwLock::new(Value::Null),
+                disposers: Mutex::new(DisposerStack::new()),
+                children: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Override the scope identifier.
+    pub fn with_scope(mut self, scope: ScopeId) -> Self {
+        Arc::get_mut(&mut self.inner).expect("context must be unique before configuration").scope =
+            scope;
+        self
+    }
+
+    /// Use a shared service registry.
+    pub fn with_services(mut self, services: Arc<RwLock<ServiceRegistry>>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("context must be unique before configuration")
+            .services = services;
+        self
+    }
+
+    /// Use a shared event bus.
+    pub fn with_events(mut self, events: EventBus) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("context must be unique before configuration")
+            .events = events;
+        self
+    }
+
+    /// Install the host command registry.
+    pub fn with_command_registry(mut self, registry: Arc<dyn CommandRegistry>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("context must be unique before configuration")
+            .commands = Some(registry);
+        self
+    }
+
+    /// Install the host contribution sink.
+    pub fn with_contribution_sink(mut self, sink: Arc<dyn ContributionSink>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("context must be unique before configuration")
+            .contributions = Some(sink);
+        self
+    }
+
+    /// Set the initial configuration value.
+    pub fn configured_with(self, config: Value) -> Self {
+        *self.inner.config.write().expect("config lock poisoned") = config;
+        self
+    }
+
+    /// Plugin package identifier.
+    pub fn plugin_id(&self) -> &PluginId {
+        &self.inner.plugin_id
+    }
+
+    /// Scope identifier.
+    pub fn scope(&self) -> &ScopeId {
+        &self.inner.scope
+    }
+
+    /// Current configuration value.
+    pub fn config(&self) -> Value {
+        self.inner.config.read().expect("config lock poisoned").clone()
+    }
+
+    /// Resolve a service by type.
+    pub fn service<T: Service>(&self) -> Option<Arc<T>> {
+        self.inner
+            .services
+            .read()
+            .expect("service registry lock poisoned")
+            .get(&ServiceKey::<T>::new())
+    }
+
+    /// Resolve a required service.
+    pub fn require<T: Service>(&self) -> Result<Arc<T>, PluginError> {
+        self.inner
+            .services
+            .read()
+            .expect("service registry lock poisoned")
+            .require(&ServiceKey::<T>::new())
+            .map_err(PluginError::from)
+    }
+
+    /// Services a plugin declares as required.
+    pub fn requires(&self) -> &[ServiceId] {
+        &[]
+    }
+
+    /// Register an observe-only event listener.
+    pub fn on<E: Event>(
+        &self,
+        listener: impl Fn(&E) + Send + Sync + 'static,
+    ) -> Result<Disposer, PluginError> {
+        let disposer = self.inner.events.on(listener)?;
+        self.track(disposer.clone());
+        Ok(disposer)
+    }
+
+    /// Register a cleanup tied to this scope.
+    ///
+    /// The installer runs immediately and must return the cleanup closure.
+    pub fn effect<F, D>(&self, install: F) -> Result<(), PluginError>
+    where
+        F: FnOnce() -> Result<D, PluginError>,
+        D: FnOnce() + Send + 'static,
+    {
+        let cleanup = install()?;
+        self.track(Disposer::new(cleanup));
+        Ok(())
+    }
+
+    /// Register a command through the host registry.
+    pub fn command(
+        &self,
+        spec: CommandSpec,
+        handler: Arc<dyn CommandHandler>,
+    ) -> Result<Disposer, PluginError> {
+        let registry = self
+            .inner
+            .commands
+            .as_ref()
+            .ok_or(PluginError::Unsupported { feature: "command registration" })?;
+        let disposer = registry.register_command(spec, handler)?;
+        self.track(disposer.clone());
+        Ok(disposer)
+    }
+
+    /// Publish a declarative contribution.
+    pub fn contribute(&self, contribution: Contribution) -> Result<Disposer, PluginError> {
+        let sink = self
+            .inner
+            .contributions
+            .as_ref()
+            .ok_or(PluginError::Unsupported { feature: "contribution publishing" })?;
+        let disposer = sink.contribute(contribution)?;
+        self.track(disposer.clone());
+        Ok(disposer)
+    }
+
+    /// Create a child scope that shares services, events, and host sinks.
+    ///
+    /// The child is disposed with the parent, in reverse creation order.
+    pub fn child_scope(&self, scope: ScopeId) -> PluginContext {
+        self.make_child(scope, self.config())
+    }
+
+    /// Create a child scope with an overridden configuration value.
+    pub fn with_config(&self, config: Value) -> PluginContext {
+        self.make_child(self.inner.scope.clone(), config)
+    }
+
+    fn make_child(&self, scope: ScopeId, config: Value) -> PluginContext {
+        let child = PluginContext {
+            inner: Arc::new(ContextInner {
+                plugin_id: self.inner.plugin_id.clone(),
+                scope,
+                services: Arc::clone(&self.inner.services),
+                events: self.inner.events.clone(),
+                commands: self.inner.commands.clone(),
+                contributions: self.inner.contributions.clone(),
+                config: RwLock::new(config),
+                disposers: Mutex::new(DisposerStack::new()),
+                children: Mutex::new(Vec::new()),
+            }),
+        };
+        self.inner.children.lock().expect("children lock poisoned").push(child.clone());
+        child
+    }
+
+    fn track(&self, disposer: Disposer) {
+        self.inner.disposers.lock().expect("disposer lock poisoned").push(disposer);
+    }
+}
+
+impl std::fmt::Debug for PluginContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginContext")
+            .field("plugin_id", &self.inner.plugin_id)
+            .field("scope", &self.inner.scope)
+            .finish()
+    }
+}
+
+/// A plugin entry point.
+///
+/// `apply` runs once during activation, outside the core lock. It may register
+/// listeners, commands, services, and contributions. It must not hold a core
+/// borrow.
+pub trait Plugin: Send + Sync + 'static {
+    /// Stable plugin name.
+    fn name(&self) -> &str;
+
+    /// Services the plugin requires before activation.
+    fn requires(&self) -> &[ServiceId] {
+        &[]
+    }
+
+    /// Install the plugin into a scope.
+    fn apply(&mut self, ctx: &PluginContext) -> Result<(), PluginError>;
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unused_must_use)]
+
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::contribution::StatusAlignment;
+    use crate::effect::{CommandRequest, Effect, StatusItem};
+    use crate::ids::CommandId;
+
+    #[derive(Debug)]
+    struct CounterService;
+    impl Service for CounterService {
+        const ID: &'static str = "test.counter@1";
+    }
+
+    #[derive(Debug)]
+    struct DemoEvent;
+    impl Event for DemoEvent {
+        const NAME: &'static str = "test.demo";
+    }
+
+    struct NoopHandler;
+    impl CommandHandler for NoopHandler {
+        fn invoke(&self, _request: CommandRequest) -> Result<Vec<Effect>, PluginError> {
+            Ok(vec![Effect::Noop])
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRegistry {
+        ids: StdMutex<Vec<CommandId>>,
+    }
+
+    impl CommandRegistry for RecordingRegistry {
+        fn register_command(
+            &self,
+            spec: CommandSpec,
+            _handler: Arc<dyn CommandHandler>,
+        ) -> Result<Disposer, PluginError> {
+            let id = spec.id.clone();
+            self.ids.lock().unwrap().push(id.clone());
+            Ok(Disposer::new(move || {
+                let _ = id;
+            }))
+        }
+    }
+
+    struct RecordingSink {
+        count: AtomicUsize,
+    }
+
+    impl ContributionSink for RecordingSink {
+        fn contribute(&self, contribution: Contribution) -> Result<Disposer, PluginError> {
+            contribution.validate()?;
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(Disposer::new(|| {}))
+        }
+    }
+
+    #[test]
+    fn child_scope_inherits_services_and_config() {
+        let services = Arc::new(RwLock::new(ServiceRegistry::new()));
+        services.write().unwrap().register(Arc::new(CounterService)).unwrap();
+
+        let parent = PluginContext::new("demo")
+            .with_services(Arc::clone(&services))
+            .configured_with(serde_json::json!({"parent": true}));
+        let child = parent.child_scope(ScopeId::new("buffer").unwrap());
+
+        assert!(child.service::<CounterService>().is_some());
+        assert_eq!(child.config(), serde_json::json!({"parent": true}));
+        assert_eq!(child.scope().as_str(), "buffer");
+    }
+
+    #[test]
+    fn with_config_creates_config_override_child() {
+        let parent = PluginContext::new("demo").configured_with(serde_json::json!({"a": 1}));
+        let child = parent.with_config(serde_json::json!({"a": 2}));
+        assert_eq!(parent.config(), serde_json::json!({"a": 1}));
+        assert_eq!(child.config(), serde_json::json!({"a": 2}));
+    }
+
+    #[test]
+    fn scope_drop_disposes_children_lifo() {
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        {
+            let parent = PluginContext::new("demo");
+            let first = parent.child_scope(ScopeId::new("first").unwrap());
+            let order_clone = Arc::clone(&order);
+            first.effect(move || Ok(move || order_clone.lock().unwrap().push(1))).unwrap();
+
+            let second = parent.child_scope(ScopeId::new("second").unwrap());
+            let order_clone = Arc::clone(&order);
+            second.effect(move || Ok(move || order_clone.lock().unwrap().push(2))).unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![2, 1]);
+    }
+
+    #[test]
+    fn listener_is_disposed_with_scope() {
+        let bus = EventBus::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        {
+            let ctx = PluginContext::new("demo").with_events(bus.clone());
+            let count_clone = Arc::clone(&count);
+            ctx.on(move |_: &DemoEvent| {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+            bus.emit(&DemoEvent).unwrap();
+        }
+        // Scope dropped, listener disposed, disposal is idempotent.
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(bus.listener_count::<DemoEvent>(), 0);
+    }
+
+    #[test]
+    fn command_registration_requires_host_registry() {
+        let ctx = PluginContext::new("demo");
+        let spec = CommandSpec {
+            id: CommandId::new("demo.run").unwrap(),
+            title: "Run".to_owned(),
+            description: String::new(),
+            category: None,
+            args_schema: None,
+        };
+        assert!(matches!(
+            ctx.command(spec, Arc::new(NoopHandler)),
+            Err(PluginError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn command_and_contribution_are_delegated() {
+        let registry = Arc::new(RecordingRegistry::default());
+        let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
+        let ctx = PluginContext::new("demo")
+            .with_command_registry(registry.clone())
+            .with_contribution_sink(sink.clone());
+
+        let spec = CommandSpec {
+            id: CommandId::new("demo.run").unwrap(),
+            title: "Run".to_owned(),
+            description: String::new(),
+            category: None,
+            args_schema: None,
+        };
+        ctx.command(spec, Arc::new(NoopHandler)).unwrap();
+        assert_eq!(registry.ids.lock().unwrap().len(), 1);
+
+        ctx.contribute(Contribution::StatusItem(crate::contribution::StatusItemContribution {
+            key: "demo.status".to_owned(),
+            text: "ok".to_owned(),
+            alignment: StatusAlignment::Left,
+            priority: 0,
+        }))
+        .unwrap();
+        assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn effect_installer_runs_immediately() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_clone = Arc::clone(&ran);
+        let ctx = PluginContext::new("demo");
+        ctx.effect(move || {
+            ran_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(|| {})
+        })
+        .unwrap();
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn status_item_is_constructible() {
+        let item = StatusItem {
+            key: crate::effect::StatusItemKey::new("demo.status"),
+            text: "ok".to_owned(),
+            alignment: StatusAlignment::Right,
+            priority: 0,
+        };
+        assert_eq!(item.text, "ok");
+    }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "ee-plugin-runtime"
+version = "0.11.11"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
+description = "Host-agnostic plugin discovery, resolution, loading, and lifecycle runtime for ee."
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ee_plugin_runtime"
+
+[features]
+default = []
+wasm = ["dep:wasmtime"]
+
+[dependencies]
+ee-plugin-api.workspace = true
+jsonschema.workspace = true
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+wasmtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

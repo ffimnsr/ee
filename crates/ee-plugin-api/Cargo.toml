@@ -1,0 +1,27 @@
+[package]
+name = "ee-plugin-api"
+version = "0.11.11"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
+description = "Stable, host-agnostic contracts for ee editor and agent plugins."
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ee_plugin_api"
+
+[features]
+default = []
+async = ["dep:futures"]
+
+[dependencies]
+futures = { workspace = true, optional = true }
+schemars.workspace = true
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
