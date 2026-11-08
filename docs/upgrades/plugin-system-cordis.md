@@ -344,11 +344,16 @@ Native process plugins keep a JSON-RPC transport (`stdio_newline` or `stdio_cont
 | host → plugin | `plugin/command` | command id, request id, args, deadline |
 | host → plugin | `plugin/contribution/request` | request a fresh contribution snapshot |
 | host → plugin | `plugin/shutdown` | reason |
+| host → plugin | `plugin/response` | response to `plugin/request` (result or typed error) |
 | plugin → host | `plugin/request` | service id, method, params, request id |
 | plugin → host | `plugin/effect` | effect list for a command or event |
 | plugin → host | `plugin/contribution` | contribution upsert/remove |
 | plugin → host | `plugin/health` | degraded/recovered state, bounded reason |
 | plugin → host | `plugin/response` | request id, result or typed error |
+
+The initialize handshake is acknowledged by a `plugin/response` with request id
+`0`. This keeps startup deterministic: the host waits for the ack (bounded by
+the manifest RPC timeout) before activating dependents.
 
 The SDK hides this wire protocol behind typed service clients:
 

@@ -115,6 +115,22 @@ impl ServiceRegistry {
         Ok(())
     }
 
+    /// Re-register an already erased service.
+    ///
+    /// Used by reload rollback to restore providers that were temporarily
+    /// removed for a candidate generation.
+    pub fn register_erased(
+        &mut self,
+        id: ServiceId,
+        service: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), ServiceError> {
+        if self.services.contains_key(&id) {
+            return Err(ServiceError::Duplicate { id });
+        }
+        self.services.insert(id, service);
+        Ok(())
+    }
+
     /// Look up a typed service through a key.
     pub fn get<T: 'static + Send + Sync>(&self, key: &ServiceKey<T>) -> Option<Arc<T>> {
         let erased = self.services.get(key.id())?;
@@ -133,6 +149,22 @@ impl ServiceRegistry {
         Arc::clone(erased)
             .downcast::<T>()
             .map_err(|_| ServiceError::TypeMismatch { id: key.id().clone() })
+    }
+
+    /// Remove a service only when it is still the same registered value.
+    ///
+    /// Reload uses this to prevent a disposed old scope from removing a
+    /// service that a newer generation already re-registered under the same
+    /// id.
+    pub fn remove_if_same(&mut self, id: &ServiceId, service: &Arc<dyn Any + Send + Sync>) -> bool {
+        let Some(current) = self.services.get(id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(current, service) {
+            return false;
+        }
+        self.services.remove(id);
+        true
     }
 
     /// Remove a service by identifier.
@@ -235,6 +267,26 @@ mod tests {
         registry.register(Arc::new(OtherService)).unwrap();
         let id = ServiceId::from_static("test.other@1");
         assert!(registry.remove(&id).is_some());
+        assert!(!registry.contains(&id));
+    }
+
+    #[test]
+    fn remove_if_same_requires_identity() {
+        let mut registry = ServiceRegistry::new();
+        let id = ServiceId::from_static("test.counter@1");
+        let first = Arc::new(CounterService::new());
+        registry.register(Arc::clone(&first)).unwrap();
+        registry.remove(&id);
+
+        let second = Arc::new(CounterService::new());
+        registry.register(Arc::clone(&second)).unwrap();
+
+        let first_erased: Arc<dyn Any + Send + Sync> = first;
+        assert!(!registry.remove_if_same(&id, &first_erased));
+        assert!(registry.contains(&id));
+
+        let second_erased: Arc<dyn Any + Send + Sync> = second;
+        assert!(registry.remove_if_same(&id, &second_erased));
         assert!(!registry.contains(&id));
     }
 

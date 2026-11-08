@@ -167,6 +167,37 @@ impl PluginContext {
             .map_err(PluginError::from)
     }
 
+    /// Register a service under `T::ID` and remove it when the returned
+    /// disposer runs or this scope is dropped.
+    pub fn register_service<T: Service>(&self, service: Arc<T>) -> Result<Disposer, PluginError> {
+        self.register_service_with_id(ServiceId::from_static(T::ID), service)
+    }
+
+    /// Register a service under an explicit identifier.
+    ///
+    /// Used by data-driven builtins whose runtime identity is not a Rust type
+    /// constant. Lookups still check the concrete type id.
+    pub fn register_service_with_id<T: 'static + Send + Sync>(
+        &self,
+        id: ServiceId,
+        service: Arc<T>,
+    ) -> Result<Disposer, PluginError> {
+        let shared = Arc::clone(&self.inner.services);
+        let erased: Arc<dyn std::any::Any + Send + Sync> = service.clone();
+        shared
+            .write()
+            .expect("service registry lock poisoned")
+            .register_with_id(id.clone(), service)?;
+
+        let disposer = Disposer::new(move || {
+            if let Ok(mut registry) = shared.write() {
+                registry.remove_if_same(&id, &erased);
+            }
+        });
+        self.track(disposer.clone());
+        Ok(disposer)
+    }
+
     /// Services a plugin declares as required.
     pub fn requires(&self) -> &[ServiceId] {
         &[]
@@ -345,6 +376,46 @@ mod tests {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(Disposer::new(|| {}))
         }
+    }
+
+    #[test]
+    fn service_registration_is_scoped() {
+        let services = Arc::new(RwLock::new(ServiceRegistry::new()));
+        let count = services.read().unwrap().ids().len();
+        assert_eq!(count, 0);
+
+        {
+            let ctx = PluginContext::new("demo").with_services(Arc::clone(&services));
+            let disposer = ctx.register_service(Arc::new(CounterService)).unwrap();
+            assert!(ctx.service::<CounterService>().is_some());
+            assert!(services.read().unwrap().contains(&ServiceId::from_static("test.counter@1")));
+            disposer.dispose();
+            assert!(!services.read().unwrap().contains(&ServiceId::from_static("test.counter@1")));
+        }
+    }
+
+    #[test]
+    fn stale_scope_does_not_remove_replacement_service() {
+        let services = Arc::new(RwLock::new(ServiceRegistry::new()));
+        let id = ServiceId::from_static("test.counter@1");
+
+        let old = PluginContext::new("demo").with_services(Arc::clone(&services));
+        let _ = old.register_service(Arc::new(CounterService)).unwrap();
+        services.write().unwrap().remove(&id);
+
+        let new = PluginContext::new("demo").with_services(Arc::clone(&services));
+        let _ = new.register_service(Arc::new(CounterService)).unwrap();
+
+        drop(old);
+        assert!(new.service::<CounterService>().is_some());
+        assert!(services.read().unwrap().contains(&id));
+    }
+
+    #[test]
+    fn duplicate_service_registration_is_rejected() {
+        let ctx = PluginContext::new("demo");
+        ctx.register_service(Arc::new(CounterService)).unwrap();
+        assert!(ctx.register_service(Arc::new(CounterService)).is_err());
     }
 
     #[test]

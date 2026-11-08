@@ -28,6 +28,10 @@ pub enum HostToPlugin {
     ContributionRequest(ContributionRequestParams),
     #[serde(rename = "plugin/shutdown")]
     Shutdown(ShutdownParams),
+    /// Response to a `plugin/request` service call. The host is the responder
+    /// for service calls initiated by the plugin.
+    #[serde(rename = "plugin/response")]
+    Response(PluginResponse),
 }
 
 /// Messages sent by a plugin to a host.
@@ -184,6 +188,16 @@ mod tests {
             }),
             HostToPlugin::ContributionRequest(ContributionRequestParams { revision: 4 }),
             HostToPlugin::Shutdown(ShutdownParams { reason: "host exit".to_owned() }),
+            HostToPlugin::Response(PluginResponse {
+                request_id: 9,
+                result: None,
+                error: Some(WireError {
+                    class: "runtime".to_owned(),
+                    code: "plugin.unsupported".to_owned(),
+                    message: "not available".to_owned(),
+                    retryable: false,
+                }),
+            }),
         ]
     }
 

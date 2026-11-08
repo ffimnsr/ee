@@ -141,55 +141,55 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Implement `discovery.rs`.
-  - [ ] Scan bundled, user, workspace, client-extra, and `EE_PLUGIN_PATH` roots for `manifest.toml`.
-  - [ ] Read each manifest and compute a SHA-256 origin hash over manifest bytes plus entrypoint bytes.
-  - [ ] Reject duplicate plugin names across roots with both paths in the diagnostic.
-  - [ ] Add tests for recursive discovery, duplicate names, missing manifest, unreadable directory, and origin hash stability.
-- [ ] Implement `config.rs`.
-  - [ ] Load host, workspace, plugin, and runtime override layers.
-  - [ ] Implement `${env:NAME}`, `${host:config_dir}`, `${host:workspace}`, and `${plugin:dir}` interpolation with an allowlist.
-  - [ ] Reject `${...}` expressions outside the allowlist and reject unresolved variables.
-  - [ ] Validate plugin config against the manifest `config.schema` using `jsonschema`.
-  - [ ] Add tests for precedence, interpolation, secret-free rejection, schema failure, and config reload.
-- [ ] Implement `resolver.rs`.
-  - [ ] Build a service provider graph from `[provides].services` and `[requires].services`.
-  - [ ] Detect cycles and missing required services; allow missing optional services.
-  - [ ] Produce a deterministic activation order and a stable diagnostic list.
-  - [ ] Add tests for satisfied dependencies, missing required service, optional service, cycle, duplicate provider, and deterministic ordering.
-- [ ] Implement `activation.rs`.
-  - [ ] Evaluate `on_startup`, `on_language`, `on_command`, `on_event`, and scope targets.
-  - [ ] Treat `on_command`/`command` scope as ephemeral with no update stream.
-  - [ ] Add tests for each activation condition and scope lifetime.
-- [ ] Implement `manager.rs`.
-  - [ ] Add `PluginManager::new(adapter, config)` and `start`, `stop`, `reload`, `status`, and `diagnostics`.
-  - [ ] Load builtins first, then discover external plugins, then activate in resolver order.
-  - [ ] Dispose listeners, commands, contributions, and services LIFO on stop/reload.
-  - [ ] Keep the old generation live when a candidate reload fails.
-  - [ ] Add tests for start/stop, reload success, reload rollback, crash restart backoff, and generation swap.
-- [ ] Implement `health.rs`.
-  - [ ] Add health states `loaded`, `blocked`, `degraded`, `crashed`, `disabled`, and `reloaded`.
-  - [ ] Add bounded crash counters, restart backoff, and typed health reasons.
-  - [ ] Add tests for backoff growth, stable uptime reset, resource breach transition, and health snapshot.
-- [ ] Implement `diagnostics.rs`.
-  - [ ] Add stable diagnostic classes: manifest, schema, dependency, permission, transport, contribution, config, resource, runtime.
-  - [ ] Include plugin name, origin, phase, and bounded message.
-  - [ ] Add snapshot tests for each diagnostic class.
-- [ ] Implement `native.rs` new wire transport.
-  - [ ] Spawn `entry` with `[launch]` args, cwd, env, and `stdio_newline` / `stdio_content_length`.
-  - [ ] Send `plugin/initialize`; handle `plugin/request`, `plugin/effect`, `plugin/contribution`, `plugin/health`, and `plugin/response`.
-  - [ ] Enforce RPC deadline, stderr cap, exit status, and terminate-on-shutdown.
-  - [ ] Add a fake native plugin test binary under `crates/ee-plugin-runtime/tests/fixtures/` that echoes events and commands.
-  - [ ] Add tests for initialize, command round trip, event delivery, malformed response, timeout, and shutdown.
-- [ ] Implement `builtin.rs`.
-  - [ ] Load builtin descriptors from a generated catalog and call `Plugin::apply` in-process.
-  - [ ] Register builtin services before external plugin resolution.
-  - [ ] Add a test builtin plugin that provides and consumes a service.
-- [ ] Add runtime integration tests.
-  - [ ] Test a two-plugin dependency chain activates in order and disposes in reverse.
-  - [ ] Test a failed dependent does not abort unrelated plugins.
-  - [ ] Test contribution conflict rejects only the conflicting plugin.
-  - [ ] Test workspace plugin blocked without trust and loaded with trust.
+- [x] Implement `discovery.rs`.
+  - [x] Scan bundled, user, workspace, client-extra, and `EE_PLUGIN_PATH` roots for `manifest.toml`.
+  - [x] Read each manifest and compute a SHA-256 origin hash over manifest bytes plus entrypoint bytes.
+  - [x] Reject duplicate plugin names across roots with both paths in the diagnostic.
+  - [x] Add tests for recursive discovery, duplicate names, missing manifest, unreadable directory, and origin hash stability.
+- [x] Implement `config.rs`.
+  - [x] Load host, workspace, plugin, and runtime override layers.
+  - [x] Implement `${env:NAME}`, `${host:config_dir}`, `${host:workspace}`, and `${plugin:dir}` interpolation with an allowlist.
+  - [x] Reject `${...}` expressions outside the allowlist and reject unresolved variables.
+  - [x] Validate plugin config against the manifest `config.schema` using `jsonschema`.
+  - [x] Add tests for precedence, interpolation, secret-free rejection, schema failure, and config reload.
+- [x] Implement `resolver.rs`.
+  - [x] Build a service provider graph from `[provides].services` and `[requires].services`.
+  - [x] Detect cycles and missing required services; allow missing optional services.
+  - [x] Produce a deterministic activation order and a stable diagnostic list.
+  - [x] Add tests for satisfied dependencies, missing required service, optional service, cycle, duplicate provider, and deterministic ordering.
+- [x] Implement `activation.rs`.
+  - [x] Evaluate `on_startup`, `on_language`, `on_command`, `on_event`, and scope targets.
+  - [x] Treat `on_command`/`command` scope as ephemeral with no update stream.
+  - [x] Add tests for each activation condition and scope lifetime.
+- [x] Implement `manager.rs`.
+  - [x] Add `PluginManager::new(adapter, config)` and `start`, `stop`, `reload`, `status`, and `diagnostics`.
+  - [x] Load builtins first, then discover external plugins, then activate in resolver order.
+  - [x] Dispose listeners, commands, contributions, and services LIFO on stop/reload.
+  - [x] Keep the old generation live when a candidate reload fails.
+  - [x] Add tests for start/stop, reload success, reload rollback, crash restart backoff, and generation swap.
+- [x] Implement `health.rs`.
+  - [x] Add health states `loaded`, `blocked`, `degraded`, `crashed`, `disabled`, and `reloaded`.
+  - [x] Add bounded crash counters, restart backoff, and typed health reasons.
+  - [x] Add tests for backoff growth, stable uptime reset, resource breach transition, and health snapshot.
+- [x] Implement `diagnostics.rs`.
+  - [x] Add stable diagnostic classes: manifest, schema, dependency, permission, transport, contribution, config, resource, runtime.
+  - [x] Include plugin name, origin, phase, and bounded message.
+  - [x] Add snapshot tests for each diagnostic class.
+- [x] Implement `native.rs` new wire transport.
+  - [x] Spawn `entry` with `[launch]` args, cwd, env, and `stdio_newline` / `stdio_content_length`.
+  - [x] Send `plugin/initialize`; handle `plugin/request`, `plugin/effect`, `plugin/contribution`, `plugin/health`, and `plugin/response`.
+  - [x] Enforce RPC deadline, stderr cap, exit status, and terminate-on-shutdown.
+  - [x] Add a fake native plugin test binary under `crates/ee-plugin-runtime/tests/fixtures/` that echoes events and commands.
+  - [x] Add tests for initialize, command round trip, event delivery, malformed response, timeout, and shutdown.
+- [x] Implement `builtin.rs`.
+  - [x] Load builtin descriptors from a generated catalog and call `Plugin::apply` in-process.
+  - [x] Register builtin services before external plugin resolution.
+  - [x] Add a test builtin plugin that provides and consumes a service.
+- [x] Add runtime integration tests.
+  - [x] Test a two-plugin dependency chain activates in order and disposes in reverse.
+  - [x] Test a failed dependent does not abort unrelated plugins.
+  - [x] Test contribution conflict rejects only the conflicting plugin.
+  - [x] Test workspace plugin blocked without trust and loaded with trust.
 
 **Acceptance criteria:**
 
