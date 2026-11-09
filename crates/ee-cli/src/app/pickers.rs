@@ -177,13 +177,17 @@ impl App {
             }
             crate::picker::PickerKind::Completions => {
                 let Some(index) = item.choice_index else { return };
-                if let Err(err) = self.backend.request_completion(Some(index)) {
+                if let Err(err) =
+                    self.backend.send_plugin_command("lsp.completion", json!({ "index": index }))
+                {
                     self.backend.status_message = Some(format!("completion failed: {err}"));
                 }
             }
             crate::picker::PickerKind::CodeActions => {
                 let Some(index) = item.choice_index else { return };
-                if let Err(err) = self.backend.request_code_actions(Some(index)) {
+                if let Err(err) =
+                    self.backend.send_plugin_command("lsp.code_actions", json!({ "index": index }))
+                {
                     self.backend.status_message = Some(format!("code action failed: {err}"));
                 }
             }

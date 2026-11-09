@@ -221,14 +221,6 @@ impl<'a> EventContext<'a> {
                 self.do_request_lines(first as usize, last as usize);
                 None
             }
-            SpecialEvent::RequestHover { request_id, position } => {
-                self.do_request_hover(request_id, position);
-                None
-            }
-            SpecialEvent::DispatchPluginCommand { capability, method, params } => {
-                self.dispatch_capability_command(capability, method, &params);
-                None
-            }
             SpecialEvent::DeleteLineRange { start_line, end_line } => {
                 self.do_delete_line_range(start_line, end_line);
                 None

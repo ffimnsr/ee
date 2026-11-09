@@ -14,120 +14,132 @@ use crate::picker::PickerKind;
 use crate::tests::helpers::*;
 
 #[test]
-fn request_completion_emits_edit_notification() {
+fn completion_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_completion(Some(2)).expect("completion request should send");
+    client
+        .send_plugin_command("lsp.completion", json!({ "index": 2 }))
+        .expect("completion request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_completion");
-    assert_eq!(value["params"]["params"]["index"], 2);
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.completion");
+    assert_eq!(value["params"]["args"]["index"], 2);
 }
 
 #[test]
-fn request_definition_emits_backend_edit_notification() {
+fn definition_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_definition().expect("definition request should send");
+    client
+        .send_plugin_command("lsp.definition", json!({}))
+        .expect("definition request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_definition");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.definition");
 }
 
 #[test]
-fn request_declaration_emits_backend_edit_notification() {
+fn declaration_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_declaration().expect("declaration request should send");
+    client
+        .send_plugin_command("lsp.declaration", json!({}))
+        .expect("declaration request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_declaration");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.declaration");
 }
 
 #[test]
-fn request_type_definition_emits_backend_edit_notification() {
+fn type_definition_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_type_definition().expect("type definition request should send");
+    client
+        .send_plugin_command("lsp.type_definition", json!({}))
+        .expect("type definition request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_type_definition");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.type_definition");
 }
 
 #[test]
-fn request_implementation_emits_backend_edit_notification() {
+fn implementation_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_implementation().expect("implementation request should send");
+    client
+        .send_plugin_command("lsp.implementation", json!({}))
+        .expect("implementation request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_implementation");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.implementation");
 }
 
 #[test]
-fn request_hover_emits_edit_notification() {
+fn hover_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_hover(Some((3, 7))).expect("hover request should send");
+    client.send_plugin_command("lsp.hover", json!({})).expect("hover request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_hover");
-    assert_eq!(value["params"]["params"]["position"]["line"], 3);
-    assert_eq!(value["params"]["params"]["position"]["column"], 7);
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.hover");
 }
 
 #[test]
-fn request_code_actions_emits_edit_notification() {
+fn code_actions_emit_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_code_actions(Some(2)).expect("code action request should send");
+    client
+        .send_plugin_command("lsp.code_actions", json!({ "index": 2 }))
+        .expect("code action request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_code_actions");
-    assert_eq!(value["params"]["params"]["index"], 2);
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.code_actions");
+    assert_eq!(value["params"]["args"]["index"], 2);
 }
 
 #[test]
-fn request_rename_emits_edit_notification() {
+fn rename_emits_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_rename("renamed_symbol").expect("rename request should send");
+    client
+        .send_plugin_command("lsp.rename", json!({ "new_name": "renamed_symbol" }))
+        .expect("rename request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_rename");
-    assert_eq!(value["params"]["params"]["new_name"], "renamed_symbol");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.rename");
+    assert_eq!(value["params"]["args"]["new_name"], "renamed_symbol");
 }
 
 #[test]
@@ -373,6 +385,7 @@ fn definition_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in [':', 'd', 'e', 'f'] {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -381,8 +394,8 @@ fn definition_command_uses_backend_edit() {
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_definition");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.definition");
 }
 
 #[test]
@@ -391,6 +404,7 @@ fn commit_undo_checkpoint_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     run_ex(&mut app, "commit_undo_checkpoint");
 
@@ -407,6 +421,7 @@ fn undo_redo_commands_use_backend_edit() {
         let (_backend_tx, backend_rx) = mpsc::channel();
         let mut app = App::from_path(None).unwrap();
         app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+        seed_lsp_commands(&mut app);
 
         run_ex(&mut app, command);
 
@@ -420,24 +435,25 @@ fn undo_redo_commands_use_backend_edit() {
 #[test]
 fn goto_lsp_commands_use_backend_edit() {
     let commands = [
-        ("goto_declaration", "request_declaration"),
-        ("goto_definition", "request_definition"),
-        ("goto_type_definition", "request_type_definition"),
-        ("goto_reference", "request_references"),
-        ("goto_implementation", "request_implementation"),
+        ("goto_declaration", "lsp.declaration"),
+        ("goto_definition", "lsp.definition"),
+        ("goto_type_definition", "lsp.type_definition"),
+        ("goto_reference", "lsp.references"),
+        ("goto_implementation", "lsp.implementation"),
     ];
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for (command, expected) in commands {
         run_ex(&mut app, command);
 
         let message = rx.recv().expect("message should be sent");
         let value: Value = serde_json::from_str(&message).expect("message should be json");
-        assert_eq!(value["method"], "edit");
-        assert_eq!(value["params"]["method"], expected);
+        assert_eq!(value["method"], "command");
+        assert_eq!(value["params"]["id"], expected);
     }
 }
 
@@ -447,6 +463,7 @@ fn codeaction_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in ":codeaction 3".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -455,9 +472,9 @@ fn codeaction_command_uses_backend_edit() {
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_code_actions");
-    assert_eq!(value["params"]["params"]["index"], 3);
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.code_actions");
+    assert_eq!(value["params"]["args"]["index"], 3);
 }
 
 #[test]
@@ -466,6 +483,7 @@ fn code_action_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in ":code_action".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -474,9 +492,9 @@ fn code_action_command_uses_backend_edit() {
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_code_actions");
-    assert!(value["params"]["params"]["index"].is_null());
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.code_actions");
+    assert!(value["params"]["args"]["index"].is_null());
 }
 
 #[test]
@@ -485,6 +503,7 @@ fn complete_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in ":complete".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -493,9 +512,9 @@ fn complete_command_uses_backend_edit() {
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_completion");
-    assert!(value["params"]["params"]["index"].is_null());
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.completion");
+    assert!(value["params"]["args"]["index"].is_null());
 }
 
 #[test]
@@ -504,14 +523,15 @@ fn completion_command_alias_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     run_ex(&mut app, "completion");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_completion");
-    assert!(value["params"]["params"]["index"].is_null());
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.completion");
+    assert!(value["params"]["args"]["index"].is_null());
 }
 
 #[test]
@@ -520,6 +540,7 @@ fn increment_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in ":increment".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -538,6 +559,7 @@ fn rename_command_uses_backend_edit() {
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     for ch in ":rename fresh_name".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
@@ -546,9 +568,9 @@ fn rename_command_uses_backend_edit() {
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_rename");
-    assert_eq!(value["params"]["params"]["new_name"], "fresh_name");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.rename");
+    assert_eq!(value["params"]["args"]["new_name"], "fresh_name");
 }
 
 #[test]
@@ -702,32 +724,36 @@ fn parse_notification_handles_symbols() {
 }
 
 #[test]
-fn request_document_symbols_emits_edit_notification() {
+fn document_symbols_emit_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_document_symbols().expect("document symbols request should send");
+    client
+        .send_plugin_command("lsp.document_symbols", json!({}))
+        .expect("document symbols request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_document_symbols");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.document_symbols");
 }
 
 #[test]
-fn request_workspace_symbols_emits_edit_notification() {
+fn workspace_symbols_emit_command_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client.request_workspace_symbols("Foo").expect("workspace symbols request should send");
+    client
+        .send_plugin_command("lsp.workspace_symbols", json!({ "query": "Foo" }))
+        .expect("workspace symbols request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_workspace_symbols");
-    assert_eq!(value["params"]["params"]["query"], "Foo");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.workspace_symbols");
+    assert_eq!(value["params"]["args"]["query"], "Foo");
 }
 
 #[test]

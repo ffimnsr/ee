@@ -202,83 +202,30 @@ impl App {
             "replace_selections_with_primary_clipboard" => {
                 self.replace_selections_with_register(RegisterName::PrimaryClipboard);
             }
-            "format" => {
-                if let Err(err) = self.backend.format_document() {
-                    self.backend.status_message = Some(format!("format failed: {err}"));
-                }
-            }
-            "complete" | "completion" => {
-                if let Err(err) = self.backend.request_completion(None) {
-                    self.backend.status_message = Some(format!("completion failed: {err}"));
-                }
-            }
-            "definition" | "def" => {
-                if let Err(err) = self.backend.request_definition() {
-                    self.backend.status_message = Some(format!("definition failed: {err}"));
-                }
-            }
-            "goto_declaration" => {
-                if let Err(err) = self.backend.request_declaration() {
-                    self.backend.status_message = Some(format!("declaration failed: {err}"));
-                }
-            }
-            "goto_definition" => {
-                if let Err(err) = self.backend.request_definition() {
-                    self.backend.status_message = Some(format!("definition failed: {err}"));
-                }
-            }
-            "goto_type_definition" => {
-                if let Err(err) = self.backend.request_type_definition() {
-                    self.backend.status_message = Some(format!("type definition failed: {err}"));
-                }
-            }
-            "references" | "refs" => {
-                if let Err(err) = self.backend.request_references() {
-                    self.backend.status_message = Some(format!("references failed: {err}"));
-                }
-            }
+            "format" => self.invoke_plugin_command("lsp.format_document", json!({})),
+            "complete" | "completion" => self.invoke_plugin_command("lsp.completion", json!({})),
+            "definition" | "def" => self.invoke_plugin_command("lsp.definition", json!({})),
+            "goto_declaration" => self.invoke_plugin_command("lsp.declaration", json!({})),
+            "goto_definition" => self.invoke_plugin_command("lsp.definition", json!({})),
+            "goto_type_definition" => self.invoke_plugin_command("lsp.type_definition", json!({})),
+            "references" | "refs" => self.invoke_plugin_command("lsp.references", json!({})),
             "goto_reference" | "select_references_to_symbol_under_cursor" => {
-                if let Err(err) = self.backend.request_references() {
-                    self.backend.status_message = Some(format!("references failed: {err}"));
-                }
+                self.invoke_plugin_command("lsp.references", json!({}))
             }
-            "goto_implementation" => {
-                if let Err(err) = self.backend.request_implementation() {
-                    self.backend.status_message = Some(format!("implementation failed: {err}"));
-                }
-            }
-            "symbols" | "outline" => {
-                if let Err(err) = self.backend.request_document_symbols() {
-                    self.backend.status_message = Some(format!("symbols failed: {err}"));
-                }
-            }
-            "symbol_picker" => {
-                if let Err(err) = self.backend.request_document_symbols() {
-                    self.backend.status_message = Some(format!("symbols failed: {err}"));
-                }
-            }
+            "goto_implementation" => self.invoke_plugin_command("lsp.implementation", json!({})),
+            "symbols" | "outline" => self.invoke_plugin_command("lsp.document_symbols", json!({})),
+            "symbol_picker" => self.invoke_plugin_command("lsp.document_symbols", json!({})),
             "wsymbols" | "wsymbol" => {
-                let query = tail.to_owned();
-                if let Err(err) = self.backend.request_workspace_symbols(&query) {
-                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
-                }
+                self.invoke_plugin_command("lsp.workspace_symbols", json!({ "query": tail }))
             }
             "workspace_symbol_picker" => {
-                if let Err(err) = self.backend.request_workspace_symbols("") {
-                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
-                }
+                self.invoke_plugin_command("lsp.workspace_symbols", json!({ "query": "" }))
             }
             "codeaction" | "codeactions" => {
                 let action_index = parts.next().and_then(|part| part.parse::<usize>().ok());
-                if let Err(err) = self.backend.request_code_actions(action_index) {
-                    self.backend.status_message = Some(format!("code action failed: {err}"));
-                }
+                self.invoke_plugin_command("lsp.code_actions", json!({ "index": action_index }))
             }
-            "code_action" => {
-                if let Err(err) = self.backend.request_code_actions(None) {
-                    self.backend.status_message = Some(format!("code action failed: {err}"));
-                }
-            }
+            "code_action" => self.invoke_plugin_command("lsp.code_actions", json!({})),
             "goto_column" => {
                 let Some(column) = parts.next().and_then(|part| part.parse::<usize>().ok()) else {
                     self.backend.status_message =
@@ -359,8 +306,8 @@ impl App {
                 if new_name.is_empty() {
                     self.backend.status_message =
                         Some(String::from("rename: usage: :rename new_name"));
-                } else if let Err(err) = self.backend.request_rename(&new_name) {
-                    self.backend.status_message = Some(format!("rename failed: {err}"));
+                } else {
+                    self.invoke_plugin_command("lsp.rename", json!({ "new_name": new_name }))
                 }
             }
             "diagnostics" => {
@@ -376,12 +323,7 @@ impl App {
                 self.enter_normal_mode();
                 return;
             }
-            "hover" => {
-                let position = Some((self.backend.cursor_line, self.backend.cursor_col));
-                if let Err(err) = self.backend.request_hover(position) {
-                    self.backend.status_message = Some(format!("hover failed: {err}"));
-                }
-            }
+            "hover" => self.invoke_plugin_command("lsp.hover", json!({})),
             "insert_register" => {
                 self.backend.status_message = Some(match self.insert_register_command(tail) {
                     Ok(message) => message,

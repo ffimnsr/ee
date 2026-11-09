@@ -6,16 +6,18 @@
 //! created.
 
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::contribution::Contribution;
 use crate::disposer::{Disposer, DisposerStack};
-use crate::effect::{CommandHandler, CommandSpec};
+use crate::effect::{CommandHandler, CommandRequest, CommandSpec, Effect};
 use crate::error::PluginError;
 use crate::event::{Event, EventBus};
 use crate::ids::{PluginId, ScopeId, ServiceId};
 use crate::service::{Service, ServiceKey, ServiceRegistry};
+use crate::wire::EventParams;
 
 /// Registry boundary implemented by the editor and agent hosts.
 pub trait CommandRegistry: Send + Sync + 'static {
@@ -33,6 +35,23 @@ pub trait ContributionSink: Send + Sync + 'static {
     fn contribute(&self, contribution: Contribution) -> Result<Disposer, PluginError>;
 }
 
+/// Service and effect boundary used by native plugins.
+///
+/// The SDK implements this over the v2 wire protocol. In-process hosts may
+/// implement it directly; plugins never depend on a concrete host crate.
+pub trait ServiceCaller: Send + Sync + 'static {
+    /// Call one versioned service method.
+    fn call_service(
+        &self,
+        service: ServiceId,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, PluginError>;
+
+    /// Submit one effect batch to the host.
+    fn submit_effects(&self, effects: Vec<Effect>) -> Result<(), PluginError>;
+}
+
 struct ContextInner {
     plugin_id: PluginId,
     scope: ScopeId,
@@ -40,6 +59,7 @@ struct ContextInner {
     events: EventBus,
     commands: Option<Arc<dyn CommandRegistry>>,
     contributions: Option<Arc<dyn ContributionSink>>,
+    caller: Option<Arc<dyn ServiceCaller>>,
     config: RwLock<Value>,
     disposers: Mutex<DisposerStack>,
     children: Mutex<Vec<PluginContext>>,
@@ -81,6 +101,7 @@ impl PluginContext {
                 events: EventBus::new(),
                 commands: None,
                 contributions: None,
+                caller: None,
                 config: RwLock::new(Value::Null),
                 disposers: Mutex::new(DisposerStack::new()),
                 children: Mutex::new(Vec::new()),
@@ -125,6 +146,45 @@ impl PluginContext {
             .expect("context must be unique before configuration")
             .contributions = Some(sink);
         self
+    }
+
+    /// Install the native service/effect caller.
+    pub fn with_service_caller(mut self, caller: Arc<dyn ServiceCaller>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("context must be unique before configuration")
+            .caller = Some(caller);
+        self
+    }
+
+    /// Caller installed by the SDK runtime for external plugins.
+    pub fn service_caller(&self) -> Option<Arc<dyn ServiceCaller>> {
+        self.inner.caller.clone()
+    }
+
+    /// Call one service method through the host caller.
+    pub fn call_service(
+        &self,
+        service: ServiceId,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, PluginError> {
+        self.inner
+            .caller
+            .as_ref()
+            .ok_or(PluginError::Unsupported { feature: "service calls" })?
+            .call_service(service, method, params)
+    }
+
+    /// Submit effects through the host caller.
+    pub fn submit_effects(&self, effects: Vec<Effect>) -> Result<(), PluginError> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        self.inner
+            .caller
+            .as_ref()
+            .ok_or(PluginError::Unsupported { feature: "effect submission" })?
+            .submit_effects(effects)
     }
 
     /// Set the initial configuration value.
@@ -275,6 +335,7 @@ impl PluginContext {
                 events: self.inner.events.clone(),
                 commands: self.inner.commands.clone(),
                 contributions: self.inner.contributions.clone(),
+                caller: self.inner.caller.clone(),
                 config: RwLock::new(config),
                 disposers: Mutex::new(DisposerStack::new()),
                 children: Mutex::new(Vec::new()),
@@ -314,6 +375,46 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// Install the plugin into a scope.
     fn apply(&mut self, ctx: &PluginContext) -> Result<(), PluginError>;
+
+    /// Handle one host event.
+    fn on_event(
+        &mut self,
+        _ctx: &PluginContext,
+        _event: &EventParams,
+    ) -> Result<Vec<Effect>, PluginError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one command invocation.
+    fn on_command(
+        &mut self,
+        _ctx: &PluginContext,
+        request: &CommandRequest,
+    ) -> Result<Vec<Effect>, PluginError> {
+        Err(PluginError::Runtime { message: format!("command `{}` is not handled", request.id) })
+    }
+
+    /// Produce a fresh contribution snapshot.
+    fn on_contribution_request(
+        &mut self,
+        _ctx: &PluginContext,
+        _revision: u64,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    /// Periodic work while the host is idle.
+    fn on_tick(&mut self, _ctx: &PluginContext) -> Result<Vec<Effect>, PluginError> {
+        Ok(Vec::new())
+    }
+
+    /// Interval at which [`Plugin::on_tick`] runs. `None` disables ticks.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Last chance to dispose resources before shutdown.
+    fn on_shutdown(&mut self, _ctx: &PluginContext) {}
 }
 
 #[cfg(test)]

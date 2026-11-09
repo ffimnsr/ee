@@ -6,8 +6,7 @@ use crate::line_offset::LineOffset;
 use crate::object::SyntaxNavigationTarget;
 use crate::plugin_rpc::PluginRequest;
 use crate::plugins::rpc::{
-    CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
-    GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
+    Diagnostic, DiagnosticSeverity, GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
 };
 use crate::rpc::SelectionModifier;
 use crate::selection::SelRegion;
@@ -21,7 +20,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use xi_rope::Interval;
-use xi_rpc::{Callback, Error as RpcError, Peer, RemoteError, RequestId};
+use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
 #[derive(Clone, Default)]
 struct RecordingPeer {

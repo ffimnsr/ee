@@ -185,29 +185,9 @@ pub fn built_xi_lsp_binary(name: &str) -> PathBuf {
     let binary_name = format!("{name}{}", env::consts::EXE_SUFFIX);
     let candidates = [target_dir.join("debug"), workspace_root.join("target").join("debug")];
 
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .current_dir(workspace_root)
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(crate_dir.join("Cargo.toml"))
-        .arg("--bin")
-        .arg(name);
-    if name == "xi-lsp-plugin" {
-        // Hermetic grammars for the test-spawned plugin: as a real subprocess
-        // it cannot see the in-process `cfg(test)` grammar preload of the app
-        // test binary, so without the forwarded feature its tree-sitter paths
-        // depend on grammar artifacts in the user state dir (present only on
-        // developer machines that fetched them).
-        command.args(["--features", "test-grammars"]);
-    }
-    let status = command.status().expect("cargo build for xi-lsp binary should start");
-    assert!(status.success(), "cargo build for xi-lsp binary should succeed");
-    candidates
-        .iter()
-        .find_map(|dir| find_built_binary(dir, &binary_name))
-        .unwrap_or_else(|| panic!("xi-lsp binary should exist after build"))
+    candidates.iter().find_map(|dir| find_built_binary(dir, &binary_name)).unwrap_or_else(|| {
+        panic!("{name} binary is missing; build workspace binaries before running ee-cli tests")
+    })
 }
 
 pub fn find_built_binary(dir: &Path, binary_name: &str) -> Option<PathBuf> {
@@ -284,6 +264,45 @@ fn private_binary_path(built: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| env::temp_dir().join("ee-test-bin"));
     fs::create_dir_all(&dir).expect("create test binary cache dir");
     dir.join(format!("{name}{}", env::consts::EXE_SUFFIX))
+}
+
+/// Register the bundled LSP command ids on a test backend without a real
+/// plugin host. Tests that exercise static ex/keymap routes need the frontend
+/// registry populated before `invoke_plugin_command` accepts the id.
+pub fn seed_lsp_commands(app: &mut App) {
+    use crate::plugin_ui::contributions::ContributionBatch;
+    use ee_plugin_api::contribution::{CommandContribution, Contribution};
+    use ee_plugin_api::ids::CommandId;
+
+    let ids = [
+        "lsp.completion",
+        "lsp.hover",
+        "lsp.declaration",
+        "lsp.definition",
+        "lsp.type_definition",
+        "lsp.references",
+        "lsp.implementation",
+        "lsp.document_symbols",
+        "lsp.workspace_symbols",
+        "lsp.format_document",
+        "lsp.code_actions",
+        "lsp.rename",
+    ];
+    let upsert = ids
+        .iter()
+        .map(|id| {
+            Contribution::Command(CommandContribution {
+                id: CommandId::new(*id).expect("static command id"),
+                title: (*id).to_owned(),
+                description: String::new(),
+                category: Some(String::from("lsp")),
+                args_schema: None,
+            })
+        })
+        .collect();
+    let batch =
+        ContributionBatch { revision: 1, upsert, remove: Vec::new(), diagnostics: Vec::new() };
+    app.backend.plugin_ui.apply_batch(&batch).expect("lsp commands should register");
 }
 
 pub fn install_test_lsp_plugin(config_root: &Path) {

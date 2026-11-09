@@ -1,131 +1,270 @@
-manifest_version = 1
+manifest_version = 2
 name = "xi-lsp-plugin"
-version = "0.0.0"
-capabilities = ["edit", "hover", "status_items", "filesystem", "network"]
-exec_path="./bin/xi-lsp-plugin"
+version = "0.11.11"
+api = "ee-plugin/2"
+targets = ["editor"]
+kind = "native"
+entry = "bin/xi-lsp-plugin"
 
-[[commands]]
+[launch]
+transport = "stdio_newline"
+args = []
+working_dir = "."
+env = {}
+
+[activation]
+on_startup = true
+on_language = []
+on_command = []
+on_event = ["editor.document.changed", "editor.document.saved"]
+scopes = ["host"]
+
+[requires]
+services = [
+  "editor.document@1",
+  "editor.document.edit@1",
+  "editor.views@1",
+  "editor.selection@1",
+  "editor.commands@1",
+  "editor.syntax@1",
+  "editor.decorations@1",
+  "editor.ui@1",
+  "editor.tasks@1",
+  "editor.fs@1",
+  "editor.config@1",
+]
+
+[permissions]
+"editor.document.read" = true
+"editor.document.write" = true
+"editor.views.read" = true
+"editor.selection.read" = true
+"editor.selection.write" = true
+"editor.commands.invoke" = true
+"editor.syntax.read" = true
+"editor.lsp.read" = true
+"editor.decorations.write" = true
+"editor.ui.write" = true
+"editor.tasks.run" = true
+"editor.fs.read" = true
+"editor.config.read" = true
+
+[limits]
+max_memory_bytes = 268435456
+max_cpu_seconds = 30
+rpc_timeout_ms = 5000
+max_contributions = 256
+
+[[contributes.commands]]
+id = "lsp.completion"
 title = "Completion"
 description = "Request editor completions"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_completion"
-params = {}
+[[contributes.commands]]
+id = "lsp.hover"
+title = "Hover"
+description = "Show hover information"
+category = "lsp"
 
-[[commands]]
-title = "Definition"
-description = "Request definition locations"
+[[contributes.commands]]
+id = "lsp.declaration"
+title = "Go to Declaration"
+description = "Jump to the declaration"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_definition"
-params = {}
+[[contributes.commands]]
+id = "lsp.definition"
+title = "Go to Definition"
+description = "Jump to the definition"
+category = "lsp"
 
-[[commands]]
-title = "Declaration"
-description = "Request declaration locations"
+[[contributes.commands]]
+id = "lsp.type_definition"
+title = "Go to Type Definition"
+description = "Jump to the type definition"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_declaration"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.references"
 title = "References"
-description = "Request reference locations"
+description = "List symbol references"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_references"
-params = {}
+[[contributes.commands]]
+id = "lsp.implementation"
+title = "Go to Implementation"
+description = "Jump to the implementation"
+category = "lsp"
 
-[[commands]]
-title = "Format Document"
-description = "Format active document"
-
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "format_document"
-params = {}
-
-[[commands]]
-title = "Code Actions"
-description = "Request or apply code actions"
-
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_code_actions"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.document_symbols"
 title = "Document Symbols"
-description = "Request symbol outline for current file"
+description = "List symbols in the current document"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_document_symbols"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.workspace_symbols"
 title = "Workspace Symbols"
 description = "Search symbols across the workspace"
+category = "lsp"
+args_schema = { type = "object", properties = { query = { type = "string" } } }
 
-[[commands.args]]
-title = "Query"
-description = "Search term"
-key = "query"
-arg_type = "String"
+[[contributes.commands]]
+id = "lsp.format_document"
+title = "Format Document"
+description = "Format the active document"
+category = "lsp"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "request_workspace_symbols"
-params = { query = "" }
+[[contributes.commands]]
+id = "lsp.code_actions"
+title = "Code Actions"
+description = "List or apply code actions"
+category = "lsp"
 
-# Agent-tool commands. The editor sends these on behalf of the agent tool
-# surface; the plugin answers on the agent-tool channel rather than the
-# editor result queue.
-[[commands]]
+[[contributes.commands]]
+id = "lsp.rename"
+title = "Rename"
+description = "Rename the symbol under the cursor"
+category = "lsp"
+args_schema = { type = "object", required = ["new_name"], properties = { new_name = { type = "string" } } }
+
+[[contributes.commands]]
+id = "lsp.agent_document_symbols"
 title = "Agent: Document Symbols"
 description = "Answer an agent document-symbols request"
+category = "lsp.agent"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "ee.agent.document_symbols"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.agent_references"
 title = "Agent: References"
 description = "Answer an agent references request"
+category = "lsp.agent"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "ee.agent.references"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.agent_code_actions"
 title = "Agent: Code Actions"
 description = "Answer an agent code-actions request"
+category = "lsp.agent"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "ee.agent.list_code_actions"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.agent_format_preview"
 title = "Agent: Format Preview"
 description = "Answer an agent format-preview request"
+category = "lsp.agent"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "ee.agent.format_preview"
-params = {}
-
-[[commands]]
+[[contributes.commands]]
+id = "lsp.agent_rename_preview"
 title = "Agent: Rename Preview"
 description = "Answer an agent rename-preview request"
+category = "lsp.agent"
 
-[commands.rpc_cmd]
-rpc_type = "notification"
-method = "ee.agent.preview_rename"
-params = {}
+[[contributes.ex_commands]]
+name = "completion"
+aliases = ["complete"]
+command = "lsp.completion"
+
+[[contributes.ex_commands]]
+name = "hover"
+aliases = []
+command = "lsp.hover"
+
+[[contributes.ex_commands]]
+name = "definition"
+aliases = ["def"]
+command = "lsp.definition"
+
+[[contributes.ex_commands]]
+name = "declaration"
+aliases = []
+command = "lsp.declaration"
+
+[[contributes.ex_commands]]
+name = "type_definition"
+aliases = []
+command = "lsp.type_definition"
+
+[[contributes.ex_commands]]
+name = "references"
+aliases = ["refs"]
+command = "lsp.references"
+
+[[contributes.ex_commands]]
+name = "implementation"
+aliases = []
+command = "lsp.implementation"
+
+[[contributes.ex_commands]]
+name = "outline"
+aliases = ["symbols"]
+command = "lsp.document_symbols"
+
+[[contributes.ex_commands]]
+name = "workspace_symbols"
+aliases = ["wsymbols"]
+command = "lsp.workspace_symbols"
+usage = "<query>"
+
+[[contributes.ex_commands]]
+name = "format"
+aliases = ["fmt"]
+command = "lsp.format_document"
+
+[[contributes.ex_commands]]
+name = "code_action"
+aliases = ["codeaction"]
+command = "lsp.code_actions"
+
+[[contributes.ex_commands]]
+name = "rename"
+aliases = []
+command = "lsp.rename"
+usage = "<new_name>"
+
+[[contributes.ui.overlays]]
+id = "lsp.ui.hover"
+anchor = "cursor"
+render = { type = "markdown" }
+transient = true
+
+[[contributes.ui.pickers]]
+id = "lsp.ui.completion"
+title = "Completion"
+filter_mode = "fuzzy"
+columns = [
+  { key = "label", title = "Item" },
+  { key = "detail", title = "Detail" },
+]
+
+[[contributes.ui.pickers]]
+id = "lsp.ui.locations"
+title = "Locations"
+columns = [
+  { key = "title", title = "Location" },
+  { key = "path", title = "Path" },
+]
+
+[[contributes.ui.pickers]]
+id = "lsp.ui.symbols"
+title = "Symbols"
+columns = [
+  { key = "name", title = "Name" },
+  { key = "kind", title = "Kind" },
+  { key = "path", title = "Path" },
+]
+
+[[contributes.ui.pickers]]
+id = "lsp.ui.workspace_symbols"
+title = "Workspace Symbols"
+columns = [
+  { key = "name", title = "Name" },
+  { key = "kind", title = "Kind" },
+  { key = "path", title = "Path" },
+]
+
+[[contributes.ui.pickers]]
+id = "lsp.ui.code_actions"
+title = "Code Actions"
+columns = [
+  { key = "title", title = "Action" },
+]

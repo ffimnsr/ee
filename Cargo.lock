@@ -1788,8 +1788,9 @@ name = "ee-xi-lsp-lib"
 version = "0.11.11"
 dependencies = [
  "chrono",
+ "ee-plugin-api",
+ "ee-plugin-sdk",
  "ee-xi-core-lib",
- "ee-xi-plugin-lib",
  "ee-xi-rope",
  "ee-xi-rpc",
  "fern",
@@ -1802,6 +1803,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio-util",
+ "toml",
  "url",
 ]
 

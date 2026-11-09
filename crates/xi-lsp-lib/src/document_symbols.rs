@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
+use ee_plugin_api::model::SymbolItem;
 use jsonrpc_lite::Error as JsonRpcError;
 use serde_json::Value;
 use xi_core_lib::document_symbols::{MAX_DOCUMENT_SYMBOL_BYTES, document_symbols_for_text};
-use xi_core_lib::plugin_rpc::SymbolItem;
-use xi_plugin_lib::{ChunkCache, View};
 
 use crate::conversion_utils::{
     symbol_items_from_document_symbols, symbol_items_from_workspace_symbols,
 };
+use crate::lsp_plugin::PluginView;
 use crate::types::LanguageResponseError;
 
 /// Current-buffer snapshot retained until an asynchronous LSP symbol request
@@ -20,9 +20,9 @@ pub(crate) struct DocumentSymbolContext {
 }
 
 impl DocumentSymbolContext {
-    pub(crate) fn capture(view: &mut View<ChunkCache>) -> Option<Self> {
+    pub(crate) fn capture(view: &mut PluginView) -> Option<Self> {
         let path = view.get_path()?.to_path_buf();
-        let language_name = view.get_language_id().as_ref().to_owned();
+        let language_name = view.get_language_id().as_str().to_owned();
         let text = (view.get_buf_size() <= MAX_DOCUMENT_SYMBOL_BYTES)
             .then(|| view.get_document().ok())
             .flatten();
@@ -48,6 +48,9 @@ impl DocumentSymbolContext {
             return Vec::new();
         };
         document_symbols_for_text(Some(&self.language_name), Some(self.path.as_path()), text)
+            .into_iter()
+            .map(api_symbol)
+            .collect()
     }
 
     fn parse_lsp_value(&self, value: Value) -> Result<Vec<SymbolItem>, LanguageResponseError> {
@@ -64,6 +67,17 @@ impl DocumentSymbolContext {
         serde_json::from_value::<Option<Vec<lsp_types::SymbolInformation>>>(value)
             .map_err(|error| LanguageResponseError::Transport(error.to_string()))
             .map(|symbols| symbol_items_from_workspace_symbols(symbols.unwrap_or_default()))
+    }
+}
+
+fn api_symbol(symbol: xi_core_lib::plugin_rpc::SymbolItem) -> SymbolItem {
+    SymbolItem {
+        name: symbol.name,
+        kind: symbol.kind,
+        path: symbol.path,
+        line: symbol.line,
+        column: symbol.column,
+        children: symbol.children.into_iter().map(api_symbol).collect(),
     }
 }
 

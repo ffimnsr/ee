@@ -14,7 +14,7 @@ cd "$repo_root"
 if [ "$#" -gt 0 ]; then
     prefixes=$*
 else
-    prefixes="tests::notifications tests::lsp_edits tests::commands tests::keybindings tests::keymap_config tests::edit_commands tests::render tests::plugin_ui"
+    prefixes="tests::notifications tests::lsp_edits tests::commands tests::keybindings tests::keymap_config tests::vim_keys tests::edit_commands tests::render tests::plugin_ui"
 fi
 
 for prefix in $prefixes; do

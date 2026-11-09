@@ -263,6 +263,31 @@ impl PluginManager {
         }
     }
 
+    /// Dispatch a command to the native plugin that contributes it.
+    ///
+    /// Returns `Ok(None)` when no active native plugin owns the id; callers
+    /// then fall back to the in-process command registry. Effects produced by
+    /// the native plugin are submitted through the host adapter.
+    pub fn invoke_command(
+        &mut self,
+        id: &ee_plugin_api::ids::CommandId,
+        view_id: ee_plugin_api::model::ViewId,
+        args: Value,
+    ) -> Result<Option<Value>, PluginError> {
+        for plugin in &mut self.running {
+            let contributes =
+                plugin.manifest.contributes.commands.iter().any(|command| command.id == *id);
+            if !contributes {
+                continue;
+            }
+            return match &mut plugin.instance {
+                PluginInstance::Native(client) => client.invoke_view(id, view_id, args).map(Some),
+                PluginInstance::Builtin { .. } => Ok(None),
+            };
+        }
+        Ok(None)
+    }
+
     /// Drain pending native-plugin messages without blocking.
     ///
     /// Effects and service requests are applied through the host adapter on the
@@ -282,7 +307,7 @@ impl PluginManager {
                     }
                 }
             }
-            if let Err(error) = client.pump() {
+            if let Err(error) = client.pump_for(std::time::Duration::from_millis(2)) {
                 failures.push((plugin.manifest.name.clone(), error));
             }
         }
@@ -364,9 +389,15 @@ impl PluginManager {
         self.apply_enablement();
         self.apply_host_targets();
 
+        let host_services = self
+            .services
+            .read()
+            .map(|registry| registry.ids().into_iter().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         let resolution = resolver::resolve_with_priority(
             &self.manifests,
             &self.builtins.manifests().map(|(name, _)| name.clone()).collect(),
+            &host_services,
         );
         for diagnostic in &resolution.blocked {
             if let Some(name) = &diagnostic.plugin {

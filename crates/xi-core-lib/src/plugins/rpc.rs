@@ -355,8 +355,6 @@ pub enum PluginRequest {
     LineCount,
     GetSelections,
     GetDiagnostics,
-    FormatDocument(FormatDocumentRequest),
-    GetCodeActions(CodeActionRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

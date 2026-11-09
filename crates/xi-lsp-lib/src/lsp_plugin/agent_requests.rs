@@ -24,7 +24,7 @@ impl LspPlugin {
         };
         core.show_agent_tool_result(view_id, kind, payload);
     }
-    pub(super) fn request_agent_document_symbols(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_agent_document_symbols(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let file_path = match view.get_path() {
             Some(path) => path.to_string_lossy().to_string(),
@@ -99,7 +99,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_agent_references(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_agent_references(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -159,7 +159,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_agent_code_actions(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_agent_code_actions(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let range = match self.current_range(view) {
             Ok(range) => range,
@@ -252,7 +252,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_agent_format_preview(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_agent_format_preview(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let options = Some(xi_core_lib::plugin_rpc::FormattingOptions {
             tab_size: view.get_config().tab_size,
@@ -304,11 +304,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_agent_preview_rename(
-        &mut self,
-        view: &mut View<ChunkCache>,
-        new_name: String,
-    ) {
+    pub(super) fn request_agent_preview_rename(&mut self, view: &mut PluginView, new_name: String) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,

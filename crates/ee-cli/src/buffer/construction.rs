@@ -18,6 +18,22 @@ impl BufferManager {
         initial_overrides: Table,
         lsp_config: Table,
     ) -> io::Result<Self> {
+        #[cfg(test)]
+        {
+            static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            INIT.get_or_init(|| {
+                // Unit/integration tests use the real HOME unless they opt into
+                // an isolated XDG config home. Never execute user-installed
+                // plugins in that case.
+                // SAFETY: test binaries run this once before any other test
+                // thread constructs a core, so no concurrent environment read
+                // can observe a torn value.
+                unsafe {
+                    std::env::set_var("EE_TEST_DISABLE_USER_PLUGINS", "1");
+                }
+            });
+        }
+
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
         let (from_core_tx, from_core_rx) = std_mpsc::channel::<Frame>();
         let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();

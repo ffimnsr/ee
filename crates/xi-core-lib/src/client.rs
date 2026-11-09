@@ -126,6 +126,11 @@ impl Client {
     }
 
     /// Publish a validated decoration patch for one view.
+    /// Forward bounded dynamic plugin UI content to the frontend.
+    pub fn plugin_ui_update(&self, payload: &serde_json::Value) {
+        self.0.send_rpc_notification("plugin_ui_update", payload);
+    }
+
     pub fn plugin_decorations(&self, view_id: ViewId, payload: &serde_json::Value) {
         self.0.send_rpc_notification(
             "plugin_decorations",

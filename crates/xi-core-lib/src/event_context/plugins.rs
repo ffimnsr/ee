@@ -1,43 +1,18 @@
-use log::{debug, error, warn};
+use log::{error, warn};
 use serde_json::{Value, json};
 use xi_rope::LinesMetric;
 use xi_rpc::{Error as RpcError, RemoteError};
 
-use crate::line_offset::LineOffset;
 use crate::plugins::rpc::{
     GetDiagnosticsResponse, GetSelectionsResponse, Hover, PluginBufferInfo, PluginNotification,
     PluginRequest, PluginUpdateAck, SelectionRange,
 };
-use crate::plugins::{Plugin, PluginCapability, PluginTerminationReason};
-use crate::rpc::Position as ClientPosition;
+use crate::plugins::{Plugin, PluginTerminationReason};
 use crate::tabs::PluginId;
 
 use super::{EventContext, buffer_items_to_table};
 
 impl<'a> EventContext<'a> {
-    pub(super) fn dispatch_capability_command(
-        &self,
-        capability: PluginCapability,
-        method: &str,
-        params: &Value,
-    ) {
-        let mut dispatched = false;
-        self.plugins
-            .iter()
-            .filter(|plugin| {
-                plugin.manifest.has_capability(capability)
-                    && plugin.manifest.supports_command(method)
-            })
-            .for_each(|plugin| {
-                dispatched = true;
-                plugin.dispatch_command(self.view_id, method, params);
-            });
-
-        if !dispatched {
-            warn!("no running plugin registered {:?} command", method);
-        }
-    }
-
     /// Dispatches an incoming notification from a plugin (fire-and-forget).
     pub(crate) fn do_plugin_cmd(&mut self, plugin: PluginId, cmd: PluginNotification) {
         use self::PluginNotification::*;
@@ -115,14 +90,6 @@ impl<'a> EventContext<'a> {
             GetDiagnostics => Ok(json!(GetDiagnosticsResponse {
                 diagnostics: self.view.borrow().get_diagnostics(),
             })),
-            FormatDocument(..) => Err(RemoteError::custom(
-                501,
-                "document formatting is not implemented for plugins",
-                None,
-            )),
-            GetCodeActions(..) => {
-                Err(RemoteError::custom(501, "code actions are not implemented for plugins", None))
-            }
         }
     }
 
@@ -174,73 +141,10 @@ impl<'a> EventContext<'a> {
         self.editor.borrow_mut().dec_revs_in_flight();
     }
 
-    /// Handles the response to a hover request from a plugin, forwarding the
-    /// result to the client or logging an error on failure.
-    pub(crate) fn do_plugin_hover(&mut self, request_id: usize, hover: Result<Value, RpcError>) {
-        match hover.map(serde_json::from_value::<Hover>) {
-            Ok(Ok(hover)) => self.do_show_hover(request_id, Ok(hover)),
-            Ok(Err(err)) => error!("hover response json err: {:?}", err),
-            Err(RpcError::RequestCancelled) => {
-                debug!("hover request {} cancelled", request_id)
-            }
-            Err(RpcError::RemoteError(err)) => self.do_show_hover(request_id, Err(err)),
-            Err(err) => warn!("hover request {} failed: {:?}", request_id, err),
-        }
-    }
-
-    pub(crate) fn do_request_hover(&mut self, request_id: usize, position: Option<ClientPosition>) {
-        use crate::plugins::PluginCapability;
-
-        if let Some(position) = self.get_resolved_position(position) {
-            let hover_plugins = self
-                .plugins
-                .iter()
-                .filter(|plugin| plugin.manifest.has_capability(PluginCapability::Hover))
-                .copied()
-                .collect::<Vec<_>>();
-
-            hover_plugins.into_iter().for_each(|plugin| {
-                if let Some(previous_request) =
-                    self.with_view(|view, _| view.take_pending_hover_request(plugin.id))
-                {
-                    plugin.cancel_request(previous_request);
-                }
-
-                let weak_core = self.weak_core.clone();
-                let plugin_id = plugin.id;
-                let view_id = self.view_id;
-                let hover_request = plugin.request_hover(view_id, position, move |resp| {
-                    weak_core.handle_plugin_hover(plugin_id, view_id, request_id, resp);
-                });
-                self.with_view(|view, _| {
-                    view.replace_pending_hover_request(plugin_id, hover_request)
-                });
-            })
-        }
-    }
-
     fn do_show_hover(&mut self, request_id: usize, hover: Result<Hover, RemoteError>) {
         match hover {
             Ok(hover) => self.client.hover(self.view_id, request_id, hover.content),
             Err(err) => warn!("Hover Response from Client Error {:?}", err),
         }
-    }
-
-    /// Gives the requested position in UTF-8 offset format to be sent to plugin.
-    /// If position is `None`, tries to get the current Caret Position instead.
-    fn get_resolved_position(&mut self, position: Option<ClientPosition>) -> Option<usize> {
-        position
-            .and_then(|p| {
-                match self
-                    .with_view(|view, text| view.try_line_col_to_offset(text, p.line, p.column))
-                {
-                    Ok(offset) => Some(offset),
-                    Err(err) => {
-                        self.client.alert(format!("request_hover: {err}"));
-                        None
-                    }
-                }
-            })
-            .or_else(|| self.view.borrow().get_caret_offset())
     }
 }

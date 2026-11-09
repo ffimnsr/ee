@@ -103,28 +103,10 @@ fn typed_plugin_requests_return_structured_results_or_errors() {
     let diagnostics = ctx
         .do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetDiagnostics)
         .expect("diagnostics request should succeed");
-    let format_err = ctx
-        .do_plugin_cmd_sync(
-            crate::plugins::PluginPid(9),
-            PluginRequest::FormatDocument(FormatDocumentRequest { options: None }),
-        )
-        .expect_err("formatting should be unsupported");
-    let code_actions_err = ctx
-        .do_plugin_cmd_sync(
-            crate::plugins::PluginPid(9),
-            PluginRequest::GetCodeActions(CodeActionRequest {
-                range: crate::plugins::rpc::Range { start: 0, end: 5 },
-                diagnostics: Vec::new(),
-            }),
-        )
-        .expect_err("code actions should be unsupported");
-
     let diagnostics: GetDiagnosticsResponse =
         serde_json::from_value(diagnostics).expect("diagnostics response should deserialize");
 
     assert!(diagnostics.diagnostics.is_empty());
-    assert!(matches!(format_err, RemoteError::Custom { code: 501, .. }));
-    assert!(matches!(code_actions_err, RemoteError::Custom { code: 501, .. }));
 }
 
 #[test]

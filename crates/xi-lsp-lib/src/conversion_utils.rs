@@ -17,14 +17,15 @@
 
 use std::fs;
 
+use crate::lsp_plugin::PluginView;
 use crate::types::{LanguageResponseError, LspCodeAction, PendingCompletionItem};
+use ee_plugin_api::error::PluginError;
+use ee_plugin_api::model::{
+    CompletionSuggestion, Diagnostic as CoreDiagnostic,
+    DiagnosticSeverity as CoreDiagnosticSeverity, NavigationTarget, Range as CoreRange, SymbolItem,
+};
 use lsp_types::*;
 use url::Url;
-use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget, SymbolItem};
-use xi_plugin_lib::{
-    Cache, Diagnostic as CoreDiagnostic, DiagnosticSeverity as CoreDiagnosticSeverity,
-    Error as PluginLibError, Hover as CoreHover, Range as CoreRange, View,
-};
 use xi_rope::rope::{byte_to_utf16_cu_idx, utf16_cu_to_byte_idx};
 
 pub(crate) fn marked_string_to_string(marked_string: &MarkedString) -> String {
@@ -49,35 +50,20 @@ pub(crate) fn markdown_from_hover_contents(
 }
 
 /// Get LSP Style Utf-16 based position given the xi-core style utf-8 offset
-pub(crate) fn get_position_of_offset<C: Cache>(
-    view: &mut View<C>,
+pub(crate) fn get_position_of_offset(
+    view: &PluginView,
     offset: usize,
-) -> Result<Position, PluginLibError> {
+) -> Result<Position, PluginError> {
     let line_num = view.line_of_offset(offset)?;
     let line_offset = view.offset_of_line(line_num)?;
     let line_text = view.get_line(line_num)?;
 
-    let char_offset = byte_to_utf16_cu_idx(line_text, offset - line_offset);
+    let char_offset = byte_to_utf16_cu_idx(&line_text, offset - line_offset);
 
     Ok(Position {
         line: u32::try_from(line_num).expect("line number should fit in u32"),
         character: u32::try_from(char_offset).expect("character offset should fit in u32"),
     })
-}
-
-pub(crate) fn offset_of_position<C: Cache>(
-    view: &mut View<C>,
-    position: Position,
-) -> Result<usize, PluginLibError> {
-    let line_offset = view.offset_of_line(position.line as usize);
-    let line_text = view.get_line(position.line as usize)?;
-
-    // A character index past the end of the line clamps to the line end,
-    // matching the previous accumulate-and-return loop.
-    let within_line =
-        utf16_cu_to_byte_idx(line_text, position.character as usize).unwrap_or(line_text.len());
-
-    Ok(line_offset? + within_line)
 }
 
 fn offset_of_position_in_document_impl(
@@ -242,8 +228,8 @@ pub(crate) fn pending_completions_from_response(
         .collect()
 }
 
-pub(crate) fn completion_text_edits<C: Cache>(
-    view: &mut View<C>,
+pub(crate) fn completion_text_edits(
+    view: &PluginView,
     item: &CompletionItem,
 ) -> Result<Vec<TextEdit>, LanguageResponseError> {
     let mut edits = Vec::new();
@@ -268,7 +254,7 @@ pub(crate) fn completion_text_edits<C: Cache>(
             .map_err(LanguageResponseError::from)?
             .into_iter()
             .next()
-            .unwrap_or(xi_plugin_lib::SelectionRange { start: 0, end: 0 });
+            .unwrap_or(ee_plugin_api::model::SelectionRange { start: 0, end: 0 });
         let start = selection.start.min(selection.end);
         let end = selection.start.max(selection.end);
         let new_text = item.insert_text.clone().unwrap_or_else(|| item.label.clone());
@@ -438,29 +424,6 @@ pub(crate) fn code_actions_from_response(
             }),
         })
         .collect()
-}
-
-pub(crate) fn core_range_from_range<C: Cache>(
-    view: &mut View<C>,
-    range: Range,
-) -> Result<CoreRange, PluginLibError> {
-    Ok(CoreRange {
-        start: offset_of_position(view, range.start)?,
-        end: offset_of_position(view, range.end)?,
-    })
-}
-
-pub(crate) fn core_hover_from_hover<C: Cache>(
-    view: &mut View<C>,
-    hover: Hover,
-) -> Result<CoreHover, LanguageResponseError> {
-    Ok(CoreHover {
-        content: markdown_from_hover_contents(hover.contents)?,
-        range: match hover.range {
-            Some(range) => Some(core_range_from_range(view, range)?),
-            None => None,
-        },
-    })
 }
 
 fn core_diagnostic_severity_from_lsp(

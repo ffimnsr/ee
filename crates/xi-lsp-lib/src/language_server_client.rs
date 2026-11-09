@@ -21,17 +21,17 @@ use std::sync::{Arc, Mutex};
 
 use log::{error, trace, warn};
 
+use crate::lsp_plugin::host_ui::HostUi;
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
 use lsp_server::Message as LspServerMessage;
 use lsp_types::Uri;
 use serde_json::{Value, json, to_value};
-use xi_plugin_lib::CoreProxy;
 
 use crate::conversion_utils::core_diagnostic_from_lsp_document;
 use crate::result_queue::ResultQueue;
 use crate::types::{Callback, Error as LspError, LspResponse};
+use ee_plugin_api::model::ViewId;
 use lsp_types::*;
-use xi_core_lib::ViewId;
 
 const STATUS_ALIGNMENT: &str = "left";
 const LONG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -52,7 +52,7 @@ pub struct LanguageServerClient {
     language_id: String,
     pub result_queue: ResultQueue,
     pub status_items: HashSet<String>,
-    pub core: CoreProxy,
+    pub core: HostUi,
     pub initialization_pending: bool,
     pub is_initialized: bool,
     pub opened_documents: HashMap<ViewId, OpenDocumentState>,
@@ -90,7 +90,7 @@ impl LanguageServerClient {
     pub fn new(
         writer: Box<dyn Write + Send>,
         process: Arc<Mutex<Child>>,
-        core: CoreProxy,
+        core: HostUi,
         result_queue: ResultQueue,
         language_id: String,
         file_extensions: Vec<String>,
@@ -293,7 +293,7 @@ impl LanguageServerClient {
             state.diagnostics = params.diagnostics;
         }
 
-        self.result_queue.push_result(view_id.into(), LspResponse::Diagnostics(diagnostics));
+        self.result_queue.push_result(view_id.0 as usize, LspResponse::Diagnostics(diagnostics));
         self.core.schedule_idle(view_id);
     }
 
@@ -994,44 +994,33 @@ impl LanguageServerClient {
 mod tests {
     use std::io;
 
+    use crate::lsp_plugin::host_ui::HostUi;
     use serde_json::json;
-    use xi_plugin_lib::CoreProxy;
-    use xi_rpc::test_utils::make_reader;
-    use xi_rpc::{Handler, NewlineWriter, RpcCtx, RpcLoop};
 
     use super::*;
 
-    #[derive(Default)]
-    struct CaptureCoreProxy {
-        proxy: Option<CoreProxy>,
-    }
+    struct CaptureCaller;
 
-    impl Handler for CaptureCoreProxy {
-        type Notification = serde_json::Value;
-        type Request = serde_json::Value;
-
-        fn handle_notification(&mut self, ctx: &RpcCtx, _rpc: Self::Notification) {
-            let plugin_id = serde_json::from_value(json!(1)).expect("plugin id should deserialize");
-            self.proxy = Some(CoreProxy::new(plugin_id, ctx, 1, []));
-            ctx.get_peer().request_shutdown();
-        }
-
-        fn handle_request(
-            &mut self,
-            _ctx: &RpcCtx,
-            _rpc: Self::Request,
-            _cancel: tokio_util::sync::CancellationToken,
-        ) -> Result<Value, xi_rpc::RemoteError> {
+    impl ee_plugin_api::context::ServiceCaller for CaptureCaller {
+        fn call_service(
+            &self,
+            _service: ee_plugin_api::ids::ServiceId,
+            _method: &str,
+            _params: Value,
+        ) -> Result<Value, ee_plugin_api::error::PluginError> {
             Ok(Value::Null)
         }
+
+        fn submit_effects(
+            &self,
+            _effects: Vec<ee_plugin_api::effect::Effect>,
+        ) -> Result<(), ee_plugin_api::error::PluginError> {
+            Ok(())
+        }
     }
 
-    fn test_core_proxy() -> CoreProxy {
-        let mut handler = CaptureCoreProxy::default();
-        let mut looper = RpcLoop::new(NewlineWriter::new(io::sink()));
-        let reader = make_reader(r#"{"method":"ping","params":{}}"#);
-        looper.mainloop(|| reader, &mut handler).expect("test rpc loop should exit cleanly");
-        handler.proxy.expect("core proxy should be captured")
+    fn test_core_proxy() -> HostUi {
+        HostUi::new(Arc::new(CaptureCaller))
     }
 
     #[test]
@@ -1083,7 +1072,7 @@ mod tests {
         );
         let uri: Uri = "file:///tmp/test.rs".parse().expect("uri should parse");
         client.opened_documents.insert(
-            7.into(),
+            ViewId(7),
             OpenDocumentState {
                 uri: uri.clone(),
                 text: String::from("fn main() {}\n"),

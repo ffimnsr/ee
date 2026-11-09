@@ -6,6 +6,8 @@ impl LspPlugin {
         LspPlugin {
             config,
             core: None,
+            caller: None,
+            views: HashMap::new(),
             result_queue: ResultQueue::new(),
             view_info: HashMap::new(),
             pending_code_actions: HashMap::new(),

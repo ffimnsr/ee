@@ -69,7 +69,7 @@ impl App {
         }
     }
     pub(super) fn format_selections(&mut self) {
-        if self.backend.format_document().is_ok() {
+        if self.backend.send_plugin_command("lsp.format_document", json!({})).is_ok() {
             self.push_change();
             if self.mode.is_visual() {
                 self.enter_normal_mode();

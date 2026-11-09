@@ -16,13 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Error as IOError;
 
+use ee_plugin_api::error::PluginError;
+use ee_plugin_api::model::{
+    CompletionSuggestion, Diagnostic as CoreDiagnostic, NavigationTarget, SymbolItem,
+};
 use jsonrpc_lite::Error as JsonRpcError;
 use lsp_types::{Command, CompletionItem, TextEdit, WorkspaceEdit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget, SymbolItem};
-use xi_plugin_lib::Diagnostic as CoreDiagnostic;
-use xi_plugin_lib::Error as PluginLibError;
 use xi_rpc::RemoteErrorDetails;
 
 use crate::language_server_client::LanguageServerClient;
@@ -619,15 +620,15 @@ impl fmt::Display for Error {
 #[derive(Debug)]
 pub enum LanguageResponseError {
     LanguageServerError(String),
-    PluginLibError(PluginLibError),
+    PluginError(PluginError),
     NullResponse,
     FallbackResponse,
     Transport(String),
 }
 
-impl From<PluginLibError> for LanguageResponseError {
-    fn from(error: PluginLibError) -> Self {
-        LanguageResponseError::PluginLibError(error)
+impl From<PluginError> for LanguageResponseError {
+    fn from(error: PluginError) -> Self {
+        LanguageResponseError::PluginError(error)
     }
 }
 
@@ -639,7 +640,7 @@ impl fmt::Display for LanguageResponseError {
             LanguageResponseError::LanguageServerError(_) => {
                 write!(f, "language server error occured")
             }
-            LanguageResponseError::PluginLibError(_) => write!(f, "Plugin Lib Error"),
+            LanguageResponseError::PluginError(_) => write!(f, "plugin error"),
             LanguageResponseError::Transport(_) => write!(f, "language server transport error"),
         }
     }
@@ -651,7 +652,7 @@ impl RemoteErrorDetails for LanguageResponseError {
             LanguageResponseError::NullResponse => 0,
             LanguageResponseError::FallbackResponse => 1,
             LanguageResponseError::LanguageServerError(_) => 2,
-            LanguageResponseError::PluginLibError(_) => 3,
+            LanguageResponseError::PluginError(_) => 3,
             LanguageResponseError::Transport(_) => 4,
         }
     }
@@ -661,7 +662,7 @@ impl RemoteErrorDetails for LanguageResponseError {
             LanguageResponseError::NullResponse | LanguageResponseError::FallbackResponse => None,
             LanguageResponseError::LanguageServerError(error)
             | LanguageResponseError::Transport(error) => Some(Value::String(error.clone())),
-            LanguageResponseError::PluginLibError(error) => {
+            LanguageResponseError::PluginError(error) => {
                 Some(Value::String(format!("{:?}", error)))
             }
         }

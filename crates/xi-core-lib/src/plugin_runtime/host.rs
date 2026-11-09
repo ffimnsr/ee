@@ -521,8 +521,21 @@ impl EditorPluginHost {
         if let Err(error) = events.waterfall(&before) {
             return Err(PluginError::from(error));
         }
-        let effects = self.commands.dispatch(id, view_id, args)?;
-        self.adapter.submit_effects(None, effects.clone())?;
+        let effects = if self.commands.contains(id) {
+            let effects = self.commands.dispatch(id, view_id, args)?;
+            self.adapter.submit_effects(None, effects.clone())?;
+            effects
+        } else {
+            let mut manager = self.manager.lock().expect("manager lock poisoned");
+            match manager.invoke_command(id, view_id, args)? {
+                Some(_result) => Vec::new(),
+                None => {
+                    return Err(PluginError::Runtime {
+                        message: format!("command `{id}` is not registered"),
+                    });
+                }
+            }
+        };
         let after = crate::plugin_runtime::events::CommandAfter {
             id: id.clone(),
             view_id,

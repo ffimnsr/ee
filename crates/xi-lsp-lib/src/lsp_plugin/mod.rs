@@ -16,16 +16,15 @@
 
 pub(crate) use std::collections::{BTreeMap, HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::{Arc, Mutex, mpsc};
-pub(crate) use std::time::{Duration, Instant};
+pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::time::Duration;
 
+pub(crate) use ee_plugin_api::context::ServiceCaller;
+pub(crate) use ee_plugin_api::model::{SelectionRange, SymbolItem, ViewId};
+pub(crate) use ee_plugin_sdk::{EditorView as PluginView, Plugin};
 pub(crate) use jsonrpc_lite::Params;
 pub(crate) use log::{debug, error, trace};
 pub(crate) use serde_json::{Map, Value, json};
-pub(crate) use tokio_util::sync::CancellationToken;
-
-pub(crate) use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View};
-pub(crate) use xi_rope::rope::RopeDelta;
 
 pub(crate) use crate::conversion_utils::*;
 pub(crate) use crate::document_symbols::DocumentSymbolContext;
@@ -38,7 +37,7 @@ pub(crate) use crate::types::{
 };
 pub(crate) use crate::utils::*;
 pub(crate) use lsp_types::*;
-pub(crate) use xi_core_lib::{ConfigTable, LanguageId, ViewId};
+pub(crate) use xi_core_lib::ConfigTable;
 
 #[derive(Clone)]
 struct ViewServerRoute {
@@ -65,7 +64,9 @@ struct ClientRestartGroup {
 pub struct LspPlugin {
     pub config: Config,
     view_info: HashMap<ViewId, ViewInfo>,
-    core: Option<CoreProxy>,
+    core: Option<HostUi>,
+    caller: Option<Arc<dyn ServiceCaller>>,
+    views: HashMap<ViewId, PluginView>,
     result_queue: ResultQueue,
     pending_code_actions: HashMap<ViewId, Vec<LspCodeAction>>,
     pending_completions: HashMap<ViewId, Vec<PendingCompletionItem>>,
@@ -138,7 +139,7 @@ struct AgentToolPlannedFileEdit {
     edits: Vec<AgentToolCodeActionEdit>,
 }
 
-fn agent_tool_range(range: Range) -> AgentToolRange {
+fn agent_tool_range(range: lsp_types::Range) -> AgentToolRange {
     AgentToolRange {
         start_line: range.start.line.saturating_add(1),
         start_character: range.start.character.saturating_add(1),
@@ -244,6 +245,8 @@ fn merge_json_object(target: &mut Map<String, Value>, update: &ConfigTable) {
 mod agent_requests;
 mod config;
 mod documents;
+pub(crate) mod host_ui;
+pub use host_ui::HostUi;
 mod lsp_requests;
 mod plugin_impl;
 

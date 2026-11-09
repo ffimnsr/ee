@@ -188,6 +188,10 @@ pub struct CoreState {
     pub(crate) plugin_host: Option<Arc<crate::plugin_runtime::host::EditorPluginHost>>,
     pub(crate) plugin_notifier: Option<Arc<crate::plugin_runtime::host::QueuedNotifier>>,
     pub(crate) plugin_generation: u64,
+    /// Plugin commands queued by the frontend and dispatched outside the core
+    /// mutex so service callbacks can borrow editor state.
+    pub(crate) queued_plugin_commands:
+        Vec<(ee_plugin_api::ids::CommandId, ee_plugin_api::model::ViewId, serde_json::Value)>,
 }
 
 #[derive(Debug, Clone)]

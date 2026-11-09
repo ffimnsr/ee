@@ -268,11 +268,22 @@ impl NativeClient {
 
     /// Invoke a command and wait for its response.
     pub fn invoke(&mut self, id: &CommandId, args: Value) -> Result<Value, PluginError> {
+        self.invoke_view(id, ee_plugin_api::model::ViewId(0), args)
+    }
+
+    /// Invoke a command for one view and wait for its response.
+    pub fn invoke_view(
+        &mut self,
+        id: &CommandId,
+        view_id: ee_plugin_api::model::ViewId,
+        args: Value,
+    ) -> Result<Value, PluginError> {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let deadline_ms = self.rpc_timeout.as_millis() as u64;
         self.send(&HostToPlugin::Command(CommandParams {
             id: id.clone(),
+            view_id,
             request_id,
             args,
             deadline_ms,
@@ -333,6 +344,43 @@ impl NativeClient {
                 ),
             }),
         }
+    }
+
+    /// Drain pending messages for a bounded window.
+    ///
+    /// Native event handling may synchronously call a host service before the
+    /// next idle cycle. Waiting a short, bounded time after an event write keeps
+    /// those calls from deadlocking against the host's non-blocking pump.
+    pub fn pump_for(&mut self, budget: Duration) -> Result<usize, PluginError> {
+        let deadline = Instant::now() + budget;
+        let mut processed = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(Ok(message)) => {
+                    processed += 1;
+                    match message {
+                        PluginToHost::Response(_) => {}
+                        other => self.handle_side_message(other)?,
+                    }
+                }
+                Ok(Err(error)) => return Err(PluginError::Transport { message: error }),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PluginError::Transport {
+                        message: format!(
+                            "plugin `{}` closed stdout{}",
+                            self.plugin_id,
+                            self.stderr_suffix()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(processed)
     }
 
     /// Drain pending messages without blocking.

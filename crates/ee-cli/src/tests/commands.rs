@@ -1100,8 +1100,10 @@ action = "request_hover"
     let picker = app.picker.as_ref().expect("keymap should open picker");
     let lines = picker.visible_items_range(0, picker.visible_count());
     assert!(
-        lines.iter().any(|line| line.contains("[config]") && line.contains("request_hover")),
-        "config-bound H → request_hover must be tagged [config]: {lines:?}"
+        lines
+            .iter()
+            .any(|line| { line.contains("[config]") && line.contains("plugin_command:lsp.hover") }),
+        "config-bound H → lsp.hover must be tagged [config]: {lines:?}"
     );
     assert!(
         lines.iter().any(|line| line.contains("unbound by config") && line.contains("K")),

@@ -135,7 +135,7 @@ fn capital_k_binding_requests_hover() {
         })
         .cloned();
 
-    assert_eq!(lookup, Some(Action::RequestHover));
+    assert_eq!(lookup, Some(Action::plugin("lsp.hover")));
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn insert_ctrl_bindings_cover_register_and_completion() {
     // ctrl-r -> insert from register
     assert_eq!(ctrl_key(KeyCode::Char('r')), Some(Action::InsertRegister));
     // ctrl-x -> request completion
-    assert_eq!(ctrl_key(KeyCode::Char('x')), Some(Action::RequestCompletion));
+    assert_eq!(ctrl_key(KeyCode::Char('x')), Some(Action::plugin("lsp.completion")));
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn parse_action_spec_accepts_requested_find_aliases() {
 #[test]
 fn keymap_action_formatter_roundtrips_representative_actions() {
     let actions = [
-        Action::RequestHover,
+        Action::plugin("lsp.hover"),
         Action::PrefillCommandLine("rename "),
         Action::DeleteSelection { yank: false, enter_insert: true },
         Action::PendingCharFind { forward: false, inclusive: true },
@@ -241,10 +241,10 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     );
 
     let assertions = [
-        ("request_hover", Action::RequestHover),
-        ("hover", Action::RequestHover),
-        ("completion", Action::RequestCompletion),
-        ("code_action", Action::RequestCodeActions),
+        ("request_hover", Action::plugin("lsp.hover")),
+        ("hover", Action::plugin("lsp.hover")),
+        ("completion", Action::plugin("lsp.completion")),
+        ("code_action", Action::plugin("lsp.code_actions")),
         ("register_prefix", Action::RegisterPrefix),
         ("insert_register", Action::InsertRegister),
         ("delete_char_forward", Action::DeleteCharForward),

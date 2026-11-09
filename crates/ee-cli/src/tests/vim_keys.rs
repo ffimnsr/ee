@@ -48,11 +48,11 @@ fn g_prefix_matches_vim_semantics() {
     );
     assert_eq!(
         bindings.get(&key(Mode::Normal, KeyCode::Char('d'), KeyModifiers::NONE, g)),
-        Some(&Action::RequestDeclaration)
+        Some(&Action::plugin("lsp.declaration"))
     );
     assert_eq!(
         bindings.get(&key(Mode::Normal, KeyCode::Char('D'), KeyModifiers::NONE, g)),
-        Some(&Action::RequestDefinition)
+        Some(&Action::plugin("lsp.definition"))
     );
     assert_eq!(
         bindings.get(&key(Mode::Normal, KeyCode::Char('o'), KeyModifiers::NONE, g)),
@@ -783,8 +783,14 @@ fn insert_mode_keys_follow_vim() {
     let bindings = bindings_for(&normal());
     let ins = |k: KeyCode, m: KeyModifiers| key(Mode::Insert, k, m, None);
     let ctrl = KeyModifiers::CONTROL;
-    assert_eq!(bindings.get(&ins(KeyCode::Char('n'), ctrl)), Some(&Action::RequestCompletion));
-    assert_eq!(bindings.get(&ins(KeyCode::Char('p'), ctrl)), Some(&Action::RequestCompletion));
+    assert_eq!(
+        bindings.get(&ins(KeyCode::Char('n'), ctrl)),
+        Some(&Action::plugin("lsp.completion"))
+    );
+    assert_eq!(
+        bindings.get(&ins(KeyCode::Char('p'), ctrl)),
+        Some(&Action::plugin("lsp.completion"))
+    );
     assert_eq!(bindings.get(&ins(KeyCode::Char('o'), ctrl)), Some(&Action::OneShotNormal));
     assert_eq!(bindings.get(&ins(KeyCode::Char('a'), ctrl)), Some(&Action::RepeatLastInsert));
     assert_eq!(

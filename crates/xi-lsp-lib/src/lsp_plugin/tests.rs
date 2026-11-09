@@ -254,3 +254,18 @@ fn language_matches_use_explicit_language_attachments_before_extensions() {
         ]
     );
 }
+
+#[test]
+fn bundled_manifest_is_valid_v2() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+    let text = std::fs::read_to_string(path).expect("manifest should read");
+    let value: toml::Value = toml::from_str(&text).expect("manifest should parse");
+    let manifest: ee_plugin_api::manifest::ManifestV2 =
+        value.try_into().expect("manifest should deserialize");
+    manifest.validate().expect("manifest should validate");
+    assert_eq!(manifest.name, "xi-lsp-plugin");
+    assert_eq!(manifest.manifest_version, 2);
+    assert!(
+        manifest.contributes.commands.iter().any(|command| command.id.as_str() == "lsp.completion")
+    );
+}

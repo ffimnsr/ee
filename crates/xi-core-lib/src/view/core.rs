@@ -30,7 +30,6 @@ impl View {
             replace_changed: false,
             annotations: AnnotationStore::new(),
             diagnostics: HashMap::new(),
-            pending_hover_requests: HashMap::new(),
         }
     }
 
@@ -60,18 +59,6 @@ impl View {
 
     pub(crate) fn has_pending_render(&self) -> bool {
         self.pending_render
-    }
-
-    pub(crate) fn replace_pending_hover_request(
-        &mut self,
-        plugin_id: PluginId,
-        request_id: RequestId,
-    ) -> Option<RequestId> {
-        self.pending_hover_requests.insert(plugin_id, request_id)
-    }
-
-    pub(crate) fn take_pending_hover_request(&mut self, plugin_id: PluginId) -> Option<RequestId> {
-        self.pending_hover_requests.remove(&plugin_id)
     }
 
     pub(crate) fn update_wrap_settings(&mut self, text: &Rope, wrap_cols: usize, word_wrap: bool) {

@@ -22,16 +22,19 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ee_plugin_api::error::PluginError;
+use ee_plugin_api::model::{EditAck, TextEdit as CoreTextEdit};
 use log::{error, warn};
 use lsp_server::Message as LspServerMessage;
 use url::Url;
-use xi_plugin_lib::{Cache, ChunkCache, CoreProxy, Error as PluginLibError, PluginEditAck, View};
+#[cfg(test)]
 use xi_rope::rope::RopeDelta;
+#[cfg(test)]
 use xi_rope::rope::count_utf16_code_units;
-use xi_rope::{DeltaBuilder, Interval, Rope};
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
+use crate::lsp_plugin::{HostUi, PluginView};
 use crate::result_queue::ResultQueue;
 use crate::types::Error;
 
@@ -92,30 +95,38 @@ pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
 
 /// Get contents changes of a document modeled according to Language Server Protocol
 /// given the RopeDelta
-fn position_of_offset_in_document(text: &str, offset: usize) -> Result<Position, PluginLibError> {
+#[cfg(test)]
+fn position_of_offset_in_document(text: &str, offset: usize) -> Result<Position, PluginError> {
     if offset > text.len() || !text.is_char_boundary(offset) {
-        return Err(PluginLibError::BadRequest);
+        return Err(PluginError::Schema { message: String::from("bad request offset") });
     }
 
-    let prefix = text.get(..offset).ok_or(PluginLibError::BadRequest)?;
+    let prefix = text
+        .get(..offset)
+        .ok_or(PluginError::Schema { message: String::from("bad request offset") })?;
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
     let line_start = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-    let character =
-        count_utf16_code_units(text.get(line_start..offset).ok_or(PluginLibError::BadRequest)?);
+    let character = count_utf16_code_units(
+        text.get(line_start..offset)
+            .ok_or(PluginError::Schema { message: String::from("bad request offset") })?,
+    );
 
     Ok(Position {
-        line: u32::try_from(line).map_err(|_| PluginLibError::BadRequest)?,
-        character: u32::try_from(character).map_err(|_| PluginLibError::BadRequest)?,
+        line: u32::try_from(line)
+            .map_err(|_| PluginError::Schema { message: String::from("bad request offset") })?,
+        character: u32::try_from(character)
+            .map_err(|_| PluginError::Schema { message: String::from("bad request offset") })?,
     })
 }
 
+#[cfg(test)]
 fn document_content_changes_from_delta<FP>(
     delta: Option<&RopeDelta>,
     mut position_of_offset: FP,
     document_text: &str,
-) -> Result<Vec<TextDocumentContentChangeEvent>, PluginLibError>
+) -> Result<Vec<TextDocumentContentChangeEvent>, PluginError>
 where
-    FP: FnMut(usize) -> Result<Position, PluginLibError>,
+    FP: FnMut(usize) -> Result<Position, PluginError>,
 {
     if let Some(delta) = delta {
         let (interval, _) = delta.summary();
@@ -156,24 +167,22 @@ where
     }])
 }
 
-pub fn get_document_content_changes<C: Cache>(
-    delta: Option<&RopeDelta>,
-    view: &mut View<C>,
-) -> Result<Vec<TextDocumentContentChangeEvent>, PluginLibError> {
+pub fn get_document_content_changes(
+    view: &PluginView,
+) -> Result<Vec<TextDocumentContentChangeEvent>, PluginError> {
     let document_text = view.get_document()?;
-    document_content_changes_from_delta(
-        delta,
-        |offset| position_of_offset_in_document(&document_text, offset),
-        &document_text,
-    )
+    Ok(vec![TextDocumentContentChangeEvent {
+        range: None,
+        range_length: None,
+        text: document_text,
+    }])
 }
 
 /// Get changes to be sent to server depending upon the type of Sync supported
 /// by server
 pub fn get_change_for_sync_kind(
     sync_kind: TextDocumentSyncKind,
-    view: &mut View<ChunkCache>,
-    delta: Option<&RopeDelta>,
+    view: &PluginView,
 ) -> Option<Vec<TextDocumentContentChangeEvent>> {
     match sync_kind {
         TextDocumentSyncKind::NONE => None,
@@ -189,7 +198,7 @@ pub fn get_change_for_sync_kind(
                 TextDocumentContentChangeEvent { range: None, range_length: None, text };
             Some(vec![text_document_content_change_event])
         }
-        TextDocumentSyncKind::INCREMENTAL => match get_document_content_changes(delta, view) {
+        TextDocumentSyncKind::INCREMENTAL => match get_document_content_changes(view) {
             Ok(result) => Some(result),
             Err(err) => {
                 warn!("Error: {:?} Occured. Sending Whole Doc", err);
@@ -214,10 +223,10 @@ pub fn get_change_for_sync_kind(
     }
 }
 
-pub(crate) fn delta_from_lsp_text_edits<C: Cache>(
-    view: &mut View<C>,
+pub(crate) fn model_edits_from_lsp_text_edits(
+    view: &PluginView,
     edits: &[TextEdit],
-) -> Result<RopeDelta, Error> {
+) -> Result<Vec<CoreTextEdit>, Error> {
     let document_text = view
         .get_document()
         .map_err(|err| Error::Protocol(format!("document fetch failed: {err:?}")))?;
@@ -233,27 +242,28 @@ pub(crate) fn delta_from_lsp_text_edits<C: Cache>(
         .collect::<Result<Vec<_>, Error>>()?;
 
     resolved_edits.sort_by_key(|(start, end, _)| (*start, *end));
-    let mut builder = DeltaBuilder::new(document_text.len());
+    let mut model_edits = Vec::new();
     let mut last_end = 0usize;
 
     for (start, end, new_text) in resolved_edits {
         if start < last_end {
             return Err(Error::Protocol(String::from("overlapping text edits are not supported")));
         }
-        builder.replace(Interval::new(start, end), Rope::from(new_text));
+        model_edits
+            .push(CoreTextEdit { range: ee_plugin_api::model::Range { start, end }, new_text });
         last_end = end;
     }
 
-    Ok(builder.build())
+    Ok(model_edits)
 }
 
-pub(crate) fn apply_lsp_text_edits<C: Cache>(
-    view: &mut View<C>,
+pub(crate) fn apply_lsp_text_edits(
+    view: &PluginView,
     edits: &[TextEdit],
     author: &str,
-) -> Result<PluginEditAck, Error> {
-    let delta = delta_from_lsp_text_edits(view, edits)?;
-    view.try_edit(delta, 0, false, true, author.to_string())
+) -> Result<EditAck, Error> {
+    let edits = model_edits_from_lsp_text_edits(view, edits)?;
+    view.apply_text_edits(&edits, author)
         .map_err(|err| Error::Protocol(format!("failed to apply plugin edit: {err:?}")))
 }
 
@@ -419,7 +429,7 @@ pub fn start_new_server(
     command: String,
     arguments: Vec<String>,
     language_id: &str,
-    core: CoreProxy,
+    core: HostUi,
     result_queue: ResultQueue,
     options: ServerStartOptions,
 ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
@@ -517,50 +527,38 @@ fn should_inherit_language_server_env_var(key: &OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::io::Cursor;
     use std::thread;
 
     use xi_rope::{DeltaBuilder, Interval, Rope};
 
-    use serde_json::json;
-    use xi_plugin_lib::CoreProxy;
-    use xi_rpc::test_utils::make_reader;
-    use xi_rpc::{Handler, NewlineWriter, RpcCtx, RpcLoop};
+    use crate::lsp_plugin::host_ui::HostUi;
+    use serde_json::Value;
 
     use super::*;
 
-    #[derive(Default)]
-    struct CaptureCoreProxy {
-        proxy: Option<CoreProxy>,
-    }
+    struct CaptureCaller;
 
-    impl Handler for CaptureCoreProxy {
-        type Notification = serde_json::Value;
-        type Request = serde_json::Value;
-
-        fn handle_notification(&mut self, ctx: &RpcCtx, _rpc: Self::Notification) {
-            let plugin_id = serde_json::from_value(json!(1)).expect("plugin id should deserialize");
-            self.proxy = Some(CoreProxy::new(plugin_id, ctx, 1, []));
-            ctx.get_peer().request_shutdown();
+    impl ee_plugin_api::context::ServiceCaller for CaptureCaller {
+        fn call_service(
+            &self,
+            _service: ee_plugin_api::ids::ServiceId,
+            _method: &str,
+            _params: Value,
+        ) -> Result<Value, ee_plugin_api::error::PluginError> {
+            Ok(Value::Null)
         }
 
-        fn handle_request(
-            &mut self,
-            _ctx: &RpcCtx,
-            _rpc: Self::Request,
-            _cancel: tokio_util::sync::CancellationToken,
-        ) -> Result<serde_json::Value, xi_rpc::RemoteError> {
-            Ok(serde_json::Value::Null)
+        fn submit_effects(
+            &self,
+            _effects: Vec<ee_plugin_api::effect::Effect>,
+        ) -> Result<(), ee_plugin_api::error::PluginError> {
+            Ok(())
         }
     }
 
-    fn test_core_proxy() -> CoreProxy {
-        let mut handler = CaptureCoreProxy::default();
-        let mut looper = RpcLoop::new(NewlineWriter::new(io::sink()));
-        let reader = make_reader(r#"{"method":"ping","params":{}}"#);
-        looper.mainloop(|| reader, &mut handler).expect("test rpc loop should exit cleanly");
-        handler.proxy.expect("core proxy should be captured")
+    fn test_core_proxy() -> HostUi {
+        HostUi::new(Arc::new(CaptureCaller))
     }
 
     #[test]

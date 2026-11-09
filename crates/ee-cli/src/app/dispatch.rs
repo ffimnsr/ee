@@ -205,57 +205,6 @@ impl App {
                     json!({ "wrap_around": true, "allow_same": false }),
                 );
             }
-            Action::RequestCompletion => {
-                if let Err(err) = self.backend.request_completion(None) {
-                    self.backend.status_message = Some(format!("completion failed: {err}"));
-                }
-            }
-            Action::RequestHover => {
-                let position = Some((self.backend.cursor_line, self.backend.cursor_col));
-                if let Err(err) = self.backend.request_hover(position) {
-                    self.backend.status_message = Some(format!("hover failed: {err}"));
-                }
-            }
-            Action::RequestDeclaration => {
-                if let Err(err) = self.backend.request_declaration() {
-                    self.backend.status_message = Some(format!("declaration failed: {err}"));
-                }
-            }
-            Action::RequestDefinition => {
-                if let Err(err) = self.backend.request_definition() {
-                    self.backend.status_message = Some(format!("definition failed: {err}"));
-                }
-            }
-            Action::RequestTypeDefinition => {
-                if let Err(err) = self.backend.request_type_definition() {
-                    self.backend.status_message = Some(format!("type definition failed: {err}"));
-                }
-            }
-            Action::RequestReferences => {
-                if let Err(err) = self.backend.request_references() {
-                    self.backend.status_message = Some(format!("references failed: {err}"));
-                }
-            }
-            Action::RequestImplementation => {
-                if let Err(err) = self.backend.request_implementation() {
-                    self.backend.status_message = Some(format!("implementation failed: {err}"));
-                }
-            }
-            Action::RequestDocumentSymbols => {
-                if let Err(err) = self.backend.request_document_symbols() {
-                    self.backend.status_message = Some(format!("symbols failed: {err}"));
-                }
-            }
-            Action::RequestWorkspaceSymbols => {
-                if let Err(err) = self.backend.request_workspace_symbols("") {
-                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
-                }
-            }
-            Action::RequestCodeActions => {
-                if let Err(err) = self.backend.request_code_actions(None) {
-                    self.backend.status_message = Some(format!("code action failed: {err}"));
-                }
-            }
             Action::FilePicker => self.open_file_picker_for_buffer_directory(),
             Action::FilePickerInCurrentDirectory => self.open_file_picker_in_current_directory(),
             Action::FileExplorer => self.open_file_explorer(),

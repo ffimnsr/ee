@@ -366,42 +366,42 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Implement `ee-plugin-sdk/src/client/`.
-  - [ ] Add `DocumentClient`, `ViewsClient`, `CommandsClient`, `SyntaxClient`, `LspClient`, `UiClient`, and `TasksClient` over the v2 wire protocol.
-  - [ ] Add `DocumentCache` delta apply, revision checks, and line/range fetch.
-  - [ ] Add `ViewState` selection, viewport, and language tracking.
-  - [ ] Add tests with a fake host transport for each client call.
-- [ ] Rewrite `crates/xi-lsp-lib/manifest.toml`.
-  - [ ] Set `manifest_version = 2`, `api = "ee-plugin/2"`, `targets = ["editor"]`, `kind = "native"`.
-  - [ ] Declare services `editor.document@1`, `editor.views@1`, `editor.selection@1`, `editor.commands@1`, `editor.lsp@1`, `editor.decorations@1`, `editor.ui@1`.
-  - [ ] Declare permissions for document read, decoration write, UI write, LSP write, filesystem read, and network as needed by existing LSP behavior.
-  - [ ] Declare command contributions for `lsp.completion`, `lsp.hover`, `lsp.declaration`, `lsp.definition`, `lsp.type_definition`, `lsp.references`, `lsp.implementation`, `lsp.document_symbols`, `lsp.workspace_symbols`, `lsp.format_document`, `lsp.code_actions`, `lsp.rename`, and agent-tool commands.
-  - [ ] Declare ex aliases and keybinding defaults currently used by LSP actions.
-  - [ ] Add a manifest validation test that parses the file through `ManifestV2`.
-- [ ] Rewrite the LSP plugin entry point.
-  - [ ] Replace `impl Plugin for LspPlugin` in `lsp_plugin/plugin_impl.rs` with `impl ee_plugin_sdk::Plugin` and `apply`.
-  - [ ] Subscribe to `editor.document.changed`, `editor.document.saved`, `editor.view.opened`, `editor.view.closed`, `editor.language.changed`, and `editor.config.changed`.
-  - [ ] Register command handlers for every contributed command.
-  - [ ] Replace `CoreProxy` status calls with `UiClient` status contribution effects.
-  - [ ] Replace `CoreProxy` edit/data calls with `DocumentClient` / `CommandsClient`.
-- [ ] Migrate LSP support modules.
-  - [ ] Update `conversion_utils.rs` to use `ee_plugin_api::model` types.
-  - [ ] Update `document_symbols.rs` to use `DocumentCache` and `SymbolItem`.
-  - [ ] Update `language_server_client.rs` to use `UiClient` and v2 status contributions.
-  - [ ] Update agent-tool request handlers to return v2 effects and `agent_tool_result` payloads.
-  - [ ] Add tests for conversion, symbols, status failure, and agent-tool replies.
-- [ ] Remove hardcoded LSP routing.
-  - [ ] Remove LSP `EditNotification` variants from `xi-core-lib/src/rpc.rs`.
-  - [ ] Remove `DispatchPluginCommand` mappings for LSP commands from `xi-core-lib/src/edit_types.rs`.
-  - [ ] Remove `Action::RequestCompletion`, `RequestHover`, `RequestDeclaration`, `RequestDefinition`, `RequestTypeDefinition`, `RequestReferences`, `RequestImplementation`, `RequestDocumentSymbols`, `RequestWorkspaceSymbols`, and `RequestCodeActions` from `ee-cli`.
-  - [ ] Map those actions to `Action::PluginCommand("lsp.*")` in defaults, vim, spec parse/format, and hints.
-  - [ ] Replace `ee-cli/src/backend.rs` request helpers with generic `command` requests.
-  - [ ] Add tests asserting the old names no longer serialize and the new ids dispatch.
-- [ ] Add LSP regression tests.
-  - [ ] Test hover, completion, declaration, definition, type definition, references, implementation, document symbols, workspace symbols, formatting, code actions, rename, and agent-tool requests.
-  - [ ] Test missing language server returns an empty result without hanging.
-  - [ ] Test status failure and recovery through UI contributions.
-  - [ ] Test formatting and code actions no longer return `501`.
+- [x] Implement `ee-plugin-sdk/src/client/`.
+  - [x] Add `DocumentClient`, `ViewsClient`, `CommandsClient`, `SyntaxClient`, `LspClient`, `UiClient`, and `TasksClient` over the v2 wire protocol.
+  - [x] Add `DocumentCache` delta apply, revision checks, and line/range fetch.
+  - [x] Add `ViewState` selection, viewport, and language tracking.
+  - [x] Add tests with a fake host transport for each client call.
+- [x] Rewrite `crates/xi-lsp-lib/manifest.toml`.
+  - [x] Set `manifest_version = 2`, `api = "ee-plugin/2"`, `targets = ["editor"]`, `kind = "native"`.
+  - [x] Declare services `editor.document@1`, `editor.views@1`, `editor.selection@1`, `editor.commands@1`, `editor.lsp@1`, `editor.decorations@1`, `editor.ui@1`.
+  - [x] Declare permissions for document read, decoration write, UI write, LSP write, filesystem read, and network as needed by existing LSP behavior.
+  - [x] Declare command contributions for `lsp.completion`, `lsp.hover`, `lsp.declaration`, `lsp.definition`, `lsp.type_definition`, `lsp.references`, `lsp.implementation`, `lsp.document_symbols`, `lsp.workspace_symbols`, `lsp.format_document`, `lsp.code_actions`, `lsp.rename`, and agent-tool commands.
+  - [x] Declare ex aliases and keybinding defaults currently used by LSP actions.
+  - [x] Add a manifest validation test that parses the file through `ManifestV2`.
+- [x] Rewrite the LSP plugin entry point.
+  - [x] Replace `impl Plugin for LspPlugin` in `lsp_plugin/plugin_impl.rs` with `impl ee_plugin_sdk::Plugin` and `apply`.
+  - [x] Subscribe to `editor.document.changed`, `editor.document.saved`, `editor.view.opened`, `editor.view.closed`, `editor.language.changed`, and `editor.config.changed`.
+  - [x] Register command handlers for every contributed command.
+  - [x] Replace `CoreProxy` status calls with `UiClient` status contribution effects.
+  - [x] Replace `CoreProxy` edit/data calls with `DocumentClient` / `CommandsClient`.
+- [x] Migrate LSP support modules.
+  - [x] Update `conversion_utils.rs` to use `ee_plugin_api::model` types.
+  - [x] Update `document_symbols.rs` to use `DocumentCache` and `SymbolItem`.
+  - [x] Update `language_server_client.rs` to use `UiClient` and v2 status contributions.
+  - [x] Update agent-tool request handlers to return v2 effects and `agent_tool_result` payloads.
+  - [x] Add tests for conversion, symbols, status failure, and agent-tool replies.
+- [x] Remove hardcoded LSP routing.
+  - [x] Remove LSP `EditNotification` variants from `xi-core-lib/src/rpc.rs`.
+  - [x] Remove `DispatchPluginCommand` mappings for LSP commands from `xi-core-lib/src/edit_types.rs`.
+  - [x] Remove `Action::RequestCompletion`, `RequestHover`, `RequestDeclaration`, `RequestDefinition`, `RequestTypeDefinition`, `RequestReferences`, `RequestImplementation`, `RequestDocumentSymbols`, `RequestWorkspaceSymbols`, and `RequestCodeActions` from `ee-cli`.
+  - [x] Map those actions to `Action::PluginCommand("lsp.*")` in defaults, vim, spec parse/format, and hints.
+  - [x] Replace `ee-cli/src/backend.rs` request helpers with generic `command` requests.
+  - [x] Add tests asserting the old names no longer serialize and the new ids dispatch.
+- [x] Add LSP regression tests.
+  - [x] Test hover, completion, declaration, definition, type definition, references, implementation, document symbols, workspace symbols, formatting, code actions, rename, and agent-tool requests.
+  - [x] Test missing language server returns an empty result without hanging.
+  - [x] Test status failure and recovery through UI contributions.
+  - [x] Test formatting and code actions no longer return `501`.
 
 **Acceptance criteria:**
 

@@ -39,56 +39,6 @@ impl BufferManager {
         Ok(())
     }
 
-    pub(crate) fn request_completion(&mut self, index: Option<usize>) -> io::Result<()> {
-        self.send_edit("request_completion", json!({ "index": index }))
-    }
-
-    pub(crate) fn request_definition(&mut self) -> io::Result<()> {
-        self.send_edit("request_definition", json!({}))
-    }
-
-    pub(crate) fn request_declaration(&mut self) -> io::Result<()> {
-        self.send_edit("request_declaration", json!({}))
-    }
-
-    pub(crate) fn request_type_definition(&mut self) -> io::Result<()> {
-        self.send_edit("request_type_definition", json!({}))
-    }
-
-    pub(crate) fn request_references(&mut self) -> io::Result<()> {
-        self.send_edit("request_references", json!({}))
-    }
-
-    pub(crate) fn request_implementation(&mut self) -> io::Result<()> {
-        self.send_edit("request_implementation", json!({}))
-    }
-
-    pub(crate) fn request_document_symbols(&mut self) -> io::Result<()> {
-        self.send_edit("request_document_symbols", json!({}))
-    }
-
-    pub(crate) fn request_workspace_symbols(&mut self, query: &str) -> io::Result<()> {
-        self.send_edit("request_workspace_symbols", json!({ "query": query }))
-    }
-
-    pub(crate) fn format_document(&mut self) -> io::Result<()> {
-        self.send_edit("format_document", json!({}))
-    }
-
-    pub(crate) fn request_code_actions(&mut self, index: Option<usize>) -> io::Result<()> {
-        self.send_edit("request_code_actions", json!({ "index": index }))
-    }
-
-    /// Ask the LSP plugin to auto-apply only the given code-action kinds
-    /// (used by `code_actions_on_save`).
-    pub(crate) fn request_code_actions_on_save(&mut self, only: Vec<String>) -> io::Result<()> {
-        self.send_edit("request_code_actions", json!({ "only": only }))
-    }
-
-    pub(crate) fn request_rename(&mut self, new_name: &str) -> io::Result<()> {
-        self.send_edit("request_rename", json!({ "new_name": new_name }))
-    }
-
     pub(crate) fn stop_plugin(&mut self, plugin_name: &str) -> io::Result<()> {
         send_xi_notification(
             &self.tx,
@@ -290,29 +240,5 @@ impl BufferManager {
     #[allow(dead_code)]
     pub(crate) fn paste_register(&mut self, chars: &str, before: bool) -> io::Result<()> {
         self.send_edit("paste_register", json!({ "chars": chars, "before": before }))
-    }
-
-    pub(crate) fn request_hover(&mut self, position: Option<(usize, usize)>) -> io::Result<()> {
-        let view_id = &self.bufs[self.current].view_id;
-        let request_id = usize::try_from(self.next_rpc_id).unwrap_or(usize::MAX);
-        self.next_rpc_id = self.next_rpc_id.saturating_add(1);
-        let position = position.map(|(line, column)| {
-            json!({
-                "line": line,
-                "column": column,
-            })
-        });
-        send_xi_notification(
-            &self.tx,
-            "edit",
-            json!({
-                "view_id": view_id,
-                "method": "request_hover",
-                "params": {
-                    "request_id": request_id,
-                    "position": position,
-                },
-            }),
-        )
     }
 }

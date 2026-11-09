@@ -161,6 +161,11 @@ impl<'a> PluginCatalog {
         let mut errors = Vec::new();
         let mut staged = HashMap::<PluginName, PendingManifest>::new();
         for manifest_path in &all_manifests {
+            if is_v2_manifest(manifest_path) {
+                // The v2 runtime owns these manifests; the legacy catalog must
+                // not report them as invalid v1 plugins.
+                continue;
+            }
             match load_manifest(manifest_path) {
                 Err(e) => errors.push(e),
                 Ok(manifest) => {
@@ -300,6 +305,16 @@ fn find_all_manifests(paths: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     manifest_paths
+}
+
+fn is_v2_manifest(path: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return false;
+    };
+    value.get("manifest_version").and_then(toml::Value::as_integer) == Some(2)
 }
 
 fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
@@ -905,7 +920,7 @@ requires = ["syntax-runtime>=0.2.0"]
     }
 
     #[test]
-    fn load_from_paths_accepts_xi_lsp_manifest() {
+    fn load_from_paths_ignores_v2_xi_lsp_manifest() {
         let temp_dir = TempDir::new().unwrap();
         let plugin_dir = temp_dir.path().join("xi-lsp-plugin");
         let exec_path = plugin_dir.join("bin/xi-lsp-plugin");
@@ -921,21 +936,8 @@ requires = ["syntax-runtime>=0.2.0"]
         let mut catalog = PluginCatalog::default();
         let errors = catalog.load_from_paths(&[plugin_dir]);
 
-        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        let plugin = catalog.get_named("xi-lsp-plugin").expect("lsp plugin registered");
-
-        // Agent tool commands are dispatched through the plugin command list,
-        // so a manifest that omits them makes every agent tool request wait out
-        // its proxy deadline instead of being served.
-        for method in [
-            "ee.agent.document_symbols",
-            "ee.agent.references",
-            "ee.agent.list_code_actions",
-            "ee.agent.format_preview",
-            "ee.agent.preview_rename",
-        ] {
-            assert!(plugin.supports_command(method), "lsp manifest must declare {method}");
-        }
+        assert!(errors.is_empty(), "legacy catalog must ignore v2 manifests: {errors:?}");
+        assert!(catalog.get_named("xi-lsp-plugin").is_none());
     }
 
     #[test]

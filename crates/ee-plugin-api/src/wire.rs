@@ -13,6 +13,7 @@ use crate::effect::Effect;
 use crate::host::HostKind;
 use crate::ids::{CommandId, ContributionId, PluginId, ServiceId};
 use crate::manifest::Limits;
+use crate::model::ViewId;
 
 /// Messages sent by a host to a plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -79,10 +80,16 @@ pub struct EventParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CommandParams {
     pub id: CommandId,
+    #[serde(default = "default_view_id")]
+    pub view_id: ViewId,
     pub request_id: u64,
     #[schemars(skip)]
     pub args: Value,
     pub deadline_ms: u64,
+}
+
+fn default_view_id() -> ViewId {
+    ViewId(0)
 }
 
 /// Request for a fresh contribution snapshot.
@@ -182,6 +189,7 @@ mod tests {
             }),
             HostToPlugin::Command(CommandParams {
                 id: CommandId::new("demo.run").unwrap(),
+                view_id: crate::model::ViewId(1),
                 request_id: 7,
                 args: serde_json::json!({}),
                 deadline_ms: 1000,

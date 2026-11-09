@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use xi_core_lib::user_state_dir;
-use xi_lsp_lib::{Config, LspPlugin, start_mainloop};
+use xi_lsp_lib::{Config, LspPlugin};
 
 /// Resolve the plugin log file path.
 ///
@@ -84,10 +84,10 @@ fn main() {
         std::process::exit(1);
     }
     let config: Config = Config::bundled();
-    let mut plugin = LspPlugin::new(config);
+    let plugin = LspPlugin::new(config);
 
-    if let Err(err) = start_mainloop(&mut plugin) {
-        eprintln!("LSP plugin mainloop failed: {err}");
+    if let Err(err) = ee_plugin_sdk::client::run_stdio(plugin) {
+        eprintln!("LSP plugin runtime failed: {err}");
         std::process::exit(1);
     }
 }

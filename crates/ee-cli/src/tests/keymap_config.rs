@@ -13,7 +13,7 @@ use crate::buffer::BufferManager;
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::{PickerKind, PickerState};
 use crate::quickfix::{QfEntry, QfList};
-use crate::tests::helpers::{CurrentDirGuard, cwd_test_lock};
+use crate::tests::helpers::{CurrentDirGuard, cwd_test_lock, seed_lsp_commands};
 use crate::ui::ui;
 
 #[test]
@@ -45,6 +45,7 @@ action = "request_hover"
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    seed_lsp_commands(&mut app);
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE)));
     assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
@@ -53,8 +54,8 @@ action = "request_hover"
     let message = rx.recv().expect("message should be sent");
 
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "edit");
-    assert_eq!(value["params"]["method"], "request_hover");
+    assert_eq!(value["method"], "command");
+    assert_eq!(value["params"]["id"], "lsp.hover");
 }
 
 #[test]
@@ -785,7 +786,7 @@ fn ctrl_p_and_ctrl_alt_p_bind_normal_mode_picker_shortcuts() {
     assert_eq!(file_picker, Some(Action::FilePickerInCurrentDirectory));
     assert_eq!(command_palette, Some(Action::CommandPalette));
     // vim: insert-mode Ctrl-p opens completion (Ctrl-n too); Ctrl-Alt-p stays free.
-    assert_eq!(insert_file_picker, Some(Action::RequestCompletion));
+    assert_eq!(insert_file_picker, Some(Action::plugin("lsp.completion")));
     assert_eq!(insert_command_palette, None);
 }
 
@@ -800,5 +801,5 @@ fn gd_binds_declaration_like_vim() {
             prefix: Some('g'),
         })
         .cloned();
-    assert_eq!(lookup, Some(Action::RequestDeclaration));
+    assert_eq!(lookup, Some(Action::plugin("lsp.declaration")));
 }

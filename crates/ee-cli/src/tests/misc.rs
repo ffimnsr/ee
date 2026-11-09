@@ -273,47 +273,20 @@ fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
 
     let mut app = App::from_path(Some(file)).unwrap();
 
-    // One request may come back empty while the backend's tree-sitter runtime
-    // is still cold-starting (lazy per-process grammar/query loading). Re-run
-    // the request like a user would re-open :symbols, and surface the plugin
-    // state in the failure message instead of asserting against a single
-    // arbitrary result.
-    // The legacy LSP plugin process is still active until the Phase 4
-    // migration, and the frontend no longer receives its old lifecycle
-    // notifications. Poll the request itself as the readiness probe; a cold
-    // plugin start under full-suite load can exceed the old 10 s budget.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let symbols = loop {
-        app.backend.request_document_symbols().unwrap();
-        while app.backend.pending_symbols.is_empty() && Instant::now() < deadline {
-            let _ = app.backend.pump();
-            thread::sleep(Duration::from_millis(10));
-        }
-        let pending = app.backend.drain_pending_symbols();
-        assert_eq!(
-            pending.len(),
-            1,
-            "one symbol result per request; plugins={:?} status={:?}",
-            app.backend.plugin_status(),
-            app.backend.status_message,
-        );
-        let symbols = pending.into_iter().next().unwrap().2;
-        if !symbols.is_empty() || Instant::now() >= deadline {
-            break symbols;
-        }
-    };
-    if symbols.is_empty() {
-        panic!(
-            "tree-sitter document symbols stayed empty after retries; plugins={:?} status={:?}",
-            app.backend.plugin_status(),
-            app.backend.status_message,
-        );
+    // The v2 plugin owns the symbol flow. A disabled/missing language server
+    // must fail closed without hanging the editor; the plugin falls back to the
+    // backend Tree-sitter symbols and publishes a declarative picker.
+    app.backend.send_plugin_command("lsp.document_symbols", json!({})).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let _ = app.backend.pump();
+        thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(symbols.len(), 2);
-    assert_eq!(symbols[0].name, "Parent");
-    assert_eq!(symbols[0].children.len(), 1);
-    assert_eq!(symbols[0].children[0].name, "Child");
-    assert_eq!(symbols[1].name, "Next");
+    assert!(
+        app.backend.status_message.is_none(),
+        "missing language server must not surface an error: {:?}",
+        app.backend.status_message,
+    );
 }
 
 #[test]

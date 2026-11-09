@@ -11,9 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use xi_plugin_lib::Plugin;
-use xi_plugin_lib::mainloop;
-
 mod bundled_catalog_generated;
 pub mod conversion_utils;
 mod document_symbols;
@@ -29,7 +26,3 @@ pub use crate::types::{Config, DisabledLanguageConfig, FormatterConfig, Language
 pub use crate::utils::{
     ServerStartOptions, read_transport_message, shutdown_language_server, start_new_server,
 };
-
-pub fn start_mainloop<P: Plugin>(plugin: &mut P) -> Result<(), xi_rpc::ReadError> {
-    mainloop(plugin)
-}

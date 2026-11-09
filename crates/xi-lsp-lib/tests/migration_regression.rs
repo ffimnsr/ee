@@ -1,51 +1,42 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ee_plugin_api::context::ServiceCaller;
+use ee_plugin_api::error::PluginError;
+use ee_plugin_api::ids::ServiceId;
+use ee_plugin_api::model::ViewId;
 use lsp_types::{Hover, Position, Range, ServerCapabilities, TextDocumentContentChangeEvent, Uri};
 use serde_json::{Value, json};
 use xi_lsp_lib::language_server_client::LanguageServerClient;
+use xi_lsp_lib::lsp_plugin::HostUi;
 use xi_lsp_lib::{ResultQueue, ServerStartOptions, shutdown_language_server, start_new_server};
-use xi_plugin_lib::CoreProxy;
-use xi_rpc::test_utils::make_reader;
-use xi_rpc::{Handler, NewlineWriter, RpcCtx, RpcLoop};
 
-#[derive(Default)]
-struct CaptureCoreProxy {
-    proxy: Option<CoreProxy>,
-}
+struct CaptureCaller;
 
-impl Handler for CaptureCoreProxy {
-    type Notification = serde_json::Value;
-    type Request = serde_json::Value;
-
-    fn handle_notification(&mut self, ctx: &RpcCtx, _rpc: Self::Notification) {
-        let plugin_id = serde_json::from_value(json!(1)).expect("plugin id should deserialize");
-        self.proxy = Some(CoreProxy::new(plugin_id, ctx, 1, []));
-        ctx.get_peer().request_shutdown();
+impl ServiceCaller for CaptureCaller {
+    fn call_service(
+        &self,
+        _service: ServiceId,
+        _method: &str,
+        _params: Value,
+    ) -> Result<Value, PluginError> {
+        Ok(Value::Null)
     }
 
-    fn handle_request(
-        &mut self,
-        _ctx: &RpcCtx,
-        _rpc: Self::Request,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<serde_json::Value, xi_rpc::RemoteError> {
-        Ok(serde_json::Value::Null)
+    fn submit_effects(
+        &self,
+        _effects: Vec<ee_plugin_api::effect::Effect>,
+    ) -> Result<(), PluginError> {
+        Ok(())
     }
 }
 
-fn test_core_proxy() -> CoreProxy {
-    let mut handler = CaptureCoreProxy::default();
-    let mut looper = RpcLoop::new(NewlineWriter::new(io::sink()));
-    let reader = make_reader(r#"{"method":"ping","params":{}}"#);
-    looper.mainloop(|| reader, &mut handler).expect("test rpc loop should exit cleanly");
-    handler.proxy.expect("core proxy should be captured")
+fn test_core_proxy() -> HostUi {
+    HostUi::new(std::sync::Arc::new(CaptureCaller))
 }
 
 fn wait_until(label: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
@@ -85,20 +76,12 @@ fn fake_server_binary_path() -> PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target"));
-    let binary_name = format!("xi_lsp_fake_server{}", std::env::consts::EXE_SUFFIX);
-    let binary_path = target_dir.join("debug").join(binary_name);
-    if binary_path.exists() {
-        return binary_path;
-    }
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(&workspace_root)
-        .args(["build", "-p", "xi-lsp-lib", "--bin", "xi_lsp_fake_server"])
-        .status()
-        .expect("cargo build for fake server should start");
-    assert!(status.success(), "cargo build for fake server should succeed");
-    assert!(binary_path.exists(), "fake server binary should exist after build");
+    let binary_path = target_dir.join("debug").join("xi_lsp_fake_server");
+    assert!(
+        binary_path.exists(),
+        "fake server binary `{}` should be built by cargo test",
+        binary_path.display()
+    );
     binary_path
 }
 
@@ -153,7 +136,7 @@ fn fake_language_server_covers_migration_flows() {
     .expect("fake language server should start");
 
     let uri: Uri = "file:///tmp/migration.rs".parse().expect("uri should parse");
-    let view_id = 9.into();
+    let view_id = ViewId(9);
 
     client
         .lock()

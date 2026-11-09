@@ -32,6 +32,17 @@ use ee_plugin_runtime::discovery::{DiscoveryOptions, RootKind};
 use ee_plugin_runtime::manager::PluginManagerConfig;
 use serde_json::json;
 
+/// Tests without an isolated config home must not execute plugins installed in
+/// the developer's real configuration tree. Tests that install fixtures set
+/// `XDG_CONFIG_HOME` to a temp path, which keeps them isolated.
+fn include_test_plugin_root(path: &Path) -> bool {
+    let test_process = cfg!(test) || std::env::var_os("EE_TEST_DISABLE_USER_PLUGINS").is_some();
+    if !test_process {
+        return true;
+    }
+    path.starts_with(std::env::temp_dir())
+}
+
 impl CoreState {
     /// Start the v2 host during `finish_setup`.
     pub(crate) fn plugin_host_start(&mut self) {
@@ -44,6 +55,9 @@ impl CoreState {
 
         let mut discovery = DiscoveryOptions::new();
         for (index, path) in self.config_manager.get_plugin_paths().iter().enumerate() {
+            if !include_test_plugin_root(path) {
+                continue;
+            }
             let kind = if index == 0 { RootKind::ClientExtra } else { RootKind::User };
             discovery.push_root(kind, path);
         }
@@ -128,7 +142,8 @@ impl CoreState {
         let Some(notifier) = self.plugin_notifier.clone() else {
             return;
         };
-        for event in notifier.drain() {
+        let events = notifier.drain();
+        for event in events {
             match event {
                 NotifierEvent::Contributions { revision, upsert, remove } => {
                     self.peer.plugin_contributions(revision, &upsert, &remove);
@@ -151,11 +166,46 @@ impl CoreState {
         let ui = host.as_ref().map(|host| host.ui().as_ref());
         let tasks = host.as_ref().map(|host| host.tasks().as_ref());
         for queued in queued {
+            let effect = queued.effect.clone();
             let report = apply_effects(self, queued.owner.as_ref(), vec![queued.effect], ui, tasks);
+            let applied = report.is_ok();
             for (_, error) in report.errors {
                 warn!("plugin effect failed: {error}");
                 self.peer.alert(format!("plugin effect failed: {error}"));
             }
+            if applied {
+                self.forward_ui_effect(&effect);
+            }
+        }
+    }
+
+    fn forward_ui_effect(&self, effect: &ee_plugin_api::effect::Effect) {
+        use ee_plugin_api::effect::Effect;
+        let payload = match effect {
+            Effect::ShowPanel(update) => Some(json!({
+                "kind": "panel",
+                "id": update.id,
+                "revision": update.revision,
+                "visible": update.visible,
+                "data": update.data,
+            })),
+            Effect::ShowOverlay(update) => Some(json!({
+                "kind": "overlay",
+                "id": update.id,
+                "revision": update.revision,
+                "visible": update.visible,
+                "data": update.data,
+            })),
+            Effect::ShowPicker(update) => Some(json!({
+                "kind": "picker",
+                "id": update.id,
+                "revision": update.revision,
+                "items": update.items,
+            })),
+            _ => None,
+        };
+        if let Some(payload) = payload {
+            self.peer.plugin_ui_update(&payload);
         }
     }
 

@@ -43,18 +43,6 @@ impl CoreState {
         }
     }
 
-    pub(crate) fn plugin_hover(
-        &mut self,
-        _plugin_id: PluginId,
-        view_id: ViewId,
-        request_id: usize,
-        response: Result<Value, xi_rpc::Error>,
-    ) {
-        if let Some(mut edit_ctx) = self.make_context(view_id) {
-            edit_ctx.do_plugin_hover(request_id, response);
-        }
-    }
-
     pub(crate) fn plugin_notification(
         &mut self,
         _ctx: &RpcCtx,

@@ -122,7 +122,7 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     // "select next/prev search match" semantics.
     bind!(Normal, KeyCode::Char('n'), none, Some('g'), FindNext);
     bind!(Normal, KeyCode::Char('N'), none, Some('g'), FindPrevious);
-    bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
+    bind!(Normal, KeyCode::Char('K'), none, None, Action::plugin("lsp.hover"));
     bind!(Normal, KeyCode::Up, ctrl, None, Edit("add_selection_above"));
     bind!(Normal, KeyCode::Down, ctrl, None, Edit("add_selection_below"));
     // * / # — search word under cursor forward / backward
@@ -191,8 +191,8 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('f'), none, Some('g'), GotoFile);
     bind!(Normal, KeyCode::Char('h'), none, Some('g'), Edit("move_to_left_end_of_line"));
     bind!(Normal, KeyCode::Char('l'), none, Some('g'), Edit("move_to_right_end_of_line"));
-    bind!(Normal, KeyCode::Char('d'), none, Some('g'), RequestDeclaration);
-    bind!(Normal, KeyCode::Char('D'), none, Some('g'), RequestDefinition);
+    bind!(Normal, KeyCode::Char('d'), none, Some('g'), Action::plugin("lsp.declaration"));
+    bind!(Normal, KeyCode::Char('D'), none, Some('g'), Action::plugin("lsp.definition"));
     bind!(Normal, KeyCode::Char('o'), none, Some('g'), GotoByte);
     bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
     bind!(Normal, KeyCode::Char('u'), none, Some('g'), SetOperator(Operator::Lowercase));
@@ -396,7 +396,7 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Insert, KeyCode::Backspace, none, None, DeleteBackward);
     bind!(Insert, KeyCode::Char('r'), ctrl, None, InsertRegister);
     bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);
-    bind!(Insert, KeyCode::Char('x'), ctrl, None, RequestCompletion);
+    bind!(Insert, KeyCode::Char('x'), ctrl, None, Action::plugin("lsp.completion"));
     bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
     bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
     bind!(Insert, KeyCode::Char('d'), ctrl, None, OutdentLine);
@@ -404,8 +404,8 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     // Ctrl-o one-shot normal, Ctrl-a re-insert last insert, Ctrl-@ same + exit,
     // Ctrl-e/y scroll without leaving insert.  Ctrl-v (literal insert) is a
     // no-op: ee inserts typed chars literally, so the default already matches.
-    bind!(Insert, KeyCode::Char('n'), ctrl, None, RequestCompletion);
-    bind!(Insert, KeyCode::Char('p'), ctrl, None, RequestCompletion);
+    bind!(Insert, KeyCode::Char('n'), ctrl, None, Action::plugin("lsp.completion"));
+    bind!(Insert, KeyCode::Char('p'), ctrl, None, Action::plugin("lsp.completion"));
     bind!(Insert, KeyCode::Char('o'), ctrl, None, OneShotNormal);
     bind!(Insert, KeyCode::Char('a'), ctrl, None, RepeatLastInsert);
     bind!(Insert, KeyCode::Char('@'), ctrl, None, RepeatLastInsertAndExit);

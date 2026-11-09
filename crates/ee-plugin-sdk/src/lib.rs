@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod client;
 pub mod command;
 pub mod config;
 pub mod run;
@@ -13,6 +14,11 @@ pub mod transport;
 pub mod view;
 
 pub use cache::{CacheError, DocumentCache};
+pub use client::{
+    CommandsClient, DocumentClient, DocumentSnapshot, EditorView, LspClient, LspRequest,
+    ServiceClient, SyntaxClient, TasksClient, UiClient, ViewConfig, Viewport, ViewsClient,
+};
+pub use client::{Connection, RuntimeTransport, SdkHost};
 pub use command::{CommandResponse, ServiceCall, ServiceCallResult};
 pub use config::PluginConfig;
 pub use ee_plugin_api::contribution::Contribution;

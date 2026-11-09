@@ -398,8 +398,6 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
         Action::GotoLastLine => String::from("last line"),
         Action::GotoByte => String::from("goto byte"),
         Action::GotoFile => String::from("goto file"),
-        Action::RequestDocumentSymbols => String::from("document symbols"),
-        Action::RequestWorkspaceSymbols => String::from("workspace symbols"),
         Action::RestoreLastVisual => String::from("restore last visual"),
         Action::ChangeListOlder => String::from("older change"),
         Action::ChangeListNewer => String::from("newer change"),

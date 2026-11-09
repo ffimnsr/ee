@@ -143,7 +143,11 @@ impl WeakXiCore {
     /// for `Arc::upgrade`.
     /// Pump native plugin transports and apply queued effects.
     pub(crate) fn plugin_cycle(&self) {
-        let host = self.with_state(|core| core.plugin_host.clone()).flatten();
+        let (host, queued_commands) = self
+            .with_state(|core| {
+                (core.plugin_host.clone(), std::mem::take(&mut core.queued_plugin_commands))
+            })
+            .unwrap_or((None, Vec::new()));
         let Some(host) = host else {
             return;
         };
@@ -157,6 +161,11 @@ impl WeakXiCore {
             && let Err(error) = host.reload_paths(&[])
         {
             tracing::warn!("failed to reload plugins: {error}");
+        }
+        for (id, view, args) in queued_commands {
+            if let Err(error) = host.dispatch_command(&id, view, args) {
+                tracing::warn!("plugin command `{id}` failed: {error}");
+            }
         }
         let _ = host.pump();
         let effects = host.take_effects();
@@ -228,20 +237,6 @@ impl WeakXiCore {
             let _t =
                 tracing::trace_span!("WeakXiCore::plugin_update", categories = "core").entered();
             core.inner().plugin_update(plugin, view, response);
-        }
-    }
-
-    pub fn handle_plugin_hover(
-        &self,
-        plugin: PluginId,
-        view: ViewId,
-        request_id: usize,
-        response: Result<Value, RpcError>,
-    ) {
-        if let Some(core) = self.upgrade() {
-            let _t =
-                tracing::trace_span!("WeakXiCore::plugin_hover", categories = "core").entered();
-            core.inner().plugin_hover(plugin, view, request_id, response);
         }
     }
 

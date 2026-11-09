@@ -42,16 +42,6 @@ pub(crate) enum Action {
     CompleteCommandLine,
     FindNext,
     FindPrevious,
-    RequestCompletion,
-    RequestHover,
-    RequestDeclaration,
-    RequestDefinition,
-    RequestTypeDefinition,
-    RequestReferences,
-    RequestImplementation,
-    RequestDocumentSymbols,
-    RequestWorkspaceSymbols,
-    RequestCodeActions,
     SwiftMotion,
     GlobalSearch,
     CommandPalette,
@@ -320,6 +310,14 @@ pub(crate) enum Action {
     PluginCommand(String),
     /// Invoke a plugin-contributed command with JSON arguments.
     PluginCommandWithArgs(String, serde_json::Value),
+}
+
+impl Action {
+    /// Build a plugin command action from a stable command id.
+    #[must_use]
+    pub fn plugin(id: &str) -> Self {
+        Self::PluginCommand(id.to_owned())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

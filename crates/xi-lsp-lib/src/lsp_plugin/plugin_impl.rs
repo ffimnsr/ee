@@ -1,74 +1,289 @@
-//! `impl Plugin for LspPlugin`: xi plugin lifecycle.
+//! `impl ee_plugin_sdk::Plugin for LspPlugin`: v2 lifecycle.
 use super::*;
+use ee_plugin_api::context::PluginContext;
+use ee_plugin_api::effect::Effect;
+use ee_plugin_api::error::PluginError;
+use ee_plugin_api::model::PluginUpdate;
+use ee_plugin_api::wire::EventParams;
 
 impl Plugin for LspPlugin {
-    type Cache = ChunkCache;
-
-    fn initialize(&mut self, core: CoreProxy) {
-        self.core = Some(core)
+    fn name(&self) -> &str {
+        "xi-lsp-plugin"
     }
 
-    fn update(
-        &mut self,
-        view: &mut View<Self::Cache>,
-        delta: Option<&RopeDelta>,
-        _edit_type: String,
-        _author: String,
-    ) {
-        if self.view_info.contains_key(&view.get_id()) {
-            let document_text = match view.get_document() {
-                Ok(text) => text,
-                Err(err) => {
-                    error!("failed to fetch document for view {} update: {:?}", view.get_id(), err);
-                    return;
-                }
-            };
+    fn apply(&mut self, ctx: &PluginContext) -> Result<(), PluginError> {
+        let caller = ctx
+            .service_caller()
+            .ok_or(PluginError::Unsupported { feature: "native service transport" })?;
+        self.core = Some(HostUi::new(Arc::clone(&caller)));
+        self.caller = Some(caller);
+        Ok(())
+    }
 
-            let Ok(ls_clients) = self.clients_for_view(view) else {
+    fn on_event(
+        &mut self,
+        _ctx: &PluginContext,
+        event: &EventParams,
+    ) -> Result<Vec<Effect>, PluginError> {
+        match event.name.as_str() {
+            "editor.view.opened" => self.on_view_opened(&event.payload),
+            "editor.document.changed" => self.on_document_changed(&event.payload),
+            "editor.document.saved" => self.on_document_saved(&event.payload),
+            "editor.view.closed" => self.on_view_closed(&event.payload),
+            "editor.language.changed" => self.on_language_changed(&event.payload),
+            "editor.config.changed" => self.on_config_changed(&event.payload),
+            _ => {}
+        }
+        Ok(Vec::new())
+    }
+
+    fn on_command(
+        &mut self,
+        _ctx: &PluginContext,
+        request: &ee_plugin_api::effect::CommandRequest,
+    ) -> Result<Vec<Effect>, PluginError> {
+        let Some(mut view) = self.view_for_command(request.view_id) else {
+            return Ok(Vec::new());
+        };
+        let view_id = view.get_id();
+        let index = request
+            .args
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
+        match request.id.as_str() {
+            "lsp.completion" => self.request_completion(&mut view, index),
+            "lsp.hover" => self.request_hover(&mut view),
+            "lsp.declaration" => self.request_declaration(&mut view),
+            "lsp.definition" => self.request_definition(&mut view),
+            "lsp.type_definition" => self.request_type_definition(&mut view),
+            "lsp.references" => self.request_references(&mut view),
+            "lsp.implementation" => self.request_implementation(&mut view),
+            "lsp.document_symbols" => self.request_document_symbols(&mut view),
+            "lsp.workspace_symbols" => {
+                let query =
+                    request.args.get("query").and_then(Value::as_str).unwrap_or("").to_owned();
+                self.request_workspace_symbols(&mut view, query);
+            }
+            "lsp.format_document" => self.request_document_formatting(&mut view),
+            "lsp.code_actions" => {
+                if let Some(only) = request.args.get("only").and_then(Value::as_array) {
+                    let only = only
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    if !only.is_empty() {
+                        self.request_code_actions_on_save(&mut view, only);
+                        return Ok(Vec::new());
+                    }
+                }
+                self.request_or_apply_code_action(&mut view, index);
+            }
+            "lsp.rename" => {
+                let Some(new_name) = request.args.get("new_name").and_then(Value::as_str) else {
+                    self.record_view_failure(
+                        &mut view,
+                        String::from("rename failed: missing new_name"),
+                    );
+                    return Ok(Vec::new());
+                };
+                self.request_rename(&mut view, new_name.to_owned());
+            }
+            "lsp.agent_document_symbols" => self.request_agent_document_symbols(&mut view),
+            "lsp.agent_references" => self.request_agent_references(&mut view),
+            "lsp.agent_code_actions" => self.request_agent_code_actions(&mut view),
+            "lsp.agent_format_preview" => self.request_agent_format_preview(&mut view),
+            "lsp.agent_rename_preview" => {
+                let Some(new_name) = request.args.get("new_name").and_then(Value::as_str) else {
+                    self.record_view_failure(
+                        &mut view,
+                        String::from("rename failed: missing new_name"),
+                    );
+                    return Ok(Vec::new());
+                };
+                self.request_agent_preview_rename(&mut view, new_name.to_owned());
+            }
+            other => {
+                return Err(PluginError::Runtime {
+                    message: format!("unhandled LSP command `{other}`"),
+                });
+            }
+        }
+        let _ = view_id;
+        Ok(Vec::new())
+    }
+
+    fn on_tick(&mut self, _ctx: &PluginContext) -> Result<Vec<Effect>, PluginError> {
+        let views = self.views.keys().copied().collect::<Vec<_>>();
+        for view_id in views {
+            if let Some(mut view) = self.views.get(&view_id).cloned() {
+                self.idle(&mut view);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(20))
+    }
+
+    fn on_shutdown(&mut self, _ctx: &PluginContext) {
+        self.shutdown_servers();
+    }
+}
+
+impl LspPlugin {
+    fn view_for_command(&mut self, view_id: ViewId) -> Option<PluginView> {
+        if let Some(view) = self.views.get(&view_id) {
+            return Some(view.clone());
+        }
+        self.views.values().next().cloned()
+    }
+
+    fn on_view_opened(&mut self, payload: &Value) {
+        let Some(view_id) =
+            payload.get("view_id").and_then(|value| serde_json::from_value(value.clone()).ok())
+        else {
+            return;
+        };
+        let Some(caller) = self.caller.clone() else {
+            return;
+        };
+        let mut view = match PluginView::load(caller, view_id) {
+            Ok(view) => view,
+            Err(error) => {
+                error!("failed to load view {view_id:?}: {error}");
+                return;
+            }
+        };
+        if let Some(config) = payload.get("config") {
+            view.set_config(config.clone());
+        }
+        self.views.insert(view_id, view.clone());
+        self.new_view(&mut view);
+    }
+
+    fn on_document_changed(&mut self, payload: &Value) {
+        let Ok(update) = serde_json::from_value::<PluginUpdate>(payload.clone()) else {
+            return;
+        };
+        let Some(mut view) = self.views.get(&update.view_id).cloned() else {
+            return;
+        };
+        if let Err(error) = view.apply_update(&update) {
+            error!("failed to apply document update for {:?}: {error}", update.view_id);
+            return;
+        }
+        self.update(&mut view);
+    }
+
+    fn on_document_saved(&mut self, payload: &Value) {
+        let Some(view_id) =
+            payload.get("view_id").and_then(|value| serde_json::from_value(value.clone()).ok())
+        else {
+            return;
+        };
+        let Some(mut view) = self.views.get(&view_id).cloned() else {
+            return;
+        };
+        self.did_save(&mut view);
+    }
+
+    fn on_view_closed(&mut self, payload: &Value) {
+        let Some(view_id) =
+            payload.get("view_id").and_then(|value| serde_json::from_value(value.clone()).ok())
+        else {
+            return;
+        };
+        if let Some(view) = self.views.remove(&view_id) {
+            self.did_close(&view);
+        }
+    }
+
+    fn on_language_changed(&mut self, payload: &Value) {
+        let Some(view_id) =
+            payload.get("view_id").and_then(|value| serde_json::from_value(value.clone()).ok())
+        else {
+            return;
+        };
+        let language =
+            payload.get("new").and_then(|value| serde_json::from_value(value.clone()).ok());
+        let Some(mut view) = self.views.get(&view_id).cloned() else {
+            return;
+        };
+        self.did_close(&view);
+        if let Some(language) = language {
+            view.set_language(language);
+            self.views.insert(view_id, view.clone());
+        }
+        self.new_view(&mut view);
+    }
+
+    fn on_config_changed(&mut self, payload: &Value) {
+        let Some(changes) = payload.get("changes").and_then(Value::as_object) else {
+            return;
+        };
+        let table = changes.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+        match self.parse_plugin_config_update(&table) {
+            Ok(config) => self.apply_plugin_config(config),
+            Err(error) => error!("failed to parse lsp plugin config update: {error}"),
+        }
+    }
+
+    fn update(&mut self, view: &mut PluginView) {
+        if !self.view_info.contains_key(&view.get_id()) {
+            return;
+        }
+        let document_text = match view.get_document() {
+            Ok(text) => text,
+            Err(err) => {
+                error!("failed to fetch document for view {:?} update: {err}", view.get_id());
+                return;
+            }
+        };
+        let Ok(ls_clients) = self.clients_for_view(view) else {
+            return;
+        };
+        let sync_kind = ls_clients
+            .iter()
+            .find_map(|client| client.lock().ok().map(|mut client| client.get_sync_kind()));
+        let next_version = {
+            let Some(view_info) = self.view_info.get_mut(&view.get_id()) else {
                 return;
             };
-            let sync_kind = ls_clients
-                .iter()
-                .find_map(|client| client.lock().ok().map(|mut client| client.get_sync_kind()));
-            let next_version = {
-                let Some(view_info) = self.view_info.get_mut(&view.get_id()) else {
-                    return;
+            view_info.version += 1;
+            view_info.version
+        };
+        if let Some(sync_kind) = sync_kind
+            && let Some(changes) = get_change_for_sync_kind(sync_kind, view)
+        {
+            for ls_client_arc in ls_clients {
+                let Ok(mut ls_client) = ls_client_arc.lock() else {
+                    error!("language server client lock poisoned for view {:?}", view.get_id());
+                    continue;
                 };
-                view_info.version += 1;
-                view_info.version
-            };
-            if let Some(sync_kind) = sync_kind
-                && let Some(changes) = get_change_for_sync_kind(sync_kind, view, delta)
-            {
-                for ls_client_arc in ls_clients {
-                    let Ok(mut ls_client) = ls_client_arc.lock() else {
-                        error!("language server client lock poisoned for view {}", view.get_id());
-                        continue;
-                    };
-                    if let Err(err) = ls_client.send_did_change(
-                        view.get_id(),
-                        changes.clone(),
-                        next_version,
-                        document_text.clone(),
-                    ) {
-                        ls_client.record_server_failure(format!("failed to send didChange: {err}"));
-                    }
+                if let Err(err) = ls_client.send_did_change(
+                    view.get_id(),
+                    changes.clone(),
+                    next_version,
+                    document_text.clone(),
+                ) {
+                    ls_client.record_server_failure(format!("failed to send didChange: {err}"));
                 }
             }
         }
     }
 
-    fn did_save(&mut self, view: &mut View<Self::Cache>, _old: Option<&Path>) {
-        trace!("saved view {}", view.get_id());
-
+    fn did_save(&mut self, view: &mut PluginView) {
+        trace!("saved view {:?}", view.get_id());
         let document_text = match view.get_document() {
             Ok(text) => text,
             Err(err) => {
-                error!("failed to fetch document for view {} save: {:?}", view.get_id(), err);
+                error!("failed to fetch document for view {:?} save: {err}", view.get_id());
                 return;
             }
         };
-
         if let Ok(ls_clients) = self.clients_for_view(view) {
             for ls_client_arc in ls_clients {
                 if let Ok(mut ls_client) = ls_client_arc.lock()
@@ -80,9 +295,8 @@ impl Plugin for LspPlugin {
         }
     }
 
-    fn did_close(&mut self, view: &View<Self::Cache>) {
-        trace!("close view {}", view.get_id());
-
+    fn did_close(&mut self, view: &PluginView) {
+        trace!("close view {:?}", view.get_id());
         if let Some(view_info) = self.view_info.remove(&view.get_id()) {
             for route in view_info.routes {
                 if let Some(ls_client_arc) =
@@ -106,15 +320,13 @@ impl Plugin for LspPlugin {
         self.pending_symbol_retries.remove(&view.get_id());
     }
 
-    fn new_view(&mut self, view: &mut View<Self::Cache>) {
-        trace!("new view {}", view.get_id());
-
-        let language_id = self.normalized_view_language_id(view.get_language_id());
+    fn new_view(&mut self, view: &mut PluginView) {
+        trace!("new view {:?}", view.get_id());
+        let language_id = self.normalized_view_language_id(view.get_language_id().as_str());
         let language_matches = self.language_matches_for_view(view);
         if language_matches.is_empty() {
             return;
         }
-
         let disabled_server_ids = language_matches
             .iter()
             .filter_map(|language_match| match language_match {
@@ -152,11 +364,7 @@ impl Plugin for LspPlugin {
                 if let Err(err) =
                     self.open_view_on_client(view, route.workspace_root.clone(), &ls_client)
                 {
-                    error!(
-                        "failed to initialize language server view {}: {:?}",
-                        view.get_id(),
-                        err
-                    );
+                    error!("failed to initialize language server view {:?}: {err}", view.get_id());
                     continue;
                 }
                 active_routes.push(route);
@@ -186,110 +394,24 @@ impl Plugin for LspPlugin {
         self.update_route_status(view.get_id(), &language_id, &active_routes);
     }
 
-    fn language_changed(&mut self, view: &mut View<Self::Cache>, _old_lang: LanguageId) {
-        self.did_close(view);
-        self.new_view(view);
-    }
-
-    fn plugin_config_changed(&mut self, changes: &ConfigTable) {
-        let next_config = match self.parse_plugin_config_update(changes) {
-            Ok(config) => config,
-            Err(err) => {
-                error!("failed to parse lsp plugin config update: {}", err);
-                return;
-            }
-        };
-
-        self.apply_plugin_config(next_config);
-    }
-
-    fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {}
-
-    fn custom_command(&mut self, view: &mut View<Self::Cache>, method: &str, params: Value) {
-        match method {
-            "request_completion" | "lsp.completion" => {
-                let index = params
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok());
-                self.request_completion(view, index);
-            }
-            "request_declaration" | "lsp.declaration" => self.request_declaration(view),
-            "request_definition" | "lsp.definition" => self.request_definition(view),
-            "request_type_definition" | "lsp.type_definition" => {
-                self.request_type_definition(view);
-            }
-            "request_references" | "lsp.references" => self.request_references(view),
-            "ee.agent.references" => self.request_agent_references(view),
-            "request_implementation" | "lsp.implementation" => {
-                self.request_implementation(view);
-            }
-            "request_document_symbols" | "lsp.document_symbols" => {
-                self.request_document_symbols(view);
-            }
-            "ee.agent.document_symbols" => self.request_agent_document_symbols(view),
-            "request_workspace_symbols" | "lsp.workspace_symbols" => {
-                let query = params.get("query").and_then(Value::as_str).unwrap_or("").to_owned();
-                self.request_workspace_symbols(view, query);
-            }
-            "format_document" | "lsp.format_document" => self.request_document_formatting(view),
-            "ee.agent.format_preview" => self.request_agent_format_preview(view),
-            "request_code_actions" | "lsp.code_action" => {
-                let index = params
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok());
-                if let Some(only) = params.get("only").and_then(Value::as_array) {
-                    let only = only
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>();
-                    if !only.is_empty() {
-                        // `code_actions_on_save`: auto-apply the requested kinds.
-                        self.request_code_actions_on_save(view, only);
-                        return;
-                    }
-                }
-                self.request_or_apply_code_action(view, index);
-            }
-            "ee.agent.list_code_actions" => self.request_agent_code_actions(view),
-            "request_rename" => {
-                let Some(new_name) = params.get("new_name").and_then(Value::as_str) else {
-                    self.record_view_failure(view, String::from("rename failed: missing new_name"));
-                    return;
-                };
-                self.request_rename(view, new_name.to_owned());
-            }
-            "ee.agent.preview_rename" => {
-                let Some(new_name) = params.get("new_name").and_then(Value::as_str) else {
-                    self.record_view_failure(view, String::from("rename failed: missing new_name"));
-                    return;
-                };
-                self.request_agent_preview_rename(view, new_name.to_owned());
-            }
-            _ => {}
-        }
-    }
-
-    fn shutdown(&mut self) {
+    fn shutdown_servers(&mut self) {
         let clients = self.language_server_clients.values().cloned().collect::<Vec<_>>();
         for client in clients {
             if let Err(err) = shutdown_language_server(&client) {
-                error!("failed to shutdown language server: {}", err);
+                error!("failed to shutdown language server: {err}");
             }
         }
     }
 
-    fn idle(&mut self, view: &mut View<Self::Cache>) {
-        let queued = self.result_queue.drain_results_for(usize::from(view.get_id()));
+    fn idle(&mut self, view: &mut PluginView) {
+        let queued = self.result_queue.drain_results_for(view.get_id().0 as usize);
         for response in queued {
             match response {
                 LspResponse::Hover(_) => {}
                 LspResponse::Diagnostics(result) => match result {
                     Ok(diagnostics) => {
                         if let Some(core) = &self.core {
-                            core.update_diagnostics(view.get_id(), &diagnostics);
+                            core.set_diagnostics(view.get_id(), view.rev(), &diagnostics);
                         }
                     }
                     Err(err) => {
@@ -297,8 +419,7 @@ impl Plugin for LspPlugin {
                             && let Ok(mut client) = client.lock()
                         {
                             client.record_server_failure(format!(
-                                "failed to convert diagnostics: {:?}",
-                                err
+                                "failed to convert diagnostics: {err:?}"
                             ));
                         }
                     }
@@ -347,8 +468,6 @@ impl Plugin for LspPlugin {
                 },
                 LspResponse::AutoCodeActions(result) => match result {
                     Ok(actions) => {
-                        // `code_actions_on_save`: apply every returned action
-                        // with edits; command-only actions still execute.
                         for action in actions {
                             self.apply_code_action(view, &action);
                         }
@@ -363,84 +482,7 @@ impl Plugin for LspPlugin {
             }
         }
         if self.pending_symbol_retries.contains_key(&view.get_id()) {
-            // Deferred tree-sitter symbol fallback: the cold backend has had
-            // an idle tick to finish loading; retry the one-shot request.
             self.request_document_symbols(view);
-        }
-    }
-
-    fn get_hover(
-        &mut self,
-        view: &mut View<Self::Cache>,
-        position: usize,
-        cancel: CancellationToken,
-    ) -> Result<xi_plugin_lib::Hover, xi_rpc::RemoteError> {
-        let view_id = view.get_id();
-        let position =
-            get_position_of_offset(view, position).map_err(LanguageResponseError::from)?;
-        let (tx, rx) = mpsc::channel();
-
-        let ls_client_arc = self.client_for_view(view).map_err(LanguageResponseError::from)?;
-        let pending_request_id = {
-            let mut ls_client = ls_client_arc.lock().map_err(|_| {
-                LanguageResponseError::Transport(String::from(
-                    "language server client lock poisoned",
-                ))
-            })?;
-            ls_client.request_hover(view_id, position, move |_ls_client, result| {
-                let response = result
-                    .map_err(|e| LanguageResponseError::LanguageServerError(format!("{:?}", e)))
-                    .and_then(|hover| {
-                        serde_json::from_value::<Option<Hover>>(hover)
-                            .map_err(|err| LanguageResponseError::Transport(err.to_string()))?
-                            .ok_or(LanguageResponseError::NullResponse)
-                    });
-                let _ = tx.send(response);
-            })
-        };
-        let pending_request_id = pending_request_id.map_err(LanguageResponseError::from)?;
-
-        let timeout_at = Instant::now() + {
-            let ls_client = ls_client_arc.lock().map_err(|_| {
-                LanguageResponseError::Transport(String::from(
-                    "language server client lock poisoned",
-                ))
-            })?;
-            ls_client.long_request_timeout()
-        };
-
-        loop {
-            match rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(response) => {
-                    return response
-                        .and_then(|hover| core_hover_from_hover(view, hover))
-                        .map_err(Into::into);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) if cancel.is_cancelled() => {
-                    if let Ok(mut ls_client) = ls_client_arc.lock() {
-                        ls_client.cancel_request(pending_request_id);
-                    }
-                    return Err(xi_rpc::RemoteError::custom(-32800, "request cancelled", None));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= timeout_at => {
-                    if let Ok(mut ls_client) = ls_client_arc.lock() {
-                        ls_client.cancel_request(pending_request_id);
-                    }
-                    return Err(xi_rpc::RemoteError::custom(
-                        -32097,
-                        "language server request timed out",
-                        None,
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(xi_rpc::RemoteError::custom(
-                        500,
-                        "hover request channel disconnected",
-                        None,
-                    ));
-                }
-            }
         }
     }
 }

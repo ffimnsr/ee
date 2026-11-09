@@ -50,7 +50,6 @@ pub(crate) use crate::vlf::search::{VlfMatchRange, VlfSearchState, VlfSearchStat
 pub(crate) use crate::width_cache::WidthCache;
 pub(crate) use crate::word_boundaries::WordCursor;
 pub(crate) use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeError};
-pub(crate) use xi_rpc::RequestId;
 
 /// A flag used to indicate when legacy actions should modify selections
 const FLAG_SELECT: u64 = 2;
@@ -141,8 +140,6 @@ pub struct View {
     annotations: AnnotationStore,
 
     diagnostics: HashMap<PluginId, Vec<crate::plugins::rpc::Diagnostic>>,
-
-    pending_hover_requests: HashMap<PluginId, RequestId>,
 }
 
 /// Indicates what changed in the find state.

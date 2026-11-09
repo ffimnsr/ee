@@ -31,7 +31,7 @@ impl Resolution {
 
 /// Resolve every manifest into one deterministic activation order.
 pub fn resolve(manifests: &BTreeMap<String, ManifestV2>) -> Resolution {
-    resolve_with_priority(manifests, &BTreeSet::new())
+    resolve_with_priority(manifests, &BTreeSet::new(), &BTreeSet::new())
 }
 
 /// Resolve with a set of names that should activate first among ready nodes.
@@ -41,6 +41,7 @@ pub fn resolve(manifests: &BTreeMap<String, ManifestV2>) -> Resolution {
 pub fn resolve_with_priority(
     manifests: &BTreeMap<String, ManifestV2>,
     priority: &BTreeSet<String>,
+    host_services: &BTreeSet<ServiceId>,
 ) -> Resolution {
     let mut blocked: BTreeMap<String, Diagnostic> = BTreeMap::new();
 
@@ -97,6 +98,7 @@ pub fn resolve_with_priority(
                     break;
                 };
                 match owners.get(&service) {
+                    None if host_services.contains(&service) => continue,
                     None => {
                         blocked.insert(
                             name.clone(),
@@ -321,7 +323,7 @@ mod tests {
     fn builtin_priority_wins_among_ready_plugins() {
         let manifests = set(vec![manifest("a", &[], &[], &[]), manifest("z", &[], &[], &[])]);
         let priority = BTreeSet::from(["z".to_owned()]);
-        let resolution = resolve_with_priority(&manifests, &priority);
+        let resolution = resolve_with_priority(&manifests, &priority, &BTreeSet::new());
         assert_eq!(resolution.order, vec!["z", "a"]);
     }
 

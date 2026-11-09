@@ -63,13 +63,13 @@ pub(crate) fn build_default_sequence_bindings() -> Vec<SequenceBinding> {
     bindings.extend(bind(
         &normal_modes,
         &["space", "s", "d"],
-        RequestDocumentSymbols,
+        Action::plugin("lsp.document_symbols"),
         "document symbols",
     ));
     bindings.extend(bind(
         &normal_modes,
         &["space", "s", "w"],
-        RequestWorkspaceSymbols,
+        Action::plugin("lsp.workspace_symbols"),
         "workspace symbols",
     ));
     bindings.extend(bind(&normal_modes, &["space", "g"], NoOp, "git"));
@@ -78,14 +78,34 @@ pub(crate) fn build_default_sequence_bindings() -> Vec<SequenceBinding> {
     bindings.extend(bind(&normal_modes, &["space", "g", "n"], GitNextHunk, "next hunk"));
     bindings.extend(bind(&normal_modes, &["space", "g", "p"], GitPrevHunk, "previous hunk"));
     bindings.extend(bind(&normal_modes, &["space", "c"], NoOp, "code"));
-    bindings.extend(bind(&normal_modes, &["space", "c", "a"], RequestCodeActions, "code actions"));
-    bindings.extend(bind(&normal_modes, &["space", "c", "h"], RequestHover, "hover"));
-    bindings.extend(bind(&normal_modes, &["space", "c", "d"], RequestDefinition, "definition"));
-    bindings.extend(bind(&normal_modes, &["space", "c", "r"], RequestReferences, "references"));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "c", "a"],
+        Action::plugin("lsp.code_actions"),
+        "code actions",
+    ));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "c", "h"],
+        Action::plugin("lsp.hover"),
+        "hover",
+    ));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "c", "d"],
+        Action::plugin("lsp.definition"),
+        "definition",
+    ));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "c", "r"],
+        Action::plugin("lsp.references"),
+        "references",
+    ));
     bindings.extend(bind(
         &normal_modes,
         &["space", "c", "i"],
-        RequestImplementation,
+        Action::plugin("lsp.implementation"),
         "implementation",
     ));
     bindings.extend(bind(&normal_modes, &["space", "w"], NoOp, "windows"));

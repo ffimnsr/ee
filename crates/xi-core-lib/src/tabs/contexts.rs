@@ -50,6 +50,8 @@ impl CoreState {
         use self::CorePluginNotification as PN;
         match cmd {
             Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit(view_id, cmd),
+            Command { id, args, view_id } => self.do_plugin_command_notification(id, args, view_id),
+            UiEvent { .. } => {}
             Save { view_id, file_path } => self.do_save(view_id, file_path),
             CloseView { view_id } => self.do_close_view(view_id),
             SetConfig { domain, changes } => self.do_set_config(domain, changes),
@@ -803,6 +805,30 @@ impl CoreState {
                     None
                 }),
         }
+    }
+
+    pub(super) fn do_plugin_command_notification(
+        &mut self,
+        id: String,
+        args: Value,
+        view_id: Option<ViewId>,
+    ) {
+        let command = match id.parse::<ee_plugin_api::ids::CommandId>() {
+            Ok(command) => command,
+            Err(error) => {
+                warn!("invalid plugin command id {id:?}: {error}");
+                return;
+            }
+        };
+        if self.plugin_host.is_none() {
+            warn!("plugin command `{command}` received with no plugin host");
+            return;
+        }
+        let view = view_id
+            .or_else(|| self.views.keys().next().copied())
+            .map(crate::plugin_runtime::bridge::api_view)
+            .unwrap_or(ee_plugin_api::model::ViewId(0));
+        self.queued_plugin_commands.push((command, view, args));
     }
 
     pub(super) fn do_start_plugin(&mut self, _view_id: ViewId, plugin: &str) {

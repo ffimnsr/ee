@@ -43,6 +43,7 @@ impl CoreState {
             plugin_host: None,
             plugin_notifier: None,
             plugin_generation: 0,
+            queued_plugin_commands: Vec::new(),
         }
     }
 
@@ -98,6 +99,13 @@ impl CoreState {
                         .iter()
                         .filter(|plugin| plugin.name == plugin_name)
                         .for_each(|plugin| plugin.plugin_config_changed(&table));
+                    if let Some(host) = self.plugin_host.as_ref() {
+                        let _ = host.emit(&crate::plugin_runtime::events::ConfigChanged {
+                            scope: format!("plugin:{plugin_name}"),
+                            changes: serde_json::to_value(&table)
+                                .unwrap_or(serde_json::Value::Null),
+                        });
+                    }
                 }
                 self.handle_config_changes(changes)
             }

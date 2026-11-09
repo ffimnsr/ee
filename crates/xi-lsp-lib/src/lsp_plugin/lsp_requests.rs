@@ -2,7 +2,7 @@
 use super::*;
 
 impl LspPlugin {
-    pub(super) fn record_view_failure(&mut self, view: &mut View<ChunkCache>, message: String) {
+    pub(super) fn record_view_failure(&mut self, view: &mut PluginView, message: String) {
         if let Ok(client) = self.client_for_view(view)
             && let Ok(mut client) = client.lock()
         {
@@ -12,27 +12,27 @@ impl LspPlugin {
 
     pub(super) fn current_position(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
     ) -> Result<Position, LanguageResponseError> {
         let selection = view
             .get_selections()
             .map_err(LanguageResponseError::from)?
             .into_iter()
             .next()
-            .unwrap_or(xi_plugin_lib::SelectionRange { start: 0, end: 0 });
+            .unwrap_or(SelectionRange { start: 0, end: 0 });
         get_position_of_offset(view, selection.end).map_err(LanguageResponseError::from)
     }
 
     pub(super) fn current_range(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
     ) -> Result<Range, LanguageResponseError> {
         let selection = view
             .get_selections()
             .map_err(LanguageResponseError::from)?
             .into_iter()
             .next()
-            .unwrap_or(xi_plugin_lib::SelectionRange { start: 0, end: 0 });
+            .unwrap_or(SelectionRange { start: 0, end: 0 });
         let start = selection.start.min(selection.end);
         let end = selection.start.max(selection.end);
         Ok(Range {
@@ -41,7 +41,53 @@ impl LspPlugin {
         })
     }
 
-    pub(super) fn request_completion(&mut self, view: &mut View<ChunkCache>, index: Option<usize>) {
+    pub(super) fn request_hover(&mut self, view: &mut PluginView) {
+        let view_id = view.get_id();
+        let position = match self.current_position(view) {
+            Ok(position) => position,
+            Err(err) => {
+                self.record_view_failure(view, format!("hover failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_hover(view_id, position, move |ls_client, result| {
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<Hover>>(value).map_err(|err| {
+                                    LanguageResponseError::Transport(err.to_string())
+                                })
+                            });
+                        let message = match response {
+                            Ok(Some(hover)) => markdown_from_hover_contents(hover.contents).ok(),
+                            Ok(None) => None,
+                            Err(err) => {
+                                ls_client.record_server_failure(format!("hover failed: {err:?}"));
+                                None
+                            }
+                        };
+                        if let Some(message) = message {
+                            ls_client.core.alert(message);
+                        }
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("hover failed: {err}"));
+        }
+    }
+
+    pub(super) fn request_completion(&mut self, view: &mut PluginView, index: Option<usize>) {
         let view_id = view.get_id();
         if let Some(index) = index
             && let Some(item) = self
@@ -86,7 +132,7 @@ impl LspPlugin {
                             });
                         ls_client
                             .result_queue
-                            .push_result(view_id.into(), LspResponse::Completions(response));
+                            .push_result(view_id.0 as usize, LspResponse::Completions(response));
                         ls_client.core.schedule_idle(view_id);
                     })
                     .map_err(|err| err.to_string())
@@ -96,7 +142,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_definition(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_definition(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -156,7 +202,7 @@ impl LspPlugin {
                                 None => Ok(Vec::new()),
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Locations {
                                 title: String::from("definition"),
                                 result: response,
@@ -171,7 +217,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_declaration(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_declaration(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -231,7 +277,7 @@ impl LspPlugin {
                                 None => Ok(Vec::new()),
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Locations {
                                 title: String::from("declaration"),
                                 result: response,
@@ -246,7 +292,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_references(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_references(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -305,7 +351,7 @@ impl LspPlugin {
                                 None => Ok(Vec::new()),
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Locations {
                                 title: String::from("references"),
                                 result: response,
@@ -320,7 +366,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_type_definition(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_type_definition(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -380,7 +426,7 @@ impl LspPlugin {
                                 None => Ok(Vec::new()),
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Locations {
                                 title: String::from("type definition"),
                                 result: response,
@@ -395,7 +441,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_implementation(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_implementation(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -455,7 +501,7 @@ impl LspPlugin {
                                 None => Ok(Vec::new()),
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Locations {
                                 title: String::from("implementation"),
                                 result: response,

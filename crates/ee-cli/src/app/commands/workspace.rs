@@ -165,7 +165,7 @@ impl App {
         let (actions, format) = self.save_pipeline_plan();
         if !actions.is_empty() {
             self.backend
-                .request_code_actions_on_save(actions)
+                .send_plugin_command("lsp.code_actions", json!({ "only": actions }))
                 .map_err(|err| format!("code actions on save failed: {err}"))?;
             self.pending_format_saves.insert(
                 buf_id,
@@ -181,7 +181,7 @@ impl App {
         }
         if format {
             self.backend
-                .format_document()
+                .send_plugin_command("lsp.format_document", json!({}))
                 .map_err(|err| format!("format on save failed: {err}"))?;
             self.pending_format_saves.insert(
                 buf_id,
@@ -292,7 +292,9 @@ impl App {
             match pending.phase {
                 SavePipelinePhase::PreSave => {
                     if pending.needs_format {
-                        if let Err(err) = self.backend.format_document() {
+                        if let Err(err) =
+                            self.backend.send_plugin_command("lsp.format_document", json!({}))
+                        {
                             self.backend.status_message =
                                 Some(format!("format on save failed: {err}"));
                         }

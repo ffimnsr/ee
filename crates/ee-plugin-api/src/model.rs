@@ -26,6 +26,18 @@ pub struct BufferId(pub u64);
 #[serde(transparent)]
 pub struct ViewId(pub u64);
 
+impl std::fmt::Display for ViewId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::fmt::Display for BufferId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Canonical language identifier.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -422,7 +434,7 @@ mod tests {
             .join("../../schemas/plugin-model-v2.json");
         let expected = std::fs::read_to_string(&expected_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", expected_path.display()));
-        let actual = serde_json::to_string_pretty(&model_schema()).unwrap();
-        assert_eq!(actual.trim_end(), expected.trim_end());
+        let expected: serde_json::Value = serde_json::from_str(&expected).unwrap();
+        assert_eq!(model_schema(), expected);
     }
 }

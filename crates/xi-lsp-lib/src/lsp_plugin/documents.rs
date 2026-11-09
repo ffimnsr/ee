@@ -2,7 +2,7 @@
 use super::*;
 
 impl LspPlugin {
-    pub(super) fn request_document_symbols(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_document_symbols(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         let Some(context) = DocumentSymbolContext::capture(view).map(Arc::new) else {
             self.record_view_failure(
@@ -28,7 +28,7 @@ impl LspPlugin {
                     .request_document_symbols(view_id, move |ls_client, result| {
                         let symbols = callback_context.resolve_lsp_response(result);
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Symbols {
                                 title: String::from("symbols"),
                                 result: Ok(symbols),
@@ -68,13 +68,9 @@ impl LspPlugin {
         self.queue_document_symbols(view_id, symbols);
     }
 
-    pub(super) fn queue_document_symbols(
-        &mut self,
-        view_id: ViewId,
-        symbols: Vec<xi_core_lib::plugin_rpc::SymbolItem>,
-    ) {
+    pub(super) fn queue_document_symbols(&mut self, view_id: ViewId, symbols: Vec<SymbolItem>) {
         self.result_queue.push_result(
-            view_id.into(),
+            view_id.0 as usize,
             LspResponse::Symbols { title: String::from("symbols"), result: Ok(symbols) },
         );
         if let Some(core) = &self.core {
@@ -82,7 +78,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_workspace_symbols(&mut self, view: &mut View<ChunkCache>, query: String) {
+    pub(super) fn request_workspace_symbols(&mut self, view: &mut PluginView, query: String) {
         let view_id = view.get_id();
         let Ok(ls_client_arc) = self.client_for_view(view) else {
             return;
@@ -107,7 +103,7 @@ impl LspPlugin {
                                 })
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Symbols {
                                 title: String::from("workspace symbols"),
                                 result: response,
@@ -122,7 +118,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn request_document_formatting(&mut self, view: &mut View<ChunkCache>) {
+    pub(super) fn request_document_formatting(&mut self, view: &mut PluginView) {
         let view_id = view.get_id();
         if let Some(language_id) = self.view_info.get(&view_id).map(|info| info.language_id.clone())
             && let Some(attachment) = self.config.language_formatters.get(&language_id).cloned()
@@ -181,7 +177,7 @@ impl LspPlugin {
                                     .map(|response| response.unwrap_or_default())
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Formatting {
                                 title: String::from("format"),
                                 result: response,
@@ -198,7 +194,7 @@ impl LspPlugin {
 
     pub(super) fn request_or_apply_code_action(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         index: Option<usize>,
     ) {
         let view_id = view.get_id();
@@ -250,7 +246,7 @@ impl LspPlugin {
                             });
                         ls_client
                             .result_queue
-                            .push_result(view_id.into(), LspResponse::CodeActions(response));
+                            .push_result(view_id.0 as usize, LspResponse::CodeActions(response));
                         ls_client.core.schedule_idle(view_id);
                     })
                     .map_err(|err| err.to_string())
@@ -265,7 +261,7 @@ impl LspPlugin {
     /// the idle loop applies without a picker.
     pub(super) fn request_code_actions_on_save(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         only: Vec<String>,
     ) {
         let view_id = view.get_id();
@@ -307,9 +303,10 @@ impl LspPlugin {
                                     .transpose()
                                     .map(|response| response.unwrap_or_default())
                             });
-                        ls_client
-                            .result_queue
-                            .push_result(view_id.into(), LspResponse::AutoCodeActions(response));
+                        ls_client.result_queue.push_result(
+                            view_id.0 as usize,
+                            LspResponse::AutoCodeActions(response),
+                        );
                         ls_client.core.schedule_idle(view_id);
                     })
                     .map_err(|err| err.to_string())
@@ -321,7 +318,7 @@ impl LspPlugin {
 
     pub(super) fn handle_code_actions_result(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         actions: Vec<LspCodeAction>,
     ) {
         let view_id = view.get_id();
@@ -341,28 +338,19 @@ impl LspPlugin {
         }
 
         if let Some(core) = &self.core {
-            let actions = actions
-                .iter()
-                .map(|action| xi_core_lib::plugin_rpc::CodeActionDescriptor {
-                    title: action.title.clone(),
-                })
-                .collect::<Vec<_>>();
-            core.show_code_actions(view_id, &actions);
+            let titles = actions.iter().map(|action| action.title.clone()).collect::<Vec<_>>();
+            core.show_code_actions(view_id, &titles);
         }
     }
 
-    pub(super) fn apply_completion(
-        &mut self,
-        view: &mut View<ChunkCache>,
-        item: &PendingCompletionItem,
-    ) {
+    pub(super) fn apply_completion(&mut self, view: &mut PluginView, item: &PendingCompletionItem) {
         match completion_text_edits(view, &item.item) {
             Ok(edits) => self.apply_named_edits(view, "completion", &edits),
             Err(err) => self.record_view_failure(view, format!("completion failed: {err:?}")),
         }
     }
 
-    pub(super) fn request_rename(&mut self, view: &mut View<ChunkCache>, new_name: String) {
+    pub(super) fn request_rename(&mut self, view: &mut PluginView, new_name: String) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
             Ok(position) => position,
@@ -390,7 +378,7 @@ impl LspPlugin {
                                 )
                             });
                         ls_client.result_queue.push_result(
-                            view_id.into(),
+                            view_id.0 as usize,
                             LspResponse::Rename { title: String::from("rename"), result: response },
                         );
                         ls_client.core.schedule_idle(view_id);
@@ -404,7 +392,7 @@ impl LspPlugin {
 
     pub(super) fn handle_rename_result(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         title: &str,
         edit: Option<WorkspaceEdit>,
     ) {
@@ -453,11 +441,7 @@ impl LspPlugin {
         }
     }
 
-    pub(super) fn apply_code_action(
-        &mut self,
-        view: &mut View<ChunkCache>,
-        action: &LspCodeAction,
-    ) {
+    pub(super) fn apply_code_action(&mut self, view: &mut PluginView, action: &LspCodeAction) {
         if !action.edits.is_empty() {
             self.apply_named_edits(view, &action.title, &action.edits);
         }
@@ -483,7 +467,7 @@ impl LspPlugin {
 
     pub(super) fn apply_named_edits(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         title: &str,
         edits: &[TextEdit],
     ) {
@@ -501,7 +485,7 @@ impl LspPlugin {
     /// resulting edits through the same named-edit path LSP formatting uses.
     pub(super) fn request_external_formatting(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         language_id: &str,
         _formatter_id: &str,
         formatter: &FormatterConfig,
@@ -602,17 +586,17 @@ impl LspPlugin {
         )
     }
 
-    pub(super) fn language_matches_for_view(&self, view: &View<ChunkCache>) -> Vec<LanguageMatch> {
+    pub(super) fn language_matches_for_view(&self, view: &PluginView) -> Vec<LanguageMatch> {
         let Some(path) = view.get_path() else {
             return Vec::new();
         };
-        let language_id = self.normalized_view_language_id(view.get_language_id());
+        let language_id = self.normalized_view_language_id(view.get_language_id().as_str());
         self.language_matches_for_path(path, Some(&language_id))
     }
 
     pub(super) fn open_view_on_client(
         &self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         workspace_root: Option<Uri>,
         ls_client: &Arc<Mutex<LanguageServerClient>>,
     ) -> Result<(), Error> {
@@ -658,7 +642,7 @@ impl LspPlugin {
 
     pub(super) fn restart_client_for_route(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         route: &ViewServerRoute,
     ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
         let Some(config) = self.config.language_config.get(&route.server_id) else {
@@ -704,7 +688,7 @@ impl LspPlugin {
 
     pub(super) fn client_for_route(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
         route: &ViewServerRoute,
     ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
         let Some(client) = self.language_server_clients.get(&route.ls_identifier).cloned() else {
@@ -726,7 +710,7 @@ impl LspPlugin {
 
     pub(super) fn clients_for_view(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
     ) -> Result<Vec<Arc<Mutex<LanguageServerClient>>>, Error> {
         let Some(view_info) = self.view_info.get(&view.get_id()).cloned() else {
             return Err(Error::Protocol(format!("missing language server view {}", view.get_id())));
@@ -737,7 +721,7 @@ impl LspPlugin {
 
     pub(super) fn client_for_view(
         &mut self,
-        view: &mut View<ChunkCache>,
+        view: &mut PluginView,
     ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
         let Some(view_info) = self.view_info.get(&view.get_id()).cloned() else {
             return Err(Error::Protocol(format!("missing language server view {}", view.get_id())));

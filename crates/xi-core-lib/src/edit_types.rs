@@ -22,10 +22,9 @@ use log::warn;
 
 use crate::movement::Movement;
 use crate::object::{SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction};
-use crate::plugins::manifest::PluginCapability;
 use crate::plugins::rpc::SelectionRange;
 use crate::rpc::{
-    EditNotification, FindQuery, GestureType, LineRange, LineReplacement, MouseAction, Position,
+    EditNotification, FindQuery, GestureType, LineRange, LineReplacement, MouseAction,
     SelectionGranularity, SelectionModifier,
 };
 use crate::view::Size;
@@ -126,15 +125,6 @@ pub(crate) enum BufferEvent {
 pub(crate) enum SpecialEvent {
     Resize(Size),
     RequestLines(LineRange),
-    RequestHover {
-        request_id: usize,
-        position: Option<Position>,
-    },
-    DispatchPluginCommand {
-        capability: PluginCapability,
-        method: &'static str,
-        params: serde_json::Value,
-    },
     DeleteLineRange {
         start_line: usize,
         end_line: usize,
@@ -548,98 +538,6 @@ impl From<EditNotification> for EventDomain {
             MoveParentNodeEnd => {
                 SpecialEvent::SyntaxSelection(SyntaxSelectionAction::MoveParentNodeEnd).into()
             }
-            RequestCompletion { index } =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_completion",
-                    params: serde_json::json!({ "index": index }),
-                }.into(),
-            RequestDeclaration =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_declaration",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestDefinition =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_definition",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestTypeDefinition =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_type_definition",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestReferences =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_references",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestImplementation =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_implementation",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestDocumentSymbols =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_document_symbols",
-                    params: serde_json::json!({}),
-                }.into(),
-            FormatDocument =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "format_document",
-                    params: serde_json::json!({}),
-                }.into(),
-            RequestCodeActions { index } =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_code_actions",
-                    params: serde_json::json!({ "index": index }),
-                }.into(),
-            RequestRename { new_name } =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "request_rename",
-                    params: serde_json::json!({ "new_name": new_name }),
-                }.into(),
-            AgentDocumentSymbols =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "ee.agent.document_symbols",
-                    params: serde_json::json!({}),
-                }.into(),
-            AgentReferences =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "ee.agent.references",
-                    params: serde_json::json!({}),
-                }.into(),
-            AgentListCodeActions =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "ee.agent.list_code_actions",
-                    params: serde_json::json!({}),
-                }.into(),
-            AgentFormatPreview =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "ee.agent.format_preview",
-                    params: serde_json::json!({}),
-                }.into(),
-            AgentPreviewRename { new_name } =>
-                SpecialEvent::DispatchPluginCommand {
-                    capability: PluginCapability::Edit,
-                    method: "ee.agent.preview_rename",
-                    params: serde_json::json!({ "new_name": new_name }),
-                }.into(),
-            RequestHover { request_id, position } =>
-                SpecialEvent::RequestHover { request_id, position }.into(),
             DeleteLineRange { start_line, end_line } =>
                 SpecialEvent::DeleteLineRange { start_line, end_line }.into(),
             DeleteBlock { start_line, end_line, left_col, right_col } =>
