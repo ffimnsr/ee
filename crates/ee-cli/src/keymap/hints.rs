@@ -428,6 +428,8 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
                 "search selection"
             })
         }
+        Action::PluginCommand(id) => format!("plugin command {id}"),
+        Action::PluginCommandWithArgs(id, _) => format!("plugin command {id}"),
         other => humanize_action_debug(&format!("{other:?}")),
     }
 }

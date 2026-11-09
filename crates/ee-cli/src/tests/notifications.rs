@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Value, json};
-use xi_core_lib::plugins::rpc::ClientPluginInfo;
 
 use crate::app::App;
 use crate::backend::update::{CoreLine, decode_spans, scope_table};
@@ -63,49 +62,37 @@ fn plugin_labels_render_expected_values() {
 }
 
 #[test]
-fn available_plugins_notification_updates_buffer_manager_snapshot() {
-    let (tx, _rx) = mpsc::channel();
-    let (backend_tx, backend_rx) = mpsc::channel();
-    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
-
-    backend_tx
-        .send(BackendEvent::AvailablePlugins {
-            view_id: String::from("view-id-1"),
-            plugins: vec![ClientPluginInfo { name: String::from("lsp"), running: true }],
-        })
-        .expect("send should succeed");
-
-    client.drain_events().expect("drain should not fail");
-
-    assert_eq!(client.available_plugins_for_current_view().len(), 1);
-    assert_eq!(client.available_plugins_for_current_view()[0].name, "lsp");
-    assert!(client.available_plugins_for_current_view()[0].running);
-}
-
-#[test]
-fn parse_available_plugins_notification() {
+fn parse_plugin_status_notification() {
     let params = json!({
-        "view_id": "view-id-1",
+        "generation": 3,
         "plugins": [
-            { "name": "lsp", "running": true },
-            { "name": "fmt", "running": false }
+            {"name": "lsp", "version": "1.0.0", "kind": "native", "active": true,
+             "health": {"state": "loaded"}},
+            {"name": "fmt", "version": "0.1.0", "kind": "wasm", "active": false,
+             "health": {"state": "blocked", "reason": "permission"}}
         ]
     });
 
-    let event =
-        parse_notification("available_plugins", params).expect("available_plugins should parse");
-
+    let event = parse_notification("plugin_status", params).expect("plugin_status should parse");
     match event {
-        BackendEvent::AvailablePlugins { view_id, plugins } => {
-            assert_eq!(view_id, "view-id-1");
-            assert_eq!(plugins.len(), 2);
-            assert_eq!(plugins[0].name, "lsp");
-            assert!(plugins[0].running);
-            assert_eq!(plugins[1].name, "fmt");
-            assert!(!plugins[1].running);
+        BackendEvent::PluginStatus { status } => {
+            assert_eq!(status.generation, 3);
+            assert_eq!(status.plugins.len(), 2);
+            assert_eq!(status.plugins[0].name, "lsp");
+            assert!(status.plugins[0].active);
+            assert_eq!(status.plugins[1].health, "blocked");
         }
         other => panic!("unexpected event: {:?}", other),
     }
+}
+
+#[test]
+fn available_plugins_notification_is_ignored() {
+    let params = json!({
+        "view_id": "view-id-1",
+        "plugins": [{"name": "lsp", "running": true}]
+    });
+    assert!(parse_notification("available_plugins", params).is_none());
 }
 
 #[test]

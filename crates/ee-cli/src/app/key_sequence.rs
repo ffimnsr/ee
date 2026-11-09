@@ -71,6 +71,14 @@ impl App {
             return;
         }
 
+        if self.plugin_picker_active() {
+            if self.dispatch_context_key(key, Mode::Picker) {
+                return;
+            }
+            self.handle_plugin_picker_text_input(key);
+            return;
+        }
+
         if self.picker.is_some() {
             if self.dispatch_context_key(key, Mode::Picker) {
                 return;
@@ -256,17 +264,28 @@ impl App {
     ) -> Option<Action> {
         let binding_key = BindingKey { mode, key: key.code, modifiers: key.modifiers, prefix };
 
-        self.key_bindings
-            .get(&binding_key)
-            .or_else(|| {
-                if key.modifiers != KeyModifiers::NONE {
-                    self.key_bindings
-                        .get(&BindingKey { modifiers: KeyModifiers::NONE, ..binding_key })
-                } else {
-                    None
-                }
-            })
-            .cloned()
+        if let Some(action) = self.key_bindings.get(&binding_key).cloned() {
+            return Some(action);
+        }
+        let fallback_key = BindingKey { modifiers: KeyModifiers::NONE, ..binding_key };
+        if key.modifiers != KeyModifiers::NONE
+            && let Some(action) = self.key_bindings.get(&fallback_key).cloned()
+        {
+            return Some(action);
+        }
+
+        self.plugin_keybinding_action(binding_key).or_else(|| {
+            (key.modifiers != KeyModifiers::NONE)
+                .then(|| self.plugin_keybinding_action(fallback_key))
+                .flatten()
+        })
+    }
+
+    fn plugin_keybinding_action(&self, binding: BindingKey) -> Option<Action> {
+        if crate::plugin_ui::keybindings::user_unbinds(&self.config.keymap, &binding) {
+            return None;
+        }
+        self.backend.plugin_ui.keybinding_action(&binding)
     }
     /// vim `Ctrl-o` one-shot normal: after the command completes, return to
     /// insert — unless the action only *starts* a normal-mode state (prefix,

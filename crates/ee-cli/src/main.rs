@@ -56,6 +56,8 @@ mod setup_prompt;
 // until then.
 mod picker;
 #[allow(dead_code)]
+mod plugin_ui;
+#[allow(dead_code)]
 mod policy;
 mod quickfix;
 mod registers;

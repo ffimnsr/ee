@@ -151,7 +151,7 @@ impl BufferManager {
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
             pending_agent_tool_results: Vec::new(),
-            available_plugins_by_view: HashMap::new(),
+            plugin_ui: PluginUiState::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile::default(),
             startup_profile_active: false,
@@ -176,11 +176,9 @@ impl BufferManager {
         std::mem::take(&mut self.pending_agent_tool_results)
     }
 
-    pub(crate) fn available_plugins_for_current_view(&self) -> &[ClientPluginInfo] {
-        self.available_plugins_by_view
-            .get(&self.bufs[self.current].view_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    /// Full v2 plugin status snapshot used by `ee do plugins`.
+    pub(crate) fn plugin_status(&self) -> &crate::plugin_ui::PluginStatusSnapshot {
+        &self.plugin_ui.status
     }
 
     pub(crate) fn drain_pending_ui_actions(&mut self) -> Vec<PendingUiAction> {

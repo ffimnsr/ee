@@ -34,6 +34,7 @@ impl BufferManager {
             json!({
                 "config_dir": crate::config::xi_core_config_dir(),
                 "client_extras_dir": crate::config::xi_core_client_extras_dir(),
+                "capabilities": crate::plugin_ui::FrontendCapabilities::ee_cli().to_json(),
             }),
         )?;
 
@@ -151,7 +152,7 @@ impl BufferManager {
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
             pending_agent_tool_results: Vec::new(),
-            available_plugins_by_view: HashMap::new(),
+            plugin_ui: PluginUiState::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile {
                 new_view_rpc,

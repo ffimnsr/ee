@@ -272,6 +272,7 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 
     // Render each window in the focused tab.
+    let mut focused_cursor = None;
     for (win_id, buf_id, win_rect, is_focused) in
         app.tabs.focused_windows().layout_for_area(root.editor_area)
     {
@@ -287,6 +288,7 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
         if is_focused && !cursor_hidden_by_agents(app) {
             let cursor = cursor_position_for(buf, vp, app, buffer_area, root.prompt_area);
+            focused_cursor = Some((cursor.x, cursor.y));
             frame.set_cursor_position(cursor);
         }
     }
@@ -318,6 +320,15 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         }
     }
 
+    // Plugin panels and overlays are declarative; they never own layout.
+    crate::plugin_ui::render::render_panels(frame, root.editor_area, &app.backend.plugin_ui);
+    crate::plugin_ui::render::render_overlays(
+        frame,
+        root.editor_area,
+        focused_cursor,
+        &app.backend.plugin_ui,
+    );
+
     // Picker overlay (drawn last so it floats above everything).
     if app.hover_popup.is_some() {
         render_hover_popup(frame, area, app);
@@ -326,6 +337,8 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     if app.picker.is_some() {
         render_picker(frame, area, app);
     }
+
+    crate::plugin_ui::render::render_picker(frame, area, &app.backend.plugin_ui);
 
     render_toast(frame, area, app);
 }
@@ -372,6 +385,7 @@ use spans::*;
 use toast::*;
 
 pub(crate) use agents_pane::agents_transcript_scroll_max;
+pub(crate) use markdown::markdown_message_lines;
 #[allow(unused_imports)]
 pub(crate) use spans::compute_editor_width;
 

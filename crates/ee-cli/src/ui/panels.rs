@@ -564,16 +564,27 @@ pub(super) fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Ap
             spans
         }
     };
+    let (plugin_left, plugin_right) =
+        crate::plugin_ui::render::status_spans(&app.backend.plugin_ui);
+    spans.extend(plugin_left);
     let left_width =
         spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum::<usize>();
     let position_width = UnicodeWidthStr::width(position_text.as_str());
     let status_width = area.width as usize;
-    if left_width + position_width < status_width {
-        spans.push(Span::styled(
-            " ".repeat(status_width - left_width - position_width),
-            Style::default().bg(theme::BG_STATUS),
-        ));
+    let mut right_spans: Vec<Span<'static>> = Vec::new();
+    let mut right_width = 0usize;
+    for span in plugin_right {
+        let width = UnicodeWidthStr::width(span.content.as_ref());
+        if left_width + right_width + position_width + width <= status_width {
+            right_width += width;
+            right_spans.push(span);
+        }
     }
+    let padding = status_width.saturating_sub(left_width + right_width + position_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), Style::default().bg(theme::BG_STATUS)));
+    }
+    spans.extend(right_spans);
     spans.push(position);
 
     frame.render_widget(

@@ -431,11 +431,16 @@ impl App {
             return;
         }
 
-        let candidates: Vec<String> = Self::ex_command_names()
+        let mut candidates: Vec<String> = Self::ex_command_names()
             .iter()
             .filter(|name| name.starts_with(&prefix))
             .map(|name| name.to_string())
             .collect();
+        candidates.extend(
+            self.plugin_ex_command_names().into_iter().filter(|name| name.starts_with(&prefix)),
+        );
+        candidates.sort();
+        candidates.dedup();
         if candidates.is_empty() {
             return;
         }

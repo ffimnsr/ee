@@ -610,8 +610,8 @@ fn plugin_started_and_stopped_notifications_are_not_shown_in_status_line() {
 }
 
 #[test]
-fn plugin_terminated_notification_updates_status_message() {
-    let params = json!({
+fn plugin_terminated_notification_is_replaced_by_plugin_health() {
+    let terminated = json!({
         "view_id": "view-id-1",
         "plugin": "rust-analyzer",
         "reason": {
@@ -620,15 +620,22 @@ fn plugin_terminated_notification_updates_status_message() {
             "method": "update"
         }
     });
+    assert!(parse_notification("plugin_terminated", terminated).is_none());
 
-    let event =
-        parse_notification("plugin_terminated", params).expect("plugin_terminated should parse");
+    let event = parse_notification(
+        "plugin_health",
+        json!({
+            "plugin": "rust-analyzer",
+            "state": "crashed",
+            "reason": "transport_timeout"
+        }),
+    )
+    .expect("plugin_health should parse");
     match event {
-        BackendEvent::Alert(message) => {
-            assert_eq!(
-                message,
-                "plugin rust-analyzer terminated: rpc update timed out after 250 ms"
-            );
+        BackendEvent::PluginHealth { event } => {
+            assert_eq!(event.plugin, "rust-analyzer");
+            assert_eq!(event.state, "crashed");
+            assert_eq!(event.reason.as_deref(), Some("transport_timeout"));
         }
         other => panic!("unexpected backend event: {other:?}"),
     }

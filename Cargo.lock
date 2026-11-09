@@ -1564,6 +1564,7 @@ dependencies = [
  "ee-mcp",
  "ee-opencode-agent",
  "ee-openrouter-agent",
+ "ee-plugin-api",
  "ee-xi-core-lib",
  "ee-xi-lsp-lib",
  "ee-xi-rpc",

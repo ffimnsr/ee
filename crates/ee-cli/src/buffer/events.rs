@@ -340,11 +340,36 @@ impl BufferManager {
                 // Collect for the App to dispatch to the symbols picker.
                 self.pending_symbols.push((view_id, title, symbols));
             }
-            BackendEvent::AvailablePlugins { view_id, plugins } => {
-                if self.buffer_index_for_view(&view_id).is_none() {
-                    return Ok(());
+            BackendEvent::PluginContributions { batch } => {
+                if let Err(error) = self.plugin_ui.apply_batch(&batch) {
+                    self.bufs[current].status_message =
+                        Some(format!("plugin contributions rejected: {error}"));
                 }
-                self.available_plugins_by_view.insert(view_id, plugins);
+            }
+            BackendEvent::PluginUiUpdate { update } => {
+                if let Err(error) = self.plugin_ui.apply_ui_update(&update) {
+                    self.plugin_ui.push_diagnostic(
+                        crate::plugin_ui::PluginDiagnostic::InvalidPayload(error.to_string()),
+                    );
+                    self.bufs[current].status_message = Some(error.to_string());
+                }
+            }
+            BackendEvent::PluginStatus { status } => {
+                let diagnostics = status.diagnostics();
+                self.plugin_ui.apply_status(status);
+                if let Some(diagnostic) = diagnostics.first() {
+                    self.bufs[current].status_message = Some(diagnostic.message());
+                }
+            }
+            BackendEvent::PluginHealth { event } => {
+                self.bufs[current].status_message = Some(event.diagnostic().message());
+                self.plugin_ui.apply_health(event);
+            }
+            BackendEvent::PluginProtocolError { message } => {
+                self.plugin_ui.push_diagnostic(crate::plugin_ui::PluginDiagnostic::InvalidPayload(
+                    message.clone(),
+                ));
+                self.bufs[current].status_message = Some(message);
             }
             BackendEvent::Diagnostics { view_id, diagnostics } => {
                 let Some(idx) = self.buffer_index_for_view(&view_id) else {

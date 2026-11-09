@@ -35,6 +35,7 @@ pub(crate) mod notifications;
 pub(crate) mod permission_policy_matrix;
 #[cfg(feature = "agents")]
 pub(crate) mod persistent_deny;
+pub(crate) mod plugin_ui;
 pub(crate) mod render;
 pub(crate) mod safe_read_profile;
 pub(crate) mod secrets_command;

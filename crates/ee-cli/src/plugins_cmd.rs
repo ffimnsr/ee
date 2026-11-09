@@ -72,9 +72,10 @@ pub(crate) fn probe_running_plugins() -> io::Result<Vec<String>> {
     backend.drain_events()?;
 
     let mut plugins = backend
-        .available_plugins_for_current_view()
+        .plugin_status()
+        .plugins
         .iter()
-        .filter(|plugin| plugin.running)
+        .filter(|plugin| plugin.active)
         .map(|plugin| plugin.name.clone())
         .collect::<Vec<_>>();
     plugins.sort();

@@ -1,4 +1,5 @@
 {
+  "enable_language_server": false,
   "context_servers": {
     "atlas": {
       "enabled": true,

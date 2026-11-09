@@ -316,6 +316,10 @@ pub(crate) enum Action {
     },
     /// Select all occurrences of current search pattern.
     FindAll,
+    /// Invoke a plugin-contributed command with no arguments.
+    PluginCommand(String),
+    /// Invoke a plugin-contributed command with JSON arguments.
+    PluginCommandWithArgs(String, serde_json::Value),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -495,7 +499,7 @@ pub(crate) use hints::{
 };
 pub(crate) use spec::{
     format_action_spec, format_binding_mode, parse_action_spec, parse_binding_mode,
-    parse_binding_spec,
+    parse_binding_spec, parse_key_press_spec,
 };
 
 mod defaults;

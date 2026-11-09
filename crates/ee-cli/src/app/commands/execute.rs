@@ -24,8 +24,14 @@ impl App {
         let cursor_line = self.backend.cursor_line;
         let line_count = self.backend.line_count().max(1);
         let (range, rest) = parse_ex_range(&raw, cursor_line, line_count, &self.marks);
-        let command = rest.trim_start();
-        let command = Self::rewrite_command_alias(command);
+        let raw_command = rest.trim_start();
+        // Plugin ex aliases resolve before the static COMMAND_SPECS table so a
+        // contributed command can never be shadowed by the built-in matcher.
+        if self.try_execute_plugin_ex_command(raw_command) {
+            self.enter_normal_mode();
+            return;
+        }
+        let command = Self::rewrite_command_alias(raw_command);
         let command = command.as_ref();
 
         match crate::terminal::parse_command(command) {
@@ -451,7 +457,9 @@ impl App {
                 return;
             }
             "commands" => {
-                self.open_help_picker("Commands", Self::command_help_items());
+                let mut items = Self::command_help_items();
+                items.extend(self.plugin_command_help_items());
+                self.open_help_picker("Commands", items);
                 return;
             }
             "keymap" => {

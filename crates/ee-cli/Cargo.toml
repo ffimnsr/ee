@@ -50,6 +50,7 @@ dirs.workspace = true
 ee-agent-host = { workspace = true, optional = true }
 ee-agent-protocol = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
+ee-plugin-api.workspace = true
 flate2 = { workspace = true, optional = true }
 rmcp = { workspace = true, features = ["server"], optional = true }
 git2.workspace = true
@@ -97,6 +98,7 @@ insta.workspace = true
 tempfile.workspace = true
 vt100.workspace = true
 xi-core-lib = { workspace = true, features = ["test-grammars"] }
+xi-lsp-lib = { workspace = true, features = ["test-grammars"] }
 
 [build-dependencies]
 chrono.workspace = true

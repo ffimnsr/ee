@@ -19,6 +19,22 @@ pub(crate) fn parse_binding_mode(spec: &str) -> Result<Mode, String> {
 pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
     let spec = spec.trim();
 
+    if let Some(rest) = spec.strip_prefix("plugin_command:") {
+        let (id, args) = match rest.split_once(':') {
+            Some((id, args)) => (id, Some(args)),
+            None => (rest, None),
+        };
+        if id.trim().is_empty() {
+            return Err(String::from("plugin_command requires a command id"));
+        }
+        return match args {
+            None => Ok(Action::PluginCommand(id.to_owned())),
+            Some(args) => serde_json::from_str::<serde_json::Value>(args)
+                .map(|value| Action::PluginCommandWithArgs(id.to_owned(), value))
+                .map_err(|error| format!("invalid plugin command args: {error}")),
+        };
+    }
+
     if let Some(mode) = spec.strip_prefix("enter_mode:") {
         return parse_mode_spec(mode)
             .map(Action::EnterMode)
@@ -784,6 +800,10 @@ pub(crate) fn format_action_spec(action: &Action) -> String {
             })
         }
         Action::FindAll => String::from("find_all"),
+        Action::PluginCommand(id) => format!("plugin_command:{id}"),
+        Action::PluginCommandWithArgs(id, args) => {
+            format!("plugin_command:{id}:{args}")
+        }
     }
 }
 

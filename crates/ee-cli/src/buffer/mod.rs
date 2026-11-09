@@ -13,9 +13,10 @@ pub(crate) use tokio::sync::mpsc;
 pub(crate) use xi_core_lib::XiCore;
 pub(crate) use xi_core_lib::config::Table;
 pub(crate) use xi_core_lib::plugin_rpc::{Diagnostic, SelectionRange, SymbolItem};
-pub(crate) use xi_core_lib::plugins::rpc::ClientPluginInfo;
 pub(crate) use xi_core_lib::rpc::{FoldRangePreview, LineReplacement};
 pub(crate) use xi_rpc::RpcLoop;
+
+pub(crate) use crate::plugin_ui::PluginUiState;
 
 pub(crate) use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreSyntaxSpan,
@@ -390,7 +391,8 @@ pub(crate) struct BufferManager {
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
     /// Generic LSP agent-tool results awaiting proxy/tool consumers.
     pub(crate) pending_agent_tool_results: Vec<(String, String, Value)>,
-    available_plugins_by_view: HashMap<String, Vec<ClientPluginInfo>>,
+    /// Declarative frontend plugin state (contributions, health, dynamic UI).
+    pub(crate) plugin_ui: PluginUiState,
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
     startup_profile: StartupProfile,
     startup_profile_active: bool,

@@ -271,22 +271,53 @@ impl App {
             Action::DiagnosticsPicker => self.open_diagnostics_picker(),
             Action::WorkspaceDiagnosticsPicker => self.open_workspace_diagnostics_picker(),
             Action::LastPicker => self.reopen_last_picker(),
-            Action::PickerClose => {
-                self.picker = None;
+            Action::PluginCommand(id) => {
+                self.invoke_plugin_command(&id, json!({}));
             }
-            Action::PickerConfirm => self.handle_picker_confirm(),
+            Action::PluginCommandWithArgs(id, args) => {
+                self.invoke_plugin_command(&id, args);
+            }
+            Action::PickerClose => {
+                if self.plugin_picker_active() {
+                    self.close_plugin_picker();
+                } else {
+                    self.picker = None;
+                }
+            }
+            Action::PickerConfirm => {
+                if self.plugin_picker_active() {
+                    self.confirm_plugin_picker();
+                } else {
+                    self.handle_picker_confirm();
+                }
+            }
             Action::PickerMoveUp => {
-                if let Some(picker) = self.picker.as_mut() {
+                if self.plugin_picker_active() {
+                    if let Some(picker) = self.backend.plugin_ui.picker.as_mut() {
+                        picker.move_up();
+                    }
+                    self.send_plugin_picker_selection();
+                } else if let Some(picker) = self.picker.as_mut() {
                     picker.move_up();
                 }
             }
             Action::PickerMoveDown => {
-                if let Some(picker) = self.picker.as_mut() {
+                if self.plugin_picker_active() {
+                    if let Some(picker) = self.backend.plugin_ui.picker.as_mut() {
+                        picker.move_down();
+                    }
+                    self.send_plugin_picker_selection();
+                } else if let Some(picker) = self.picker.as_mut() {
                     picker.move_down();
                 }
             }
             Action::PickerBackspace => {
-                if let Some(picker) = self.picker.as_mut() {
+                if self.plugin_picker_active() {
+                    if let Some(picker) = self.backend.plugin_ui.picker.as_mut() {
+                        picker.pop_char();
+                    }
+                    self.send_plugin_picker_filter();
+                } else if let Some(picker) = self.picker.as_mut() {
                     picker.pop_char();
                 }
             }

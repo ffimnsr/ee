@@ -298,49 +298,49 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Add `crates/ee-cli/src/plugin_ui/` module and wire it into `lib.rs`.
-- [ ] Implement `contributions.rs`.
-  - [ ] Add typed parsing for `plugin_contributions`, `plugin_ui_update`, `plugin_status`, and `plugin_health`.
-  - [ ] Add `ContributionBatch` with `revision`, `upsert`, and `remove`.
-  - [ ] Reject malformed JSON, unknown kinds, duplicate ids, empty ids, oversized text, and invalid key specs.
-  - [ ] Add snapshot tests for valid and invalid payloads.
-- [ ] Implement `sanitize.rs`.
-  - [ ] Add ANSI/control-sequence rejection, line-count caps, byte caps, and markdown escaping policy.
-  - [ ] Add tests for ANSI, C0/C1 controls, oversized text, too many items, and valid Unicode.
-- [ ] Implement `registry.rs`.
-  - [ ] Add registries for commands, ex commands, keybindings, status items, panels, overlays, pickers, and menu items.
-  - [ ] Add atomic revision apply and remove behavior.
-  - [ ] Add owner tracking for diagnostics and removal.
-  - [ ] Add tests for upsert, remove, duplicate id, revision ordering, stale revision, and owner removal.
-- [ ] Implement `render.rs` for declarative UI.
-  - [ ] Render status items in the existing status bar layout.
-  - [ ] Render panels with list/text/markdown renderers and placement fallback.
-  - [ ] Render overlays with bounded anchors and clipping.
-  - [ ] Render pickers with local filter/selection and column metadata.
-  - [ ] Add snapshot tests for each renderer and unsupported renderer fallback.
-- [ ] Implement `keybindings.rs`.
-  - [ ] Add `Action::PluginCommand(String)` and `Action::PluginCommandWithArgs(String, serde_json::Value)`.
-  - [ ] Parse/format `plugin_command:<id>` and `plugin_command:<id>:<json>`.
-  - [ ] Merge plugin defaults below user keybindings; reject conflicting defaults deterministically.
-  - [ ] Add tests for parse/format round trip, user override, conflict, and unknown command.
-- [ ] Update command palette and ex-command resolution.
-  - [ ] Add contributed commands to `command_help_items()` with category and usage.
-  - [ ] Add contributed ex aliases before static `COMMAND_SPECS`; duplicate alias fails validation.
-  - [ ] Add tests for palette row, filtered search, ex alias, duplicate alias, and missing args usage.
-- [ ] Add protocol senders and interaction routing.
-  - [ ] Send `command { id, args }` for palette/keymap/ex invocation.
-  - [ ] Send `ui_event` for panel/picker/overlay filter/select/activate/close.
-  - [ ] Send frontend capabilities in `client_started`.
-  - [ ] Add tests with a recording backend channel for each method.
-- [ ] Replace old lifecycle parsing.
-  - [ ] Remove `BackendEvent::AvailablePlugins` and plugin label parsing paths used only for old notifications.
-  - [ ] Parse `plugin_status` and `plugin_health` into displayable diagnostics.
-  - [ ] Add tests for blocked workspace plugin, permission failure, crash, timeout, and reload.
-- [ ] Add end-to-end frontend tests with a fake backend.
-  - [ ] Fake backend sends command, status item, panel, overlay, picker, keybinding, and ex-command contributions.
-  - [ ] Assert rendered status, panel, overlay, picker, palette row, keybinding action, and ex alias.
-  - [ ] Fake backend sends malformed revision; assert previous registry remains.
-  - [ ] Fake backend sends unsupported renderer; assert diagnostic and no render.
+- [x] Add `crates/ee-cli/src/plugin_ui/` module and wire it into `lib.rs`.
+- [x] Implement `contributions.rs`.
+  - [x] Add typed parsing for `plugin_contributions`, `plugin_ui_update`, `plugin_status`, and `plugin_health`.
+  - [x] Add `ContributionBatch` with `revision`, `upsert`, and `remove`.
+  - [x] Reject malformed JSON, unknown kinds, duplicate ids, empty ids, oversized text, and invalid key specs.
+  - [x] Add snapshot tests for valid and invalid payloads.
+- [x] Implement `sanitize.rs`.
+  - [x] Add ANSI/control-sequence rejection, line-count caps, byte caps, and markdown escaping policy.
+  - [x] Add tests for ANSI, C0/C1 controls, oversized text, too many items, and valid Unicode.
+- [x] Implement `registry.rs`.
+  - [x] Add registries for commands, ex commands, keybindings, status items, panels, overlays, pickers, and menu items.
+  - [x] Add atomic revision apply and remove behavior.
+  - [x] Add owner tracking for diagnostics and removal.
+  - [x] Add tests for upsert, remove, duplicate id, revision ordering, stale revision, and owner removal.
+- [x] Implement `render.rs` for declarative UI.
+  - [x] Render status items in the existing status bar layout.
+  - [x] Render panels with list/text/markdown renderers and placement fallback.
+  - [x] Render overlays with bounded anchors and clipping.
+  - [x] Render pickers with local filter/selection and column metadata.
+  - [x] Add snapshot tests for each renderer and unsupported renderer fallback.
+- [x] Implement `keybindings.rs`.
+  - [x] Add `Action::PluginCommand(String)` and `Action::PluginCommandWithArgs(String, serde_json::Value)`.
+  - [x] Parse/format `plugin_command:<id>` and `plugin_command:<id>:<json>`.
+  - [x] Merge plugin defaults below user keybindings; reject conflicting defaults deterministically.
+  - [x] Add tests for parse/format round trip, user override, conflict, and unknown command.
+- [x] Update command palette and ex-command resolution.
+  - [x] Add contributed commands to `command_help_items()` with category and usage.
+  - [x] Add contributed ex aliases before static `COMMAND_SPECS`; duplicate alias fails validation.
+  - [x] Add tests for palette row, filtered search, ex alias, duplicate alias, and missing args usage.
+- [x] Add protocol senders and interaction routing.
+  - [x] Send `command { id, args }` for palette/keymap/ex invocation.
+  - [x] Send `ui_event` for panel/picker/overlay filter/select/activate/close.
+  - [x] Send frontend capabilities in `client_started`.
+  - [x] Add tests with a recording backend channel for each method.
+- [x] Replace old lifecycle parsing.
+  - [x] Remove `BackendEvent::AvailablePlugins` and plugin label parsing paths used only for old notifications.
+  - [x] Parse `plugin_status` and `plugin_health` into displayable diagnostics.
+  - [x] Add tests for blocked workspace plugin, permission failure, crash, timeout, and reload.
+- [x] Add end-to-end frontend tests with a fake backend.
+  - [x] Fake backend sends command, status item, panel, overlay, picker, keybinding, and ex-command contributions.
+  - [x] Assert rendered status, panel, overlay, picker, palette row, keybinding action, and ex alias.
+  - [x] Fake backend sends malformed revision; assert previous registry remains.
+  - [x] Fake backend sends unsupported renderer; assert diagnostic and no render.
 
 **Acceptance criteria:**
 

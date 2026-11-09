@@ -28,6 +28,8 @@ pub mod perf;
 #[allow(dead_code)]
 mod picker;
 #[allow(dead_code)]
+pub(crate) mod plugin_ui;
+#[allow(dead_code)]
 mod policy;
 #[allow(dead_code)]
 mod quickfix;

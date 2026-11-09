@@ -272,24 +272,17 @@ fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
     fs::write(&file, "# Parent\n\n## Child\n\nNext\n====\n").unwrap();
 
     let mut app = App::from_path(Some(file)).unwrap();
-    wait_until_with_backend(
-        &mut app.backend,
-        "LSP plugin startup",
-        Duration::from_secs(5),
-        |backend| {
-            backend
-                .available_plugins_for_current_view()
-                .iter()
-                .any(|plugin| plugin.name == crate::config::LSP_PLUGIN_NAME && plugin.running)
-        },
-    );
 
-    // One request may come back empty while the plugin's tree-sitter backend
-    // is still cold-starting (lazy per-process grammar/query loading).  Re-run
+    // One request may come back empty while the backend's tree-sitter runtime
+    // is still cold-starting (lazy per-process grammar/query loading). Re-run
     // the request like a user would re-open :symbols, and surface the plugin
     // state in the failure message instead of asserting against a single
     // arbitrary result.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The legacy LSP plugin process is still active until the Phase 4
+    // migration, and the frontend no longer receives its old lifecycle
+    // notifications. Poll the request itself as the readiness probe; a cold
+    // plugin start under full-suite load can exceed the old 10 s budget.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let symbols = loop {
         app.backend.request_document_symbols().unwrap();
         while app.backend.pending_symbols.is_empty() && Instant::now() < deadline {
@@ -301,7 +294,7 @@ fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
             pending.len(),
             1,
             "one symbol result per request; plugins={:?} status={:?}",
-            app.backend.available_plugins_for_current_view(),
+            app.backend.plugin_status(),
             app.backend.status_message,
         );
         let symbols = pending.into_iter().next().unwrap().2;
@@ -312,7 +305,7 @@ fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
     if symbols.is_empty() {
         panic!(
             "tree-sitter document symbols stayed empty after retries; plugins={:?} status={:?}",
-            app.backend.available_plugins_for_current_view(),
+            app.backend.plugin_status(),
             app.backend.status_message,
         );
     }

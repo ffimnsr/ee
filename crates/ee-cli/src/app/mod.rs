@@ -48,6 +48,7 @@ mod motion;
 mod operators;
 mod parsing;
 mod pickers;
+mod plugin_ui;
 mod quickfix;
 mod registers;
 mod shell;

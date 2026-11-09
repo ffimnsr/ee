@@ -11,9 +11,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
-use xi_core_lib::plugins::PluginTerminationReason;
-use xi_core_lib::plugins::rpc::ClientPluginInfo;
 use xi_rpc::{ReadTransport, WriteTransport};
+
+use crate::plugin_ui::{
+    ContributionBatch, PluginHealthEvent, PluginStatusSnapshot, PluginUiUpdate,
+};
 
 pub(crate) mod update;
 pub(crate) use update::{
@@ -102,9 +104,25 @@ pub(crate) enum BackendEvent {
         title: String,
         symbols: Vec<SymbolItem>,
     },
-    AvailablePlugins {
-        view_id: String,
-        plugins: Vec<ClientPluginInfo>,
+    /// One atomic revisioned contribution batch.
+    PluginContributions {
+        batch: ContributionBatch,
+    },
+    /// Bounded dynamic panel/overlay/picker/status content.
+    PluginUiUpdate {
+        update: PluginUiUpdate,
+    },
+    /// Full plugin status snapshot.
+    PluginStatus {
+        status: PluginStatusSnapshot,
+    },
+    /// One plugin health transition.
+    PluginHealth {
+        event: PluginHealthEvent,
+    },
+    /// Malformed or unsupported plugin protocol payload.
+    PluginProtocolError {
+        message: String,
     },
     Diagnostics {
         view_id: String,
@@ -173,8 +191,8 @@ impl BackendEvent {
             Self::Diagnostics { view_id, .. } => {
                 Some(BackendEventCoalesceKey::Diagnostics(view_id.clone()))
             }
-            Self::AvailablePlugins { view_id, .. } => {
-                Some(BackendEventCoalesceKey::AvailablePlugins(view_id.clone()))
+            Self::PluginUiUpdate { update } => {
+                Some(BackendEventCoalesceKey::PluginUiUpdate(plugin_ui_update_key(update)))
             }
             Self::CodeActions { view_id, .. } => {
                 Some(BackendEventCoalesceKey::CodeActions(view_id.clone()))
@@ -198,7 +216,7 @@ enum BackendEventCoalesceKey {
     Hover(String),
     Completions(String),
     Diagnostics(String),
-    AvailablePlugins(String),
+    PluginUiUpdate(String),
     CodeActions(String),
     AgentToolResult(String, String),
     DocumentMode(String),
@@ -505,17 +523,30 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let msg = params.get("msg").and_then(Value::as_str)?.to_owned();
             Some(BackendEvent::Alert(msg))
         }
-        "plugin_started" => {
-            let _ = format_plugin_state_notification("started", &params)?;
-            None
-        }
-        "plugin_stopped" => {
-            let _ = format_plugin_state_notification("stopped", &params)?;
-            None
-        }
-        "plugin_terminated" => {
-            Some(BackendEvent::Alert(format_plugin_terminated_notification(&params)?))
-        }
+        "plugin_contributions" => match ContributionBatch::parse(&params) {
+            Ok(batch) => Some(BackendEvent::PluginContributions { batch }),
+            Err(error) => Some(BackendEvent::PluginProtocolError {
+                message: format!("plugin_contributions: {error}"),
+            }),
+        },
+        "plugin_ui_update" => match PluginUiUpdate::parse(&params) {
+            Ok(update) => Some(BackendEvent::PluginUiUpdate { update }),
+            Err(error) => Some(BackendEvent::PluginProtocolError {
+                message: format!("plugin_ui_update: {error}"),
+            }),
+        },
+        "plugin_status" => match PluginStatusSnapshot::parse(&params) {
+            Ok(status) => Some(BackendEvent::PluginStatus { status }),
+            Err(error) => Some(BackendEvent::PluginProtocolError {
+                message: format!("plugin_status: {error}"),
+            }),
+        },
+        "plugin_health" => match PluginHealthEvent::parse(&params) {
+            Ok(event) => Some(BackendEvent::PluginHealth { event }),
+            Err(error) => Some(BackendEvent::PluginProtocolError {
+                message: format!("plugin_health: {error}"),
+            }),
+        },
         "hover" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let content = params.get("content").and_then(Value::as_str)?.to_owned();
@@ -543,13 +574,7 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 serde_json::from_value::<Vec<SymbolItem>>(params.get("symbols")?.clone()).ok()?;
             Some(BackendEvent::Symbols { view_id, title, symbols })
         }
-        "available_plugins" => {
-            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
-            let plugins =
-                serde_json::from_value::<Vec<ClientPluginInfo>>(params.get("plugins")?.clone())
-                    .ok()?;
-            Some(BackendEvent::AvailablePlugins { view_id, plugins })
-        }
+        "available_plugins" => None,
         "diagnostics" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let diagnostics =
@@ -622,27 +647,13 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
     }
 }
 
-fn format_plugin_state_notification(state: &str, params: &Value) -> Option<String> {
-    let plugin = params.get("plugin").and_then(Value::as_str)?;
-    Some(format!("plugin {plugin} {state}"))
-}
-
-fn format_plugin_terminated_notification(params: &Value) -> Option<String> {
-    let plugin = params.get("plugin").and_then(Value::as_str)?;
-    let reason =
-        serde_json::from_value::<PluginTerminationReason>(params.get("reason")?.clone()).ok()?;
-    Some(match reason {
-        PluginTerminationReason::MaxRssBytes { limit_bytes, observed_bytes } => {
-            format!("plugin {plugin} terminated: rss {} > {} bytes", observed_bytes, limit_bytes)
-        }
-        PluginTerminationReason::MaxCpuSeconds { limit_seconds, observed_seconds } => format!(
-            "plugin {plugin} terminated: cpu {} > {} seconds",
-            observed_seconds, limit_seconds
-        ),
-        PluginTerminationReason::RpcTimedOut { limit_ms, method } => {
-            format!("plugin {plugin} terminated: rpc {method} timed out after {limit_ms} ms")
-        }
-    })
+fn plugin_ui_update_key(update: &PluginUiUpdate) -> String {
+    match update {
+        PluginUiUpdate::Status { key, .. } => format!("status:{key}"),
+        PluginUiUpdate::Panel { id, .. } => format!("panel:{id}"),
+        PluginUiUpdate::Overlay { id, .. } => format!("overlay:{id}"),
+        PluginUiUpdate::Picker { id, .. } => format!("picker:{id}"),
+    }
 }
 
 pub(crate) fn send_rpc_notification(

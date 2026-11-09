@@ -268,7 +268,9 @@ impl App {
         self.enter_normal_mode();
     }
     pub(in crate::app) fn open_command_palette(&mut self) {
-        self.open_help_picker("Command Palette", Self::command_help_items());
+        let mut items = Self::command_help_items();
+        items.extend(self.plugin_command_help_items());
+        self.open_help_picker("Command Palette", items);
     }
     pub(crate) fn reopen_last_picker(&mut self) {
         let Some(picker) = self.last_picker.clone() else {
