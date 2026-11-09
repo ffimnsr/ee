@@ -12,6 +12,7 @@ members = [
   "crates/ee-opencode-agent",
   "crates/ee-plugin-api",
   "crates/ee-plugin-derive",
+  "crates/ee-plugin-example-wasm",
   "crates/ee-plugin-runtime",
   "crates/ee-plugin-sdk",
   "crates/ee-openrouter-agent",

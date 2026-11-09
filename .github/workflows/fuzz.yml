@@ -24,10 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - ee_plugin_wasm
           - xi_core_config
           - xi_core_text
           - xi_lsp_transport
-          - xi_plugin_wasm
           - xi_rope_compare
           - xi_rope_crdt
           - xi_rpc_parse

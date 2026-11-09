@@ -4,11 +4,16 @@
 //! `Content-Length` framing. The client is synchronous: a reader thread only
 //! frames messages, while request/response correlation, deadlines, effects, and
 //! contributions are handled on the caller thread so ordering is deterministic.
+//!
+//! Isolation is split into focused modules: [`sandbox`] owns the syscall policy
+//! and resource monitor, [`platform`] owns the platform FFI, and [`broker`] owns
+//! scoped filesystem/network permissions.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -18,7 +23,7 @@ use ee_plugin_api::context::ContributionSink;
 use ee_plugin_api::error::PluginError;
 use ee_plugin_api::host::{HostAdapter, HostKind};
 use ee_plugin_api::ids::{CommandId, PluginId, ServiceId};
-use ee_plugin_api::manifest::{LaunchConfig, LaunchTransport, Limits, ManifestV2};
+use ee_plugin_api::manifest::{LaunchConfig, LaunchTransport, Limits, ManifestV2, Permissions};
 use ee_plugin_api::wire::{
     CommandParams, ContributionEnvelope, ContributionRequestParams, EffectEnvelope, EventParams,
     HealthReport, HostToPlugin, InitializeParams, PluginResponse, PluginToHost, ShutdownParams,
@@ -27,6 +32,16 @@ use ee_plugin_api::wire::{
 use serde_json::Value;
 
 use crate::contributions::ContributionSession;
+use crate::health::TerminationReason;
+
+pub mod broker;
+pub mod platform;
+pub mod sandbox;
+
+pub use broker::BrokerPolicy;
+pub use sandbox::{
+    ResourceMonitor, ResourceSample, SAMPLE_INTERVAL, SandboxConfig, denied_syscalls,
+};
 
 /// Maximum accepted frame size.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -48,6 +63,12 @@ pub struct NativeSpec {
     pub host: HostKind,
     pub services: Vec<ServiceId>,
     pub config: Value,
+    /// Declared manifest permissions used for sandbox and broker policy.
+    pub permissions: Permissions,
+    /// Scoped filesystem/network broker for service calls.
+    pub broker: BrokerPolicy,
+    /// Platform isolation and resource monitoring switch.
+    pub sandbox: SandboxConfig,
 }
 
 impl NativeSpec {
@@ -63,16 +84,25 @@ impl NativeSpec {
             host: HostKind::Editor,
             services: Vec::new(),
             config: Value::Null,
+            permissions: Permissions::default(),
+            broker: BrokerPolicy::deny_all(),
+            // Low-level constructor: tests and embedders opt into isolation.
+            // Manifest-driven spawns enable it in `from_manifest`.
+            sandbox: SandboxConfig::disabled(),
         }
     }
 
     /// Build a spec from a validated manifest and its directory.
+    ///
+    /// `workspace_root` scopes the filesystem broker. Isolation is enabled for
+    /// manifest-driven loads; only `NativeSpec::new` leaves it off.
     pub fn from_manifest(
         manifest: &ManifestV2,
         manifest_dir: &Path,
         host: HostKind,
         services: Vec<ServiceId>,
         config: Value,
+        workspace_root: &Path,
     ) -> Result<Self, PluginError> {
         if manifest.kind != ee_plugin_api::manifest::PluginKind::Native {
             return Err(PluginError::Manifest(
@@ -102,6 +132,9 @@ impl NativeSpec {
             host,
             services,
             config,
+            permissions: manifest.permissions.clone(),
+            broker: BrokerPolicy::from_manifest(manifest, workspace_root),
+            sandbox: SandboxConfig::enforced(),
         })
     }
 }
@@ -124,6 +157,11 @@ pub struct NativeClient {
     last_contribution_revision: u64,
     plugin_id: PluginId,
     stopped: bool,
+    broker: BrokerPolicy,
+    monitor: ResourceMonitor,
+    sandbox: SandboxConfig,
+    termination: Option<TerminationReason>,
+    stderr_truncated: Arc<AtomicBool>,
 }
 
 impl NativeClient {
@@ -159,10 +197,16 @@ impl NativeClient {
         for (key, value) in &spec.env {
             command.env(key, value);
         }
+        if spec.sandbox.enforce {
+            platform::apply_linux_sandbox(&mut command, &spec.permissions)?;
+        }
 
         let mut child = command.spawn().map_err(|error| PluginError::Io {
             message: format!("cannot spawn `{}`: {error}", spec.entry.display()),
         })?;
+        if spec.sandbox.enforce {
+            platform::apply_windows_job_limits(&child, &spec.limits)?;
+        }
         let stdin = child.stdin.take().ok_or_else(|| PluginError::Transport {
             message: "child stdin is unavailable".to_owned(),
         })?;
@@ -200,14 +244,18 @@ impl NativeClient {
 
         let stderr_text = Arc::new(Mutex::new(String::new()));
         let stderr_handle = Arc::clone(&stderr_text);
+        let stderr_truncated = Arc::new(AtomicBool::new(false));
+        let truncated_handle = Arc::clone(&stderr_truncated);
         let stderr_reader = thread::Builder::new()
             .name(format!("ee-plugin-stderr-{}", spec.plugin_id))
-            .spawn(move || read_stderr(stderr, stderr_handle))
+            .spawn(move || read_stderr(stderr, stderr_handle, truncated_handle))
             .map_err(|error| PluginError::Runtime {
                 message: format!("cannot start plugin stderr thread: {error}"),
             })?;
 
         let rpc_timeout = Duration::from_millis(spec.limits.rpc_timeout_ms.max(1));
+        let monitor = ResourceMonitor::new(&spec.limits, spec.sandbox);
+        let sandbox = spec.sandbox;
         let mut client = Self {
             child,
             stdin: Some(stdin),
@@ -225,6 +273,11 @@ impl NativeClient {
             last_contribution_revision: 0,
             plugin_id: spec.plugin_id.clone(),
             stopped: false,
+            broker: spec.broker,
+            monitor,
+            sandbox,
+            termination: None,
+            stderr_truncated,
         };
 
         let initialize = InitializeParams {
@@ -249,6 +302,7 @@ impl NativeClient {
                     message: "initialize handshake timed out".to_owned(),
                 });
             }
+            self.check_resources()?;
             let message = self.recv(remaining)?;
             match message {
                 PluginToHost::Response(response)
@@ -297,6 +351,7 @@ impl NativeClient {
                     message: format!("command `{id}` timed out"),
                 });
             }
+            self.check_resources()?;
             let message = self.recv(remaining)?;
             match message {
                 PluginToHost::Response(response) if response.request_id == request_id => {
@@ -332,6 +387,7 @@ impl NativeClient {
     /// tests that assert on wire data. Normal command dispatch uses
     /// [`NativeClient::invoke`], which applies side messages.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<PluginToHost>, PluginError> {
+        self.check_resources()?;
         match self.receiver.recv_timeout(timeout) {
             Ok(Ok(message)) => Ok(Some(message)),
             Ok(Err(error)) => Err(PluginError::Transport { message: error }),
@@ -359,6 +415,7 @@ impl NativeClient {
             if remaining.is_zero() {
                 break;
             }
+            self.check_resources()?;
             match self.receiver.recv_timeout(remaining) {
                 Ok(Ok(message)) => {
                     processed += 1;
@@ -391,6 +448,7 @@ impl NativeClient {
     pub fn pump(&mut self) -> Result<usize, PluginError> {
         let mut processed = 0;
         loop {
+            self.check_resources()?;
             match self.receiver.try_recv() {
                 Ok(Ok(message)) => {
                     processed += 1;
@@ -428,6 +486,21 @@ impl NativeClient {
         self.health.as_ref()
     }
 
+    /// Scoped broker policy applied to service requests.
+    pub fn broker(&self) -> &BrokerPolicy {
+        &self.broker
+    }
+
+    /// Why the plugin stopped, once known.
+    pub fn termination_reason(&self) -> Option<TerminationReason> {
+        self.termination
+    }
+
+    /// Whether stderr retention hit [`MAX_STDERR_BYTES`].
+    pub fn stderr_truncated(&self) -> bool {
+        self.stderr_truncated.load(Ordering::Relaxed)
+    }
+
     pub fn contribution_ids(&self) -> Vec<ee_plugin_api::ids::ContributionId> {
         self.contributions.ids()
     }
@@ -439,7 +512,43 @@ impl NativeClient {
 
     /// Whether the child is still running.
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match self.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                self.termination.get_or_insert_with(|| {
+                    if status.success() {
+                        TerminationReason::CleanExit
+                    } else {
+                        TerminationReason::Crashed
+                    }
+                });
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Kill the child after a resource or protocol breach.
+    fn terminate(&mut self, reason: TerminationReason) {
+        self.termination.get_or_insert(reason);
+        self.stdin = None;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Sample process resources and terminate on a manifest breach.
+    fn check_resources(&mut self) -> Result<(), PluginError> {
+        if !self.sandbox.enforce {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let Some(reason) = self.monitor.poll_process(self.child.id(), now) else {
+            return Ok(());
+        };
+        self.terminate(reason);
+        Err(PluginError::Resource {
+            message: format!("plugin `{}` terminated: {}", self.plugin_id, reason.as_str()),
+        })
     }
 
     fn send(&mut self, message: &HostToPlugin) -> Result<(), PluginError> {
@@ -450,19 +559,33 @@ impl NativeClient {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<PluginToHost, PluginError> {
-        match self.receiver.recv_timeout(timeout) {
-            Ok(Ok(message)) => Ok(message),
-            Ok(Err(error)) => Err(PluginError::Transport { message: error }),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(PluginError::Transport { message: "plugin response timed out".to_owned() })
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PluginError::Transport {
+                    message: "plugin response timed out".to_owned(),
+                });
             }
-            Err(RecvTimeoutError::Disconnected) => Err(PluginError::Transport {
-                message: format!(
-                    "plugin `{}` closed stdout{}",
-                    self.plugin_id,
-                    self.stderr_suffix()
-                ),
-            }),
+            let slice = remaining.min(SAMPLE_INTERVAL);
+            match self.receiver.recv_timeout(slice) {
+                Ok(Ok(message)) => return Ok(message),
+                Ok(Err(error)) => return Err(PluginError::Transport { message: error }),
+                Err(RecvTimeoutError::Timeout) => {
+                    // Keep sampling while blocked so RSS/CPU breaches terminate
+                    // a plugin that never answers.
+                    self.check_resources()?;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PluginError::Transport {
+                        message: format!(
+                            "plugin `{}` closed stdout{}",
+                            self.plugin_id,
+                            self.stderr_suffix()
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -477,6 +600,14 @@ impl NativeClient {
                 Ok(())
             }
             PluginToHost::Request(request) => {
+                if let Err(error) = self.broker.check_service_request(&request) {
+                    return self.respond_error(
+                        request.request_id,
+                        error.class().as_str(),
+                        error.code(),
+                        &error.to_string(),
+                    );
+                }
                 let response = self.adapter.handle_service_request(&self.plugin_id, &request);
                 match response {
                     Ok(result) => self.respond_ok(request.request_id, result),
@@ -549,6 +680,7 @@ impl NativeClient {
             return;
         }
         self.stopped = true;
+        self.termination.get_or_insert(TerminationReason::HostShutdown);
         let _ = self
             .send(&HostToPlugin::Shutdown(ShutdownParams { reason: "host shutdown".to_owned() }));
         self.stdin = None;
@@ -563,6 +695,7 @@ impl NativeClient {
         }
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
+            self.termination = Some(TerminationReason::ShutdownTimeout);
         }
         let _ = self.child.wait();
 
@@ -669,7 +802,7 @@ fn read_frame(
         .map_err(|error| format!("malformed plugin message: {error}"))
 }
 
-fn read_stderr(mut stderr: impl Read, target: Arc<Mutex<String>>) {
+fn read_stderr(mut stderr: impl Read, target: Arc<Mutex<String>>, truncated: Arc<AtomicBool>) {
     let mut buffer = [0_u8; 2048];
     loop {
         match stderr.read(&mut buffer) {
@@ -678,9 +811,13 @@ fn read_stderr(mut stderr: impl Read, target: Arc<Mutex<String>>) {
                 if let Ok(mut target) = target.lock() {
                     let remaining = MAX_STDERR_BYTES.saturating_sub(target.len());
                     if remaining == 0 {
+                        truncated.store(true, Ordering::Relaxed);
                         continue;
                     }
                     let take = read.min(remaining);
+                    if take < read {
+                        truncated.store(true, Ordering::Relaxed);
+                    }
                     let chunk = String::from_utf8_lossy(&buffer[..take]);
                     let mut end = chunk.len();
                     while end > 0 && !chunk.is_char_boundary(end) {
@@ -741,5 +878,24 @@ mod tests {
         let mut reader = Cursor::new(b"not json\n".to_vec());
         let error = read_frame(&mut reader, LaunchTransport::StdioNewline).unwrap_err();
         assert!(error.contains("malformed"));
+    }
+
+    #[test]
+    fn stderr_capture_is_capped() {
+        let bytes = vec![b'x'; MAX_STDERR_BYTES * 2];
+        let target = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
+        read_stderr(Cursor::new(bytes), Arc::clone(&target), Arc::clone(&truncated));
+        assert_eq!(target.lock().unwrap().len(), MAX_STDERR_BYTES);
+        assert!(truncated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn stderr_under_cap_is_not_truncated() {
+        let target = Arc::new(Mutex::new(String::new()));
+        let truncated = Arc::new(AtomicBool::new(false));
+        read_stderr(Cursor::new(b"small".to_vec()), Arc::clone(&target), truncated.clone());
+        assert_eq!(target.lock().unwrap().as_str(), "small");
+        assert!(!truncated.load(Ordering::Relaxed));
     }
 }

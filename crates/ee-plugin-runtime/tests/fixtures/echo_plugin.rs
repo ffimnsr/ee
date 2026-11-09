@@ -141,6 +141,58 @@ fn main() {
                     }
                 }
                 "echo.timeout" => {}
+                "echo.spin" => {
+                    let mut spin: u64 = 0;
+                    loop {
+                        spin = spin.wrapping_add(1);
+                        std::hint::black_box(spin);
+                    }
+                }
+                "echo.alloc" => {
+                    // Grow past the configured RSS cap and hold the pages so the
+                    // host monitor observes the breach.
+                    let mut bytes = vec![0_u8; 128 * 1024 * 1024];
+                    std::hint::black_box(&mut bytes);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                "echo.fs" => {
+                    write_message(
+                        &mut writer,
+                        framing,
+                        &PluginToHost::Request(ServiceRequestParams {
+                            service: ServiceId::from_static("editor.fs@1"),
+                            method: "read".to_owned(),
+                            request_id: 78,
+                            params: json!({"path": "file.txt"}),
+                        }),
+                    );
+                    match read_message(&mut reader, framing) {
+                        Ok(Some(HostToPlugin::Response(response))) => {
+                            respond(
+                                &mut writer,
+                                framing,
+                                params.request_id,
+                                match response.error {
+                                    Some(error) => Err(error),
+                                    None => Ok(response.result.unwrap_or(Value::Null)),
+                                },
+                            );
+                        }
+                        _ => respond(
+                            &mut writer,
+                            framing,
+                            params.request_id,
+                            Err(WireError {
+                                class: "transport".to_owned(),
+                                code: "plugin.transport".to_owned(),
+                                message: "missing host response".to_owned(),
+                                retryable: false,
+                            }),
+                        ),
+                    }
+                }
                 "echo.malformed" => {
                     writer.write_all(b"not json\n").unwrap();
                     writer.flush().unwrap();
@@ -170,6 +222,11 @@ fn main() {
             }
             HostToPlugin::Shutdown(_) => {
                 respond(&mut writer, framing, 0, Ok(json!({"shutdown": true})));
+                if std::env::var("ECHO_IGNORE_SHUTDOWN").is_ok() {
+                    // Simulates a plugin that ignores shutdown; the host must
+                    // kill it after the grace period.
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
                 break;
             }
             HostToPlugin::ContributionRequest(params) => {

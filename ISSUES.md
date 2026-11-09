@@ -498,33 +498,33 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Harden `native.rs`.
-  - [ ] Move seccomp and Windows Job Object code from `xi-core-lib/src/plugins/mod.rs` into `ee-plugin-runtime/src/native.rs`.
-  - [ ] Add RSS and CPU monitors with termination reasons.
-  - [ ] Add filesystem/network brokers or explicit seccomp allowlists for declared permissions.
-  - [ ] Add tests for RSS breach, CPU breach, RPC timeout, stderr cap, and shutdown timeout.
-- [ ] Implement `wasm.rs`.
-  - [ ] Add `wasmtime` engine, module loading, memory, and capability-gated linker.
-  - [ ] Export `plugin_alloc`, `plugin_dealloc`, `plugin_apply`, `plugin_event`, `plugin_command`, and `plugin_contribution`.
-  - [ ] Import `host_event`, `host_command`, `host_service_call`, `host_contribute`, and `host_health`.
-  - [ ] Add fuel/epoch timeout, memory cap, contribution cap, and trap handling.
-  - [ ] Add tests for valid module, missing export, invalid import, timeout, memory cap, trap, and denied ambient access.
-- [ ] Implement `ee-plugin-sdk/src/wasm.rs`.
-  - [ ] Add the Wasm guest entry point and host import bindings.
-  - [ ] Add a compile test for a `wasm32-unknown-unknown` example plugin.
-  - [ ] Add a runtime test loading the example through `ee-plugin-runtime`.
-- [ ] Replace the fuzz target.
-  - [ ] Rename `fuzz/fuzz_targets/xi_plugin_wasm.rs` to `ee_plugin_wasm.rs`.
-  - [ ] Fuzz manifest parse, initialize payload, event payload, and command payload.
-  - [ ] Update `.github/workflows/fuzz.yml` matrix and any fuzz registration file.
-  - [ ] Add a local smoke test that runs the fuzz target with a bounded input.
-- [ ] Add isolation regression tests.
-  - [ ] Untrusted Wasm plugin cannot read a file outside its declared broker scope.
-  - [ ] Untrusted Wasm plugin cannot open a socket.
-  - [ ] Wasm plugin exceeds fuel and is terminated.
-  - [ ] Wasm plugin exceeds memory and is terminated.
-  - [ ] Native plugin without permission cannot read workspace files.
-  - [ ] Plugin crash or trap does not crash the host.
+- [x] Harden `native.rs`.
+  - [x] Move seccomp and Windows Job Object code from `xi-core-lib/src/plugins/mod.rs` into `ee-plugin-runtime/src/native.rs`.
+  - [x] Add RSS and CPU monitors with termination reasons.
+  - [x] Add filesystem/network brokers or explicit seccomp allowlists for declared permissions.
+  - [x] Add tests for RSS breach, CPU breach, RPC timeout, stderr cap, and shutdown timeout.
+- [x] Implement `wasm.rs`.
+  - [x] Add `wasmtime` engine, module loading, memory, and capability-gated linker.
+  - [x] Export `plugin_alloc`, `plugin_dealloc`, `plugin_apply`, `plugin_event`, `plugin_command`, and `plugin_contribution`.
+  - [x] Import `host_event`, `host_command`, `host_service_call`, `host_contribute`, and `host_health`.
+  - [x] Add fuel/epoch timeout, memory cap, contribution cap, and trap handling.
+  - [x] Add tests for valid module, missing export, invalid import, timeout, memory cap, trap, and denied ambient access.
+- [x] Implement `ee-plugin-sdk/src/wasm.rs`.
+  - [x] Add the Wasm guest entry point and host import bindings.
+  - [x] Add a compile test for a `wasm32-unknown-unknown` example plugin.
+  - [x] Add a runtime test loading the example through `ee-plugin-runtime`.
+- [x] Replace the fuzz target.
+  - [x] Rename `fuzz/fuzz_targets/xi_plugin_wasm.rs` to `ee_plugin_wasm.rs`.
+  - [x] Fuzz manifest parse, initialize payload, event payload, and command payload.
+  - [x] Update `.github/workflows/fuzz.yml` matrix and any fuzz registration file.
+  - [x] Add a local smoke test that runs the fuzz target with a bounded input.
+- [x] Add isolation regression tests.
+  - [x] Untrusted Wasm plugin cannot read a file outside its declared broker scope.
+  - [x] Untrusted Wasm plugin cannot open a socket.
+  - [x] Wasm plugin exceeds fuel and is terminated.
+  - [x] Wasm plugin exceeds memory and is terminated.
+  - [x] Native plugin without permission cannot read workspace files.
+  - [x] Plugin crash or trap does not crash the host.
 
 **Acceptance criteria:**
 

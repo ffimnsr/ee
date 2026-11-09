@@ -12,7 +12,8 @@ use ee_plugin_api::ids::{CommandId, PluginId};
 use ee_plugin_api::manifest::LaunchTransport;
 use ee_plugin_api::wire::PluginToHost;
 use ee_plugin_runtime::MemoryContributionSink;
-use ee_plugin_runtime::native::{NativeClient, NativeSpec};
+use ee_plugin_runtime::health::TerminationReason;
+use ee_plugin_runtime::native::{NativeClient, NativeSpec, SandboxConfig};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_ee-plugin-runtime-echo");
 
@@ -160,4 +161,56 @@ fn shutdown_terminates_child() {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("child process {pid} is still running after shutdown");
+}
+
+#[test]
+fn shutdown_timeout_kills_a_stuck_plugin() {
+    let env = BTreeMap::from([("ECHO_IGNORE_SHUTDOWN".to_owned(), "1".to_owned())]);
+    let adapter = Arc::new(RecordingAdapter::default());
+    let sink = Arc::new(MemoryContributionSink::new());
+    let mut client = NativeClient::spawn(spec(env, 2_000), adapter, sink).unwrap();
+    client.shutdown();
+    assert_eq!(client.termination_reason(), Some(TerminationReason::ShutdownTimeout));
+    assert!(!client.is_running());
+}
+
+#[test]
+fn rss_breach_terminates_the_child() {
+    let adapter = Arc::new(RecordingAdapter::default());
+    let sink = Arc::new(MemoryContributionSink::new());
+    let mut spec = spec(BTreeMap::new(), 5_000);
+    spec.sandbox = SandboxConfig::enforced();
+    spec.limits.max_memory_bytes = 32 * 1024 * 1024;
+    spec.limits.max_cpu_seconds = 30;
+    let mut client = NativeClient::spawn(spec, adapter, sink).unwrap();
+    let error =
+        client.invoke(&CommandId::new("echo.alloc").unwrap(), serde_json::json!({})).unwrap_err();
+    assert_eq!(error.class(), ErrorClass::Resource);
+    assert!(error.to_string().contains("rss_limit"), "{error}");
+    assert_eq!(client.termination_reason(), Some(TerminationReason::RssLimit));
+}
+
+#[test]
+fn cpu_breach_terminates_the_child() {
+    let adapter = Arc::new(RecordingAdapter::default());
+    let sink = Arc::new(MemoryContributionSink::new());
+    let mut spec = spec(BTreeMap::new(), 10_000);
+    spec.sandbox = SandboxConfig::enforced();
+    spec.limits.max_memory_bytes = 256 * 1024 * 1024;
+    spec.limits.max_cpu_seconds = 1;
+    let mut client = NativeClient::spawn(spec, adapter, sink).unwrap();
+    let error =
+        client.invoke(&CommandId::new("echo.spin").unwrap(), serde_json::json!({})).unwrap_err();
+    assert_eq!(error.class(), ErrorClass::Resource);
+    assert!(error.to_string().contains("cpu_limit"), "{error}");
+    assert_eq!(client.termination_reason(), Some(TerminationReason::CpuLimit));
+}
+
+#[test]
+fn undeclared_filesystem_service_call_is_denied() {
+    let (mut client, _adapter, _sink) = spawn(BTreeMap::new(), 2_000);
+    let error =
+        client.invoke(&CommandId::new("echo.fs").unwrap(), serde_json::json!({})).unwrap_err();
+    assert_eq!(error.class(), ErrorClass::Transport);
+    assert!(error.to_string().contains("editor.fs.read"), "{error}");
 }

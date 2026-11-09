@@ -16,7 +16,6 @@ ee-plugin-api.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-xi-rpc.workspace = true
 
 [dev-dependencies]
 ee-plugin-derive.workspace = true

@@ -3,7 +3,7 @@
 //! The SDK owns helper types and caches. It does not depend on a host crate: the
 //! transport loop is supplied by `ee-plugin-runtime`.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod cache;
 pub mod client;
@@ -12,6 +12,8 @@ pub mod config;
 pub mod run;
 pub mod transport;
 pub mod view;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 pub use cache::{CacheError, DocumentCache};
 pub use client::{
@@ -30,3 +32,5 @@ pub use ee_plugin_api::{
 };
 pub use run::{run, run_with_config};
 pub use view::{SelectionError, ViewState};
+#[cfg(target_arch = "wasm32")]
+pub use wasm::{WasmPlugin, export_bytes, read_input};

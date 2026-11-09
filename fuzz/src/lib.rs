@@ -1,4 +1,6 @@
 use arbitrary::Arbitrary;
+use ee_plugin_api::manifest::ManifestV2;
+use ee_plugin_api::wire::{CommandParams, EventParams, InitializeParams};
 use std::collections::BTreeSet;
 use xi_core_lib::backspace::offset_for_delete_backwards;
 use xi_core_lib::config::BufferItems;
@@ -318,6 +320,31 @@ pub fn run_core_text_input(input: CoreTextInput) {
     let visible_start = usize::from(input.visible_start);
     let visible_end = visible_start + usize::from(input.visible_end % 64) + 1;
     fuzz_rewrap_mono(&rope, usize::from(input.wrap_cols % 120), visible_start, visible_end);
+}
+
+/// Largest payload passed to the plugin parsers by the fuzz target.
+pub const PLUGIN_INPUT_LIMIT: usize = 4096;
+
+/// Untrusted JSON surfaces parsed before a plugin is instantiated.
+#[derive(Arbitrary, Debug)]
+pub struct PluginInput {
+    pub manifest: Vec<u8>,
+    pub initialize: Vec<u8>,
+    pub event: Vec<u8>,
+    pub command: Vec<u8>,
+}
+
+pub fn run_plugin_input(input: PluginInput) {
+    if let Ok(manifest) = serde_json::from_slice::<ManifestV2>(bounded(&input.manifest)) {
+        let _ = manifest.validate();
+    }
+    let _ = serde_json::from_slice::<InitializeParams>(bounded(&input.initialize));
+    let _ = serde_json::from_slice::<EventParams>(bounded(&input.event));
+    let _ = serde_json::from_slice::<CommandParams>(bounded(&input.command));
+}
+
+fn bounded(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(PLUGIN_INPUT_LIMIT)]
 }
 
 #[cfg(test)]

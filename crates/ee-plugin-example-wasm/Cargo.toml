@@ -1,0 +1,20 @@
+[package]
+name = "ee-plugin-example-wasm"
+version = "0.11.11"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
+description = "Reference Wasm guest plugin for the ee v2 plugin ABI."
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "ee_plugin_example_wasm"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+ee-plugin-sdk = { path = "../ee-plugin-sdk" }
+serde_json.workspace = true

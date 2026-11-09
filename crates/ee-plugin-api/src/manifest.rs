@@ -27,6 +27,7 @@ pub const API_VERSION: &str = "ee-plugin/2";
 pub const KNOWN_PERMISSIONS: &[&str] = &[
     "agent.context.contribute",
     "agent.models.register",
+    "agent.network",
     "agent.policy.gate",
     "agent.policy.observe",
     "agent.sessions.control",
@@ -47,6 +48,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "editor.fs.write",
     "editor.lsp.read",
     "editor.lsp.write",
+    "editor.network",
     "editor.selection.read",
     "editor.selection.write",
     "editor.syntax.read",

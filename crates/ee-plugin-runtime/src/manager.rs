@@ -36,6 +36,8 @@ use crate::health::{HealthPolicy, HealthReason, HealthSnapshot, HealthState, Hea
 use crate::host_impl::{MemoryCommandRegistry, MemoryContributionSink};
 use crate::native::{NativeClient, NativeSpec};
 use crate::resolver::{self, Resolution};
+#[cfg(feature = "wasm")]
+use crate::wasm::{WasmClient, WasmSpec};
 
 /// Configuration for one manager instance.
 #[derive(Debug, Clone)]
@@ -130,8 +132,12 @@ struct OriginInfo {
 }
 
 enum PluginInstance {
-    Builtin { context: PluginContext },
+    Builtin {
+        context: PluginContext,
+    },
     Native(Box<NativeClient>),
+    #[cfg(feature = "wasm")]
+    Wasm(Box<WasmClient>),
 }
 
 struct RunningPlugin {
@@ -241,7 +247,7 @@ impl PluginManager {
         &self.manifests
     }
 
-    /// Queue one event for every active native plugin.
+    /// Queue one event for every active external (native or Wasm) plugin.
     ///
     /// Delivery is coalesced: only the newest payload per plugin is sent on the
     /// next [`PluginManager::pump`], so external plugins cannot build unbounded
@@ -249,7 +255,7 @@ impl PluginManager {
     /// typed event through the shared [`EventBus`], which the host owns.
     pub fn emit_event(&mut self, name: &str, revision: u64, payload: Value) {
         for plugin in &self.running {
-            if !matches!(plugin.instance, PluginInstance::Native(_)) {
+            if matches!(plugin.instance, PluginInstance::Builtin { .. }) {
                 continue;
             }
             let queue = self.pending_events.entry(plugin.manifest.name.clone()).or_default();
@@ -263,11 +269,11 @@ impl PluginManager {
         }
     }
 
-    /// Dispatch a command to the native plugin that contributes it.
+    /// Dispatch a command to the external plugin that contributes it.
     ///
-    /// Returns `Ok(None)` when no active native plugin owns the id; callers
+    /// Returns `Ok(None)` when no active external plugin owns the id; callers
     /// then fall back to the in-process command registry. Effects produced by
-    /// the native plugin are submitted through the host adapter.
+    /// the plugin are submitted through the host adapter.
     pub fn invoke_command(
         &mut self,
         id: &ee_plugin_api::ids::CommandId,
@@ -282,33 +288,55 @@ impl PluginManager {
             }
             return match &mut plugin.instance {
                 PluginInstance::Native(client) => client.invoke_view(id, view_id, args).map(Some),
+                #[cfg(feature = "wasm")]
+                PluginInstance::Wasm(client) => client.invoke_view(id, view_id, args).map(Some),
                 PluginInstance::Builtin { .. } => Ok(None),
             };
         }
         Ok(None)
     }
 
-    /// Drain pending native-plugin messages without blocking.
+    /// Drain pending external-plugin messages without blocking.
     ///
     /// Effects and service requests are applied through the host adapter on the
-    /// calling thread, matching command dispatch ordering.
+    /// calling thread, matching command dispatch ordering. Wasm calls are
+    /// synchronous, so their queued events are delivered immediately.
     pub fn pump(&mut self) -> Vec<(String, PluginError)> {
         let mut failures = Vec::new();
         let pending = std::mem::take(&mut self.pending_events);
         for plugin in &mut self.running {
-            let PluginInstance::Native(client) = &mut plugin.instance else {
-                continue;
-            };
-            if let Some(queue) = pending.get(&plugin.manifest.name) {
-                for (name, revision, payload) in queue {
-                    if let Err(error) = client.send_event(name, *revision, payload.clone()) {
+            let queue = pending.get(&plugin.manifest.name);
+            match &mut plugin.instance {
+                PluginInstance::Builtin { .. } => continue,
+                PluginInstance::Native(client) => {
+                    if let Some(queue) = queue {
+                        for (name, revision, payload) in queue {
+                            if let Err(error) = client.send_event(name, *revision, payload.clone())
+                            {
+                                failures.push((plugin.manifest.name.clone(), error));
+                                break;
+                            }
+                        }
+                    }
+                    if let Err(error) = client.pump_for(std::time::Duration::from_millis(2)) {
                         failures.push((plugin.manifest.name.clone(), error));
-                        break;
                     }
                 }
-            }
-            if let Err(error) = client.pump_for(std::time::Duration::from_millis(2)) {
-                failures.push((plugin.manifest.name.clone(), error));
+                #[cfg(feature = "wasm")]
+                PluginInstance::Wasm(client) => {
+                    if let Some(queue) = queue {
+                        for (name, revision, payload) in queue {
+                            if let Err(error) = client.send_event(name, *revision, payload.clone())
+                            {
+                                failures.push((plugin.manifest.name.clone(), error));
+                                break;
+                            }
+                        }
+                    }
+                    if let Err(error) = client.pump() {
+                        failures.push((plugin.manifest.name.clone(), error));
+                    }
+                }
             }
         }
         failures
@@ -715,6 +743,11 @@ impl PluginManager {
                         let _ = client.plugin_id();
                         "native".to_owned()
                     }
+                    #[cfg(feature = "wasm")]
+                    PluginInstance::Wasm(client) => {
+                        let _ = client.plugin_id();
+                        "wasm".to_owned()
+                    }
                 }
             } else {
                 manifest.kind.as_str().to_owned()
@@ -906,6 +939,7 @@ impl PluginManager {
                     self.config.host_kind,
                     services,
                     config,
+                    &self.config.workspace,
                 )?;
                 let client = NativeClient::spawn(
                     spec,
@@ -915,9 +949,31 @@ impl PluginManager {
                 PluginInstance::Native(Box::new(client))
             }
             PluginKind::Wasm => {
-                return Err(PluginError::Unsupported {
-                    feature: "wasm plugin transport (Phase 6)",
-                });
+                #[cfg(feature = "wasm")]
+                {
+                    let services =
+                        self.services.read().map(|registry| registry.ids()).unwrap_or_default();
+                    let mut spec = WasmSpec::from_manifest(
+                        manifest,
+                        &origin.manifest_dir,
+                        &self.config.workspace,
+                    )?;
+                    spec.host = self.config.host_kind;
+                    spec.services = services;
+                    spec.config = config;
+                    let client = WasmClient::spawn(
+                        spec,
+                        Arc::clone(&self.adapter),
+                        Arc::clone(&self.contributions),
+                    )?;
+                    PluginInstance::Wasm(Box::new(client))
+                }
+                #[cfg(not(feature = "wasm"))]
+                {
+                    return Err(PluginError::Unsupported {
+                        feature: "wasm plugin transport (build ee-plugin-runtime with `wasm`)",
+                    });
+                }
             }
         };
 

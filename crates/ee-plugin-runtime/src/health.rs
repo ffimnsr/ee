@@ -67,6 +67,67 @@ impl HealthReason {
     }
 }
 
+/// Why a plugin instance stopped.
+///
+/// Runtime transports record this instead of collapsing every stop into a
+/// generic crash, so hosts can distinguish clean exits from resource breaches
+/// and timeouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationReason {
+    /// The plugin exited on its own or acknowledged shutdown.
+    CleanExit,
+    /// The process exited without a shutdown handshake or trapped.
+    Crashed,
+    /// Resident set size crossed the manifest memory cap.
+    RssLimit,
+    /// Accumulated CPU time crossed the manifest CPU cap.
+    CpuLimit,
+    /// An RPC or initialize handshake exceeded `rpc_timeout_ms`.
+    RpcTimeout,
+    /// Retained stderr crossed the runtime cap.
+    StderrLimit,
+    /// The plugin ignored shutdown and was killed after the grace period.
+    ShutdownTimeout,
+    /// Wasm fuel was exhausted.
+    FuelExhausted,
+    /// A Wasm memory growth request was denied.
+    MemoryLimit,
+    /// A Wasm call trapped.
+    Trap,
+    /// The host shut the plugin down.
+    HostShutdown,
+}
+
+impl TerminationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CleanExit => "clean_exit",
+            Self::Crashed => "crashed",
+            Self::RssLimit => "rss_limit",
+            Self::CpuLimit => "cpu_limit",
+            Self::RpcTimeout => "rpc_timeout",
+            Self::StderrLimit => "stderr_limit",
+            Self::ShutdownTimeout => "shutdown_timeout",
+            Self::FuelExhausted => "fuel_exhausted",
+            Self::MemoryLimit => "memory_limit",
+            Self::Trap => "trap",
+            Self::HostShutdown => "host_shutdown",
+        }
+    }
+
+    /// Health reason reported for a termination.
+    pub fn health_reason(self) -> HealthReason {
+        match self {
+            Self::CleanExit | Self::HostShutdown => HealthReason::Stopped,
+            Self::Crashed | Self::Trap | Self::StderrLimit => HealthReason::Crashed,
+            Self::RssLimit | Self::CpuLimit | Self::MemoryLimit => HealthReason::ResourceLimit,
+            Self::RpcTimeout => HealthReason::TransportTimeout,
+            Self::FuelExhausted | Self::ShutdownTimeout => HealthReason::ResourceLimit,
+        }
+    }
+}
+
 /// Restart policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealthPolicy {
