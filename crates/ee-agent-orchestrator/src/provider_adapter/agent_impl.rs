@@ -53,6 +53,7 @@ impl AgentProvider for OrchestratorProvider {
         let implementation = self.config.implementation.clone();
         let next_session = self.next_session.clone();
         let recovery_enabled = config.recovery.enabled;
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             // Monotonic id per process, raised past ids that survive in the
             // durable stores so a reconnected session is never shadowed by a
@@ -65,14 +66,18 @@ impl AgentProvider for OrchestratorProvider {
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mode = default_session_mode();
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let runtime = Arc::new(OrchestratorRuntime::with_shared_model_registry(
-                config,
-                models,
-                mode_policy(&policy, &mode)?,
-            )?);
+            let runtime = Arc::new(
+                OrchestratorRuntime::with_shared_model_registry(
+                    config,
+                    models,
+                    plugins.gate_policy(mode_policy(&policy, &mode)?),
+                )?
+                .with_plugin_observer(plugins.bridge().observer(session_id.to_string())),
+            );
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
+            plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
             let entry = SessionRuntime {
                 runtime,
                 system_context,
@@ -112,6 +117,7 @@ impl AgentProvider for OrchestratorProvider {
         let session_store = self.session_store.clone();
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
@@ -142,11 +148,16 @@ impl AgentProvider for OrchestratorProvider {
                 Some(state) => {
                     let mode = state.mode;
                     (
-                        Arc::new(OrchestratorRuntime::with_shared_model_registry(
-                            config,
-                            models.clone(),
-                            mode_policy(&policy, &mode)?,
-                        )?),
+                        Arc::new(
+                            OrchestratorRuntime::with_shared_model_registry(
+                                config,
+                                models.clone(),
+                                plugins.gate_policy(mode_policy(&policy, &mode)?),
+                            )?
+                            .with_plugin_observer(
+                                plugins.bridge().observer(session_id.to_string()),
+                            ),
+                        ),
                         Vec::new(),
                         mode,
                     )
@@ -179,7 +190,8 @@ impl AgentProvider for OrchestratorProvider {
                         &checkpoint,
                         &implementation.name,
                         models.clone(),
-                        mode_policy(&policy, &mode)?,
+                        plugins.gate_policy(mode_policy(&policy, &mode)?),
+                        Some(plugins.bridge().observer(session_id.to_string())),
                     )?;
                     // Durable checkpoints contain no transcript content, so
                     // crash restore never replays user or model text.
@@ -190,6 +202,7 @@ impl AgentProvider for OrchestratorProvider {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
             replay_conversation(ctx.replay_sink.as_ref(), &conversation)?;
+            plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
             sessions.lock().expect("adapter sessions poisoned").insert(
                 session_id.to_string(),
                 SessionRuntime {
@@ -219,6 +232,7 @@ impl AgentProvider for OrchestratorProvider {
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
         let recovery_durable = config.recovery.is_durable();
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             if !recovery_durable {
                 return Err(ProviderError::BackendFailure(
@@ -260,7 +274,8 @@ impl AgentProvider for OrchestratorProvider {
                     &checkpoint,
                     &implementation.name,
                     models.clone(),
-                    mode_policy(&policy, &mode)?,
+                    plugins.gate_policy(mode_policy(&policy, &mode)?),
+                    Some(plugins.bridge().observer(session_id.to_string())),
                 )?;
                 runtime.register_builtins(&session_id).map_err(|error| {
                     ProviderError::BackendFailure(format!(
@@ -269,6 +284,7 @@ impl AgentProvider for OrchestratorProvider {
                 })?;
                 let system_context =
                     workspace_system_context(&ctx.cwd, &ctx.additional_directories);
+                plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
                 // The checkpoint stays pending: the next prompt resumes it.
                 sessions.lock().expect("adapter sessions poisoned").insert(
                     session_id.to_string(),
@@ -306,6 +322,7 @@ impl AgentProvider for OrchestratorProvider {
         let telemetry = self.telemetry.clone();
         let telemetry_attribution = self.config.telemetry_attribution.clone();
         let next_telemetry_turn = self.next_telemetry_turn.clone();
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             let session = {
                 let sessions = sessions.lock().expect("adapter sessions poisoned");
@@ -505,12 +522,36 @@ impl AgentProvider for OrchestratorProvider {
             let mut diagnostics = manager.discover_all().await;
             let manager = Arc::new(manager);
             let mut registered = Vec::new();
+            // Mirror prompt-scoped MCP tools through `agent.tools` so scope
+            // ownership and disposal are observable by plugins. The runtime
+            // registry remains the execution path.
+            let plugin_turn =
+                plugins.sessions().session(&session_id.to_string()).and_then(|session| {
+                    let turn = session.next_turn();
+                    session.turn_scope(turn).ok()
+                });
+            let mut host_tool_disposers = Vec::new();
+            let mcp_plugin = ee_plugin_api::ids::PluginId::new("ee.mcp").ok();
             let definitions = manager.tool_definitions();
+            let host_turn =
+                plugin_turn.as_ref().map(|turn| crate::plugin_runtime::services::ToolScope::Turn {
+                    session_id: session_id.to_string(),
+                    turn: turn.turn(),
+                });
             for definition in definitions {
-                match runtime.register_tool(Arc::new(McpBackedTool::new(
-                    definition.clone(),
-                    manager.clone(),
-                ))) {
+                let tool: Arc<dyn crate::tools::ServerTool> =
+                    Arc::new(McpBackedTool::new(definition.clone(), manager.clone()));
+                if let (Some(plugin), Some(scope)) = (mcp_plugin.as_ref(), host_turn.clone())
+                    && let Ok(disposer) = plugins.tools().register_for_session(
+                        plugin,
+                        scope,
+                        Some(&session_id.to_string()),
+                        Arc::clone(&tool),
+                    )
+                {
+                    host_tool_disposers.push(disposer);
+                }
+                match runtime.register_tool(tool) {
                     Ok(()) => registered.push(definition.name),
                     Err(error) => diagnostics.push(McpDiscoveryDiagnostic {
                         server_id: "mcp".to_string(),
@@ -521,6 +562,7 @@ impl AgentProvider for OrchestratorProvider {
                     }),
                 }
             }
+            drop(host_turn);
             emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
             let cleanup =
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
@@ -699,8 +741,9 @@ impl AgentProvider for OrchestratorProvider {
         let session_store = self.session_store.clone();
         let implementation_name = self.config.implementation.name.clone();
         let base_policy = self.policy.clone();
+        let plugins = self.plugins.clone();
         Box::pin(async move {
-            let policy = mode_policy(&base_policy, &ctx.mode_id)?;
+            let policy = plugins.gate_policy(mode_policy(&base_policy, &ctx.mode_id)?);
             {
                 let mut sessions = sessions.lock().expect("adapter sessions poisoned");
                 let Some(session) = sessions.get_mut(&ctx.session_id.to_string()) else {
@@ -723,6 +766,7 @@ impl AgentProvider for OrchestratorProvider {
 
     fn cancel_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
         let sessions = self.sessions.clone();
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             // Framework cancellation reaches the parent watch; explicit child
             // cancellation also covers queued children and targeted registry
@@ -731,6 +775,9 @@ impl AgentProvider for OrchestratorProvider {
                 sessions.lock().expect("adapter sessions poisoned").get(&session_id.to_string())
             {
                 session.runtime.cancel_all_children();
+            }
+            if let Some(session) = plugins.sessions().session(&session_id.to_string()) {
+                session.cancel();
             }
             Ok(())
         })
@@ -741,9 +788,13 @@ impl AgentProvider for OrchestratorProvider {
         let persisted = self.persisted.clone();
         let session_store = self.session_store.clone();
         let implementation_name = self.config.implementation.name.clone();
+        let plugins = self.plugins.clone();
         Box::pin(async move {
             // The framework awaits the active prompt's cleanup (bounded)
             // before invoking this hook, so serializing the stores is safe.
+            if let Some(session) = plugins.sessions().session(&session_id.to_string()) {
+                session.close("session closed");
+            }
             let Some(runtime) =
                 sessions.lock().expect("adapter sessions poisoned").remove(&session_id.to_string())
             else {

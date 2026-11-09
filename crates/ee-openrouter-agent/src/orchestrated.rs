@@ -195,10 +195,21 @@ pub fn openrouter_multi_model_provider(
         ),
     };
 
-    let provider = OrchestratorProvider::with_model_registry(
-        openrouter_orchestrator_config(config, session_state_dir),
+    let provider_config = openrouter_orchestrator_config(config, session_state_dir);
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let plugins = Arc::new(
+        ee_agent_orchestrator::plugin_runtime::AgentPluginHost::new(
+            ee_agent_orchestrator::plugin_runtime::AgentPluginHostConfig::new(workspace),
+            Arc::new(ee_agent_orchestrator::plugin_runtime::NoopAgentNotifier),
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    plugins.models().adopt_registry(&registry).map_err(|error| error.to_string())?;
+    let provider = OrchestratorProvider::with_model_registry_and_host(
+        provider_config,
         registry,
         openrouter_orchestrated_policy(),
+        plugins,
     )
     .map_err(|error| error.to_string())?;
     Ok((provider, critic_warning))

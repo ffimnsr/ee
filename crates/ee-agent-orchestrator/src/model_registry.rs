@@ -333,6 +333,22 @@ impl ModelRegistry {
         self.entries.get(id).map(|entry| entry.adapter.clone())
     }
 
+    /// Every registered adapter with its id and registration metadata, sorted by
+    /// id. Plugin hosts mirror the provider-owned registry through this accessor
+    /// without duplicating identity rules.
+    #[must_use]
+    pub fn registrations(&self) -> Vec<(String, Arc<dyn ModelAdapter>, ModelRegistration)> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), Arc::clone(&entry.adapter), entry.registration.clone()))
+            .collect()
+    }
+
+    /// Removes one adapter by id; returns whether it existed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        self.entries.remove(id).is_some()
+    }
+
     #[must_use]
     pub fn info(&self, id: &str) -> Option<ModelInfo> {
         self.entries.get(id).map(|entry| model_info(id, entry))

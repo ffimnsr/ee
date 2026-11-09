@@ -35,6 +35,9 @@
 //! - [`budget`] — per-turn budget tracking: iterations, model calls, tools,
 //!   subagents, output bytes, optional token caps, and a wall-clock deadline.
 //! - [`policy`] — the conservative default tool policy.
+//! - [`plugin_runtime`] — agent plugin host: `agent.*` services, session/turn
+//!   scopes, `agent.*` events, structured effects, and the mandatory-first
+//!   policy/approval bridge.
 //! - [`events`] — loop event types and the test recorder.
 //! - [`subagents`] — logical in-process subagents with depth/parallelism
 //!   limits, scoped roles, and bounded structured handoffs.
@@ -192,6 +195,7 @@ pub mod model_router;
 pub mod observability;
 pub mod parallel_tools;
 pub mod plan_compiler;
+pub mod plugin_runtime;
 pub mod policy;
 pub mod progress;
 pub mod progress_scoring;

@@ -420,57 +420,57 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 **Rules:**
 
 - Mandatory policy, approval, workspace trust, destructive-operation safeguards, budget, and write transaction checks run before plugin listeners.
-- Plugin tools execute through the existing `ToolExecutor` pipeline; plugins do not bypass cache, retries, or evidence checks.
+- Plugin tools execute through the exiscan we implement phase 5ting `ToolExecutor` pipeline; plugins do not bypass cache, retries, or evidence checks.
 - Session-scoped contributions dispose at session close; turn-scoped contributions dispose at turn end.
 - Agent plugins cannot write editor UI directly; they return structured tool results.
 - Replay fixtures remain deterministic with and without plugin registration.
 
 **Work items:**
 
-- [ ] Add `crates/ee-agent-orchestrator/src/plugin_runtime/` and `host.rs`.
-  - [ ] Add `AgentPluginHost` owning `PluginManager`, service registry, session scopes, and diagnostics.
-  - [ ] Add `start`, `session_scope`, `turn_scope`, `stop`, and `status`.
-  - [ ] Add tests for host start/stop, session scope disposal, and turn scope disposal.
-- [ ] Implement `services/tools.rs`.
-  - [ ] Wrap `ToolRegistry` with service registration/removal and list definitions.
-  - [ ] Register builtin tools through the service path.
-  - [ ] Reject duplicate tool names and session-scope mismatches.
-  - [ ] Add tests for register, remove, duplicate, session scope, and builtin registration.
-- [ ] Implement `services/models.rs`.
-  - [ ] Wrap `ModelRegistry` and `ModelRouter` adapter registration.
-  - [ ] Add model metadata and routing hints.
-  - [ ] Add tests for adapter registration, route resolution, missing adapter, and duplicate id.
-- [ ] Implement `services/policy.rs`.
-  - [ ] Add `agent.tool.before` and `agent.approval.before` bail listeners.
-  - [ ] Ensure mandatory deny/safeguard rules run before plugin listeners.
-  - [ ] Add tests for plugin allow, plugin deny, mandatory deny override, and approval non-bypass.
-- [ ] Implement `services/context.rs`, `services/strategies.rs`, `services/validation.rs`.
-  - [ ] Add bounded context providers with trust labels and byte caps.
-  - [ ] Add strategy candidates with deterministic host selection.
-  - [ ] Add validation planners/metadata with existing executor routing.
-  - [ ] Add tests for context cap, trust labeling, strategy selection, validation routing, and provenance.
-- [ ] Implement `services/sessions.rs`.
-  - [ ] Add session lifecycle events and session-scoped contributions.
-  - [ ] Add cancellation, checkpoint, and close handling.
-  - [ ] Add tests for create, cancel, close, checkpoint, and disposal.
-- [ ] Implement `events.rs`, `effects.rs`, and `bridge.rs`.
-  - [ ] Emit `agent.turn.*`, `agent.model.*`, `agent.tool.*`, `agent.approval.*`, `agent.context.*`, `agent.strategy.*`, `agent.subagent.*`, `agent.validation.*`, and `agent.session.*` from existing boundaries.
-  - [ ] Apply effects for tool results, context updates, and session control.
-  - [ ] Add tests for event order, bail precedence, effect application, and cancellation.
-- [ ] Wire provider crates.
-  - [ ] Update `ee-openrouter-agent` to construct `AgentPluginHost` and register its model adapter.
-  - [ ] Update `ee-opencode-agent` to construct `AgentPluginHost` and register its model adapter.
-  - [ ] Update `ee-agent-host` to forward plugin health/status to the frontend.
-  - [ ] Add tests for provider construction and adapter registration.
-- [ ] Bridge MCP and remote ACP into the service path.
-  - [ ] Register MCP tools through `agent.tools` with prompt-scoped disposal.
-  - [ ] Keep MCP policy, approval, redaction, and manifest gating.
-  - [ ] Keep ACP provider tools as remote transports, not in-process plugins.
-  - [ ] Add tests for prompt-scoped MCP registration, removal, policy denial, and redaction.
-- [ ] Add replay and determinism tests.
-  - [ ] Run existing replay fixtures with no plugins and with a fake agent plugin.
-  - [ ] Assert identical event trace, stop reason, and tool outcomes when the plugin is observational.
-  - [ ] Assert deterministic event trace when a plugin adds an allow-listed context provider.
+- [x] Add `crates/ee-agent-orchestrator/src/plugin_runtime/` and `host.rs`.
+  - [x] Add `AgentPluginHost` owning `PluginManager`, service registry, session scopes, and diagnostics.
+  - [x] Add `start`, `session_scope`, `turn_scope`, `stop`, and `status`.
+  - [x] Add tests for host start/stop, session scope disposal, and turn scope disposal.
+- [x] Implement `services/tools.rs`.
+  - [x] Wrap `ToolRegistry` with service registration/removal and list definitions.
+  - [x] Register builtin tools through the service path.
+  - [x] Reject duplicate tool names and session-scope mismatches.
+  - [x] Add tests for register, remove, duplicate, session scope, and builtin registration.
+- [x] Implement `services/models.rs`.
+  - [x] Wrap `ModelRegistry` and `ModelRouter` adapter registration.
+  - [x] Add model metadata and routing hints.
+  - [x] Add tests for adapter registration, route resolution, missing adapter, and duplicate id.
+- [x] Implement `services/policy.rs`.
+  - [x] Add `agent.tool.before` and `agent.approval.before` bail listeners.
+  - [x] Ensure mandatory deny/safeguard rules run before plugin listeners.
+  - [x] Add tests for plugin allow, plugin deny, mandatory deny override, and approval non-bypass.
+- [x] Implement `services/context.rs`, `services/strategies.rs`, `services/validation.rs`.
+  - [x] Add bounded context providers with trust labels and byte caps.
+  - [x] Add strategy candidates with deterministic host selection.
+  - [x] Add validation planners/metadata with existing executor routing.
+  - [x] Add tests for context cap, trust labeling, strategy selection, validation routing, and provenance.
+- [x] Implement `services/sessions.rs`.
+  - [x] Add session lifecycle events and session-scoped contributions.
+  - [x] Add cancellation, checkpoint, and close handling.
+  - [x] Add tests for create, cancel, close, checkpoint, and disposal.
+- [x] Implement `events.rs`, `effects.rs`, and `bridge.rs`.
+  - [x] Emit `agent.turn.*`, `agent.model.*`, `agent.tool.*`, `agent.approval.*`, `agent.context.*`, `agent.strategy.*`, `agent.subagent.*`, `agent.validation.*`, and `agent.session.*` from existing boundaries.
+  - [x] Apply effects for tool results, context updates, and session control.
+  - [x] Add tests for event order, bail precedence, effect application, and cancellation.
+- [x] Wire provider crates.
+  - [x] Update `ee-openrouter-agent` to construct `AgentPluginHost` and register its model adapter.
+  - [x] Update `ee-opencode-agent` to construct `AgentPluginHost` and register its model adapter.
+  - [x] Update `ee-agent-host` to forward plugin health/status to the frontend.
+  - [x] Add tests for provider construction and adapter registration.
+- [x] Bridge MCP and remote ACP into the service path.
+  - [x] Register MCP tools through `agent.tools` with prompt-scoped disposal.
+  - [x] Keep MCP policy, approval, redaction, and manifest gating.
+  - [x] Keep ACP provider tools as remote transports, not in-process plugins.
+  - [x] Add tests for prompt-scoped MCP registration, removal, policy denial, and redaction.
+- [x] Add replay and determinism tests.
+  - [x] Run existing replay fixtures with no plugins and with a fake agent plugin.
+  - [x] Assert identical event trace, stop reason, and tool outcomes when the plugin is observational.
+  - [x] Assert deterministic event trace when a plugin adds an allow-listed context provider.
 
 **Acceptance criteria:**
 

@@ -399,6 +399,19 @@ impl App {
                     }
                 }
             }
+            AgentEvent::PluginStatusChanged { agent_id, report } => {
+                let active = report.plugins.iter().filter(|plugin| plugin.active).count();
+                let notice = format!(
+                    "agent plugins: {active}/{} active, {} diagnostic(s)",
+                    report.plugins.len(),
+                    report.diagnostics
+                );
+                for thread in &mut self.agents.threads {
+                    if thread.agent_id == agent_id {
+                        thread.push_system(notice.clone());
+                    }
+                }
+            }
         }
     }
 

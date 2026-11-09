@@ -8,6 +8,7 @@
 //! Events never carry secrets: stderr lines are capped, and permission
 //! events carry only the wire `PermissionOption` values the agent sent.
 
+use ee_agent_orchestrator::plugin_runtime::AgentHealthReport;
 use ee_agent_protocol::{
     AgentCapabilities, AuthMethod, ElicitationId, Implementation, PermissionOption,
     RequestPermissionOutcome, SessionId, SessionUpdate, StopReason, ToolCallUpdate,
@@ -190,6 +191,11 @@ pub enum AgentEvent {
     /// Bounded: the host keeps at most [`crate::process::STDERR_MAX_LINES`]
     /// lines and truncates each line.
     StderrLine { agent_id: String, line: String },
+    /// The agent process reported bounded plugin health/status.
+    ///
+    /// The report carries plugin names, versions, active flags, health states,
+    /// and diagnostic counts only; no plugin output or workspace content.
+    PluginStatusChanged { agent_id: String, report: Box<AgentHealthReport> },
 }
 
 /// Why a session thread closed.

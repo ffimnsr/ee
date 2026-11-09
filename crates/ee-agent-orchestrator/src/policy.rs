@@ -5,8 +5,11 @@
 //! bounded by subagent depth and parallel-count limits (subagent phase).
 
 use std::collections::{BTreeSet, HashSet};
+use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::destructive_policy::SideEffectSubclass;
 use crate::tools::{SideEffectClass, ToolDefinition};
@@ -120,20 +123,85 @@ impl PolicyDecision {
     }
 }
 
+/// Plugin policy listener evaluated after every mandatory gate passed.
+///
+/// Implementations must not re-run or bypass mandatory policy. They may deny an
+/// operation the host allowed; they cannot allow one the host denied because the
+/// gate is only consulted after the host decision is already `allow`.
+pub trait PluginPolicyGate: Send + Sync + fmt::Debug {
+    fn check_tool(
+        &self,
+        tool: &ToolDefinition,
+        context: PolicyContext,
+        arguments: &Value,
+    ) -> PolicyDecision;
+}
+
 /// Immutable policy gate checked before every tool execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PolicyEngine {
     policy: ToolPolicy,
     /// Exact optional dispatch allowlist. Used by immutable critic policy as a
     /// second gate matching model-visible tool discovery.
     allowed_tool_names: Option<BTreeSet<String>>,
+    /// Plugin gate consulted only after every mandatory check passed.
+    #[serde(skip)]
+    plugin_gate: Option<Arc<dyn PluginPolicyGate>>,
 }
+
+impl fmt::Debug for PolicyEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PolicyEngine")
+            .field("policy", &self.policy)
+            .field("allowed_tool_names", &self.allowed_tool_names)
+            .field("plugin_gate", &self.plugin_gate.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for PolicyEngine {
+    fn eq(&self, other: &Self) -> bool {
+        self.policy == other.policy
+            && self.allowed_tool_names == other.allowed_tool_names
+            && match (&self.plugin_gate, &other.plugin_gate) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for PolicyEngine {}
 
 impl PolicyEngine {
     /// Creates an engine from a policy.
     #[must_use]
     pub fn new(policy: ToolPolicy) -> Self {
-        Self { policy, allowed_tool_names: None }
+        Self { policy, allowed_tool_names: None, plugin_gate: None }
+    }
+
+    /// Installs the plugin gate consulted after mandatory checks.
+    #[must_use]
+    pub fn with_plugin_gate(mut self, gate: Arc<dyn PluginPolicyGate>) -> Self {
+        self.plugin_gate = Some(gate);
+        self
+    }
+
+    /// Whether a plugin gate is installed.
+    #[must_use]
+    pub fn has_plugin_gate(&self) -> bool {
+        self.plugin_gate.is_some()
+    }
+
+    /// Plugin gate installed after mandatory policy, budget, and write checks.
+    ///
+    /// Execution hosts call this from the tool executor, not from
+    /// [`PolicyEngine::check_with_arguments`], so budget reservation and
+    /// write-transaction checks stay ahead of plugin listeners.
+    #[must_use]
+    pub fn plugin_gate(&self) -> Option<Arc<dyn PluginPolicyGate>> {
+        self.plugin_gate.clone()
     }
 
     /// Restricts dispatch to exact names, independent of side-effect metadata.

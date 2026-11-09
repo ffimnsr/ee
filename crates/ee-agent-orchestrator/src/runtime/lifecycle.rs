@@ -189,6 +189,16 @@ impl OrchestratorRuntime {
             last_repair_stop: Mutex::new(None),
         }
     }
+    /// Installs an observe-only observer on the runtime event recorder.
+    ///
+    /// The recorder keeps the same event buffer, so early events are not lost.
+    /// Plugin observation must never change loop decisions.
+    #[must_use]
+    pub fn with_plugin_observer(mut self, observer: crate::events::EventObserver) -> Self {
+        self.events = self.events.with_observer(move |event| observer(event));
+        self
+    }
+
     /// Replaces the active tool policy without resetting session state.
     pub fn set_policy(&self, policy: PolicyEngine) {
         *self.policy.write().expect("runtime policy poisoned") = policy;

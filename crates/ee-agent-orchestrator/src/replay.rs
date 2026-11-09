@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
-use crate::events::{EventRecorder, OrchestratorEvent};
+use crate::events::{EventObserver, EventRecorder, OrchestratorEvent};
 use crate::model::{ModelRequest, ModelResponse};
 use crate::policy::{PolicyEngine, ToolPolicy};
 use crate::runtime::OrchestratorRuntime;
@@ -52,6 +52,18 @@ pub struct ReplayScript {
     pub expected_events: Vec<OrchestratorEvent>,
     /// The expected final task graph (stable id order).
     pub expected_tasks: Vec<TaskNode>,
+    /// Optional observe-only event observer used by plugin determinism tests.
+    pub observer: Option<ReplayObserver>,
+}
+
+/// Observe-only replay observer wrapper with a stable `Debug` representation.
+#[derive(Clone)]
+pub struct ReplayObserver(pub EventObserver);
+
+impl std::fmt::Debug for ReplayObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReplayObserver")
+    }
 }
 
 impl ReplayScript {
@@ -67,6 +79,7 @@ impl ReplayScript {
             config: None,
             expected_events: Vec::new(),
             expected_tasks: Vec::new(),
+            observer: None,
         }
     }
 
@@ -109,6 +122,13 @@ impl ReplayScript {
     #[must_use]
     pub fn with_expected_tasks(mut self, tasks: Vec<TaskNode>) -> Self {
         self.expected_tasks = tasks;
+        self
+    }
+
+    /// Attaches an observe-only observer without changing the expected trace.
+    #[must_use]
+    pub fn with_observer(mut self, observer: EventObserver) -> Self {
+        self.observer = Some(ReplayObserver(observer));
         self
     }
 }
@@ -182,6 +202,13 @@ pub async fn run_replay(script: ReplayScript) -> ReplayOutcome {
         vec![ContentBlock::Text(TextContent::new(script.prompt_text.clone()))],
     );
     let events = EventRecorder::new();
+    let events = match &script.observer {
+        Some(observer) => {
+            let observer = Arc::clone(&observer.0);
+            events.with_observer(move |event: &OrchestratorEvent| observer(event))
+        }
+        None => events,
+    };
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let prompt_result =
         runtime.run_turn_recording(ctx, sink, client, cancel_rx, events.clone()).await;

@@ -135,10 +135,20 @@ fn provider_from_adapters(
     critic: Option<(OpenCodeRoute, Arc<dyn ModelAdapter>)>,
 ) -> Result<OrchestratorProvider, String> {
     let registry = registry_with_root(root, config.route, critic)?;
-    OrchestratorProvider::with_model_registry(
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let plugins = Arc::new(
+        ee_agent_orchestrator::plugin_runtime::AgentPluginHost::new(
+            ee_agent_orchestrator::plugin_runtime::AgentPluginHostConfig::new(workspace),
+            Arc::new(ee_agent_orchestrator::plugin_runtime::NoopAgentNotifier),
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    plugins.models().adopt_registry(&registry).map_err(|error| error.to_string())?;
+    OrchestratorProvider::with_model_registry_and_host(
         opencode_orchestrator_config(config, session_state_dir),
         registry,
         ee_agent_orchestrator::default_agent_policy(),
+        plugins,
     )
     .map_err(|error| error.to_string())
 }

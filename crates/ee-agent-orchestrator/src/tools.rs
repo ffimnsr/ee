@@ -1039,6 +1039,23 @@ impl ToolExecutor {
         // update lifecycle is still streamed from the cached result and the
         // tool call still counts against the per-turn budget.
         let session_id = sink.session_id().to_string();
+        // Plugin tool gates run after mandatory policy, budget reservation, and
+        // the write-transaction/ownership checks above. A plugin may deny an
+        // otherwise allowed call; it can never allow a mandatory denial.
+        if let Some(gate) = self.policy.plugin_gate() {
+            let decision = gate.check_tool(
+                &definition,
+                PolicyContext { subagent_depth: self.depth, active_delegates: 0 },
+                &intent.arguments,
+            );
+            if !decision.allow {
+                let reason =
+                    decision.reason.unwrap_or_else(|| "tool denied by plugin gate".to_string());
+                let result = ToolResult::failure(ToolErrorKind::PermissionDenied, reason);
+                emit_failed_tool(sink, intent, &result)?;
+                return Ok(result);
+            }
+        }
         if let Some(cache) = &self.cache {
             let key = cache_key(
                 &definition.name,

@@ -179,7 +179,9 @@ pub enum OrchestratorEvent {
     },
 }
 
-type EventObserver = Arc<dyn Fn(&OrchestratorEvent) + Send + Sync>;
+/// Observe-only event callback used by plugin bridges, runtime observers, and
+/// deterministic replay harnesses.
+pub type EventObserver = Arc<dyn Fn(&OrchestratorEvent) + Send + Sync>;
 
 /// Thread-safe in-memory recorder of [`OrchestratorEvent`] values.
 ///

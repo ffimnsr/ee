@@ -301,6 +301,21 @@ impl AgentManager {
             .map(AgentConnection::state)
     }
 
+    /// Forwards one bounded plugin health/status report to the frontend.
+    ///
+    /// Providers produce the report from their own `AgentPluginHost`; this
+    /// method never executes plugins and never inspects workspace content.
+    pub fn publish_plugin_status(
+        &self,
+        agent_id: impl Into<String>,
+        report: ee_agent_orchestrator::plugin_runtime::AgentHealthReport,
+    ) {
+        let _ = self.events.send(AgentEvent::PluginStatusChanged {
+            agent_id: agent_id.into(),
+            report: Box::new(report),
+        });
+    }
+
     /// The default agent id (`agents.default_agent` resolved by the caller),
     /// falling back to the single configured agent when unambiguous.
     #[must_use]
@@ -694,6 +709,29 @@ mod tests {
         config.agents.insert("secondary".into(), AgentProcessConfig::new("cat"));
         let (events, _rx) = mpsc::unbounded_channel();
         AgentManager::new(config, Arc::new(DenyAllHandler), events)
+    }
+
+    #[test]
+    fn plugin_status_is_forwarded_to_the_frontend() {
+        let mut config = AgentManagerConfig::default();
+        config.agents.insert("primary".into(), AgentProcessConfig::new("echo"));
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let manager = AgentManager::new(config, Arc::new(DenyAllHandler), events);
+        manager.publish_plugin_status(
+            "primary",
+            ee_agent_orchestrator::plugin_runtime::AgentHealthReport {
+                generation: 3,
+                plugins: Vec::new(),
+                diagnostics: 0,
+            },
+        );
+        match rx.try_recv().expect("event forwarded") {
+            AgentEvent::PluginStatusChanged { agent_id, report } => {
+                assert_eq!(agent_id, "primary");
+                assert_eq!(report.generation, 3);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

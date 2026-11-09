@@ -24,6 +24,8 @@ ee-acp-agent-server.workspace = true
 # the in-process fake MCP server used by MCP bridge tests.
 ee-mcp.workspace = true
 ee-agent-protocol.workspace = true
+ee-plugin-api.workspace = true
+ee-plugin-runtime.workspace = true
 futures.workspace = true
 globset.workspace = true
 rmcp.workspace = true

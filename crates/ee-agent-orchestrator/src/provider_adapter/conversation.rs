@@ -206,6 +206,7 @@ pub(super) fn restore_runtime_from_checkpoint(
     implementation_name: &str,
     models: Arc<crate::model_registry::ModelRegistry>,
     policy: PolicyEngine,
+    observer: Option<crate::events::EventObserver>,
 ) -> Result<Arc<OrchestratorRuntime>, ProviderError> {
     if checkpoint.provider != implementation_name {
         return Err(ProviderError::BackendFailure(format!(
@@ -213,9 +214,14 @@ pub(super) fn restore_runtime_from_checkpoint(
             checkpoint.provider, implementation_name
         )));
     }
-    OrchestratorRuntime::from_checkpoint_with_model_registry(checkpoint, models, policy)
-        .map(Arc::new)
-        .map_err(ProviderError::from)
+    let runtime =
+        OrchestratorRuntime::from_checkpoint_with_model_registry(checkpoint, models, policy)
+            .map_err(ProviderError::from)?;
+    let runtime = match observer {
+        Some(observer) => runtime.with_plugin_observer(observer),
+        None => runtime,
+    };
+    Ok(Arc::new(runtime))
 }
 
 /// Initial slash commands for orchestrated sessions. `/rubber-duck` is

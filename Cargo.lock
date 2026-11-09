@@ -1511,6 +1511,8 @@ dependencies = [
  "ee-agent-orchestrator",
  "ee-agent-protocol",
  "ee-mcp",
+ "ee-plugin-api",
+ "ee-plugin-runtime",
  "futures",
  "globset",
  "rmcp",

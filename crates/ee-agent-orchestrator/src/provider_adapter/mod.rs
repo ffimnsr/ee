@@ -499,6 +499,8 @@ pub struct OrchestratorProvider {
     config: OrchestratorProviderConfig,
     models: Arc<crate::model_registry::ModelRegistry>,
     policy: PolicyEngine,
+    /// Agent plugin host shared by every session (process-scoped).
+    plugins: Arc<crate::plugin_runtime::AgentPluginHost>,
     sessions: Arc<Mutex<HashMap<String, SessionRuntime>>>,
     persisted: Arc<Mutex<HashMap<String, PersistedSession>>>,
     session_store: Arc<SessionStateStore>,
@@ -517,6 +519,7 @@ impl Clone for OrchestratorProvider {
             config: self.config.clone(),
             models: self.models.clone(),
             policy: self.policy.clone(),
+            plugins: self.plugins.clone(),
             sessions: self.sessions.clone(),
             persisted: self.persisted.clone(),
             session_store: self.session_store.clone(),

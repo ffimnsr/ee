@@ -29,7 +29,35 @@ impl OrchestratorProvider {
         models: crate::model_registry::ModelRegistry,
         policy: PolicyEngine,
     ) -> Result<Self, ProviderError> {
+        let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let plugins = crate::plugin_runtime::AgentPluginHost::new(
+            crate::plugin_runtime::AgentPluginHostConfig::new(workspace),
+            std::sync::Arc::new(crate::plugin_runtime::NoopAgentNotifier),
+        )
+        .map_err(ProviderError::from)?;
+        Self::with_model_registry_and_host(config, models, policy, std::sync::Arc::new(plugins))
+    }
+
+    /// Creates a provider with an explicitly constructed agent plugin host.
+    ///
+    /// Providers register their model adapters into the host before calling
+    /// this constructor; the host mirrors the registry for plugin metadata and
+    /// deterministic routing hints.
+    pub fn with_model_registry_and_host(
+        config: OrchestratorProviderConfig,
+        models: crate::model_registry::ModelRegistry,
+        policy: PolicyEngine,
+        plugins: std::sync::Arc<crate::plugin_runtime::AgentPluginHost>,
+    ) -> Result<Self, ProviderError> {
         models.default_adapter().map_err(ProviderError::from)?;
+        plugins.models().adopt_registry(&models).map_err(|error| {
+            ProviderError::BackendFailure(format!("failed to mirror model registry: {error}"))
+        })?;
+        // Mandatory policy runs without the plugin gate; the gate is installed on
+        // the effective engine the loop uses.
+        plugins.policy().set_mandatory(policy.clone());
+        let policy = plugins.gate_policy(policy);
+        plugins.start().map_err(ProviderError::from)?;
         let session_store = Arc::new(SessionStateStore::new(
             config.session_state_dir.clone(),
             config.max_session_state_bytes,
@@ -41,6 +69,7 @@ impl OrchestratorProvider {
             config,
             models: Arc::new(models),
             policy,
+            plugins,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             persisted: Arc::new(Mutex::new(HashMap::new())),
             session_store,
@@ -54,6 +83,18 @@ impl OrchestratorProvider {
     #[must_use]
     pub fn registered_models(&self) -> Vec<crate::model_registry::ModelInfo> {
         self.models.advertised()
+    }
+
+    /// Process-scoped agent plugin host.
+    #[must_use]
+    pub fn plugin_host(&self) -> std::sync::Arc<crate::plugin_runtime::AgentPluginHost> {
+        self.plugins.clone()
+    }
+
+    /// Bounded plugin health/status snapshot for host forwarding.
+    #[must_use]
+    pub fn plugin_health(&self) -> crate::plugin_runtime::AgentHealthReport {
+        self.plugins.health_report()
     }
     /// Exports retained privacy-safe telemetry as local JSONL. This never
     /// writes files or sends data over the network; caller owns destination.
