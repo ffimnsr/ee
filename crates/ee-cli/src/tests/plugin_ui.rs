@@ -394,6 +394,61 @@ fn unknown_dynamic_panel_is_diagnosed_and_not_rendered() {
 }
 
 #[test]
+fn dynamic_status_updates_override_and_remove_status_items() {
+    let mut state = PluginUiState::new();
+    state.apply_batch(&batch(1, demo_contributions(), json!([]))).unwrap();
+
+    state
+        .apply_ui_update(
+            &PluginUiUpdate::parse(&json!({
+                "kind": "status",
+                "key": "outline.status",
+                "text": "outline: busy",
+                "alignment": "right",
+                "priority": 21
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let status = state.status_items();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].1, "outline: busy");
+    assert_eq!(status[0].3, 21);
+
+    // Plugin status keys are dynamic, so an update without a static descriptor
+    // is still rendered instead of being rejected.
+    state
+        .apply_ui_update(
+            &PluginUiUpdate::parse(&json!({
+                "kind": "status",
+                "key": "lsp:rust:routes",
+                "text": "lsp:rust: rust-analyzer"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(state.status_items().iter().any(|(key, text, _, _)| {
+        key == "lsp:rust:routes" && text == "lsp:rust: rust-analyzer"
+    }));
+
+    state
+        .apply_ui_update(
+            &PluginUiUpdate::parse(&json!({"kind": "status_remove", "key": "lsp:rust:routes"}))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(!state.status_items().iter().any(|(key, _, _, _)| key == "lsp:rust:routes"));
+
+    state
+        .apply_ui_update(
+            &PluginUiUpdate::parse(&json!({"kind": "status_remove", "key": "outline.status"}))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(state.status_items().is_empty());
+}
+
+#[test]
 fn status_and_health_snapshots_become_displayable_diagnostics() {
     let mut state = PluginUiState::new();
     let status = PluginStatusSnapshot::parse(&json!({

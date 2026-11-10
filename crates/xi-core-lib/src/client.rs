@@ -212,47 +212,6 @@ impl Client {
         );
     }
 
-    pub fn add_status_item(
-        &self,
-        view_id: ViewId,
-        source: &str,
-        key: &str,
-        value: &str,
-        alignment: &str,
-    ) {
-        self.0.send_rpc_notification(
-            "add_status_item",
-            &json!({
-                "view_id": view_id,
-                "source": source,
-                "key": key,
-                "value": value,
-                "alignment": alignment
-            }),
-        );
-    }
-
-    pub fn update_status_item(&self, view_id: ViewId, key: &str, value: &str) {
-        self.0.send_rpc_notification(
-            "update_status_item",
-            &json!({
-                "view_id": view_id,
-                "key": key,
-                "value": value,
-            }),
-        );
-    }
-
-    pub fn remove_status_item(&self, view_id: ViewId, key: &str) {
-        self.0.send_rpc_notification(
-            "remove_status_item",
-            &json!({
-                "view_id": view_id,
-                "key": key,
-            }),
-        );
-    }
-
     pub fn hover(&self, view_id: ViewId, request_id: usize, content: String) {
         self.0.send_rpc_notification(
             "hover",

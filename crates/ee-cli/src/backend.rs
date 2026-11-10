@@ -574,7 +574,6 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 serde_json::from_value::<Vec<SymbolItem>>(params.get("symbols")?.clone()).ok()?;
             Some(BackendEvent::Symbols { view_id, title, symbols })
         }
-        "available_plugins" => None,
         "diagnostics" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let diagnostics =
@@ -649,7 +648,9 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
 
 fn plugin_ui_update_key(update: &PluginUiUpdate) -> String {
     match update {
-        PluginUiUpdate::Status { key, .. } => format!("status:{key}"),
+        PluginUiUpdate::Status { key, .. } | PluginUiUpdate::StatusRemove { key } => {
+            format!("status:{key}")
+        }
         PluginUiUpdate::Panel { id, .. } => format!("panel:{id}"),
         PluginUiUpdate::Overlay { id, .. } => format!("overlay:{id}"),
         PluginUiUpdate::Picker { id, .. } => format!("picker:{id}"),

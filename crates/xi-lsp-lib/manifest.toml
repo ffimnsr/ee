@@ -28,6 +28,7 @@ services = [
   "editor.commands@1",
   "editor.syntax@1",
   "editor.decorations@1",
+  "editor.lsp@1",
   "editor.ui@1",
   "editor.tasks@1",
   "editor.fs@1",

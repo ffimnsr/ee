@@ -16,10 +16,11 @@ use ee_plugin_api::effect::Effect;
 use ee_plugin_api::error::PluginError;
 use ee_plugin_api::event::Event;
 use ee_plugin_api::host::{HostAdapter, HostKind};
-use ee_plugin_api::ids::{PluginId, ServiceId};
+use ee_plugin_api::ids::{ContributionId, PluginId, ServiceId};
 use ee_plugin_api::service::ServiceRegistry;
 use ee_plugin_api::wire::ServiceRequestParams;
 use ee_plugin_runtime::builtin::BuiltinCatalog;
+use ee_plugin_runtime::contributions::contribution_key;
 use ee_plugin_runtime::manager::{ManagerStatus, PluginManager, PluginManagerConfig};
 use serde::Serialize;
 use serde_json::Value;
@@ -213,6 +214,7 @@ pub struct EditorPluginHost {
     router: EditorServiceRouter,
     adapter: Arc<EditorHostAdapter>,
     notifier: Arc<dyn HostNotifier>,
+    published_contributions: Mutex<BTreeSet<(ContributionId, &'static str)>>,
     started: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     reload_requested: Arc<AtomicBool>,
@@ -299,6 +301,7 @@ impl EditorPluginHost {
             router,
             adapter,
             notifier,
+            published_contributions: Mutex::new(BTreeSet::new()),
             started: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
             reload_requested: Arc::new(AtomicBool::new(false)),
@@ -406,6 +409,7 @@ impl EditorPluginHost {
         manager.stop();
         drop(manager);
         self.publish_status();
+        self.publish_contributions();
     }
 
     /// Re-discover plugin roots. Existing instances are stopped first.
@@ -445,6 +449,7 @@ impl EditorPluginHost {
         if !failures.is_empty() {
             self.publish_status();
         }
+        self.publish_contributions();
         failures
     }
 
@@ -630,13 +635,28 @@ impl EditorPluginHost {
         }
     }
 
+    /// Publish the contribution diff since the last publish.
+    ///
+    /// The frontend requires a strictly increasing revision, so unchanged
+    /// registries are not re-sent. Removals travel as ids because the registry
+    /// is the only authoritative source of current contributions.
     fn publish_contributions(&self) {
         let upsert = self.contributions.list();
-        if upsert.is_empty() {
+        let current = upsert.iter().map(contribution_key).collect::<BTreeSet<_>>();
+        let (removed, changed) = {
+            let mut published =
+                self.published_contributions.lock().expect("published lock poisoned");
+            let removed =
+                published.difference(&current).map(|(id, _)| id.clone()).collect::<BTreeSet<_>>();
+            let changed = *published != current;
+            *published = current;
+            (removed.into_iter().collect::<Vec<_>>(), changed)
+        };
+        if !changed {
             return;
         }
         let revision = self.contributions.revision();
-        self.notifier.plugin_contributions(revision, upsert, Vec::new());
+        self.notifier.plugin_contributions(revision, upsert, removed);
     }
 
     fn publish_status(&self) {

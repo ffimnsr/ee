@@ -315,3 +315,53 @@ fn edit_notification_vlf_replace_range_updates_search_and_viewport() {
         "unified render must carry the edited line: {texts:?}"
     );
 }
+
+#[test]
+fn plugin_status_effects_forward_plugin_ui_updates() {
+    use ee_plugin_api::contribution::StatusAlignment;
+    use ee_plugin_api::effect::{Effect, StatusItem, StatusItemKey};
+
+    use crate::plugin_runtime::host::QueuedEffect;
+
+    let peer = RecordingPeer::default();
+    let ctx = RpcCtx::new(Box::new(peer.clone()));
+    let mut core = crate::XiCore::new();
+    core.handle_notification(
+        &ctx,
+        crate::rpc::CoreNotification::ClientStarted { config_dir: None, client_extras_dir: None },
+    );
+
+    let item = StatusItem {
+        key: StatusItemKey::new("lsp:rust:routes"),
+        text: String::from("lsp:rust: rust-analyzer"),
+        alignment: StatusAlignment::Left,
+        priority: 3,
+    };
+    core.inner()
+        .apply_plugin_effects(vec![QueuedEffect { owner: None, effect: Effect::SetStatus(item) }]);
+
+    let notifications = peer.take_notifications();
+    assert!(
+        !notifications.iter().any(|(method, _)| method == "add_status_item"),
+        "legacy status notifications must not be sent: {notifications:?}"
+    );
+    let (_, update) = notifications
+        .iter()
+        .find(|(method, params)| method == "plugin_ui_update" && params["kind"] == "status")
+        .expect("status effect should forward a plugin_ui_update");
+    assert_eq!(update["key"], "lsp:rust:routes");
+    assert_eq!(update["text"], "lsp:rust: rust-analyzer");
+    assert_eq!(update["alignment"], "left");
+    assert_eq!(update["priority"], 3);
+
+    core.inner().apply_plugin_effects(vec![QueuedEffect {
+        owner: None,
+        effect: Effect::RemoveStatus { key: StatusItemKey::new("lsp:rust:routes") },
+    }]);
+    let notifications = peer.take_notifications();
+    let (_, removal) = notifications
+        .iter()
+        .find(|(method, params)| method == "plugin_ui_update" && params["kind"] == "status_remove")
+        .expect("remove status effect should forward a plugin_ui_update");
+    assert_eq!(removal["key"], "lsp:rust:routes");
+}

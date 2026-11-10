@@ -5,7 +5,7 @@
 //! content, status/health snapshots, and the local picker selection. It never
 //! loads plugin manifests, binaries, Wasm modules, or config.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) mod contributions;
 pub(crate) mod keybindings;
@@ -58,6 +58,7 @@ pub(crate) struct PluginUiState {
     pub(crate) panel_content: BTreeMap<ContributionId, DynamicContent>,
     pub(crate) overlay_content: BTreeMap<ContributionId, DynamicContent>,
     status_overrides: BTreeMap<String, DynamicStatus>,
+    status_hidden: BTreeSet<String>,
     pub(crate) picker: Option<PluginPickerState>,
 }
 
@@ -79,6 +80,7 @@ impl PluginUiState {
             panel_content: BTreeMap::new(),
             overlay_content: BTreeMap::new(),
             status_overrides: BTreeMap::new(),
+            status_hidden: BTreeSet::new(),
             picker: None,
         }
     }
@@ -94,10 +96,18 @@ impl PluginUiState {
                 for diagnostic in &report.diagnostics {
                     self.push_diagnostic(diagnostic.clone());
                 }
+                for contribution in &batch.upsert {
+                    if let ee_plugin_api::contribution::Contribution::StatusItem(item) =
+                        contribution
+                    {
+                        self.status_hidden.remove(&item.key);
+                    }
+                }
                 for id in &report.removed {
                     self.panel_content.remove(id);
                     self.overlay_content.remove(id);
                     self.status_overrides.remove(id.as_str());
+                    self.status_hidden.remove(id.as_str());
                     if self.picker.as_ref().is_some_and(|picker| picker.id == *id) {
                         self.picker = None;
                     }
@@ -115,12 +125,7 @@ impl PluginUiState {
     pub(crate) fn apply_ui_update(&mut self, update: &PluginUiUpdate) -> Result<(), ProtocolError> {
         match update {
             PluginUiUpdate::Status { key, text, alignment, priority } => {
-                if self.registry.status_item(key).is_none() {
-                    return Err(ProtocolError::InvalidField {
-                        field: "status",
-                        reason: format!("unknown status item `{key}`"),
-                    });
-                }
+                self.status_hidden.remove(key);
                 self.status_overrides.insert(
                     key.clone(),
                     DynamicStatus {
@@ -129,6 +134,10 @@ impl PluginUiState {
                         priority: *priority,
                     },
                 );
+            }
+            PluginUiUpdate::StatusRemove { key } => {
+                self.status_overrides.remove(key);
+                self.status_hidden.insert(key.clone());
             }
             PluginUiUpdate::Panel { id, revision, visible, data } => {
                 let Some(panel) = self.registry.panel(id) else {
@@ -282,6 +291,9 @@ impl PluginUiState {
         }
         for (key, dynamic) in &self.status_overrides {
             merged.insert(key.clone(), (dynamic.text.clone(), dynamic.alignment, dynamic.priority));
+        }
+        for key in &self.status_hidden {
+            merged.remove(key);
         }
         let mut items = merged
             .into_iter()

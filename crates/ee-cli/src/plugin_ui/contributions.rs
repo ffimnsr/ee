@@ -280,6 +280,7 @@ fn validate_frontend_contribution(contribution: &Contribution) -> Result<(), Pro
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginUiUpdate {
     Status { key: String, text: String, alignment: StatusAlignment, priority: i32 },
+    StatusRemove { key: String },
     Panel { id: ContributionId, revision: u64, visible: bool, data: Value },
     Overlay { id: ContributionId, revision: u64, visible: bool, data: Value },
     Picker { id: ContributionId, revision: u64, items: Vec<PickerRow> },
@@ -312,6 +313,15 @@ impl PluginUiUpdate {
                 .map_err(json_error)?;
                 let priority = params.get("priority").and_then(Value::as_i64).unwrap_or(0) as i32;
                 Ok(Self::Status { key, text, alignment, priority })
+            }
+            "status_remove" => {
+                let key = params
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or(ProtocolError::MissingField("key"))?
+                    .to_owned();
+                sanitize_non_empty("status.key", &key)?;
+                Ok(Self::StatusRemove { key })
             }
             "panel" | "overlay" => {
                 let id = parse_contribution_id(params)?;

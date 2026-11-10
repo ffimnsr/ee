@@ -335,21 +335,20 @@ impl EffectSink for CoreState {
 
     fn effect_set_status(
         &mut self,
-        owner: Option<&PluginId>,
+        _owner: Option<&PluginId>,
         item: &StatusItem,
     ) -> Result<(), PluginError> {
-        let view_id = self
-            .views
-            .keys()
-            .next()
-            .copied()
-            .ok_or_else(|| PluginError::Schema { message: "no open view".to_owned() })?;
-        let source = owner.map(PluginId::as_str).unwrap_or("plugin");
         let alignment = match item.alignment {
             ee_plugin_api::contribution::StatusAlignment::Left => "left",
             ee_plugin_api::contribution::StatusAlignment::Right => "right",
         };
-        self.peer.add_status_item(view_id, source, item.key.as_str(), &item.text, alignment);
+        self.peer.plugin_ui_update(&json!({
+            "kind": "status",
+            "key": item.key.as_str(),
+            "text": item.text,
+            "alignment": alignment,
+            "priority": item.priority,
+        }));
         Ok(())
     }
 
@@ -358,9 +357,10 @@ impl EffectSink for CoreState {
         _owner: Option<&PluginId>,
         key: &str,
     ) -> Result<(), PluginError> {
-        if let Some(view_id) = self.views.keys().next().copied() {
-            self.peer.remove_status_item(view_id, key);
-        }
+        self.peer.plugin_ui_update(&json!({
+            "kind": "status_remove",
+            "key": key,
+        }));
         Ok(())
     }
 
