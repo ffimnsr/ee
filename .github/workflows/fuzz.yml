@@ -49,4 +49,15 @@ jobs:
         with:
           tool: cargo-fuzz
       - name: Run fuzz target
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=30
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # cargo-fuzz derives its default --target from the platform it was built
+          # for, and the only prebuilt Linux binary is x86_64-unknown-linux-musl.
+          # That makes it cross-build fuzz targets for musl, where ASan cannot
+          # link against a static libc. Pin the runner's host triple explicitly.
+          host_triple="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+
+          cargo +nightly fuzz run --target "${host_triple}" "${{ matrix.target }}" -- \
+            -max_total_time=60 -timeout=30
