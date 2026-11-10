@@ -37,7 +37,7 @@ impl CoreState {
         match cmd {
             Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit(view_id, cmd),
             Command { id, args, view_id } => self.do_plugin_command_notification(id, args, view_id),
-            UiEvent { .. } => {}
+            UiEvent { host, id, kind, value } => self.do_plugin_ui_event(host, id, kind, value),
             Save { view_id, file_path } => self.do_save(view_id, file_path),
             CloseView { view_id } => self.do_close_view(view_id),
             SetConfig { domain, changes } => self.do_set_config(domain, changes),
@@ -91,6 +91,25 @@ impl CoreState {
             SymbolDependencyMap { view_id, line, character, language_id, path } => {
                 self.do_symbol_dependency_map(view_id, line, character, &language_id, path)
             }
+        }
+    }
+
+    pub(super) fn do_plugin_ui_event(
+        &mut self,
+        host: String,
+        id: String,
+        kind: String,
+        value: Value,
+    ) {
+        if !host.is_empty() && host != "editor" {
+            warn!("ignoring ui_event for unsupported host `{host}`");
+            return;
+        }
+        let Some(plugin_host) = self.plugin_host.clone() else {
+            return;
+        };
+        if let Err(error) = plugin_host.dispatch_ui_event(&id, &kind, value) {
+            warn!("plugin ui_event `{id}` ({kind}) failed: {error}");
         }
     }
 

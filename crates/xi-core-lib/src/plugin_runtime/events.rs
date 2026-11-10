@@ -193,6 +193,21 @@ impl Event for UiContributions {
     const NAME: &'static str = "editor.ui.contributions";
 }
 
+/// Emitted when the frontend interacts with a declarative contribution.
+///
+/// `id` names a panel, overlay, or picker and is routed only to the plugin that
+/// declared it. Unknown ids fail closed in the host.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiEvent {
+    pub id: ContributionId,
+    pub kind: String,
+    pub value: Value,
+}
+
+impl Event for UiEvent {
+    const NAME: &'static str = "editor.ui.event";
+}
+
 /// Emitted once before the host shuts plugins down.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Shutdown;

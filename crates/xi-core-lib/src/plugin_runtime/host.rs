@@ -28,11 +28,15 @@ use serde_json::Value;
 use crate::plugin_runtime::commands::EditorCommandRegistry;
 use crate::plugin_runtime::contributions::EditorContributionRegistry;
 use crate::plugin_runtime::core_api::{DocumentSnapshot, SharedEditorAccess};
+use crate::plugin_runtime::events::UiEvent;
 use crate::plugin_runtime::services::{
     ConfigService, DecorationService, DocumentEditService, DocumentService, FsService, LspService,
     SelectionService, SyntaxService, TaskService, UiService, ViewsService, fs::FsScope,
     router::EditorServiceRouter,
 };
+
+/// Maximum encoded size of one frontend `ui_event` payload.
+pub const MAX_UI_EVENT_BYTES: usize = 64 * 1024;
 
 /// One queued effect with its originating plugin.
 #[derive(Debug, Clone)]
@@ -567,6 +571,53 @@ impl EditorPluginHost {
         };
         let _ = events.emit(&after);
         Ok(effects)
+    }
+
+    /// Route one frontend `ui_event` to the plugin that owns the contribution.
+    ///
+    /// Ownership comes from the manifest UI tables. Unknown or oversized ids
+    /// fail closed, and a plugin that is not running never receives the event.
+    pub fn dispatch_ui_event(&self, id: &str, kind: &str, value: Value) -> Result<(), PluginError> {
+        let id = ContributionId::new(id).map_err(|error| PluginError::Schema {
+            message: format!("invalid ui contribution id: {error}"),
+        })?;
+        let owner = {
+            let manager = self.manager.lock().expect("manager lock poisoned");
+            manager.manifests().iter().find_map(|(name, manifest)| {
+                let ui = &manifest.contributes.ui;
+                let owns = ui.panels.iter().any(|panel| panel.id == id)
+                    || ui.overlays.iter().any(|overlay| overlay.id == id)
+                    || ui.pickers.iter().any(|picker| picker.id == id);
+                owns.then(|| name.clone())
+            })
+        };
+        let Some(owner) = owner else {
+            return Err(PluginError::Unsupported { feature: "ui event target" });
+        };
+
+        let event = UiEvent { id, kind: kind.to_owned(), value };
+        let payload = serde_json::to_value(&event).map_err(|error| PluginError::Schema {
+            message: format!("cannot encode ui event: {error}"),
+        })?;
+        if payload.to_string().len() > MAX_UI_EVENT_BYTES {
+            return Err(PluginError::Resource {
+                message: format!("ui event exceeds {MAX_UI_EVENT_BYTES} bytes"),
+            });
+        }
+
+        let revision = self.generation();
+        let (delivered, builtin) = {
+            let mut manager = self.manager.lock().expect("manager lock poisoned");
+            let delivered = manager.emit_event_to(&owner, UiEvent::NAME, revision, payload);
+            (delivered, manager.is_builtin(&owner))
+        };
+        if delivered {
+            return Ok(());
+        }
+        if builtin {
+            return self.events().emit(&event).map_err(PluginError::from);
+        }
+        Err(PluginError::Runtime { message: format!("plugin `{owner}` is not active") })
     }
 
     /// Language definitions contributed by active plugins.

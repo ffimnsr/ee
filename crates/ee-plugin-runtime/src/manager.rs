@@ -269,6 +269,40 @@ impl PluginManager {
         }
     }
 
+    /// Queue one event for a single running external plugin.
+    ///
+    /// Returns `false` when the plugin is not running, or when it is an
+    /// in-process builtin (those receive typed events through the shared bus).
+    pub fn emit_event_to(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        revision: u64,
+        payload: Value,
+    ) -> bool {
+        let Some(state) = self.running.iter_mut().find(|entry| entry.manifest.name == plugin)
+        else {
+            return false;
+        };
+        if matches!(state.instance, PluginInstance::Builtin { .. }) {
+            return false;
+        }
+        let queue = self.pending_events.entry(plugin.to_owned()).or_default();
+        queue.push_back((name.to_owned(), revision, payload));
+        while queue.len() > MAX_PENDING_EVENTS {
+            queue.pop_front();
+        }
+        true
+    }
+
+    /// Whether `plugin` is a running in-process builtin.
+    pub fn is_builtin(&self, plugin: &str) -> bool {
+        self.running
+            .iter()
+            .find(|entry| entry.manifest.name == plugin)
+            .is_some_and(|entry| matches!(entry.instance, PluginInstance::Builtin { .. }))
+    }
+
     /// Dispatch a command to the external plugin that contributes it.
     ///
     /// Returns `Ok(None)` when no active external plugin owns the id; callers

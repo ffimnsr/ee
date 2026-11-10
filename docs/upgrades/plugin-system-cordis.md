@@ -437,6 +437,7 @@ Non-plugin core stays non-plugin. Everything else is expected to register throug
 | `editor.decorations.collect` | `serial` | view, rev, accumulator | Collects decoration patches deterministically. |
 | `editor.status.collect` | `serial` | view, accumulator | Collects status items. |
 | `editor.ui.render` | `serial` | view, panel/picker/overlay id, revision | Requests bounded dynamic UI content from the owning provider. |
+| `editor.ui.event` | `emit` | contribution id, kind, value | Routed only to the plugin that declared the contribution. |
 | `editor.ui.contributions` | `serial` | host, accumulator | Collects declarative UI contributions at activation/reload. |
 | `editor.shutdown` | `emit` | none | Last chance to dispose cleanly. |
 
