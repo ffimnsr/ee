@@ -149,10 +149,14 @@ fn main() {
                     }
                 }
                 "echo.alloc" => {
-                    // Grow past the configured RSS cap and hold the pages so the
-                    // host monitor observes the breach.
+                    // Grow past the configured RSS cap and touch every page so the
+                    // kernel accounts resident memory; an untouched `vec![0; n]`
+                    // stays in anonymous zero pages and never raises VmRSS.
                     let mut bytes = vec![0_u8; 128 * 1024 * 1024];
-                    std::hint::black_box(&mut bytes);
+                    for index in (0..bytes.len()).step_by(4096) {
+                        bytes[index] = 1;
+                    }
+                    std::hint::black_box(&bytes);
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }

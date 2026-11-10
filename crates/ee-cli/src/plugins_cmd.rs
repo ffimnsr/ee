@@ -271,7 +271,13 @@ mod tests {
     fn list_rows_include_discovered_manifest() {
         let root = TempDir::new().unwrap();
         write_manifest(&root.path().join("demo"), &v2_manifest("demo"));
-        write_manifest(&root.path().join("wasm"), &v2_manifest("wasm").replace("native", "wasm"));
+        // Wasm entries must end in `.wasm`; the runtime validates the suffix.
+        write_manifest(
+            &root.path().join("wasm"),
+            &v2_manifest("wasm")
+                .replace("kind = \"native\"", "kind = \"wasm\"")
+                .replace("entry = \"bin/wasm\"", "entry = \"bin/wasm.wasm\""),
+        );
 
         let mut manager =
             diagnostics_manager(DiscoveryOptions::new().with_root(RootKind::User, root.path()));

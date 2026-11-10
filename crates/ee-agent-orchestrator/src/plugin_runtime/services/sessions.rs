@@ -148,8 +148,11 @@ impl SessionHandle {
                 record.cancelled.store(true, Ordering::SeqCst);
                 record.context.take()
             };
-            // Dropping the scope disposes every child registration LIFO.
-            drop(context);
+            // Disposing the scope revokes every child registration LIFO, even
+            // while callers still hold clones of the session context.
+            if let Some(context) = context {
+                context.dispose();
+            }
             let _ = self
                 .events
                 .emit(&AgentSessionClosed { session_id: self.session_id.clone(), reason });
@@ -173,6 +176,12 @@ pub struct TurnScope {
     session_id: String,
     turn: u64,
     cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for TurnScope {
+    fn drop(&mut self) {
+        self.context.dispose();
+    }
 }
 
 impl TurnScope {

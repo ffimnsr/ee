@@ -185,7 +185,7 @@ fn rss_breach_terminates_the_child() {
     let mut client = NativeClient::spawn(spec, adapter, sink).unwrap();
     let error =
         client.invoke(&CommandId::new("echo.alloc").unwrap(), serde_json::json!({})).unwrap_err();
-    assert_eq!(error.class(), ErrorClass::Resource);
+    assert_eq!(error.class(), ErrorClass::Resource, "{error}");
     assert!(error.to_string().contains("rss_limit"), "{error}");
     assert_eq!(client.termination_reason(), Some(TerminationReason::RssLimit));
 }

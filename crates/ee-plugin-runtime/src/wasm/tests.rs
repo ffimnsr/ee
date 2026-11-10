@@ -37,9 +37,18 @@ impl HostAdapter for RecordingAdapter {
     }
 }
 
-fn exports(extra: &str) -> String {
+fn exports(body: &str) -> String {
+    exports_with_imports("", body)
+}
+
+/// Build a fixture module, keeping imports ahead of every other definition.
+///
+/// WAT requires all `(import ...)` forms before functions, globals, and
+/// memories; appending an import to a module body is a parse error.
+fn exports_with_imports(imports: &str, body: &str) -> String {
     format!(
         r#"(module
+  {imports}
   (memory (export "memory") 1)
   (global $next (mut i32) (i32.const 4096))
   (func (export "plugin_alloc") (param $len i32) (result i32)
@@ -52,7 +61,7 @@ fn exports(extra: &str) -> String {
     global.set $next
     local.get $ptr)
   (func (export "plugin_dealloc") (param i32) (param i32))
-  {extra}
+  {body}
 )"#
     )
 }
@@ -112,11 +121,11 @@ fn missing_export_is_rejected() {
 
 #[test]
 fn undeclared_import_is_denied_before_instantiation() {
-    let wat = exports(&format!(
+    let wat = exports_with_imports(
         r#"(import "wasi_snapshot_preview1" "fd_write"
-      (func (param i32) (param i32) (param i32) (param i32) (result i32)))
-    {EMPTY_I64}"#
-    ));
+      (func (param i32) (param i32) (param i32) (param i32) (result i32)))"#,
+        EMPTY_I64,
+    );
     let fixture = fixture(&wat);
     let mut spec = WasmSpec::new(PluginId::new("guest").unwrap(), &fixture.path);
     spec.limits.rpc_timeout_ms = 100;
@@ -131,10 +140,10 @@ fn undeclared_import_is_denied_before_instantiation() {
 
 #[test]
 fn command_import_requires_its_permission() {
-    let wat = exports(&format!(
-        r#"(import "env" "host_command" (func (param i32) (param i32) (result i64)))
-    {EMPTY_I64}"#
-    ));
+    let wat = exports_with_imports(
+        r#"(import "env" "host_command" (func (param i32) (param i32) (result i64)))"#,
+        EMPTY_I64,
+    );
     let engine = Engine::new(&Config::new()).unwrap();
     let module = Module::new(&engine, &wat).unwrap();
 
@@ -148,10 +157,10 @@ fn command_import_requires_its_permission() {
 
 #[test]
 fn undeclared_socket_import_is_denied() {
-    let wat = exports(&format!(
-        r#"(import "env" "host_socket" (func (param i32) (param i32) (result i32)))
-    {EMPTY_I64}"#
-    ));
+    let wat = exports_with_imports(
+        r#"(import "env" "host_socket" (func (param i32) (param i32) (result i32)))"#,
+        EMPTY_I64,
+    );
     let engine = Engine::new(&Config::new()).unwrap();
     let module = Module::new(&engine, &wat).unwrap();
     let gates = ImportGates::new(&Permissions::default());
@@ -161,9 +170,9 @@ fn undeclared_socket_import_is_denied() {
 
 #[test]
 fn wasm_filesystem_service_call_uses_broker_scope() {
-    let wat = exports(
-        r#"(import "env" "host_service_call" (func $call (param i32) (param i32) (result i64)))
-  (data (i32.const 64) "{\"service\":\"editor.fs@1\",\"method\":\"read\",\"request_id\":1,\"params\":{\"path\":\"secret\"}}")
+    let wat = exports_with_imports(
+        r#"(import "env" "host_service_call" (func $call (param i32) (param i32) (result i64)))"#,
+        r#"(data (i32.const 64) "{\"service\":\"editor.fs@1\",\"method\":\"read\",\"request_id\":1,\"params\":{\"path\":\"secret\"}}")
   (func (export "plugin_apply") (param i32) (param i32) (result i64)
     (drop (call $call (i32.const 64) (i32.const 83)))
     (i64.const 0))
@@ -189,9 +198,9 @@ fn wasm_filesystem_service_call_uses_broker_scope() {
 
 #[test]
 fn granted_health_import_reaches_host_state() {
-    let wat = exports(
-        r#"(import "env" "host_health" (func $health (param i32) (param i32) (result i32)))
-  (data (i32.const 64) "{\"state\":\"loaded\"}")
+    let wat = exports_with_imports(
+        r#"(import "env" "host_health" (func $health (param i32) (param i32) (result i32)))"#,
+        r#"(data (i32.const 64) "{\"state\":\"loaded\"}")
   (func (export "plugin_apply") (param i32) (param i32) (result i64)
     (drop (call $health (i32.const 64) (i32.const 18)))
     (i64.const 0))
@@ -254,7 +263,7 @@ fn memory_cap_denies_growth_and_terminates() {
 #[test]
 fn trap_is_contained() {
     let wat = exports(
-        r#"(func (export "plugin_apply") (param i32) (param i32) (result i64) (unreachable)
+        r#"(func (export "plugin_apply") (param i32) (param i32) (result i64) (unreachable))
   (func (export "plugin_event") (param i32) (param i32) (result i64) (i64.const 0))
   (func (export "plugin_command") (param i32) (param i32) (result i64) (i64.const 0))
   (func (export "plugin_contribution") (param i32) (param i32) (result i64) (i64.const 0))"#,
@@ -280,7 +289,7 @@ fn oversized_output_is_rejected() {
     (i64.const 0))
   (func (export "plugin_event") (param i32) (param i32) (result i64) (i64.const 0))
   (func (export "plugin_command") (param i32) (param i32) (result i64)
-    (i64.const 1099511627776))
+    (i64.const 16777216))
   (func (export "plugin_contribution") (param i32) (param i32) (result i64) (i64.const 0))"#,
     );
     let fixture = fixture(&wat);

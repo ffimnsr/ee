@@ -176,8 +176,10 @@ mod tests {
     }
 
     fn context() -> StrategyContext {
+        // Inspection prompt so the host cascade selects `ToolLoop`; the
+        // candidate tests assert replacement of that host-owned baseline.
         StrategyContext {
-            prompt_text: "implement the parser".to_owned(),
+            prompt_text: "inspect the parser".to_owned(),
             has_code_changes: false,
             validation_tools_available: false,
             delegation_allowed: false,

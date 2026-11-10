@@ -160,6 +160,11 @@ fn parse_cpu_seconds(stat: &str) -> Option<f64> {
 /// filtering is not expressible in seccomp. Filesystem permissions are enforced
 /// by the [`super::broker`] service path instead. Native plugins are the trusted
 /// install tier; untrusted code must ship as Wasm.
+///
+/// `clone`/`clone3` stay allowed because the SDK runtime starts a reader thread
+/// for stdio multiplexing. Process creation is still blocked by denying `fork`
+/// and `vfork`; seccomp cannot distinguish thread flags from process flags on
+/// this path, and the trusted-tier boundary is the manifest permission set.
 pub fn denied_syscalls(permissions: &Permissions) -> Vec<i64> {
     #[cfg(target_os = "linux")]
     {
@@ -168,7 +173,6 @@ pub fn denied_syscalls(permissions: &Permissions) -> Vec<i64> {
         #[cfg(target_arch = "x86")]
         {
             syscalls.push(libc::SYS_socketcall);
-            syscalls.push(libc::SYS_clone3);
             if !permissions.grants("editor.network") && !permissions.grants("agent.network") {
                 syscalls.push(libc::SYS_socket);
             }
@@ -176,7 +180,6 @@ pub fn denied_syscalls(permissions: &Permissions) -> Vec<i64> {
 
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
         {
-            syscalls.push(libc::SYS_clone3);
             if !permissions.grants("editor.network") && !permissions.grants("agent.network") {
                 syscalls.push(libc::SYS_socket);
             }

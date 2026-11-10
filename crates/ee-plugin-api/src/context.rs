@@ -5,6 +5,7 @@
 //! scope tears down every listener, command, contribution, and effect it
 //! created.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -63,10 +64,32 @@ struct ContextInner {
     config: RwLock<Value>,
     disposers: Mutex<DisposerStack>,
     children: Mutex<Vec<PluginContext>>,
+    disposed: AtomicBool,
+}
+
+impl ContextInner {
+    /// Dispose children (reverse creation order) then this scope's disposers.
+    /// Idempotent, and safe while clones of the scope are still alive.
+    fn dispose(&self) {
+        if self.disposed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut children) = self.children.lock() {
+            while let Some(child) = children.pop() {
+                child.dispose();
+            }
+        }
+        if let Ok(mut disposers) = self.disposers.lock() {
+            disposers.dispose_all();
+        }
+    }
 }
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
+        if *self.disposed.get_mut() {
+            return;
+        }
         if let Ok(children) = self.children.get_mut() {
             // Children dispose in reverse creation order, before parent cleanup.
             while let Some(child) = children.pop() {
@@ -105,6 +128,7 @@ impl PluginContext {
                 config: RwLock::new(Value::Null),
                 disposers: Mutex::new(DisposerStack::new()),
                 children: Mutex::new(Vec::new()),
+                disposed: AtomicBool::new(false),
             }),
         }
     }
@@ -273,6 +297,14 @@ impl PluginContext {
         Ok(disposer)
     }
 
+    /// Dispose this scope and every child scope immediately.
+    ///
+    /// Idempotent. Hosts call this when a session or turn ends so registrations
+    /// are revoked even while other clones of the scope are still alive.
+    pub fn dispose(&self) {
+        self.inner.dispose();
+    }
+
     /// Register a cleanup tied to this scope.
     ///
     /// The installer runs immediately and must return the cleanup closure.
@@ -339,13 +371,21 @@ impl PluginContext {
                 config: RwLock::new(config),
                 disposers: Mutex::new(DisposerStack::new()),
                 children: Mutex::new(Vec::new()),
+                disposed: AtomicBool::new(false),
             }),
         };
         self.inner.children.lock().expect("children lock poisoned").push(child.clone());
+        if self.inner.disposed.load(Ordering::SeqCst) {
+            child.dispose();
+        }
         child
     }
 
     fn track(&self, disposer: Disposer) {
+        if self.inner.disposed.load(Ordering::SeqCst) {
+            disposer.dispose();
+            return;
+        }
         self.inner.disposers.lock().expect("disposer lock poisoned").push(disposer);
     }
 }
@@ -633,6 +673,25 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dispose_revokes_registrations_while_clones_are_alive() {
+        let services = Arc::new(RwLock::new(ServiceRegistry::new()));
+        let root = PluginContext::new("demo").with_services(Arc::clone(&services));
+        let scope = root.child_scope(ScopeId::new("agent.session.1").unwrap());
+        let clone = scope.clone();
+        scope.register_service(Arc::new(CounterService)).unwrap();
+        assert!(root.service::<CounterService>().is_some());
+
+        clone.dispose();
+        assert!(root.service::<CounterService>().is_none());
+
+        // Idempotent, and a disposed scope rejects new registrations instead of
+        // leaking them into the shared registry.
+        clone.dispose();
+        clone.register_service(Arc::new(CounterService)).unwrap();
+        assert!(root.service::<CounterService>().is_none());
     }
 
     #[test]

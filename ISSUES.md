@@ -592,24 +592,24 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
   - [x] Assert `test ! -d crates/xi-plugin-derive`.
   - [x] Assert no `manifest_version = 1`, `xi_plugin`, `xi-plugin-lib`, `plugin_rpc`, `HostNotification`, `PluginNotification`, `CoreProxy`, or `PluginCatalog` in `crates`, `scripts`, `fuzz`, `.github`, or `Cargo.toml`.
   - [x] Assert no old LSP `Action::Request*` or `EditNotification` LSP variants remain.
-- [ ] Run full validation.
+- [x] Run full validation.
   - [x] `cargo fmt --all --check`.
   - [x] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
   - [x] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
-  - [ ] `./scripts/test-workspace-summary.sh`.
-  - [ ] `cargo test --quiet -p ee-plugin-api`.
-  - [ ] `cargo test --quiet -p ee-plugin-runtime`.
-  - [ ] `cargo test --quiet -p xi-core-lib`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator`.
-  - [ ] `cargo test --quiet -p ee-cli --features agents`.
-  - [ ] `cargo test --quiet -p xi-lsp-lib`.
-  - [ ] `cargo fuzz build ee_plugin_wasm`.
-- [ ] Add final regression gates.
-  - [ ] Assert core editing, undo, selection, and VLF tests pass unchanged.
-  - [ ] Assert LSP hover/completion/definition/references/formatting/code actions/symbols pass through v2 registration.
-  - [ ] Assert agent replay fixtures remain deterministic.
-  - [ ] Assert a v2 plugin can register a command, status item, panel, decoration, agent tool, and model adapter.
-  - [ ] Assert a v1 manifest is rejected with a typed diagnostic.
+  - [x] `./scripts/test-workspace-summary.sh`.
+  - [x] `cargo test --quiet -p ee-plugin-api`.
+  - [x] `cargo test --quiet -p ee-plugin-runtime`.
+  - [x] `cargo test --quiet -p xi-core-lib`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator`.
+  - [x] `cargo test --quiet -p ee-cli --features agents`.
+  - [x] `cargo test --quiet -p xi-lsp-lib`.
+  - [x] `cargo fuzz build ee_plugin_wasm`.
+- [x] Add final regression gates.
+  - [x] Assert core editing, undo, selection, and VLF tests pass unchanged.
+  - [x] Assert LSP hover/completion/definition/references/formatting/code actions/symbols pass through v2 registration.
+  - [x] Assert agent replay fixtures remain deterministic.
+  - [x] Assert a v2 plugin can register a command, status item, panel, decoration, agent tool, and model adapter.
+  - [x] Assert a v1 manifest is rejected with a typed diagnostic.
   - [x] Assert `tasks.yaml` `lf` reports no new file over 1,000 LOC.
 
 **Acceptance criteria:**

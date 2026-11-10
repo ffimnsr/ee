@@ -415,6 +415,14 @@ impl WasmClient {
             });
         }
 
+        // Reset the compute and wall-clock budgets before the first guest call:
+        // instantiation consumes fuel, and the default epoch deadline traps as
+        // soon as the ticker advances, so `plugin_alloc` needs a fresh window.
+        self.store.set_fuel(FUEL_PER_CALL).map_err(|error| PluginError::Runtime {
+            message: format!("cannot reset wasm fuel: {error}"),
+        })?;
+        self.store.set_epoch_deadline(self.epoch_ticks);
+
         let alloc: TypedFunc<i32, i32> =
             self.instance.get_typed_func(&mut self.store, "plugin_alloc").map_err(|error| {
                 PluginError::Runtime { message: format!("wasm missing plugin_alloc: {error}") }
@@ -437,10 +445,6 @@ impl WasmClient {
             self.instance.get_typed_func(&mut self.store, name).map_err(|error| {
                 PluginError::Runtime { message: format!("wasm missing export {name}: {error}") }
             })?;
-        self.store.set_fuel(FUEL_PER_CALL).map_err(|error| PluginError::Runtime {
-            message: format!("cannot reset wasm fuel: {error}"),
-        })?;
-        self.store.set_epoch_deadline(self.epoch_ticks);
         let packed = func
             .call(&mut self.store, (ptr, input.len() as i32))
             .map_err(|error| self.map_trap(name, error))?;

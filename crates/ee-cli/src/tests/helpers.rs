@@ -125,7 +125,11 @@ pub fn wait_until_with_backend(
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {label}; status={:?}", backend.status_message.as_deref());
+    panic!(
+        "timed out waiting for {label}; status={:?}; health={:?}",
+        backend.status_message.as_deref(),
+        backend.plugin_ui.health
+    );
 }
 
 pub fn wait_until_file_matches(
