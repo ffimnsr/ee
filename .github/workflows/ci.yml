@@ -5,6 +5,7 @@ on:
     branches:
       - master
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -41,7 +42,9 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          # Job-scoped: `shared-key` replaces the automatic job-based key, so a
+          # single shared value makes jobs race to save the same cache entry.
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Run clippy
@@ -69,7 +72,7 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Check documentation
@@ -124,7 +127,7 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Build project
@@ -173,7 +176,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Run tests
@@ -194,3 +197,43 @@ jobs:
 
       - name: Run OpenRouter ACP host-transport integration gate
         run: cargo test --quiet -p ee-agent-host --test orchestrated_replay --locked
+
+  test-all-features:
+    name: Test (all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Manual only for now: a full all-features compile plus run is the most
+    # expensive job in the workflow. Run it from the Actions tab (or
+    # `gh workflow run ci.yml`) when touching feature-gated code paths.
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
+          cache-on-failure: "true"
+
+      # clippy and rustdoc only compile feature-gated code; this runs it.
+      - name: Run tests with all features
+        run: cargo test --workspace --all-features --locked

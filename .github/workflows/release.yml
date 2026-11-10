@@ -56,7 +56,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Resolve matching CI run
@@ -142,8 +142,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
       # Scoped to this job on purpose: a workflow-level RUSTFLAGS overrides
       # `.cargo/config.toml` target rustflags, which would silently drop the
-      # mold `-fuse-ld` flag for every other job in this workflow.
-      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace
+      # mold `-fuse-ld` flag for every other job in this workflow. The macOS
+      # linker-warning allowance is restored here for the same reason.
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}=/workspace
+        ${{ runner.os == 'macOS' && '-A linker-messages' || '' }}
 
     strategy:
       fail-fast: false
@@ -182,7 +185,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ee-rust-${{ runner.os }}
+          shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
       - name: Install Linux musl build tools
@@ -302,17 +305,31 @@ jobs:
 
   publish:
     name: Publish release
-    needs: build
+    needs:
+      - verify
+      - build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.ref_type == 'tag'
+    # Publish even when one platform leg failed, so the platforms that did build
+    # still ship. `verify` stays a hard gate, and the archive check below refuses
+    # to publish an empty release when every platform leg failed.
+    if: always() && github.ref_type == 'tag' && needs.verify.result == 'success'
 
     steps:
       - name: Download all release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
+
+      - name: Require at least one platform archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          compgen -G '*.tar.gz' > /dev/null || {
+            echo 'no platform archives were produced; refusing to publish' >&2
+            exit 1
+          }
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2

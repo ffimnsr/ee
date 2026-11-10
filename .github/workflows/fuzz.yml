@@ -45,6 +45,8 @@ jobs:
           make-default: false
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Run fuzz target
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=30
