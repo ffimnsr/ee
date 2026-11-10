@@ -1,3 +1,11 @@
+# Use mold on Linux x86_64 for faster links. rustc still appends its own
+# `-fuse-ld=lld`, so this argument has to come last, which `link-arg` does.
+# Requires `mold` (or `ld.mold`) on PATH; install it with your package manager
+# or, in CI, with `rui314/setup-mold`. Do not hardcode an install path here:
+# gcc rejects an absolute `-fuse-ld` value, and CI installs to /usr/local/bin.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
 # Large macOS test binaries can exceed ld64's 16 MiB compact-unwind offset table.
 # Keep linker errors fatal while suppressing rustc's linker-warning lint on macOS.
 [target.'cfg(target_os = "macos")']

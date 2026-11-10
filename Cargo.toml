@@ -29,6 +29,16 @@ exclude = ["fuzz"]
 
 [profile.dev]
 opt-level = 2
+# Debug info dominates link time and target size: the `ee-cli` test binary is
+# ~1.41 GB, of which ~1.27 GB is `.debug_*` sections against 62 MB `.text`.
+# `line-tables-only` keeps `file:line` in panic backtraces at a fraction of the
+# cost. The `test` profile inherits this via `dev`.
+debug = "line-tables-only"
+
+# Bench binaries are the largest link inputs in the tree (~1.2 GB each) and are
+# never debugged, so drop their debug info entirely.
+[profile.bench]
+debug = 0
 
 # Profiling builds: release codegen plus line tables and symbols so sampling and
 # instrumentation profilers can attribute work to functions. Build through

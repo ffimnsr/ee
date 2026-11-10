@@ -127,6 +127,9 @@ export PATH="$HOME/.local/bin:$PATH"
 - Rust `1.95` or newer
 - Unix-like shell for `install.sh`
 - `cargo` toolchain for local development and builds
+- `mold` linker on Linux x86_64. The checked-in `.cargo/config.toml` passes
+  `-fuse-ld=mold`; install it with your package manager (`pacman -S mold`,
+  `apt-get install mold`). CI installs it with `rui314/setup-mold`.
 
 ## Build and run
 

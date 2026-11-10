@@ -29,6 +29,10 @@ jobs:
   verify:
     name: Verify release inputs
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - name: Checkout
@@ -40,6 +44,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -123,6 +135,10 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: verify
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
 
     strategy:
       fail-fast: false
@@ -148,6 +164,15 @@ jobs:
         with:
           components: clippy, rustfmt
           targets: ${{ matrix.target }}
+
+      - name: Set up mold linker
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: false
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2

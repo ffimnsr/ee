@@ -37,6 +37,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+        with:
+          make-default: false
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz
