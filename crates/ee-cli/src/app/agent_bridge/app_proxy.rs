@@ -533,18 +533,16 @@ impl App {
                             end_character: u32::try_from(end_col + 1).unwrap_or(u32::MAX),
                         },
                         severity: match diagnostic.severity {
-                            xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => {
+                            ee_plugin_api::model::DiagnosticSeverity::Error => {
                                 String::from("error")
                             }
-                            xi_core_lib::plugin_rpc::DiagnosticSeverity::Warning => {
+                            ee_plugin_api::model::DiagnosticSeverity::Warning => {
                                 String::from("warning")
                             }
-                            xi_core_lib::plugin_rpc::DiagnosticSeverity::Information => {
+                            ee_plugin_api::model::DiagnosticSeverity::Information => {
                                 String::from("information")
                             }
-                            xi_core_lib::plugin_rpc::DiagnosticSeverity::Hint => {
-                                String::from("hint")
-                            }
+                            ee_plugin_api::model::DiagnosticSeverity::Hint => String::from("hint"),
                         },
                         source: diagnostic.source.clone(),
                         code: diagnostic.code.clone(),

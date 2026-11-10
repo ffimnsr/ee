@@ -1,5 +1,3 @@
-use log::warn;
-use serde_json::Value;
 use xi_rope::{LinesMetric, Rope, RopeDelta};
 
 use crate::edit_types::{BufferEvent, EventDomain, SpecialEvent};
@@ -9,11 +7,10 @@ use crate::indent::SyntaxIndentContext;
 use crate::line_offset::LineOffset;
 use crate::rpc::{EditNotification, FoldRangePreview, LineRange};
 use crate::selection::{InsertDrift, Selection};
-use crate::tabs::RENDER_VIEW_IDLE_MASK;
 use crate::tree_sitter_support::syntax_feature_availability;
 use crate::view::View;
 
-use super::{BufferItems, EventContext, RENDER_DELAY};
+use super::{BufferItems, EventContext};
 
 impl<'a> EventContext<'a> {
     /// Executes a closure with mutable references to the editor and the view,
@@ -38,20 +35,6 @@ impl<'a> EventContext<'a> {
         let editor = self.editor.borrow();
         let mut view = self.view.borrow_mut();
         f(&mut view, editor.get_buffer())
-    }
-
-    pub(super) fn dispatch_command_to_plugins(&self, method: &str, params: &Value) {
-        let mut dispatched = false;
-        self.plugins.iter().filter(|plugin| plugin.manifest.supports_command(method)).for_each(
-            |plugin| {
-                dispatched = true;
-                plugin.dispatch_command(self.view_id, method, params);
-            },
-        );
-
-        if !dispatched {
-            warn!("no running plugin registered command {:?}", method);
-        }
     }
 
     /// Dispatches an incoming edit notification from the client, records the
@@ -395,8 +378,6 @@ impl<'a> EventContext<'a> {
             Some(crate::plugin_runtime::bridge::rope_delta_to_model(&delta))
         };
 
-        self.update_plugins(&mut self.editor.borrow_mut(), delta, author);
-
         crate::plugin_runtime::bridge::document_changed(
             self.plugin_host,
             &crate::plugin_runtime::events::DocumentChanged {
@@ -412,18 +393,6 @@ impl<'a> EventContext<'a> {
             },
         );
         self.selection_changed();
-
-        // if we have no plugins we always render immediately.
-        if !self.plugins.is_empty() {
-            let mut view = self.view.borrow_mut();
-            if !view.has_pending_render() {
-                let timeout = std::time::Instant::now() + RENDER_DELAY;
-                let view_id: usize = self.view_id.into();
-                let token = RENDER_VIEW_IDLE_MASK | view_id;
-                self.client.schedule_timer(timeout, token);
-                view.set_has_pending_render(true);
-            }
-        }
     }
 
     fn update_views(&self, ed: &Editor, delta: &RopeDelta, last_text: &Rope, drift: InsertDrift) {
@@ -439,38 +408,6 @@ impl<'a> EventContext<'a> {
                 drift,
             )
         });
-    }
-
-    fn update_plugins(&self, ed: &mut Editor, delta: RopeDelta, author: &str) {
-        use crate::plugins::rpc::PluginUpdate;
-
-        let new_len = delta.new_document_len();
-        let nb_lines = ed.get_buffer().measure::<LinesMetric>() + 1;
-        let approx_size = delta.inserts_len() + (delta.els.len() * 10);
-        let delta = if approx_size > super::MAX_SIZE_LIMIT { None } else { Some(delta) };
-
-        let undo_group = ed.get_active_undo_group();
-        let edit_type_str = super::edit_type_to_string(ed.get_edit_type());
-
-        let update = PluginUpdate::new(
-            self.view_id,
-            ed.get_head_rev_token(),
-            delta,
-            new_len,
-            nb_lines,
-            Some(undo_group),
-            edit_type_str,
-            author.into(),
-        );
-
-        ed.increment_revs_in_flight();
-
-        self.plugins.iter().for_each(|plugin| {
-            ed.increment_revs_in_flight();
-            plugin.update(&update, self.weak_core.clone(), self.view_id);
-        });
-        ed.dec_revs_in_flight();
-        ed.update_edit_type();
     }
 
     /// Emits `editor.selection.changed` for the current view.

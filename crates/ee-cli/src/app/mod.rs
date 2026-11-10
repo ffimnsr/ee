@@ -7,9 +7,9 @@ pub(crate) use std::time::{Duration, Instant};
 pub(crate) use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+pub(crate) use ee_plugin_api::model::{CodeAction as CodeActionDescriptor, SelectionRange};
 pub(crate) use ratatui::layout::Rect;
 pub(crate) use serde_json::json;
-pub(crate) use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SelectionRange};
 pub(crate) use xi_core_lib::rpc::LineReplacement;
 
 pub(crate) use crate::backend::{CompletionSuggestion, PendingUiAction};

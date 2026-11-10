@@ -364,8 +364,19 @@ install_runtime_assets() {
     echo "Installed tree-sitter runtime to ${RUNTIME_DIR}"
 }
 
+validate_plugin_manifest() {
+    local _manifest="$1" _version
+    if [ ! -f "${_manifest}" ]; then
+        err "plugin manifest not found: ${_manifest}"
+    fi
+    _version="$(sed -n 's/^[[:space:]]*manifest_version[[:space:]]*=[[:space:]]*//p' "${_manifest}" | head -n 1 | tr -d '[:space:]')"
+    if [ "${_version}" != "2" ]; then
+        err "unsupported plugin manifest at ${_manifest}: expected manifest_version = 2"
+    fi
+}
+
 install_plugin_assets() {
-    local _package_root _plugin_src
+    local _package_root _plugin_src _manifest
     _package_root="$1"
     _plugin_src=""
 
@@ -376,6 +387,11 @@ install_plugin_assets() {
     fi
 
     [ -n "${_plugin_src}" ] || return 0
+
+    for _manifest in "${_plugin_src}"/*/manifest.toml; do
+        [ -f "${_manifest}" ] || continue
+        validate_plugin_manifest "${_manifest}"
+    done
 
     ensure try_sudo mkdir -p -- "${PLUGIN_DIR}"
     ensure try_sudo cp -R -- "${_plugin_src}/." "${PLUGIN_DIR}/"

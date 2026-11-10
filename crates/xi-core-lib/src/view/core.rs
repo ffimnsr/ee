@@ -28,8 +28,6 @@ impl View {
             vlf_find: None,
             replace: None,
             replace_changed: false,
-            annotations: AnnotationStore::new(),
-            diagnostics: HashMap::new(),
         }
     }
 

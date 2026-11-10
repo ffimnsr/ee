@@ -6,11 +6,11 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ee_plugin_api::model::{CodeAction as CodeActionDescriptor, Diagnostic, SymbolItem};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
 use xi_rpc::{ReadTransport, WriteTransport};
 
 use crate::plugin_ui::{

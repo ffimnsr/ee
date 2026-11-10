@@ -44,6 +44,21 @@ install_file_atomically() {
   fi
 }
 
+manifest_value() {
+  local manifest_path="$1" key="$2"
+  sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$manifest_path" | head -n 1 | tr -d '"'
+}
+
+validate_manifest_v2() {
+  local manifest_path="$1" version
+  version="$(manifest_value "$manifest_path" manifest_version | tr -d '[:space:]')"
+  if [[ "$version" != "2" ]]; then
+    printf 'error: unsupported plugin manifest at %s: expected manifest_version = 2\n' \
+      "$manifest_path" >&2
+    exit 1
+  fi
+}
+
 main() {
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -87,6 +102,17 @@ main() {
     exit 1
   fi
 
+  validate_manifest_v2 "$manifest_path"
+
+  local plugin_name plugin_kind plugin_entry
+  plugin_name="$(manifest_value "$manifest_path" name)"
+  plugin_kind="$(manifest_value "$manifest_path" kind)"
+  plugin_entry="$(manifest_value "$manifest_path" entry)"
+  if [[ -z "$plugin_name" || -z "$plugin_kind" || -z "$plugin_entry" ]]; then
+    printf 'error: manifest is missing name, kind, or entry: %s\n' "$manifest_path" >&2
+    exit 1
+  fi
+
   if [[ -z "$binary_path" ]]; then
     local cargo_cmd=(cargo build -p ee-xi-lsp-lib --bin xi-lsp-plugin)
     if [[ "$profile" == "release" ]]; then
@@ -104,16 +130,22 @@ main() {
     exit 1
   fi
 
-  local install_dir="$plugin_dir/xi-lsp-plugin"
-  mkdir -p "$install_dir/bin"
+  local install_dir="$plugin_dir/$plugin_name"
+  local entry_path="$install_dir/$plugin_entry"
+  mkdir -p "$(dirname "$entry_path")"
   install_file_atomically "$manifest_path" "$install_dir/manifest.toml" 0644
-  install_file_atomically \
-    "$binary_path" \
-    "$install_dir/bin/xi-lsp-plugin${EXE_SUFFIX:-}" \
-    0755
+  if [[ "$plugin_kind" == "wasm" ]]; then
+    if [[ "$plugin_entry" != *.wasm ]]; then
+      printf 'error: wasm entry must end in .wasm: %s\n' "$plugin_entry" >&2
+      exit 1
+    fi
+    install_file_atomically "$binary_path" "$entry_path" 0644
+  else
+    install_file_atomically "$binary_path" "$entry_path" 0755
+  fi
 
   printf 'bundled plugins installed at %s\n' "$plugin_dir"
-  printf 'installed plugin: xi-lsp-plugin\n'
+  printf 'installed plugin: %s\n' "$plugin_name"
 }
 
 main "$@"

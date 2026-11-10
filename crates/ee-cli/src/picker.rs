@@ -7,10 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+use ee_plugin_api::model::{CodeAction as CodeActionDescriptor, SymbolItem};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::UTF8};
 use ignore::WalkBuilder;
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SymbolItem};
 
 use crate::backend::CompletionSuggestion;
 

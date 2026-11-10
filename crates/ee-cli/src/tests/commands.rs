@@ -290,6 +290,25 @@ fn cli_utility_commands_live_under_do() {
     ));
 
     let cli =
+        crate::Cli::try_parse_from(["ee", "do", "plugins", "validate", "plugins/demo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Plugins {
+                command: crate::PluginCommands::Validate { path: Some(path) }
+            }
+        }) if path == std::path::Path::new("plugins/demo")
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "schema"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Plugins { command: crate::PluginCommands::Schema { .. } }
+        })
+    ));
+
+    let cli =
         crate::Cli::try_parse_from(["ee", "do", "language", "list", "--dir", "sample"]).unwrap();
 
     assert!(matches!(

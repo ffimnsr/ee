@@ -23,14 +23,14 @@
 //! alerts, and post-save UI/config updates.
 
 pub(crate) use std::cell::{Cell, RefCell};
-pub(crate) use std::collections::{BTreeMap, HashMap, HashSet};
+pub(crate) use std::collections::BTreeMap;
 pub(crate) use std::fmt;
 pub(crate) use std::fs::OpenOptions;
 pub(crate) use std::io::ErrorKind;
 pub(crate) use std::mem;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::Arc;
-pub(crate) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub(crate) use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use log::{debug, error, info, warn};
 pub(crate) use serde::de::{self, Deserializer, Unexpected};
@@ -39,7 +39,7 @@ pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use serde_json::{Value, json};
 
 pub(crate) use xi_rope::Rope;
-pub(crate) use xi_rpc::{self, OptionExt, ReadError, RemoteError, RpcCtx, RpcPeer};
+pub(crate) use xi_rpc::{self, OptionExt, RemoteError, RpcPeer};
 
 pub(crate) use crate::WeakXiCore;
 pub(crate) use crate::client::Client;
@@ -48,24 +48,15 @@ pub(crate) use crate::editor::Editor;
 pub(crate) use crate::event_context::EventContext;
 pub(crate) use crate::file::{FileManager, OpenResult, SampledIndentation, SampledLineEnding};
 pub(crate) use crate::line_ending::LineEnding;
-pub(crate) use crate::plugin_rpc::{PluginNotification, PluginRequest};
-pub(crate) use crate::plugins::rpc::ClientPluginInfo;
-pub(crate) use crate::plugins::rpc::SelectionRange;
-pub(crate) use crate::plugins::{
-    Plugin, PluginCatalog, PluginDescription, PluginPid, PluginTerminationReason,
-    start_plugin_process,
-};
-pub(crate) use crate::rpc::{
-    CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
-};
+pub(crate) use crate::rpc::{CoreNotification, CoreRequest, EditNotification};
 pub(crate) use crate::runtime_loader::{
     merged_runtime_languages, reload_default_runtime_loader_languages,
 };
-pub(crate) use crate::syntax::LanguageId;
 pub(crate) use crate::text_store::{DocumentMode, EditPermission, TextStore};
 pub(crate) use crate::view::View;
 pub(crate) use crate::whitespace::Indentation;
 pub(crate) use crate::width_cache::WidthCache;
+pub(crate) use ee_plugin_api::model::SelectionRange;
 
 #[cfg(feature = "notify")]
 pub(crate) use crate::watcher::{FileWatcher, WatchToken};
@@ -73,7 +64,6 @@ pub(crate) use crate::watcher::{FileWatcher, WatchToken};
 pub(crate) use notify::Event;
 
 mod plugin_host;
-mod plugin_lifecycle;
 
 /// ViewIds are the primary means of routing messages between
 /// xi-core and a client view.
@@ -83,8 +73,6 @@ pub struct ViewId(pub(crate) usize);
 /// BufferIds uniquely identify open buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 pub struct BufferId(pub(crate) usize);
-
-pub type PluginId = crate::plugins::PluginPid;
 
 fn save_complete_alert(path: &Path) -> String {
     format!("save complete: {}", path.display())
@@ -128,7 +116,6 @@ fn elevated_save_temp_path(target_path: &Path) -> Result<PathBuf, std::io::Error
     Ok(candidate)
 }
 
-// old-style names; will be deprecated
 pub type BufferIdentifier = BufferId;
 
 /// Totally arbitrary; we reserve this space for `ViewId`s
@@ -145,11 +132,6 @@ const VERIFY_LINE_ENDINGS_IDLE_TOKEN: usize = 1003;
 
 /// xi_rpc idle Token for watcher related idle scheduling.
 pub(crate) const WATCH_IDLE_TOKEN: usize = 1002;
-
-const PLUGIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const PLUGIN_RESTART_BASE_DELAY_MS: u64 = 250;
-const PLUGIN_RESTART_MAX_DELAY_MS: u64 = 5_000;
-const PLUGIN_STABLE_UPTIME: Duration = Duration::from_secs(30);
 
 /// Token for file-change events in open files
 #[cfg(feature = "notify")]
@@ -176,15 +158,7 @@ pub struct CoreState {
     pending_line_ending_verifications: Vec<BufferId>,
     peer: Client,
     id_counter: Counter,
-    plugins: PluginCatalog,
-    launching_plugins: HashSet<String>,
-    scheduled_plugin_restarts: HashSet<String>,
-    stopping_plugins: HashMap<PluginId, StopReason>,
-    plugin_restart_state: HashMap<String, PluginRestartState>,
-    pending_plugin_commands: Vec<PendingPluginCommand>,
-    running_plugins: Vec<Plugin>,
-    /// Cordis-style v2 plugin host. The old plugin fields above remain until the
-    /// final cutover phase.
+    /// Cordis-style v2 plugin host.
     pub(crate) plugin_host: Option<Arc<crate::plugin_runtime::host::EditorPluginHost>>,
     pub(crate) plugin_notifier: Option<Arc<crate::plugin_runtime::host::QueuedNotifier>>,
     pub(crate) plugin_generation: u64,
@@ -192,37 +166,9 @@ pub struct CoreState {
     /// mutex so service callbacks can borrow editor state.
     pub(crate) queued_plugin_commands:
         Vec<(ee_plugin_api::ids::CommandId, ee_plugin_api::model::ViewId, serde_json::Value)>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingPluginCommand {
-    plugin_name: String,
-    view_id: ViewId,
-    method: String,
-    params: Value,
-    shutdown_after_dispatch: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum StopReason {
-    Manual,
-    Restart,
-    SingleInvocation,
-    ResourceLimit(PluginTerminationReason),
-}
-
-#[derive(Debug, Default, Clone)]
-struct PluginRestartState {
-    consecutive_failures: u32,
-    last_start: Option<Instant>,
-}
-
-fn stderr_is_user_visible(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("panic")
-        || lower.contains("panicked")
-        || lower.contains("error")
-        || lower.contains("failed")
+    /// Languages opened while the core mutex was held; activated on the next
+    /// plugin cycle so activation callbacks never run under the core lock.
+    pub(crate) pending_plugin_language_activations: Vec<String>,
 }
 
 /// test helpers
@@ -235,37 +181,6 @@ pub mod test_helpers {
 
     pub fn new_buffer_id(id: usize) -> BufferId {
         BufferId(id)
-    }
-}
-
-/// A multi-view aware iterator over `EventContext`s. A view which appears
-/// as a sibling will not appear again as a main view.
-pub struct Iter<'a, I> {
-    views: I,
-    seen: HashSet<ViewId>,
-    inner: &'a CoreState,
-}
-
-impl<'a, I> Iterator for Iter<'a, I>
-where
-    I: Iterator<Item = &'a ViewId>,
-{
-    type Item = EventContext<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let &mut Iter { ref mut views, ref mut seen, inner } = self;
-        loop {
-            let next_view = match views.next() {
-                None => return None,
-                Some(v) if seen.contains(v) => continue,
-                Some(v) => v,
-            };
-            let context = inner.make_context(*next_view).unwrap();
-            context.siblings.iter().for_each(|sibl| {
-                let _ = seen.insert(sibl.borrow().get_view_id());
-            });
-            return Some(context);
-        }
     }
 }
 
@@ -336,8 +251,6 @@ impl BufferId {
 mod construction;
 mod contexts;
 mod idle;
-mod plugin_events;
-mod plugins;
 mod test_access;
 
 #[cfg(test)]

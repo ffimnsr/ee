@@ -80,62 +80,12 @@ fn language_changed_invalidates_view_for_syntax_refresh() {
 #[test]
 fn get_selections_returns_current_selection_ranges() {
     use crate::rpc::EditNotification;
+    use ee_plugin_api::model::SelectionRange;
 
     let harness = ContextHarness::new("hello world");
     let mut ctx = harness.make_context();
 
     ctx.do_edit(EditNotification::MoveToRightEndOfLineAndModifySelection);
 
-    let response: GetSelectionsResponse = serde_json::from_value(
-        ctx.do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetSelections)
-            .expect("selection request should succeed"),
-    )
-    .expect("selection response should deserialize");
-
-    assert_eq!(response.selections, vec![SelectionRange { start: 0, end: 11 }]);
-}
-
-#[test]
-fn typed_plugin_requests_return_structured_results_or_errors() {
-    let harness = ContextHarness::new("hello world");
-    let mut ctx = harness.make_context();
-
-    let diagnostics = ctx
-        .do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetDiagnostics)
-        .expect("diagnostics request should succeed");
-    let diagnostics: GetDiagnosticsResponse =
-        serde_json::from_value(diagnostics).expect("diagnostics response should deserialize");
-
-    assert!(diagnostics.diagnostics.is_empty());
-}
-
-#[test]
-fn plugin_diagnostics_round_trip_through_view_state() {
-    use crate::plugins::rpc::PluginNotification;
-
-    let harness = ContextHarness::new("hello world");
-    let mut ctx = harness.make_context();
-
-    ctx.do_plugin_cmd(
-        crate::plugins::PluginPid(9),
-        PluginNotification::UpdateDiagnostics {
-            diagnostics: vec![Diagnostic {
-                range: crate::plugins::rpc::Range { start: 1, end: 4 },
-                severity: DiagnosticSeverity::Warning,
-                message: String::from("warn"),
-                source: Some(String::from("lsp")),
-                code: Some(String::from("W1")),
-            }],
-        },
-    );
-
-    let diagnostics: GetDiagnosticsResponse = serde_json::from_value(
-        ctx.do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetDiagnostics)
-            .expect("diagnostics request should succeed"),
-    )
-    .expect("diagnostics response should deserialize");
-
-    assert_eq!(diagnostics.diagnostics.len(), 1);
-    assert_eq!(diagnostics.diagnostics[0].message, "warn");
-    assert_eq!(diagnostics.diagnostics[0].severity, DiagnosticSeverity::Warning);
+    assert_eq!(ctx.preview_selections(), vec![SelectionRange { start: 0, end: 11 }]);
 }

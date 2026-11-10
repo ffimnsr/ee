@@ -1,6 +1,6 @@
 //! Host UI bridge used by the LSP plugin.
 //!
-//! The old `CoreProxy` mutated plugin state directly. The v2 host only accepts
+//! The legacy plugin proxy mutated plugin state directly. The v2 host only accepts
 //! typed effects, so this bridge converts status and picker updates into
 //! effects submitted on the plugin connection.
 

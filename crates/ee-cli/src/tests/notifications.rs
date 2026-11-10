@@ -21,47 +21,6 @@ use crate::git::{GitBufferCache, GitBufferStatus, GitSign};
 use crate::tests::helpers::*;
 
 #[test]
-fn plugin_labels_render_expected_values() {
-    let startup = xi_core_lib::plugin_manifest::PluginDescription {
-        name: String::from("startup-plugin"),
-        version: String::from("1.0.0"),
-        requires: Vec::new(),
-        scope: Default::default(),
-        runtime: xi_core_lib::plugin_manifest::PluginRuntime::Native,
-        capabilities: Vec::new(),
-        launch: Default::default(),
-        max_rss_bytes: None,
-        max_cpu_seconds: None,
-        rpc_timeout_ms: None,
-        exec_path: std::path::PathBuf::from("bin/startup-plugin"),
-        activations: Vec::new(),
-        commands: Vec::new(),
-        languages: Vec::new(),
-    };
-    let command = xi_core_lib::plugin_manifest::PluginDescription {
-        name: String::from("command-plugin"),
-        version: String::from("2.0.0"),
-        requires: Vec::new(),
-        scope: Default::default(),
-        runtime: xi_core_lib::plugin_manifest::PluginRuntime::Wasm,
-        capabilities: Vec::new(),
-        launch: Default::default(),
-        max_rss_bytes: None,
-        max_cpu_seconds: None,
-        rpc_timeout_ms: None,
-        exec_path: std::path::PathBuf::from("bin/command-plugin"),
-        activations: vec![xi_core_lib::plugin_manifest::PluginActivation::OnCommand],
-        commands: Vec::new(),
-        languages: Vec::new(),
-    };
-
-    assert_eq!(crate::plugin_activation_label(&startup), "startup");
-    assert_eq!(crate::plugin_activation_label(&command), "command");
-    assert_eq!(crate::plugin_runtime_label(&startup), "native");
-    assert_eq!(crate::plugin_runtime_label(&command), "wasm");
-}
-
-#[test]
 fn parse_plugin_status_notification() {
     let params = json!({
         "generation": 3,

@@ -1,5 +1,6 @@
 //! Event-context tests: filter.
 use super::*;
+use ee_plugin_api::model::SelectionRange;
 
 #[test]
 fn preview_filter_selections_keeps_matching_regions() {
@@ -163,8 +164,8 @@ fn move_word_end_extends_selection_when_requested() {
 
 #[test]
 fn set_selections_clamps_out_of_range_offsets() {
-    use crate::plugins::rpc::SelectionRange;
     use crate::rpc::EditNotification;
+    use ee_plugin_api::model::SelectionRange;
 
     // `go` with a huge count must clamp to the end of the buffer.
     let harness = ContextHarness::new("alpha beta");

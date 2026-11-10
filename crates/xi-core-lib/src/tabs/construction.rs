@@ -33,17 +33,11 @@ impl CoreState {
             pending_line_ending_verifications: Vec::new(),
             peer: Client::new(peer.clone()),
             id_counter: Counter::default(),
-            plugins: PluginCatalog::default(),
-            launching_plugins: HashSet::new(),
-            scheduled_plugin_restarts: HashSet::new(),
-            stopping_plugins: HashMap::new(),
-            plugin_restart_state: HashMap::new(),
-            pending_plugin_commands: Vec::new(),
-            running_plugins: Vec::new(),
             plugin_host: None,
             plugin_notifier: None,
             plugin_generation: 0,
             queued_plugin_commands: Vec::new(),
+            pending_plugin_language_activations: Vec::new(),
         }
     }
 
@@ -55,23 +49,10 @@ impl CoreState {
         BufferId(self.id_counter.next())
     }
 
-    pub(super) fn next_plugin_id(&self) -> PluginId {
-        PluginPid(self.id_counter.next())
-    }
-
     pub(crate) fn finish_setup(&mut self, self_ref: WeakXiCore) {
         self.self_ref = Some(self_ref);
 
-        // instead of having to do this here, config should just own
-        // the plugin catalog and reload automatically
-        let plugin_paths = self.config_manager.get_plugin_paths();
-        self.plugins.reload_from_paths(&plugin_paths).into_iter().for_each(|err| {
-            let message = format!("error loading plugin {err:?}");
-            warn!("{message}");
-            self.peer.alert(message);
-        });
-        let plugin_languages = self.plugins.make_languages_map();
-        let languages = merged_runtime_languages(&plugin_languages);
+        let languages = merged_runtime_languages(&Default::default());
         let languages_ids = languages.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
         self.peer.available_languages(languages_ids);
         let lang_config_changes = self.config_manager.set_languages(languages);
@@ -81,7 +62,6 @@ impl CoreState {
         }
         self.handle_config_changes(lang_config_changes);
 
-        self.ensure_manifest_plugins_started();
         self.plugin_host_start();
     }
 
@@ -95,10 +75,6 @@ impl CoreState {
             Err(e) => self.peer.alert(format!("{}", e)),
             Ok(changes) => {
                 if let Some(plugin_name) = plugin_name {
-                    self.running_plugins
-                        .iter()
-                        .filter(|plugin| plugin.name == plugin_name)
-                        .for_each(|plugin| plugin.plugin_config_changed(&table));
                     if let Some(host) = self.plugin_host.as_ref() {
                         let _ = host.emit(&crate::plugin_runtime::events::ConfigChanged {
                             scope: format!("plugin:{plugin_name}"),

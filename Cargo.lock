@@ -1567,6 +1567,7 @@ dependencies = [
  "ee-opencode-agent",
  "ee-openrouter-agent",
  "ee-plugin-api",
+ "ee-plugin-runtime",
  "ee-xi-core-lib",
  "ee-xi-lsp-lib",
  "ee-xi-rpc",
@@ -1778,7 +1779,6 @@ dependencies = [
  "notify",
  "regex",
  "schemars 1.2.2",
- "seccompiler",
  "semver",
  "serde",
  "serde_json",
@@ -1790,8 +1790,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-loader",
  "unicode-width 0.2.0",
- "wasmtime",
- "windows-sys 0.61.2",
  "zerocopy",
 ]
 
@@ -1817,34 +1815,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "url",
-]
-
-[[package]]
-name = "ee-xi-plugin-derive"
-version = "0.11.11"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "ee-xi-plugin-lib"
-version = "0.11.11"
-dependencies = [
- "bytecount",
- "ee-xi-core-lib",
- "ee-xi-plugin-derive",
- "ee-xi-rope",
- "ee-xi-rpc",
- "log",
- "memchr",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "tempfile",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

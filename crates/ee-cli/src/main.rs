@@ -29,7 +29,6 @@ use xi_core_lib::runtime_loader::{
 };
 use xi_core_lib::text_store::{ByteRange, TextChunkResult, TextStore};
 use xi_core_lib::vlf::store::VlfStore;
-use xi_core_lib::{plugin_manifest, plugins::PluginCatalog};
 
 #[cfg(feature = "agents")]
 mod agent_bootstrap;
@@ -152,7 +151,7 @@ use config_cmd::{
 use doctor::cmd_doctor;
 use file_cmd::{cmd_file_head, cmd_file_line_check, cmd_file_tail};
 use language_cmd::cmd_language_list;
-use plugins_cmd::cmd_plugins_list;
+use plugins_cmd::{cmd_plugins_list, cmd_plugins_schema, cmd_plugins_validate};
 use runtime_cmd::{cmd_runtime, cmd_runtime_build, cmd_runtime_fetch, cmd_runtime_languages};
 use schema_cmd::{cmd_completions, cmd_schema_check, cmd_schema_generate, cmd_validate};
 use secrets_cmd::cmd_secrets;
@@ -164,8 +163,7 @@ pub(crate) use args::{ALL_AGENT_TRUST_PROFILES, AgentTrustProfile, SecretsComman
 pub(crate) use doctor::doctor_report;
 #[cfg(test)]
 pub(crate) use file_cmd::{count_file_line_feeds, read_file_head, read_file_tail};
-#[cfg(test)]
-pub(crate) use plugins_cmd::{plugin_activation_label, plugin_runtime_label};
+
 #[cfg(test)]
 pub(crate) use runtime_cmd::{
     EffectiveRuntimeLanguageRow, render_runtime_languages_report, render_runtime_report,
@@ -311,6 +309,8 @@ fn main() -> io::Result<()> {
                 },
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
+                    PluginCommands::Validate { path } => cmd_plugins_validate(path.as_deref()),
+                    PluginCommands::Schema { output } => cmd_plugins_schema(&output),
                 },
                 DoCommands::Language { command } => match command {
                     LanguageCommands::List { dir, file } => {

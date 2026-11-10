@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub(crate) use std::cmp::{max, min};
-pub(crate) use std::collections::HashMap;
 pub(crate) use std::iter;
 pub(crate) use std::ops::Range;
 pub(crate) use std::path::Path;
@@ -24,7 +23,7 @@ pub(crate) use regex::RegexBuilder;
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use serde_json::{Value, json};
 
-pub(crate) use crate::annotations::{AnnotationStore, Annotations, ToAnnotation};
+pub(crate) use crate::annotations::ToAnnotation;
 pub(crate) use crate::client::{Client, Update, UpdateOp};
 pub(crate) use crate::edit_types::ViewEvent;
 pub(crate) use crate::find::{Find, FindStatus};
@@ -33,7 +32,6 @@ pub(crate) use crate::line_offset::LineOffset;
 pub(crate) use crate::linewrap::{InvalLines, Lines, VisualLine, WrapWidth};
 pub(crate) use crate::movement::{Movement, region_movement, selection_movement};
 pub(crate) use crate::object::{self, SyntaxNavigationAction, SyntaxSelectionAction};
-pub(crate) use crate::plugins::PluginId;
 pub(crate) use crate::rpc::{
     FindQuery, GestureType, MouseAction, SelectionGranularity, SelectionModifier,
 };
@@ -135,11 +133,6 @@ pub struct View {
 
     /// Tracks whether the replacement string or replace parameters changed.
     replace_changed: bool,
-
-    /// Annotations provided by plugins.
-    annotations: AnnotationStore,
-
-    diagnostics: HashMap<PluginId, Vec<crate::plugins::rpc::Diagnostic>>,
 }
 
 /// Indicates what changed in the find state.

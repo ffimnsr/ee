@@ -1,37 +1,5 @@
-//! Editor, plugin, and line-ending tests.
+//! Editor and line-ending tests.
 use super::*;
-
-#[test]
-fn begin_plugin_launch_blocks_duplicate_starts() {
-    let peer = Box::new(DummyPeer);
-    let mut state = CoreState::new(&peer.box_clone(), None, None);
-
-    assert!(state.begin_plugin_launch("test-plugin"));
-    assert!(!state.begin_plugin_launch("test-plugin"));
-    assert!(state.launching_plugins.contains("test-plugin"));
-}
-
-#[test]
-fn stderr_visibility_filters_noise() {
-    assert!(stderr_is_user_visible("plugin panicked at line 7"));
-    assert!(stderr_is_user_visible("ERROR: broken transport"));
-    assert!(stderr_is_user_visible("request failed"));
-    assert!(!stderr_is_user_visible("info: warming cache"));
-}
-
-#[test]
-fn restart_delay_backs_off_for_repeated_crashes() {
-    let peer = Box::new(DummyPeer);
-    let mut state = CoreState::new(&peer.box_clone(), None, None);
-
-    let first = state.next_restart_delay("test-plugin");
-    let second = state.next_restart_delay("test-plugin");
-    let third = state.next_restart_delay("test-plugin");
-
-    assert!(first < second);
-    assert!(second <= third);
-    assert!(third <= Duration::from_millis(PLUGIN_RESTART_MAX_DELAY_MS));
-}
 
 #[test]
 fn test_deserialize_view_id() {

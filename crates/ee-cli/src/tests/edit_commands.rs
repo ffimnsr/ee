@@ -5,8 +5,8 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ee_plugin_api::model::SelectionRange;
 use serde_json::{Value, json};
-use xi_core_lib::plugin_rpc::SelectionRange;
 
 use crate::app::{App, Mode};
 use crate::backend::{CachedLine, LineSlot};

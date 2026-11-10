@@ -1,3 +1,4 @@
+pub(crate) use ee_plugin_api::model::DiagnosticSeverity;
 pub(crate) use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 pub(crate) use ratatui::style::{Color, Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
@@ -5,7 +6,6 @@ pub(crate) use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 pub(crate) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-pub(crate) use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
 pub(crate) use crate::app::{App, Mode, SwiftMotionTarget, Viewport, smart_case_sensitive};
 pub(crate) use crate::backend::{CoreAnnotation, LineSlot, VlfSearchRange};

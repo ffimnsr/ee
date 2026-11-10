@@ -17,7 +17,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
 use xi_core_lib::open_policy::OpenThresholds;
-use xi_core_lib::plugin_rpc::{
+use ee_plugin_api::model::{
     CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SelectionRange, SymbolItem,
 };
 use xi_core_lib::rpc::LineReplacement;

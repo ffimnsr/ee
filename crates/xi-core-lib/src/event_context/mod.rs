@@ -19,25 +19,19 @@ mod editing;
 mod helpers;
 mod init;
 mod movement;
-mod plugins;
 mod vlf;
 
 #[cfg(test)]
 mod tests;
 
 use std::cell::RefCell;
-use std::time::Duration;
-
-use serde_json::Value;
 
 use xi_rope::Rope;
 
-use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{BufferItems, Table};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
-use crate::plugins::Plugin;
 use crate::syntax::LanguageId;
 use crate::tabs::{BufferId, ViewId};
 use crate::view::View;
@@ -59,10 +53,6 @@ pub(crate) use vlf::*;
 // Maximum returned result from plugin get_data RPC.
 pub const MAX_SIZE_LIMIT: usize = 1024 * 1024;
 
-/// The render delay after an edit occurs; plugin updates received in this
-/// window will be sent to the view along with the edit.
-const RENDER_DELAY: Duration = Duration::from_millis(2);
-
 /// A collection of all the state relevant for handling a particular event.
 ///
 /// This is created dynamically for each event that arrives to the core,
@@ -76,11 +66,9 @@ pub struct EventContext<'a> {
     pub(crate) language: LanguageId,
     pub(crate) view: &'a RefCell<View>,
     pub(crate) siblings: Vec<&'a RefCell<View>>,
-    pub(crate) plugins: Vec<&'a Plugin>,
     pub(crate) client: &'a Client,
     pub(crate) width_cache: &'a RefCell<WidthCache>,
     pub(crate) kill_ring: &'a RefCell<Rope>,
-    pub(crate) weak_core: &'a WeakXiCore,
     pub(crate) plugin_host: Option<&'a crate::plugin_runtime::host::EditorPluginHost>,
 }
 
@@ -97,18 +85,4 @@ fn edit_type_to_string(edit_type: EditType) -> String {
         EditType::Surround => "surround",
     }
     .to_string()
-}
-
-fn buffer_items_to_table(config: &BufferItems) -> Table {
-    match serde_json::to_value(config) {
-        Ok(Value::Object(table)) => table,
-        Ok(other) => {
-            log::error!("buffer config serialized to non-object value: {:?}", other);
-            Table::new()
-        }
-        Err(err) => {
-            log::error!("failed to serialize buffer config: {:?}", err);
-            Table::new()
-        }
-    }
 }

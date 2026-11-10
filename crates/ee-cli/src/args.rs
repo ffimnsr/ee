@@ -215,6 +215,18 @@ pub(crate) enum PluginCommands {
     /// List installed plugins discovered from bundled and user plugin directories
     #[command(visible_alias = "ls")]
     List,
+    /// Validate a v2 plugin manifest file or plugin directory
+    Validate {
+        /// Manifest file or plugin directory; defaults to every configured root
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
+    /// Write the generated plugin manifest JSON Schema
+    Schema {
+        /// Schema output path
+        #[arg(long, default_value = "schemas/plugin-manifest-v2.json", value_name = "FILE")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]

@@ -31,7 +31,7 @@ impl Parse for PluginArgs {
     }
 }
 
-/// Implement [`ee_plugin_api::Plugin`] for the type in an inherent `impl` block.
+/// Implement `ee_plugin_api::Plugin` for the type in an inherent `impl` block.
 ///
 /// The block must define:
 ///
@@ -39,7 +39,7 @@ impl Parse for PluginArgs {
 /// fn apply(&mut self, ctx: &ee_plugin_api::PluginContext) -> Result<(), ee_plugin_api::PluginError>
 /// ```
 ///
-/// The optional `name = "..."` argument sets [`Plugin::name`]. Without it, the
+/// The optional `name = "..."` argument sets `Plugin::name`. Without it, the
 /// type identifier is used.
 ///
 /// # Examples

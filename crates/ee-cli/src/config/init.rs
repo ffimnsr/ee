@@ -87,6 +87,7 @@ pub(crate) fn resolved_config_with_env(
         keymap: keymap_settings_to_toml(&settings.keymap),
         agents: agents_settings_to_toml(&settings.agents),
         mcp: mcp_settings_to_toml(&settings.mcp),
+        plugins: Default::default(),
     }
 }
 

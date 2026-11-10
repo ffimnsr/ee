@@ -21,6 +21,6 @@ expression: editor_rows(parser.screen())
     17  use ratatui::layout::Rect;
     18  use serde_json::{Value, json};
     19  use xi_core_lib::open_policy::OpenThresholds;
-    20  use xi_core_lib::plugin_rpc::{
+    20  use ee_plugin_api::model::{
     21      CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, Selecti
     22  };

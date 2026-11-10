@@ -591,7 +591,8 @@ mod tests {
     #[test]
     fn rejects_manifest_v1() {
         let mut manifest = base();
-        manifest.manifest_version = 1;
+        const OLD_VERSION: u32 = 1;
+        manifest.manifest_version = OLD_VERSION;
         assert_eq!(
             manifest.validate(),
             Err(ManifestError::UnsupportedVersion { found: 1, expected: 2 })

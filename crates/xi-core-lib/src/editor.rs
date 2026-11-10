@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -23,23 +23,19 @@ use serde::{Deserialize, Serialize};
 use xi_rope::diff::{Diff, LineHashDiff};
 use xi_rope::engine::{Engine, RevId, RevToken};
 use xi_rope::rope::count_newlines;
-use xi_rope::spans::SpansBuilder;
-use xi_rope::{DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta, Transformer};
+use xi_rope::{DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 
-use crate::annotations::{AnnotationType, Annotations};
 use crate::config::BufferItems;
 use crate::edit_ops::{self, IndentDirection};
 use crate::edit_types::BufferEvent;
-use crate::event_context::MAX_SIZE_LIMIT;
 use crate::indent::SyntaxIndentContext;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::movement::Movement;
-use crate::plugins::PluginId;
-use crate::plugins::rpc::{DataSpan, GetDataResponse, PluginEdit, PluginEditAck, TextUnit};
 use crate::rpc::{LineRange, SelectionModifier};
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::text_store::DocumentMode;
 use crate::view::{Replace, View};
+use ee_plugin_api::model::EditAck;
 
 /// Maximum retained undo groups before CRDT history garbage collection.
 const MAX_UNDOS: usize = 100;
@@ -92,8 +88,6 @@ pub struct Editor {
     this_edit_type: EditType,
     last_edit_type: EditType,
 
-    revs_in_flight: usize,
-
     /// Tracks an in-flight async whole-document scan operation (e.g. reindent).
     pub(crate) whole_scan_task: crate::whole_scan::WholeScanTask,
     /// Tracks an in-flight async save operation for rope-backed buffers.
@@ -137,7 +131,6 @@ impl Editor {
             force_undo_group: false,
             last_edit_type: EditType::Other,
             this_edit_type: EditType::Other,
-            revs_in_flight: 0,
             vlf_store: None,
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
             save_task: crate::whole_scan::SaveTask::new(),
@@ -170,7 +163,6 @@ impl Editor {
             force_undo_group: false,
             last_edit_type: EditType::Other,
             this_edit_type: EditType::Other,
-            revs_in_flight: 0,
             vlf_store: Some(Box::new(store)),
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
             save_task: crate::whole_scan::SaveTask::new(),
@@ -344,45 +336,32 @@ impl Editor {
         self.set_pristine();
     }
 
-    /// Increments the count of plugin revisions in flight.
+    /// Applies an external plugin edit to the buffer at `rev`.
     ///
-    /// Each outstanding plugin edit holds a reference to the current revision;
-    /// CRDT garbage collection is deferred until all in-flight revisions are
-    /// acknowledged via [`dec_revs_in_flight`].
-    ///
-    /// [`dec_revs_in_flight`]: Self::dec_revs_in_flight
-    pub fn increment_revs_in_flight(&mut self) {
-        self.revs_in_flight += 1;
-    }
-
-    /// Decrements the count of plugin revisions in flight and triggers CRDT
-    /// garbage collection when the count reaches zero.
-    ///
-    /// Must only be called after a corresponding [`increment_revs_in_flight`].
-    ///
-    /// [`increment_revs_in_flight`]: Self::increment_revs_in_flight
-    pub fn dec_revs_in_flight(&mut self) {
-        self.revs_in_flight -= 1;
-        self.gc_undos();
-    }
-
-    /// Applies a delta to the text, and updates undo state.
-    ///
-    /// Records the delta into the CRDT engine so that it can be undone. Also
-    /// contains the logic for merging edits into the same undo group. At call
-    /// time, self.this_edit_type should be set appropriately.
-    ///
-    /// This method can be called multiple times, accumulating deltas that will
-    /// be committed at once with `commit_delta`. Note that it does not update
-    /// the views. Thus, view-associated state such as the selection and line
-    /// breaks are to be considered invalid after this method, until the
-    /// `commit_delta` call.
-    fn add_delta(&mut self, delta: RopeDelta) {
-        let head_rev_id = self.engine.get_head_rev_id();
-        let undo_group = self.calculate_undo_group();
-        self.last_edit_type = self.this_edit_type;
-        self.engine.edit_rev(CORE_EDIT_PRIORITY, undo_group, head_rev_id.token(), delta);
-        self.text = self.engine.get_head().clone();
+    /// Core edits occupy the middle priority. External edits use bounded bands
+    /// on either side so `after_cursor` controls concurrent insertion placement.
+    pub(crate) fn apply_external_edit(
+        &mut self,
+        rev: RevToken,
+        delta: RopeDelta,
+        priority: u64,
+        after_cursor: bool,
+        undo_group: Option<usize>,
+    ) -> EditAck {
+        let _t = tracing::trace_span!("Editor::apply_external_edit", categories = "core").entered();
+        let priority = plugin_edit_priority(priority, after_cursor);
+        let undo_group = undo_group.unwrap_or_else(|| self.calculate_undo_group());
+        match self.engine.try_edit_rev(priority, undo_group, rev, delta) {
+            Err(e) => {
+                let reason = e.to_string();
+                error!("Error applying plugin edit: {}", reason);
+                EditAck { applied: false, rev, reason: Some(reason) }
+            }
+            Ok(_) => {
+                self.text = self.engine.get_head().clone();
+                EditAck { applied: true, rev, reason: None }
+            }
+        }
     }
 
     pub(crate) fn calculate_undo_group(&mut self) -> usize {
@@ -407,25 +386,23 @@ impl Editor {
         }
     }
 
-    /// generates a delta from a plugin's response and applies it to the buffer.
-    pub fn apply_plugin_edit(&mut self, edit: PluginEdit) -> PluginEditAck {
-        let _t = tracing::trace_span!("Editor::apply_plugin_edit", categories = "core").entered();
-        let PluginEdit { rev, delta, priority, after_cursor, undo_group, .. } = edit;
-        // Core edits occupy the middle priority. Plugin edits use bounded bands on
-        // either side so `after_cursor` controls concurrent insertion placement.
-        let priority = plugin_edit_priority(priority, after_cursor);
-        let undo_group = undo_group.unwrap_or_else(|| self.calculate_undo_group());
-        match self.engine.try_edit_rev(priority, undo_group, rev, delta) {
-            Err(e) => {
-                let reason = e.to_string();
-                error!("Error applying plugin edit: {}", reason);
-                PluginEditAck { applied: false, rev, reason: Some(reason) }
-            }
-            Ok(_) => {
-                self.text = self.engine.get_head().clone();
-                PluginEditAck { applied: true, rev, reason: None }
-            }
-        }
+    /// Applies a delta to the text, and updates undo state.
+    ///
+    /// Records the delta into the CRDT engine so that it can be undone. Also
+    /// contains the logic for merging edits into the same undo group. At call
+    /// time, self.this_edit_type should be set appropriately.
+    ///
+    /// This method can be called multiple times, accumulating deltas that will
+    /// be committed at once with `commit_delta`. Note that it does not update
+    /// the views. Thus, view-associated state such as the selection and line
+    /// breaks are to be considered invalid after this method, until the
+    /// `commit_delta` call.
+    fn add_delta(&mut self, delta: RopeDelta) {
+        let head_rev_id = self.engine.get_head_rev_id();
+        let undo_group = self.calculate_undo_group();
+        self.last_edit_type = self.this_edit_type;
+        self.engine.edit_rev(CORE_EDIT_PRIORITY, undo_group, head_rev_id.token(), delta);
+        self.text = self.engine.get_head().clone();
     }
 
     /// Commits the current delta. If the buffer has changed, returns
@@ -451,11 +428,12 @@ impl Editor {
         };
         self.last_rev_id = self.engine.get_head_rev_id();
         self.last_text = self.text.clone();
+        self.gc_undos();
         Some((delta, last_text, drift))
     }
 
     fn gc_undos(&mut self) {
-        if self.revs_in_flight == 0 && !self.gc_undos.is_empty() {
+        if !self.gc_undos.is_empty() {
             let gc_groups: Vec<usize> = self.gc_undos.iter().copied().collect();
             self.engine.gc(self.gc_undos.iter());
             if let Some(store) = self.vlf_store.as_ref() {
@@ -839,9 +817,9 @@ impl Editor {
         }
     }
 
-    /// Returns the number of lines in the buffer as seen by plugins
-    /// (always at least 1, even for an empty buffer).
-    pub fn plugin_n_lines(&self) -> usize {
+    /// Returns the number of lines in the buffer (always at least 1, even for
+    /// an empty buffer).
+    pub(crate) fn line_count(&self) -> usize {
         self.text.measure::<LinesMetric>() + 1
     }
 
@@ -854,49 +832,6 @@ impl Editor {
         })
     }
 
-    /// Applies annotation span updates from a plugin, transforming spans if
-    /// `rev` is stale.
-    ///
-    /// # Preconditions
-    ///
-    /// `start` and `len` must describe a valid byte range within the buffer at
-    /// the revision identified by `rev`.
-    pub fn update_annotations(
-        &mut self,
-        view: &mut View,
-        plugin: PluginId,
-        start: usize,
-        len: usize,
-        annotation_spans: Vec<DataSpan>,
-        annotation_type: AnnotationType,
-        rev: RevToken,
-    ) {
-        let _t = tracing::trace_span!("Editor::update_annotations", categories = "core").entered();
-
-        let mut start = start;
-        let mut end_offset = start + len;
-        let mut sb = SpansBuilder::new(len);
-        for span in annotation_spans {
-            sb.add_span(Interval::new(span.start, span.end), span.data);
-        }
-        let mut spans = sb.build();
-        if rev != self.engine.get_head_rev_id().token() {
-            if let Ok(delta) = self.engine.try_delta_rev_head(rev) {
-                let mut transformer = Transformer::new(&delta);
-                let new_start = transformer.transform(start, false);
-                if !transformer.interval_untouched(Interval::new(start, end_offset)) {
-                    spans = spans.transform(start, end_offset, &mut transformer);
-                }
-                start = new_start;
-                end_offset = transformer.transform(end_offset, true);
-            } else {
-                error!("Revision {} not found", rev);
-            }
-        }
-        let iv = Interval::new(start, end_offset);
-        view.update_annotations(plugin, iv, Annotations { items: spans, annotation_type });
-    }
-
     pub(crate) fn get_rev(&self, rev: RevToken) -> Option<Cow<'_, Rope>> {
         let text_cow = if rev == self.engine.get_head_rev_id().token() {
             Cow::Borrowed(&self.text)
@@ -905,42 +840,6 @@ impl Editor {
         };
 
         Some(text_cow)
-    }
-
-    /// Returns a contiguous chunk of the buffer at the given `start` position
-    /// for plugin consumption. Returns `None` if the revision or offset is
-    /// invalid.
-    ///
-    /// # Preconditions
-    ///
-    /// `rev` must be a valid revision token issued by this editor's CRDT engine.
-    pub fn plugin_get_data(
-        &self,
-        start: usize,
-        unit: TextUnit,
-        max_size: usize,
-        rev: RevToken,
-    ) -> Option<GetDataResponse> {
-        let _t = tracing::trace_span!("Editor::plugin_get_data", categories = "core").entered();
-        let text_cow = self.get_rev(rev)?;
-        let text = &text_cow;
-        // convert our offset into a valid byte offset
-        let offset = unit.resolve_offset(text.borrow(), start)?;
-
-        let max_size = min(max_size, MAX_SIZE_LIMIT);
-        let mut end_off = offset.saturating_add(max_size);
-        if end_off >= text.len() {
-            end_off = text.len();
-        } else {
-            // Snap end to codepoint boundary.
-            end_off = text.prev_codepoint_offset(end_off + 1).unwrap();
-        }
-
-        let chunk = text.slice_to_cow(offset..end_off).into_owned();
-        let first_line = text.line_of_offset(offset);
-        let first_line_offset = offset - text.offset_of_line(first_line);
-
-        Some(GetDataResponse { chunk, offset, first_line, first_line_offset })
     }
 }
 
@@ -1151,15 +1050,11 @@ mod tests {
 
             let mut plugin_builder = DeltaBuilder::new(2);
             plugin_builder.replace(1..1, "P".into());
-            let edit = PluginEdit {
-                rev: plugin_rev,
-                delta: plugin_builder.build(),
-                priority: 0,
-                after_cursor,
-                undo_group: None,
-                author: "plugin".into(),
-            };
-            assert!(editor.apply_plugin_edit(edit).applied);
+            assert!(
+                editor
+                    .apply_external_edit(plugin_rev, plugin_builder.build(), 0, after_cursor, None,)
+                    .applied
+            );
             editor.get_buffer().to_string()
         }
 
@@ -1176,17 +1071,8 @@ mod tests {
         let delta = builder.build();
         let rev = editor.get_head_rev_token();
 
-        let edit_one = PluginEdit {
-            rev,
-            delta,
-            priority: 55,
-            after_cursor: false,
-            undo_group: None,
-            author: "plugin_one".into(),
-        };
-
-        editor.apply_plugin_edit(edit_one.clone());
-        editor.apply_plugin_edit(edit_one);
+        editor.apply_external_edit(rev, delta.clone(), 55, false, None);
+        editor.apply_external_edit(rev, delta, 55, false, None);
 
         assert_eq!(editor.get_buffer().to_string(), "sshello");
     }

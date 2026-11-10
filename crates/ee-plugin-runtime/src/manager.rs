@@ -349,7 +349,18 @@ impl PluginManager {
         if !self.running.is_empty() {
             return Ok(());
         }
+        self.load_inner(true)
+    }
 
+    /// Discover and resolve plugins without activating them.
+    ///
+    /// Used by diagnostics-only commands so listing plugins cannot execute
+    /// untrusted code. Blocked entries and diagnostics are still recorded.
+    pub fn load(&mut self) -> Result<(), PluginError> {
+        self.load_inner(false)
+    }
+
+    fn load_inner(&mut self, activate: bool) -> Result<(), PluginError> {
         self.reset_loading_state();
         let mut discovery_options = self.config.discovery.clone();
         if let Some(paths) = self.config.env.get("EE_PLUGIN_PATH") {
@@ -472,6 +483,9 @@ impl PluginManager {
         }
 
         for name in resolution.order {
+            if !activate {
+                break;
+            }
             if self.blocked.contains_key(&name) || self.deferred.contains(&name) {
                 continue;
             }

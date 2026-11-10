@@ -1,8 +1,8 @@
 use std::sync::mpsc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ee_plugin_api::model::SelectionRange;
 use serde_json::Value;
-use xi_core_lib::plugin_rpc::SelectionRange;
 
 use crate::app::{App, Mode};
 use crate::buffer::BufferManager;

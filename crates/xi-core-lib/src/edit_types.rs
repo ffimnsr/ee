@@ -22,12 +22,12 @@ use log::warn;
 
 use crate::movement::Movement;
 use crate::object::{SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction};
-use crate::plugins::rpc::SelectionRange;
 use crate::rpc::{
     EditNotification, FindQuery, GestureType, LineRange, LineReplacement, MouseAction,
     SelectionGranularity, SelectionModifier,
 };
 use crate::view::Size;
+use ee_plugin_api::model::SelectionRange;
 
 /// Events that only modify view state
 #[derive(Debug, PartialEq, Clone)]

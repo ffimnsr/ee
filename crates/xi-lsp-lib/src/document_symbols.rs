@@ -70,7 +70,7 @@ impl DocumentSymbolContext {
     }
 }
 
-fn api_symbol(symbol: xi_core_lib::plugin_rpc::SymbolItem) -> SymbolItem {
+fn api_symbol(symbol: ee_plugin_api::model::SymbolItem) -> SymbolItem {
     SymbolItem {
         name: symbol.name,
         kind: symbol.kind,

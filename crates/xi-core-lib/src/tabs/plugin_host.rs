@@ -16,7 +16,6 @@ use crate::plugin_runtime::core_api::{
 use crate::plugin_runtime::effects::apply_effects;
 use crate::plugin_runtime::host::{EditorPluginHost, NotifierEvent, QueuedNotifier};
 use crate::plugin_runtime::services::fs::FsScope;
-use crate::plugins::rpc::PluginEdit;
 use crate::selection::{SelRegion, Selection};
 use crate::tabs::{BufferId, CoreState, ViewId};
 use ee_plugin_api::effect::{DecorationPatch, ScrollRequest, SelectionRequest, StatusItem};
@@ -247,15 +246,13 @@ impl CoreState {
                 }
             }
             let delta = bridge::text_edits_to_delta(base_len, &request.edits)?;
-            let edit = PluginEdit {
-                rev: request.rev,
+            editor.apply_external_edit(
+                request.rev,
                 delta,
-                priority: request.priority,
-                after_cursor: request.after_cursor,
-                undo_group: request.undo_group,
-                author: request.author.clone(),
-            };
-            editor.apply_plugin_edit(edit)
+                request.priority,
+                request.after_cursor,
+                request.undo_group,
+            )
         };
 
         if ack.applied {
@@ -282,7 +279,7 @@ impl CoreState {
             buffer_id: buffer,
             rev: editor.get_head_rev_token(),
             len: editor.get_buffer().len(),
-            line_count: editor.plugin_n_lines(),
+            line_count: editor.line_count(),
             path: info.map(|info| info.path.display().to_string()),
             language: ApiLanguageId::new(language.as_ref()),
             vlf: editor.is_vlf(),
@@ -616,10 +613,7 @@ impl EditorAccess for WeakCoreAccess {
                 Some(language.as_ref()),
                 info.map(|info| info.path.as_path()),
                 &text,
-            )
-            .into_iter()
-            .map(api_symbol)
-            .collect())
+            ))
         })
     }
 
@@ -708,17 +702,6 @@ fn core_view(view: ApiViewId) -> ViewId {
 
 fn api_view(view: ViewId) -> ApiViewId {
     ApiViewId(view.0 as u64)
-}
-
-fn api_symbol(symbol: crate::plugins::rpc::SymbolItem) -> ApiSymbolItem {
-    ApiSymbolItem {
-        name: symbol.name,
-        kind: symbol.kind,
-        path: symbol.path,
-        line: symbol.line,
-        column: symbol.column,
-        children: symbol.children.into_iter().map(api_symbol).collect(),
-    }
 }
 
 // Re-exported helpers used by EventContext bridge calls.

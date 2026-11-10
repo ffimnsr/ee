@@ -2,27 +2,6 @@
 use super::*;
 
 impl View {
-    pub fn update_annotations(
-        &mut self,
-        plugin: PluginId,
-        interval: Interval,
-        annotations: Annotations,
-    ) {
-        self.annotations.update(plugin, interval, annotations)
-    }
-
-    pub fn update_diagnostics(
-        &mut self,
-        plugin: PluginId,
-        diagnostics: Vec<crate::plugins::rpc::Diagnostic>,
-    ) {
-        self.diagnostics.insert(plugin, diagnostics);
-    }
-
-    pub fn get_diagnostics(&self) -> Vec<crate::plugins::rpc::Diagnostic> {
-        self.diagnostics.values().flat_map(|diagnostics| diagnostics.iter().cloned()).collect()
-    }
-
     /// Select entire buffer.
     ///
     /// Note: unlike movement based selection, this does not scroll.

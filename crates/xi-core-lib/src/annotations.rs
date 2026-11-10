@@ -19,18 +19,9 @@ use serde::ser::{SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value, json};
 
-use std::collections::HashMap;
-
-use crate::line_offset::LineOffset;
-use crate::plugins::PluginId;
 use crate::view::View;
-use log::warn;
-use xi_rope::spans::Spans;
-use xi_rope::{Interval, Rope};
-
-/// Maximum number of distinct annotation types a single plugin may register.
-/// Requests that would exceed this limit are dropped with a warning.
-const MAX_ANNOTATION_TYPES_PER_PLUGIN: usize = 64;
+use xi_rope::Interval;
+use xi_rope::Rope;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AnnotationType {
@@ -91,47 +82,6 @@ impl<'de> Deserialize<'de> for AnnotationRange {
 }
 
 /// A set of annotations of a given type.
-#[derive(Debug, Clone)]
-pub struct Annotations {
-    pub items: Spans<Value>,
-    pub annotation_type: AnnotationType,
-}
-
-impl Annotations {
-    /// Update the annotations in `interval` with the provided `items`.
-    pub fn update(&mut self, interval: Interval, items: Spans<Value>) {
-        self.items.edit(interval, items);
-    }
-
-    /// Remove annotations intersecting `interval`.
-    pub fn invalidate(&mut self, interval: Interval) {
-        self.items.delete_after(interval);
-    }
-
-    fn slice_for_interval(&self, interval: Interval, view: &View, text: &Rope) -> AnnotationSlice {
-        let mut payloads = Vec::new();
-        let mut ranges = Vec::new();
-
-        for (item_interval, payload) in self.items.iter() {
-            if item_interval.start() > interval.end() || item_interval.end() < interval.start() {
-                continue;
-            }
-
-            let (start_line, start_col) = view.offset_to_line_col(text, item_interval.start());
-            let (end_line, end_col) = view.offset_to_line_col(text, item_interval.end());
-
-            payloads.push(payload.clone());
-            ranges.push(AnnotationRange { start_line, start_col, end_line, end_col });
-        }
-
-        AnnotationSlice {
-            annotation_type: self.annotation_type.clone(),
-            ranges,
-            payloads: Some(payloads),
-        }
-    }
-}
-
 /// A region of an `Annotation`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AnnotationSlice {
@@ -170,70 +120,9 @@ pub trait ToAnnotation {
 }
 
 /// All the annotations for a given view
-pub struct AnnotationStore {
-    store: HashMap<PluginId, Vec<Annotations>>,
-}
-
-impl AnnotationStore {
-    pub fn new() -> Self {
-        AnnotationStore { store: HashMap::new() }
-    }
-
-    /// Invalidates and removes all annotations in the range of the interval.
-    pub fn invalidate(&mut self, interval: Interval) {
-        self.store.values_mut().flat_map(|v| v.iter_mut()).for_each(|a| a.invalidate(interval));
-    }
-
-    /// Applies an update from a plugin to a set of annotations
-    pub fn update(&mut self, source: PluginId, interval: Interval, item: Annotations) {
-        if !self.store.contains_key(&source) {
-            self.store.insert(source, vec![item]);
-            return;
-        }
-
-        let entry = self.store.get_mut(&source).unwrap();
-        if let Some(annotation) =
-            entry.iter_mut().find(|a| a.annotation_type == item.annotation_type)
-        {
-            annotation.update(interval, item.items);
-        } else {
-            if entry.len() >= MAX_ANNOTATION_TYPES_PER_PLUGIN {
-                warn!(
-                    "plugin {:?} exceeded annotation type limit ({}), dropping update",
-                    source, MAX_ANNOTATION_TYPES_PER_PLUGIN
-                );
-                return;
-            }
-            entry.push(item);
-        }
-    }
-
-    /// Returns an iterator which produces, for each type of annotation,
-    /// those annotations which intersect the given interval.
-    pub fn iter_range<'c>(
-        &'c self,
-        view: &'c View,
-        text: &'c Rope,
-        interval: Interval,
-    ) -> impl Iterator<Item = AnnotationSlice> + 'c {
-        self.store.values().flat_map(move |value| {
-            value.iter().map(move |annotation| annotation.slice_for_interval(interval, view, text))
-        })
-    }
-
-    /// Removes any annotations provided by this plugin
-    pub fn clear(&mut self, plugin: PluginId) {
-        self.store.remove(&plugin);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::PluginPid;
-    use crate::tabs::BufferId;
-    use crate::view::View;
-    use xi_rope::spans::SpansBuilder;
 
     #[test]
     fn test_annotation_range_serialization() {
@@ -267,129 +156,5 @@ mod tests {
                 "type": "find",
             })
         )
-    }
-
-    #[test]
-    fn test_annotation_store_update() {
-        let mut store = AnnotationStore::new();
-
-        let mut sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(1, 5), json!(null));
-
-        assert_eq!(store.store.len(), 0);
-
-        store.update(
-            PluginPid(1),
-            Interval::new(1, 5),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        assert_eq!(store.store.len(), 1);
-
-        sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(6, 8), json!(null));
-
-        store.update(
-            PluginPid(2),
-            Interval::new(6, 8),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        assert_eq!(store.store.len(), 2);
-    }
-
-    #[test]
-    fn test_annotation_store_clear() {
-        let mut store = AnnotationStore::new();
-
-        let mut sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(1, 5), json!(null));
-
-        assert_eq!(store.store.len(), 0);
-
-        store.update(
-            PluginPid(1),
-            Interval::new(1, 5),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        assert_eq!(store.store.len(), 1);
-
-        sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(6, 8), json!(null));
-
-        store.update(
-            PluginPid(2),
-            Interval::new(6, 8),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        assert_eq!(store.store.len(), 2);
-
-        store.clear(PluginPid(1));
-
-        assert_eq!(store.store.len(), 1);
-
-        store.clear(PluginPid(1));
-
-        assert_eq!(store.store.len(), 1);
-    }
-
-    #[test]
-    fn test_annotation_store_iter_range_keeps_zero_length_spans() {
-        let mut store = AnnotationStore::new();
-        let mut sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(3, 3), json!("cursor"));
-
-        store.update(
-            PluginPid(1),
-            Interval::new(3, 3),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        let text = Rope::from("abcdefghij");
-        let view = View::new(1.into(), BufferId::new(2));
-        let interval = Interval::new(2, 4);
-
-        let slices = store.iter_range(&view, &text, interval).collect::<Vec<_>>();
-        assert_eq!(slices.len(), 1);
-        assert_eq!(
-            slices[0].to_json(),
-            json!({
-                "type": "find",
-                "ranges": [[0, 3, 0, 3]],
-                "payloads": ["cursor"],
-                "n": 1
-            })
-        );
-    }
-
-    #[test]
-    fn test_annotation_store_iter_range_excludes_non_overlapping_spans() {
-        let mut store = AnnotationStore::new();
-        let mut sb = SpansBuilder::new(10);
-        sb.add_span(Interval::new(7, 8), json!("note"));
-
-        store.update(
-            PluginPid(1),
-            Interval::new(7, 8),
-            Annotations { annotation_type: AnnotationType::Find, items: sb.build() },
-        );
-
-        let text = Rope::from("abcdefghij");
-        let view = View::new(1.into(), BufferId::new(2));
-        let interval = Interval::new(2, 4);
-
-        let slices = store.iter_range(&view, &text, interval).collect::<Vec<_>>();
-        assert_eq!(slices.len(), 1);
-        assert_eq!(
-            slices[0].to_json(),
-            json!({
-                "type": "find",
-                "ranges": [],
-                "payloads": [],
-                "n": 0
-            })
-        );
     }
 }

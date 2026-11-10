@@ -1,8 +1,8 @@
 use std::sync::mpsc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ee_plugin_api::model::{CodeAction as CodeActionDescriptor, SymbolItem};
 use serde_json::{Value, json};
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::App;
@@ -595,7 +595,11 @@ fn pending_code_actions_notification_opens_picker() {
     let mut app = App::from_path(None).unwrap();
     app.backend.pending_ui_actions.push(crate::backend::PendingUiAction::CodeActions {
         view_id: app.backend.view_id.clone(),
-        actions: vec![CodeActionDescriptor { title: String::from("Extract variable") }],
+        actions: vec![CodeActionDescriptor {
+            title: String::from("Extract variable"),
+            edits: Vec::new(),
+            command: None,
+        }],
     });
 
     app.handle_pending_ui_actions();

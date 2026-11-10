@@ -20,16 +20,14 @@ use serde::Serialize;
 use serde_json::{self, Value, json};
 use xi_rpc::{self, RpcPeer};
 
-use crate::plugins::Command;
-use crate::plugins::PluginTerminationReason;
-use crate::plugins::rpc::{
-    ClientPluginInfo, CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
-    SymbolItem,
-};
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
 use crate::vlf::search::VlfMatchRange;
 use crate::width_cache::{WidthReq, WidthResponse};
+use ee_plugin_api::model::{
+    CodeAction as CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
+    SymbolItem,
+};
 
 /// An interface to the frontend.
 pub struct Client(RpcPeer);
@@ -137,69 +135,6 @@ impl Client {
             &json!({
                 "view_id": view_id,
                 "patch": payload,
-            }),
-        );
-    }
-
-    /// Notify the client that a plugin has started.
-    pub fn plugin_started(&self, view_id: ViewId, plugin: &str) {
-        self.0.send_rpc_notification(
-            "plugin_started",
-            &json!({
-                "view_id": view_id,
-                "plugin": plugin,
-            }),
-        );
-    }
-
-    /// Notify the client that a plugin has stopped.
-    ///
-    /// `code` is not currently used; in the future may be used to
-    /// pass an exit code.
-    pub fn plugin_stopped(&self, view_id: ViewId, plugin: &str, code: i32) {
-        self.0.send_rpc_notification(
-            "plugin_stopped",
-            &json!({
-                "view_id": view_id,
-                "plugin": plugin,
-                "code": code,
-            }),
-        );
-    }
-
-    pub fn plugin_terminated(
-        &self,
-        view_id: ViewId,
-        plugin: &str,
-        reason: &PluginTerminationReason,
-    ) {
-        self.0.send_rpc_notification(
-            "plugin_terminated",
-            &json!({
-                "view_id": view_id,
-                "plugin": plugin,
-                "reason": reason,
-            }),
-        );
-    }
-
-    /// Notify the client of the available plugins.
-    pub fn available_plugins(&self, view_id: ViewId, plugins: &[ClientPluginInfo]) {
-        self.0.send_rpc_notification(
-            "available_plugins",
-            &json!({
-                "view_id": view_id,
-                "plugins": plugins }),
-        );
-    }
-
-    pub fn update_cmds(&self, view_id: ViewId, plugin: &str, cmds: &[Command]) {
-        self.0.send_rpc_notification(
-            "update_cmds",
-            &json!({
-                "view_id": view_id,
-                "plugin": plugin,
-                "cmds": cmds,
             }),
         );
     }

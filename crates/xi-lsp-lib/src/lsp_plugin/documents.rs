@@ -152,7 +152,7 @@ impl LspPlugin {
                 }
             }
         }
-        let options = Some(xi_core_lib::plugin_rpc::FormattingOptions {
+        let options = Some(ee_plugin_api::model::FormattingOptions {
             tab_size: view.get_config().tab_size,
             insert_spaces: view.get_config().translate_tabs_to_spaces,
         });

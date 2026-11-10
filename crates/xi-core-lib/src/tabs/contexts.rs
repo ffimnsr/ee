@@ -13,11 +13,6 @@ impl CoreState {
             let editor = &self.editors[&buffer_id];
             let info = self.file_manager.get_info(buffer_id);
             let language = self.config_manager.get_buffer_language(buffer_id);
-            let plugins = self
-                .running_plugins
-                .iter()
-                .filter(|plugin| plugin.receives_updates_for(&language))
-                .collect::<Vec<_>>();
             let config = self.config_manager.get_buffer_config(buffer_id);
 
             EventContext {
@@ -29,25 +24,16 @@ impl CoreState {
                 language,
                 info,
                 siblings: Vec::new(),
-                plugins,
                 client: &self.peer,
                 width_cache: &self.width_cache,
                 kill_ring: &self.kill_ring,
-                weak_core: self.self_ref.as_ref().unwrap(),
                 plugin_host: self.plugin_host.as_deref(),
             }
         })
     }
 
-    /// Produces an iterator over all event contexts, with each view appearing
-    /// exactly once.
-    pub(super) fn iter_groups<'a>(&'a self) -> Iter<'a, Box<dyn Iterator<Item = &'a ViewId> + 'a>> {
-        Iter { views: Box::new(self.views.keys()), seen: HashSet::new(), inner: self }
-    }
-
     pub(crate) fn client_notification(&mut self, cmd: CoreNotification) {
         use self::CoreNotification::*;
-        use self::CorePluginNotification as PN;
         match cmd {
             Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit(view_id, cmd),
             Command { id, args, view_id } => self.do_plugin_command_notification(id, args, view_id),
@@ -55,16 +41,6 @@ impl CoreState {
             Save { view_id, file_path } => self.do_save(view_id, file_path),
             CloseView { view_id } => self.do_close_view(view_id),
             SetConfig { domain, changes } => self.do_set_config(domain, changes),
-            Plugin(cmd) => match cmd {
-                PN::Start { view_id, plugin_name } => self.do_start_plugin(view_id, &plugin_name),
-                PN::Stop { view_id, plugin_name } => self.do_stop_plugin(view_id, &plugin_name),
-                PN::Restart { view_id, plugin_name } => {
-                    self.do_restart_plugin(view_id, &plugin_name)
-                }
-                PN::PluginRpc { view_id, receiver, rpc } => {
-                    self.do_plugin_rpc(view_id, &receiver, &rpc.method, &rpc.params)
-                }
-            },
             // handled at the top level
             ClientStarted { .. } => (),
         }
@@ -468,7 +444,9 @@ impl CoreState {
 
         let config = self.config_manager.add_buffer(buffer_id, path.as_deref());
         let language = self.config_manager.get_buffer_language(buffer_id);
-        self.ensure_plugins_for_language(&language);
+        if self.plugin_host.is_some() {
+            self.pending_plugin_language_activations.push(language.as_ref().to_string());
+        }
 
         // NOTE: because this is a synchronous call, we have to initialize the
         // view and return the view_id before we can send any events to this
@@ -829,85 +807,5 @@ impl CoreState {
             .map(crate::plugin_runtime::bridge::api_view)
             .unwrap_or(ee_plugin_api::model::ViewId(0));
         self.queued_plugin_commands.push((command, view, args));
-    }
-
-    pub(super) fn do_start_plugin(&mut self, _view_id: ViewId, plugin: &str) {
-        if self.running_plugins.iter().any(|p| p.name == plugin) {
-            info!("plugin {} already running", plugin);
-            return;
-        }
-
-        if let Some(manifest) = self.plugins.get_named(plugin) {
-            self.start_plugin(manifest);
-        } else {
-            warn!("no plugin found with name '{}'", plugin);
-        }
-    }
-
-    pub(super) fn do_stop_plugin(&mut self, _view_id: ViewId, plugin: &str) {
-        if let Some(plugin) = self.running_plugins.iter().find(|running| running.name == plugin) {
-            self.begin_plugin_shutdown(plugin.id, StopReason::Manual);
-        }
-    }
-
-    pub(super) fn do_restart_plugin(&mut self, view_id: ViewId, plugin: &str) {
-        if let Some(plugin) = self.running_plugins.iter().find(|running| running.name == plugin) {
-            self.begin_plugin_shutdown(plugin.id, StopReason::Restart);
-            return;
-        }
-
-        self.do_start_plugin(view_id, plugin);
-    }
-
-    pub(super) fn do_plugin_rpc(
-        &mut self,
-        view_id: ViewId,
-        receiver: &str,
-        method: &str,
-        params: &Value,
-    ) {
-        let mut dispatched = false;
-        self.running_plugins.iter().filter(|plugin| plugin.name == receiver).for_each(|plugin| {
-            dispatched = true;
-            plugin.dispatch_command(view_id, method, params);
-        });
-
-        if dispatched {
-            return;
-        }
-
-        let Some(manifest) = self.plugins.get_named(receiver) else {
-            warn!("plugin {} is not available for command {}", receiver, method);
-            return;
-        };
-
-        if !manifest.activates_on_command() {
-            warn!("plugin {} is not running and is not command-activated", receiver);
-            return;
-        }
-
-        self.pending_plugin_commands.push(PendingPluginCommand {
-            plugin_name: manifest.name.clone(),
-            view_id,
-            method: method.to_string(),
-            params: params.clone(),
-            shutdown_after_dispatch: matches!(
-                manifest.scope,
-                crate::plugins::manifest::PluginScope::SingleInvocation
-            ),
-        });
-        self.start_plugin(manifest);
-    }
-
-    pub(super) fn after_stop_plugin(&mut self, plugin: &Plugin) {
-        self.iter_groups().for_each(|mut cx| cx.plugin_stopped(plugin));
-    }
-
-    pub(super) fn notify_plugin_terminated(
-        &mut self,
-        plugin_name: &str,
-        reason: &PluginTerminationReason,
-    ) {
-        self.iter_groups().for_each(|cx| cx.plugin_terminated(plugin_name, reason));
     }
 }

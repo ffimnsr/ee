@@ -35,7 +35,6 @@ fn test_startup() {
     let json = make_reader(r#"{"id":0,"method":"new_view","params":{}}"#);
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
-    rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
     rx.expect_rpc("document_mode");
     rx.expect_rpc("update");
@@ -264,7 +263,6 @@ fn move_parent_node_start_rpc_updates_selection_annotation() {
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
     rx.expect_rpc("available_languages");
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
-    rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
     rx.expect_rpc("document_mode");
     rx.expect_rpc("update");
@@ -306,7 +304,6 @@ fn move_parent_node_end_rpc_updates_selection_annotation() {
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
     rx.expect_rpc("available_languages");
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
-    rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
     rx.expect_rpc("document_mode");
     rx.expect_rpc("update");

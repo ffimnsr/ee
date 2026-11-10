@@ -1,87 +1,898 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ManifestV2",
+  "description": "Complete v2 manifest.",
+  "type": "object",
+  "properties": {
+    "manifest_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "api": {
+      "type": "string"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HostTarget"
+      }
+    },
+    "kind": {
+      "$ref": "#/$defs/PluginKind"
+    },
+    "entry": {
+      "type": "string"
+    },
+    "launch": {
+      "$ref": "#/$defs/LaunchConfig",
+      "default": {
+        "transport": "stdio_newline",
+        "args": [],
+        "working_dir": "",
+        "env": {}
+      }
+    },
+    "activation": {
+      "$ref": "#/$defs/Activation",
+      "default": {
+        "on_startup": false,
+        "on_language": [],
+        "on_command": [],
+        "on_event": [],
+        "scopes": []
+      }
+    },
+    "requires": {
+      "$ref": "#/$defs/Requires",
+      "default": {
+        "services": [],
+        "optional_services": []
+      }
+    },
+    "provides": {
+      "$ref": "#/$defs/Provides",
+      "default": {
+        "services": []
+      }
+    },
+    "permissions": {
+      "$ref": "#/$defs/Permissions",
+      "default": {}
+    },
+    "limits": {
+      "$ref": "#/$defs/Limits",
+      "default": {
+        "max_memory_bytes": 67108864,
+        "max_cpu_seconds": 10,
+        "rpc_timeout_ms": 2000,
+        "max_contributions": 128
+      }
+    },
+    "contributes": {
+      "$ref": "#/$defs/Contributions",
+      "default": {
+        "commands": [],
+        "ex_commands": [],
+        "keybindings": [],
+        "menu_items": [],
+        "ui": {
+          "status_items": [],
+          "panels": [],
+          "overlays": [],
+          "pickers": []
+        },
+        "languages": [],
+        "formatters": [],
+        "lsp_servers": [],
+        "agent": {
+          "tools": [],
+          "model_providers": [],
+          "policy_rules": [],
+          "context_providers": []
+        },
+        "config_schema": []
+      }
+    },
+    "config": {
+      "$ref": "#/$defs/ConfigSchema",
+      "default": {
+        "schema": null,
+        "defaults": null
+      }
+    }
+  },
+  "required": [
+    "manifest_version",
+    "name",
+    "version",
+    "api",
+    "targets",
+    "kind",
+    "entry"
+  ],
   "$defs": {
+    "HostTarget": {
+      "description": "Host that loads the plugin.",
+      "type": "string",
+      "enum": [
+        "editor",
+        "agent"
+      ]
+    },
+    "PluginKind": {
+      "description": "Plugin implementation kind.",
+      "type": "string",
+      "enum": [
+        "builtin",
+        "native",
+        "wasm"
+      ]
+    },
+    "LaunchConfig": {
+      "description": "Native launch parameters. Wasm plugins ignore these fields.",
+      "type": "object",
+      "properties": {
+        "transport": {
+          "$ref": "#/$defs/LaunchTransport",
+          "default": "stdio_newline"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "working_dir": {
+          "type": "string",
+          "default": "."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      }
+    },
+    "LaunchTransport": {
+      "description": "Native transport used to speak the v2 wire protocol.",
+      "type": "string",
+      "enum": [
+        "stdio_newline",
+        "stdio_content_length"
+      ]
+    },
     "Activation": {
       "description": "Activation conditions.",
+      "type": "object",
       "properties": {
-        "on_command": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "on_event": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "on_startup": {
+          "type": "boolean",
+          "default": false
         },
         "on_language": {
-          "default": [],
+          "type": "array",
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "default": []
         },
-        "on_startup": {
-          "default": false,
-          "type": "boolean"
+        "on_command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "on_event": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         },
         "scopes": {
-          "default": [],
+          "type": "array",
           "items": {
             "$ref": "#/$defs/ScopeTarget"
           },
-          "type": "array"
+          "default": []
+        }
+      }
+    },
+    "ScopeTarget": {
+      "description": "Scope lifetime targets.",
+      "type": "string",
+      "enum": [
+        "host",
+        "workspace",
+        "buffer",
+        "view",
+        "session",
+        "turn",
+        "command"
+      ]
+    },
+    "Requires": {
+      "description": "Required and optional service dependencies.",
+      "type": "object",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "optional_services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "Provides": {
+      "description": "Services provided by the plugin.",
+      "type": "object",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "Permissions": {
+      "description": "Declared permissions. Every value must be `true`.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "Limits": {
+      "description": "Runtime resource limits.",
+      "type": "object",
+      "properties": {
+        "max_memory_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 67108864
+        },
+        "max_cpu_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 10
+        },
+        "rpc_timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 2000
+        },
+        "max_contributions": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 128
+        }
+      }
+    },
+    "Contributions": {
+      "description": "Declarative contribution tables.",
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommandContribution"
+          },
+          "default": []
+        },
+        "ex_commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExCommandContribution"
+          },
+          "default": []
+        },
+        "keybindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeybindingContribution"
+          },
+          "default": []
+        },
+        "menu_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MenuItemContribution"
+          },
+          "default": []
+        },
+        "ui": {
+          "$ref": "#/$defs/UiContributions",
+          "default": {
+            "status_items": [],
+            "panels": [],
+            "overlays": [],
+            "pickers": []
+          }
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageContribution"
+          },
+          "default": []
+        },
+        "formatters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormatterContribution"
+          },
+          "default": []
+        },
+        "lsp_servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LspServerContribution"
+          },
+          "default": []
+        },
+        "agent": {
+          "$ref": "#/$defs/AgentContributions",
+          "default": {
+            "tools": [],
+            "model_providers": [],
+            "policy_rules": [],
+            "context_providers": []
+          }
+        },
+        "config_schema": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigSchemaContribution"
+          },
+          "default": []
+        }
+      }
+    },
+    "CommandContribution": {
+      "description": "Command contributed to the palette and keymap.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "args_schema": {
+          "default": null
         }
       },
-      "type": "object"
+      "required": [
+        "id",
+        "title"
+      ]
+    },
+    "CommandId": {
+      "description": "Identifier for a command registered by a plugin.",
+      "type": "string"
+    },
+    "ExCommandContribution": {
+      "description": "Ex command alias.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "command": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "usage": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ]
+    },
+    "KeybindingContribution": {
+      "description": "Default key binding contributed beneath user bindings.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "key": {
+          "type": "string"
+        },
+        "when": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "command",
+        "key"
+      ]
+    },
+    "MenuItemContribution": {
+      "description": "Menu entry pointing at a command.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/CommandId"
+        },
+        "label": {
+          "type": "string"
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "order": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      },
+      "required": [
+        "command",
+        "label"
+      ]
+    },
+    "UiContributions": {
+      "description": "UI contributions.",
+      "type": "object",
+      "properties": {
+        "status_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusItemContribution"
+          },
+          "default": []
+        },
+        "panels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PanelContribution"
+          },
+          "default": []
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OverlayContribution"
+          },
+          "default": []
+        },
+        "pickers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PickerContribution"
+          },
+          "default": []
+        }
+      }
+    },
+    "StatusItemContribution": {
+      "description": "Status bar item.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "alignment": {
+          "$ref": "#/$defs/StatusAlignment"
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      },
+      "required": [
+        "key",
+        "text",
+        "alignment"
+      ]
+    },
+    "StatusAlignment": {
+      "description": "Horizontal alignment for a status item.",
+      "type": "string",
+      "enum": [
+        "left",
+        "right"
+      ]
+    },
+    "PanelContribution": {
+      "description": "Panel descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ContributionId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/PanelPlacement"
+        },
+        "render": {
+          "$ref": "#/$defs/RenderSpec"
+        },
+        "data_provider": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "placement",
+        "render"
+      ]
+    },
+    "ContributionId": {
+      "description": "Identifier for one declarative contribution.",
+      "type": "string"
+    },
+    "PanelPlacement": {
+      "description": "Panel placement requested from the frontend.",
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "center"
+      ]
+    },
+    "RenderSpec": {
+      "description": "Declarative renderer for a panel or overlay.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "empty_text": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "markdown"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "OverlayContribution": {
+      "description": "Overlay descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ContributionId"
+        },
+        "anchor": {
+          "$ref": "#/$defs/OverlayAnchor"
+        },
+        "render": {
+          "$ref": "#/$defs/RenderSpec"
+        },
+        "transient": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "anchor",
+        "render"
+      ]
+    },
+    "OverlayAnchor": {
+      "description": "Anchor for an overlay.",
+      "type": "string",
+      "enum": [
+        "cursor",
+        "top_left",
+        "top_right",
+        "bottom_left",
+        "bottom_right",
+        "center"
+      ]
+    },
+    "PickerContribution": {
+      "description": "Picker descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ContributionId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PickerColumn"
+          },
+          "default": []
+        },
+        "filter_mode": {
+          "$ref": "#/$defs/FilterMode",
+          "default": "substring"
+        },
+        "data_provider": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ]
+    },
+    "PickerColumn": {
+      "description": "One picker column.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "title"
+      ]
+    },
+    "FilterMode": {
+      "description": "Picker filtering strategy.",
+      "type": "string",
+      "enum": [
+        "substring",
+        "fuzzy",
+        "regex"
+      ]
+    },
+    "LanguageContribution": {
+      "description": "Language definition contributed by a language plugin.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "filenames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "globs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "first_line_match": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "type": "string",
+          "default": ""
+        },
+        "default_config": {
+          "default": null
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "FormatterContribution": {
+      "description": "Formatter descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ContributionId"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "id",
+        "command"
+      ]
+    },
+    "LspServerContribution": {
+      "description": "LSP server descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "id",
+        "language",
+        "command"
+      ]
     },
     "AgentContributions": {
       "description": "Agent contributions.",
+      "type": "object",
       "properties": {
-        "context_providers": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ContextProviderContribution"
-          },
-          "type": "array"
-        },
-        "model_providers": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ModelProviderContribution"
-          },
-          "type": "array"
-        },
-        "policy_rules": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PolicyRuleContribution"
-          },
-          "type": "array"
-        },
         "tools": {
-          "default": [],
+          "type": "array",
           "items": {
             "$ref": "#/$defs/AgentToolContribution"
           },
-          "type": "array"
+          "default": []
+        },
+        "model_providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelProviderContribution"
+          },
+          "default": []
+        },
+        "policy_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PolicyRuleContribution"
+          },
+          "default": []
+        },
+        "context_providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextProviderContribution"
+          },
+          "default": []
         }
-      },
-      "type": "object"
+      }
     },
     "AgentToolContribution": {
       "description": "Agent tool descriptor.",
+      "type": "object",
       "properties": {
-        "description": {
-          "type": "string"
-        },
         "id": {
           "type": "string"
         },
         "name": {
+          "type": "string"
+        },
+        "description": {
           "type": "string"
         },
         "parameters_schema": true,
@@ -95,66 +906,103 @@
         "name",
         "description",
         "parameters_schema"
-      ],
-      "type": "object"
+      ]
     },
     "AgentToolScope": {
       "description": "Lifetime of an agent tool contribution.",
+      "type": "string",
       "enum": [
         "host",
         "session",
         "turn"
-      ],
-      "type": "string"
+      ]
     },
-    "CommandContribution": {
-      "description": "Command contributed to the palette and keymap.",
+    "ModelProviderContribution": {
+      "description": "Model provider descriptor.",
+      "type": "object",
       "properties": {
-        "args_schema": {
-          "default": null
-        },
-        "category": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "description": {
-          "default": "",
-          "type": "string"
-        },
         "id": {
-          "$ref": "#/$defs/CommandId"
-        },
-        "title": {
           "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         }
       },
       "required": [
         "id",
-        "title"
-      ],
-      "type": "object"
+        "name"
+      ]
     },
-    "CommandId": {
-      "description": "Identifier for a command registered by a plugin.",
-      "type": "string"
-    },
-    "ConfigSchema": {
-      "description": "Plugin configuration schema and defaults.",
+    "PolicyRuleContribution": {
+      "description": "Agent policy rule descriptor.",
+      "type": "object",
       "properties": {
-        "defaults": {
-          "default": null
+        "id": {
+          "type": "string"
         },
-        "schema": {
-          "default": null
+        "gate": {
+          "$ref": "#/$defs/PolicyGate"
+        },
+        "precedence": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
         }
       },
-      "type": "object"
+      "required": [
+        "id",
+        "gate"
+      ]
+    },
+    "PolicyGate": {
+      "description": "Policy gate class.",
+      "type": "string",
+      "enum": [
+        "observe",
+        "gate"
+      ]
+    },
+    "ContextProviderContribution": {
+      "description": "Agent context provider descriptor.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustLevel"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 16384
+        }
+      },
+      "required": [
+        "id",
+        "trust"
+      ]
+    },
+    "TrustLevel": {
+      "description": "Trust level attached to contributed agent context.",
+      "type": "string",
+      "enum": [
+        "untrusted",
+        "workspace",
+        "trusted"
+      ]
     },
     "ConfigSchemaContribution": {
       "description": "Plugin configuration section contributed to the host schema.",
+      "type": "object",
       "properties": {
         "section": {
           "type": "string"
@@ -162,867 +1010,19 @@
       },
       "required": [
         "section"
-      ],
-      "type": "object"
-    },
-    "ContextProviderContribution": {
-      "description": "Agent context provider descriptor.",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "max_bytes": {
-          "default": 16384,
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "trust": {
-          "$ref": "#/$defs/TrustLevel"
-        }
-      },
-      "required": [
-        "id",
-        "trust"
-      ],
-      "type": "object"
-    },
-    "ContributionId": {
-      "description": "Identifier for one declarative contribution.",
-      "type": "string"
-    },
-    "Contributions": {
-      "description": "Declarative contribution tables.",
-      "properties": {
-        "agent": {
-          "$ref": "#/$defs/AgentContributions",
-          "default": {
-            "context_providers": [],
-            "model_providers": [],
-            "policy_rules": [],
-            "tools": []
-          }
-        },
-        "commands": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/CommandContribution"
-          },
-          "type": "array"
-        },
-        "config_schema": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ConfigSchemaContribution"
-          },
-          "type": "array"
-        },
-        "ex_commands": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ExCommandContribution"
-          },
-          "type": "array"
-        },
-        "formatters": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/FormatterContribution"
-          },
-          "type": "array"
-        },
-        "keybindings": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/KeybindingContribution"
-          },
-          "type": "array"
-        },
-        "languages": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/LanguageContribution"
-          },
-          "type": "array"
-        },
-        "lsp_servers": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/LspServerContribution"
-          },
-          "type": "array"
-        },
-        "menu_items": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MenuItemContribution"
-          },
-          "type": "array"
-        },
-        "ui": {
-          "$ref": "#/$defs/UiContributions",
-          "default": {
-            "overlays": [],
-            "panels": [],
-            "pickers": [],
-            "status_items": []
-          }
-        }
-      },
-      "type": "object"
-    },
-    "ExCommandContribution": {
-      "description": "Ex command alias.",
-      "properties": {
-        "aliases": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "command": {
-          "$ref": "#/$defs/CommandId"
-        },
-        "name": {
-          "type": "string"
-        },
-        "usage": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "name",
-        "command"
-      ],
-      "type": "object"
-    },
-    "FilterMode": {
-      "description": "Picker filtering strategy.",
-      "enum": [
-        "substring",
-        "fuzzy",
-        "regex"
-      ],
-      "type": "string"
-    },
-    "FormatterContribution": {
-      "description": "Formatter descriptor.",
-      "properties": {
-        "args": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "command": {
-          "type": "string"
-        },
-        "extensions": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "id": {
-          "$ref": "#/$defs/ContributionId"
-        }
-      },
-      "required": [
-        "id",
-        "command"
-      ],
-      "type": "object"
-    },
-    "HostTarget": {
-      "description": "Host that loads the plugin.",
-      "enum": [
-        "editor",
-        "agent"
-      ],
-      "type": "string"
-    },
-    "KeybindingContribution": {
-      "description": "Default key binding contributed beneath user bindings.",
-      "properties": {
-        "command": {
-          "$ref": "#/$defs/CommandId"
-        },
-        "key": {
-          "type": "string"
-        },
-        "when": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "command",
-        "key"
-      ],
-      "type": "object"
-    },
-    "LanguageContribution": {
-      "description": "Language definition contributed by a language plugin.",
-      "properties": {
-        "default_config": {
-          "default": null
-        },
-        "extensions": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "filenames": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "first_line_match": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "globs": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "name": {
-          "type": "string"
-        },
-        "scope": {
-          "default": "",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "type": "object"
-    },
-    "LaunchConfig": {
-      "description": "Native launch parameters. Wasm plugins ignore these fields.",
-      "properties": {
-        "args": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "type": "object"
-        },
-        "transport": {
-          "$ref": "#/$defs/LaunchTransport",
-          "default": "stdio_newline"
-        },
-        "working_dir": {
-          "default": ".",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "LaunchTransport": {
-      "description": "Native transport used to speak the v2 wire protocol.",
-      "enum": [
-        "stdio_newline",
-        "stdio_content_length"
-      ],
-      "type": "string"
-    },
-    "Limits": {
-      "description": "Runtime resource limits.",
-      "properties": {
-        "max_contributions": {
-          "default": 128,
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_cpu_seconds": {
-          "default": 10,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_memory_bytes": {
-          "default": 67108864,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "rpc_timeout_ms": {
-          "default": 2000,
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
-    "LspServerContribution": {
-      "description": "LSP server descriptor.",
-      "properties": {
-        "args": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "command": {
-          "type": "string"
-        },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "type": "object"
-        },
-        "id": {
-          "type": "string"
-        },
-        "language": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "language",
-        "command"
-      ],
-      "type": "object"
-    },
-    "MenuItemContribution": {
-      "description": "Menu entry pointing at a command.",
-      "properties": {
-        "command": {
-          "$ref": "#/$defs/CommandId"
-        },
-        "group": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "label": {
-          "type": "string"
-        },
-        "order": {
-          "default": 0,
-          "format": "int32",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "command",
-        "label"
-      ],
-      "type": "object"
-    },
-    "ModelProviderContribution": {
-      "description": "Model provider descriptor.",
-      "properties": {
-        "capabilities": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "id": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "name"
-      ],
-      "type": "object"
-    },
-    "OverlayAnchor": {
-      "description": "Anchor for an overlay.",
-      "enum": [
-        "cursor",
-        "top_left",
-        "top_right",
-        "bottom_left",
-        "bottom_right",
-        "center"
-      ],
-      "type": "string"
-    },
-    "OverlayContribution": {
-      "description": "Overlay descriptor.",
-      "properties": {
-        "anchor": {
-          "$ref": "#/$defs/OverlayAnchor"
-        },
-        "id": {
-          "$ref": "#/$defs/ContributionId"
-        },
-        "render": {
-          "$ref": "#/$defs/RenderSpec"
-        },
-        "transient": {
-          "default": false,
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "id",
-        "anchor",
-        "render"
-      ],
-      "type": "object"
-    },
-    "PanelContribution": {
-      "description": "Panel descriptor.",
-      "properties": {
-        "data_provider": {
-          "default": false,
-          "type": "boolean"
-        },
-        "id": {
-          "$ref": "#/$defs/ContributionId"
-        },
-        "placement": {
-          "$ref": "#/$defs/PanelPlacement"
-        },
-        "render": {
-          "$ref": "#/$defs/RenderSpec"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "title",
-        "placement",
-        "render"
-      ],
-      "type": "object"
-    },
-    "PanelPlacement": {
-      "description": "Panel placement requested from the frontend.",
-      "enum": [
-        "left",
-        "right",
-        "top",
-        "bottom",
-        "center"
-      ],
-      "type": "string"
-    },
-    "Permissions": {
-      "additionalProperties": {
-        "type": "boolean"
-      },
-      "description": "Declared permissions. Every value must be `true`.",
-      "type": "object"
-    },
-    "PickerColumn": {
-      "description": "One picker column.",
-      "properties": {
-        "key": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "key",
-        "title"
-      ],
-      "type": "object"
-    },
-    "PickerContribution": {
-      "description": "Picker descriptor.",
-      "properties": {
-        "columns": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PickerColumn"
-          },
-          "type": "array"
-        },
-        "data_provider": {
-          "default": false,
-          "type": "boolean"
-        },
-        "filter_mode": {
-          "$ref": "#/$defs/FilterMode",
-          "default": "substring"
-        },
-        "id": {
-          "$ref": "#/$defs/ContributionId"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "title"
-      ],
-      "type": "object"
-    },
-    "PluginKind": {
-      "description": "Plugin implementation kind.",
-      "enum": [
-        "builtin",
-        "native",
-        "wasm"
-      ],
-      "type": "string"
-    },
-    "PolicyGate": {
-      "description": "Policy gate class.",
-      "enum": [
-        "observe",
-        "gate"
-      ],
-      "type": "string"
-    },
-    "PolicyRuleContribution": {
-      "description": "Agent policy rule descriptor.",
-      "properties": {
-        "gate": {
-          "$ref": "#/$defs/PolicyGate"
-        },
-        "id": {
-          "type": "string"
-        },
-        "precedence": {
-          "default": 0,
-          "format": "int32",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "id",
-        "gate"
-      ],
-      "type": "object"
-    },
-    "Provides": {
-      "description": "Services provided by the plugin.",
-      "properties": {
-        "services": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
-    "RenderSpec": {
-      "description": "Declarative renderer for a panel or overlay.",
-      "oneOf": [
-        {
-          "properties": {
-            "empty_text": {
-              "default": null,
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "const": "list",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "const": "text",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "const": "markdown",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        }
       ]
     },
-    "Requires": {
-      "description": "Required and optional service dependencies.",
+    "ConfigSchema": {
+      "description": "Plugin configuration schema and defaults.",
+      "type": "object",
       "properties": {
-        "optional_services": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "schema": {
+          "default": null
         },
-        "services": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "defaults": {
+          "default": null
         }
-      },
-      "type": "object"
-    },
-    "ScopeTarget": {
-      "description": "Scope lifetime targets.",
-      "enum": [
-        "host",
-        "workspace",
-        "buffer",
-        "view",
-        "session",
-        "turn",
-        "command"
-      ],
-      "type": "string"
-    },
-    "StatusAlignment": {
-      "description": "Horizontal alignment for a status item.",
-      "enum": [
-        "left",
-        "right"
-      ],
-      "type": "string"
-    },
-    "StatusItemContribution": {
-      "description": "Status bar item.",
-      "properties": {
-        "alignment": {
-          "$ref": "#/$defs/StatusAlignment"
-        },
-        "key": {
-          "type": "string"
-        },
-        "priority": {
-          "default": 0,
-          "format": "int32",
-          "type": "integer"
-        },
-        "text": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "key",
-        "text",
-        "alignment"
-      ],
-      "type": "object"
-    },
-    "TrustLevel": {
-      "description": "Trust level attached to contributed agent context.",
-      "enum": [
-        "untrusted",
-        "workspace",
-        "trusted"
-      ],
-      "type": "string"
-    },
-    "UiContributions": {
-      "description": "UI contributions.",
-      "properties": {
-        "overlays": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/OverlayContribution"
-          },
-          "type": "array"
-        },
-        "panels": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PanelContribution"
-          },
-          "type": "array"
-        },
-        "pickers": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PickerContribution"
-          },
-          "type": "array"
-        },
-        "status_items": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/StatusItemContribution"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
+      }
     }
-  },
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Complete v2 manifest.",
-  "properties": {
-    "activation": {
-      "$ref": "#/$defs/Activation",
-      "default": {
-        "on_command": [],
-        "on_event": [],
-        "on_language": [],
-        "on_startup": false,
-        "scopes": []
-      }
-    },
-    "api": {
-      "type": "string"
-    },
-    "config": {
-      "$ref": "#/$defs/ConfigSchema",
-      "default": {
-        "defaults": null,
-        "schema": null
-      }
-    },
-    "contributes": {
-      "$ref": "#/$defs/Contributions",
-      "default": {
-        "agent": {
-          "context_providers": [],
-          "model_providers": [],
-          "policy_rules": [],
-          "tools": []
-        },
-        "commands": [],
-        "config_schema": [],
-        "ex_commands": [],
-        "formatters": [],
-        "keybindings": [],
-        "languages": [],
-        "lsp_servers": [],
-        "menu_items": [],
-        "ui": {
-          "overlays": [],
-          "panels": [],
-          "pickers": [],
-          "status_items": []
-        }
-      }
-    },
-    "entry": {
-      "type": "string"
-    },
-    "kind": {
-      "$ref": "#/$defs/PluginKind"
-    },
-    "launch": {
-      "$ref": "#/$defs/LaunchConfig",
-      "default": {
-        "args": [],
-        "env": {},
-        "transport": "stdio_newline",
-        "working_dir": ""
-      }
-    },
-    "limits": {
-      "$ref": "#/$defs/Limits",
-      "default": {
-        "max_contributions": 128,
-        "max_cpu_seconds": 10,
-        "max_memory_bytes": 67108864,
-        "rpc_timeout_ms": 2000
-      }
-    },
-    "manifest_version": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "name": {
-      "type": "string"
-    },
-    "permissions": {
-      "$ref": "#/$defs/Permissions",
-      "default": {}
-    },
-    "provides": {
-      "$ref": "#/$defs/Provides",
-      "default": {
-        "services": []
-      }
-    },
-    "requires": {
-      "$ref": "#/$defs/Requires",
-      "default": {
-        "optional_services": [],
-        "services": []
-      }
-    },
-    "targets": {
-      "items": {
-        "$ref": "#/$defs/HostTarget"
-      },
-      "type": "array"
-    },
-    "version": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "manifest_version",
-    "name",
-    "version",
-    "api",
-    "targets",
-    "kind",
-    "entry"
-  ],
-  "title": "ManifestV2",
-  "type": "object"
+  }
 }

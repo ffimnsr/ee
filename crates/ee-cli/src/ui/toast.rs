@@ -99,7 +99,7 @@ pub(super) fn diagnostic_marker_for_line(
         .iter()
         .filter_map(|diagnostic| {
             let overlaps = diagnostic.range.start <= line_end && diagnostic.range.end >= line_start;
-            overlaps.then_some(diagnostic.severity.clone())
+            overlaps.then_some(diagnostic.severity)
         })
         .min_by_key(diagnostic_rank)
 }

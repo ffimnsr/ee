@@ -21,10 +21,13 @@ manifest_path="$tmpdir/manifest.toml"
 binary_path="$tmpdir/xi-lsp-plugin"
 
 cat >"$manifest_path" <<'EOF'
-manifest_version = 1
+manifest_version = 2
 name = "xi-lsp-plugin"
 version = "0.0.0"
-exec_path = "./bin/xi-lsp-plugin"
+api = "ee-plugin/2"
+targets = ["editor"]
+kind = "native"
+entry = "bin/xi-lsp-plugin"
 EOF
 
 printf '#!/usr/bin/env bash\nexit 0\n' >"$binary_path"
@@ -80,5 +83,22 @@ custom_output="$({
 [[ -f "$custom_plugin_root/xi-lsp-plugin/manifest.toml" ]]
 [[ -f "$custom_plugin_root/xi-lsp-plugin/bin/xi-lsp-plugin" ]]
 [[ "$custom_output" == *"bundled plugins installed at $custom_plugin_root"* ]]
+
+invalid_manifest="$tmpdir/invalid-manifest.toml"
+legacy_manifest_version=1
+cat >"$invalid_manifest" <<EOF
+manifest_version = ${legacy_manifest_version}
+name = "xi-lsp-plugin"
+version = "0.0.0"
+exec_path = "./bin/xi-lsp-plugin"
+EOF
+if bash "$script_path" \
+  --plugin-dir "$tmpdir/invalid-plugins" \
+  --manifest-path "$invalid_manifest" \
+  --binary-path "$binary_path" 2>"$tmpdir/invalid-output"; then
+  echo 'install-plugins.sh accepted a v1 manifest' >&2
+  exit 1
+fi
+grep -qF 'expected manifest_version = 2' "$tmpdir/invalid-output"
 
 printf 'install plugins script passed\n'

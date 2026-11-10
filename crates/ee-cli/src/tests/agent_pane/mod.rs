@@ -29,6 +29,7 @@ use ee_openrouter_agent::orchestrated::{
     openrouter_orchestrated_provider_with_turn_timeout, openrouter_orchestrator_config,
     test_support::ScriptedOpenRouterCompletion,
 };
+use ee_plugin_api::model::{Diagnostic, DiagnosticSeverity, Range};
 use futures::channel::mpsc as futures_mpsc;
 use futures::{StreamExt, sink, stream};
 use git2::{IndexAddOption, Repository, Signature};
@@ -36,7 +37,6 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range};
 
 use crate::app::{
     AgentPaneLayout, AgentPermissionPreview, App, MessageRenderKind, Mode, ThreadUiState,

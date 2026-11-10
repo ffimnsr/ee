@@ -1,13 +1,8 @@
 //! Event-context tests: shared harness.
 use super::*;
 use crate::config::ConfigManager;
-use crate::core::dummy_weak_core;
 use crate::line_offset::LineOffset;
 use crate::object::SyntaxNavigationTarget;
-use crate::plugin_rpc::PluginRequest;
-use crate::plugins::rpc::{
-    Diagnostic, DiagnosticSeverity, GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
-};
 use crate::rpc::SelectionModifier;
 use crate::selection::SelRegion;
 use crate::tabs::BufferId;
@@ -19,7 +14,6 @@ use std::io::Write;
 use std::mem;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
-use xi_rope::Interval;
 use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
 #[derive(Clone, Default)]
@@ -93,7 +87,6 @@ struct ContextHarness {
     editor: RefCell<Editor>,
     client: Client,
     peer: RecordingPeer,
-    core_ref: WeakXiCore,
     kill_ring: RefCell<Rope>,
     width_cache: RefCell<WidthCache>,
     config_manager: ConfigManager,
@@ -109,19 +102,10 @@ impl ContextHarness {
         let editor = RefCell::new(Editor::with_text(s));
         let peer = RecordingPeer::default();
         let client = Client::new(Box::new(peer.clone()));
-        let core_ref = dummy_weak_core();
         let kill_ring = RefCell::new(Rope::from(""));
         let width_cache = RefCell::new(WidthCache::new());
-        let harness = ContextHarness {
-            view,
-            editor,
-            client,
-            peer,
-            core_ref,
-            kill_ring,
-            width_cache,
-            config_manager,
-        };
+        let harness =
+            ContextHarness { view, editor, client, peer, kill_ring, width_cache, config_manager };
         harness.make_context().view_init();
         harness.make_context().finish_init(&config);
         harness
@@ -163,11 +147,9 @@ impl ContextHarness {
             language,
             info: None,
             siblings: Vec::new(),
-            plugins: Vec::new(),
             client: &self.client,
             kill_ring: &self.kill_ring,
             width_cache: &self.width_cache,
-            weak_core: &self.core_ref,
             plugin_host: None,
         }
     }

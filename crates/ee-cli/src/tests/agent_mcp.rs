@@ -18,8 +18,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::FakeTransportFactory;
 use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport};
 use ee_mcp::fake::{FakeMcpScript, FakeMcpServer, FakeMcpTransportFactory};
+use ee_plugin_api::model::{Diagnostic, DiagnosticSeverity, Range, SelectionRange};
 use serde_json::{Value, json};
-use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range, SelectionRange};
 
 use crate::app::{AgentPaneLayout, App, ThreadUiState};
 use crate::tests::helpers::*;

@@ -9,7 +9,7 @@ use crate::app::{
 };
 use crate::keymap::{Action, BindingKey};
 use crate::tests::helpers::*;
-use xi_core_lib::plugin_rpc::SelectionRange;
+use ee_plugin_api::model::SelectionRange;
 
 // ── Normal/Insert mode transitions ──────────────────────────────────────
 

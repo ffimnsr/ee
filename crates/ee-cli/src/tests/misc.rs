@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ee_plugin_api::model::{Diagnostic, DiagnosticSeverity, Range, SelectionRange};
 use serde_json::json;
-use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range, SelectionRange};
 
 use crate::app::App;
 use crate::backend::{CachedLine, LineSlot};

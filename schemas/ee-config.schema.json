@@ -235,6 +235,14 @@
           "type": "null"
         }
       ]
+    },
+    "plugins": {
+      "description": "Per-plugin enablement and configuration tables.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PluginSettingsToml"
+      },
+      "default": {}
     }
   },
   "additionalProperties": false,
@@ -1579,6 +1587,23 @@
             "boolean",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginSettingsToml": {
+      "description": "Raw `[plugins.<name>]` table consumed by the v2 plugin runtime.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "When `false`, the plugin is discovered but never activated.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "config": {
+          "description": "Plugin-owned configuration; validated by the plugin's manifest schema."
         }
       },
       "additionalProperties": false

@@ -32,7 +32,6 @@ semver.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio-util = { workspace = true }
-wasmtime = { workspace = true }
 
 ee-plugin-api.workspace = true
 ee-plugin-runtime.workspace = true
@@ -43,12 +42,6 @@ tree-sitter.workspace = true
 tree-sitter-loader.workspace = true
 unicode-width.workspace = true
 ee-ts-test-grammars = { path = "../ee-ts-test-grammars", optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-seccompiler = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true

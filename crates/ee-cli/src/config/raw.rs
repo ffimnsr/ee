@@ -83,6 +83,19 @@ pub(crate) struct EeToml {
     pub keymap: Option<KeymapToml>,
     pub agents: Option<AgentsToml>,
     pub mcp: Option<McpToml>,
+    /// Per-plugin enablement and configuration tables.
+    #[serde(default)]
+    pub plugins: BTreeMap<String, PluginSettingsToml>,
+}
+
+/// Raw `[plugins.<name>]` table consumed by the v2 plugin runtime.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PluginSettingsToml {
+    /// When `false`, the plugin is discovered but never activated.
+    pub enabled: Option<bool>,
+    /// Plugin-owned configuration; validated by the plugin's manifest schema.
+    pub config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

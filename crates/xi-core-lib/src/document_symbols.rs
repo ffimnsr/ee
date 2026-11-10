@@ -10,10 +10,10 @@ use tree_sitter::{
     Language, Node, ParseOptions, Parser, Query, QueryCursor, StreamingIterator, Tree,
 };
 
-use crate::plugin_rpc::SymbolItem;
 use crate::runtime_loader::{
     CompiledQueryArtifact, RuntimeQueryKind, with_default_runtime_loader_mut,
 };
+use ee_plugin_api::model::SymbolItem;
 
 pub const MAX_DOCUMENT_SYMBOL_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_DOCUMENT_SYMBOLS: usize = 4_096;

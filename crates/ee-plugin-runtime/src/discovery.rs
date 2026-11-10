@@ -435,7 +435,8 @@ entry = "bin/plugin"
         let temp = TempDir::new().unwrap();
         let dir = temp.path().join("legacy");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("manifest.toml"), "manifest_version = 1\nname = \"legacy\"\n").unwrap();
+        let legacy = format!("manifest_version = {}\nname = \"legacy\"\n", 1);
+        fs::write(dir.join("manifest.toml"), legacy).unwrap();
         let options = DiscoveryOptions::new().with_root(RootKind::User, temp.path().to_path_buf());
         let result = discover(&options);
         assert!(result.plugins.is_empty());

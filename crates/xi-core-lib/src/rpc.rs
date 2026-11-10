@@ -27,10 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self, Value, json};
 
 use crate::config::{ConfigDomainExternal, Table};
-use crate::plugins::PlaceholderRpc;
-use crate::plugins::rpc::SelectionRange;
 use crate::tabs::ViewId;
 use crate::view::Size;
+use ee_plugin_api::model::SelectionRange;
 
 // =============================================================================
 //  Command types
@@ -161,44 +160,8 @@ pub enum CoreNotification {
         #[serde(default)]
         value: Value,
     },
-    /// The 'plugin' namespace, for interacting with plugins.
-    ///
-    /// As with edit commands, the params object has is a nested RPC,
-    /// with the name of the command included as the `command` field.
-    ///
-    /// (this should be changed to more accurately reflect the behaviour
-    /// of the edit commands).
-    ///
-    /// For the available commands, see [`PluginNotification`].
-    ///
-    /// [`PluginNotification`]: enum.PluginNotification.html
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # extern crate xi_core_lib as xi_core;
-    /// #[macro_use]
-    /// extern crate serde_json;
-    /// use crate::xi_core::rpc::*;
-    /// # fn main() {
-    /// let rpc = CoreNotification::Plugin(
-    ///     PluginNotification::Start {
-    ///         view_id: 1.into(),
-    ///         plugin_name: "sample-plugin".into(),
-    ///     });
-    ///
-    /// let expected = json!({
-    ///     "method": "plugin",
-    ///     "params": {
-    ///         "command": "start",
-    ///         "view_id": "view-id-1",
-    ///         "plugin_name": "sample-plugin",
-    ///     }
-    /// });
-    /// assert_eq!(serde_json::to_value(&rpc).unwrap(), expected);
-    /// # }
-    /// ```
-    Plugin(PluginNotification),
+    /// The 'plugin' namespace was removed in the v2 cutover. Plugin commands
+    /// are delivered through [`CoreNotification::Command`].
     /// Tells `xi-core` to close the specified view.
     CloseView { view_id: ViewId },
     /// Replaces frontend-owned editor config for one domain.
@@ -756,17 +719,6 @@ pub enum EditNotification {
         end_col: u64,
         text: String,
     },
-}
-
-/// The plugin related notifications.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-#[serde(tag = "command")]
-#[serde(rename_all = "snake_case")]
-pub enum PluginNotification {
-    Start { view_id: ViewId, plugin_name: String },
-    Stop { view_id: ViewId, plugin_name: String },
-    Restart { view_id: ViewId, plugin_name: String },
-    PluginRpc { view_id: ViewId, receiver: String, rpc: PlaceholderRpc },
 }
 
 // Serialize / Deserialize

@@ -1,7 +1,7 @@
 //! External wire protocol.
 //!
 //! Native process and Wasm plugins use the same logical methods. There are no
-//! v1 methods, no `HostNotification`/`PluginRequest` compatibility types, and no
+//! v1 methods, no legacy host-notification compatibility types, and no
 //! legacy namespace alongside these variants.
 
 use schemars::JsonSchema;

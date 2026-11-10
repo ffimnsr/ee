@@ -20,8 +20,6 @@ members = [
   "crates/xi-core-lib",
   "crates/xi-core",
   "crates/xi-lsp-lib",
-  "crates/xi-plugin-derive",
-  "crates/xi-plugin-lib",
   "crates/xi-rope",
   "crates/xi-rpc",
   "crates/xi-unicode",
@@ -164,8 +162,6 @@ ee-plugin-derive = { package = "ee-plugin-derive", path = "crates/ee-plugin-deri
 ee-plugin-runtime = { package = "ee-plugin-runtime", path = "crates/ee-plugin-runtime", version = "0.11.11" }
 ee-plugin-sdk = { package = "ee-plugin-sdk", path = "crates/ee-plugin-sdk", version = "0.11.11" }
 xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.11.11" }
-xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.11.11" }
-xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.11.11" }
 xi-rope = { package = "ee-xi-rope", path = "crates/xi-rope", version = "0.11.11" }
 xi-rpc = { package = "ee-xi-rpc", path = "crates/xi-rpc", version = "0.11.11" }
 xi-unicode = { package = "ee-xi-unicode", path = "crates/xi-unicode", version = "0.11.11" }

@@ -43,7 +43,7 @@ impl App {
             }
             if matches!(mode, ShellSelectionMode::KeepByStatus) {
                 if result.success {
-                    kept.push(selection.clone());
+                    kept.push(*selection);
                 }
             } else {
                 outputs.push(result.stdout);
@@ -53,7 +53,7 @@ impl App {
         match mode {
             ShellSelectionMode::Replace => {
                 for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
-                    self.replace_range_with_text(selection.clone(), output)?;
+                    self.replace_range_with_text(*selection, output)?;
                 }
                 self.backend.sync_pending_events().map_err(|err| format!("pipe failed: {err}"))?;
                 self.push_change();

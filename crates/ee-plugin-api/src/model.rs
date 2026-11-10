@@ -1,6 +1,6 @@
 //! Host-neutral document and language model types.
 //!
-//! Field names match the historical `xi_core_lib::plugin_rpc` wire shapes so
+//! Field names match the historical editor wire shapes so
 //! editor semantics are preserved. The difference is that deltas are expressed
 //! as explicit, bounded splice operations instead of a rope type, keeping this
 //! crate free of editor dependencies.

@@ -3,7 +3,6 @@ use std::path::Path;
 use log::{debug, warn};
 use xi_rope::{Cursor, Rope};
 
-use crate::plugins::rpc::ClientPluginInfo;
 use crate::tabs::{FIND_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK};
 use crate::view::rope_render_source;
 use crate::width_cache::WidthCache;
@@ -26,22 +25,6 @@ impl<'a> EventContext<'a> {
     /// config and language to the client, performs the first rewrap pass,
     /// and schedules an initial render.
     pub(crate) fn finish_init(&mut self, _config: &super::Table) {
-        if !self.plugins.is_empty() {
-            let info = self.plugin_info();
-
-            self.plugins.iter().for_each(|plugin| {
-                plugin.new_buffer(&info);
-                self.plugin_started(plugin);
-            });
-        }
-
-        let available_plugins = self
-            .plugins
-            .iter()
-            .map(|plugin| ClientPluginInfo { name: plugin.name.clone(), running: true })
-            .collect::<Vec<_>>();
-        self.client.available_plugins(self.view_id, &available_plugins);
-
         self.client.language_changed(self.view_id, &self.language);
 
         let is_vlf = self.editor.borrow().is_vlf();
@@ -73,8 +56,6 @@ impl<'a> EventContext<'a> {
         path: &Path,
         saved_rev_id: xi_rope::engine::RevId,
     ) {
-        self.plugins.iter().for_each(|plugin| plugin.did_save(self.view_id, path));
-
         let rev = self.editor.borrow().get_head_rev_token();
         crate::plugin_runtime::bridge::document_saved(
             self.plugin_host,
@@ -93,7 +74,6 @@ impl<'a> EventContext<'a> {
 
     /// Returns `true` if this was the last view
     pub(crate) fn close_view(&self) -> bool {
-        self.plugins.iter().for_each(|plug| plug.close_view(self.view_id));
         crate::plugin_runtime::bridge::view_closed(
             self.plugin_host,
             &crate::plugin_runtime::events::ViewClosed {
@@ -114,7 +94,6 @@ impl<'a> EventContext<'a> {
             self.update_wrap_settings(true);
         }
 
-        self.plugins.iter().for_each(|plug| plug.config_changed(self.view_id, changes));
         crate::plugin_runtime::bridge::config_changed(
             self.plugin_host,
             &crate::plugin_runtime::events::ConfigChanged {
@@ -130,7 +109,6 @@ impl<'a> EventContext<'a> {
         let old = self.language.clone();
         self.language = new_language_id.clone();
         self.client.language_changed(self.view_id, new_language_id);
-        self.plugins.iter().for_each(|plug| plug.language_changed(self.view_id, new_language_id));
         crate::plugin_runtime::bridge::language_changed(
             self.plugin_host,
             &crate::plugin_runtime::events::LanguageChanged {

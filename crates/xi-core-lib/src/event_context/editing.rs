@@ -1,17 +1,16 @@
 use std::ops::Range;
 
 use regex::Regex;
-use serde_json::json;
 use xi_rope::{Interval, LinesMetric};
 use xi_rpc::RemoteError;
 
 use crate::edit_ops;
 use crate::editor::EditType;
 use crate::lang_features;
-use crate::plugins::rpc::SelectionRange;
 use crate::rpc::LineReplacement;
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::tree_sitter_support::syntax_feature_availability;
+use ee_plugin_api::model::SelectionRange;
 
 use super::{
     EventContext, apply_line_replacements, block_text, collect_join_operations,
@@ -207,7 +206,6 @@ impl<'a> EventContext<'a> {
             self.editor.borrow().document_mode(),
         );
         if !capabilities.reindent {
-            self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
             return;
         }
 

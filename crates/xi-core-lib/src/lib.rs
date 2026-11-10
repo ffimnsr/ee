@@ -58,7 +58,6 @@ pub mod open_policy;
 pub(crate) mod open_probe;
 pub(crate) mod paths;
 pub mod plugin_runtime;
-pub mod plugins;
 #[cfg(test)]
 pub mod recorder;
 pub mod runtime_loader;
@@ -89,9 +88,6 @@ pub use crate::config::{BufferItems as BufferConfig, Table as ConfigTable};
 pub use crate::core::{WeakXiCore, XiCore};
 pub use crate::editor::EditType;
 pub use crate::paths::user_state_dir;
-pub use crate::plugins::PluginPid;
-pub use crate::plugins::manifest as plugin_manifest;
-pub use crate::plugins::rpc as plugin_rpc;
 pub use crate::syntax::{LanguageDefinition, LanguageId};
 pub use crate::tabs::test_helpers;
 pub use crate::tabs::{BufferId, BufferIdentifier, ViewId};

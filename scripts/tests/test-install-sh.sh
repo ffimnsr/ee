@@ -36,10 +36,13 @@ cat >"$package_root/share/ee/queries/rust/indents.scm" <<'EOF'
 ((block) @indent)
 EOF
 cat >"$package_root/share/ee/plugins/xi-lsp-plugin/manifest.toml" <<'EOF'
-manifest_version = 1
+manifest_version = 2
 name = "xi-lsp-plugin"
 version = "0.0.0"
-exec_path = "./bin/xi-lsp-plugin"
+api = "ee-plugin/2"
+targets = ["editor"]
+kind = "native"
+entry = "bin/xi-lsp-plugin"
 EOF
 cat >"$package_root/share/ee/plugins/xi-lsp-plugin/bin/xi-lsp-plugin" <<'EOF'
 #!/bin/sh
@@ -95,6 +98,41 @@ EE_INSTALL_LOCAL_PACKAGE="$tarball" \
     --without-openrouter-agent \
     --sudo true >/dev/null
 [[ ! -e "$bin_dir_without_agent/ee-openrouter-agent" ]]
+
+# ── plugin manifest validation ──────────────────────────────────────────────
+invalid_root="$tmpdir/ee-invalid-plugin"
+mkdir -p "$invalid_root/share/ee/plugins/old-plugin/bin"
+cp "$package_root/ee" "$invalid_root/ee"
+legacy_manifest_version=1
+cat >"$invalid_root/share/ee/plugins/old-plugin/manifest.toml" <<EOF
+manifest_version = ${legacy_manifest_version}
+name = "old-plugin"
+version = "0.0.0"
+exec_path = "./bin/old-plugin"
+EOF
+cat >"$invalid_root/share/ee/plugins/old-plugin/bin/old-plugin" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$invalid_root/share/ee/plugins/old-plugin/bin/old-plugin"
+invalid_tarball="$tmpdir/ee-invalid-plugin.tar.gz"
+(
+  cd "$tmpdir"
+  tar -czf "$invalid_tarball" "$(basename "$invalid_root")"
+)
+if EE_INSTALL_LOCAL_PACKAGE="$invalid_tarball" \
+  sh "$script_path" \
+    --arch x86_64-unknown-linux-musl \
+    --bin-dir "$tmpdir/invalid-bin" \
+    --runtime-dir "$tmpdir/invalid-runtime" \
+    --plugin-dir "$tmpdir/invalid-plugins" \
+    --doc-dir "$tmpdir/invalid-doc" \
+    --license-dir "$tmpdir/invalid-licenses" \
+    --sudo true >"$tmpdir/invalid-output" 2>&1; then
+  echo 'install.sh accepted a v1 plugin manifest' >&2
+  exit 1
+fi
+grep -qF 'expected manifest_version = 2' "$tmpdir/invalid-output"
 
 # ── completions wiring ──────────────────────────────────────────────────────
 # Completion generation lives under `ee do completions`; an `ee completions`

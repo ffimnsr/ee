@@ -14,10 +14,7 @@ use xi_rpc::{Callback, Error as RpcError, Handler, Peer, RequestId, RpcCtx};
 use crate::open_policy::{OpenPolicy, OpenThresholds};
 use crate::text_store::TextStore;
 
-use super::{
-    CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS, SAVE_VIEW_IDLE_MASK,
-    VERIFY_LINE_ENDINGS_IDLE_TOKEN, ViewId, stderr_is_user_visible,
-};
+use super::{NEW_VIEW_IDLE_TOKEN, SAVE_VIEW_IDLE_MASK, VERIFY_LINE_ENDINGS_IDLE_TOKEN, ViewId};
 
 #[derive(Clone, Default)]
 struct RecordingPeer {

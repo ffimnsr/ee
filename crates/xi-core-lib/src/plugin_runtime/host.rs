@@ -423,9 +423,23 @@ impl EditorPluginHost {
 
     /// Activate deferred plugins matching an event name.
     pub fn activate_for_event(&self, event: &str) -> Vec<(String, PluginError)> {
+        self.activate_with(|manager| manager.activate_for_event(event))
+    }
+
+    /// Activate deferred plugins matching a language id.
+    pub fn activate_for_language(&self, language: &str) -> Vec<(String, PluginError)> {
+        self.activate_with(|manager| manager.activate_for_language(language))
+    }
+
+    fn activate_with(
+        &self,
+        activate: impl FnOnce(
+            &mut ee_plugin_runtime::manager::PluginManager,
+        ) -> Vec<(String, PluginError)>,
+    ) -> Vec<(String, PluginError)> {
         let failures = {
             let mut manager = self.manager.lock().expect("manager lock poisoned");
-            manager.activate_for_event(event)
+            activate(&mut manager)
         };
         self.sync_permissions();
         if !failures.is_empty() {
@@ -512,6 +526,11 @@ impl EditorPluginHost {
         view_id: ee_plugin_api::model::ViewId,
         args: Value,
     ) -> Result<Vec<Effect>, PluginError> {
+        for (plugin, error) in
+            self.activate_with(|manager| manager.activate_for_command(id.as_str()))
+        {
+            tracing::warn!("failed to activate plugin `{plugin}` for command `{id}`: {error}");
+        }
         let events = self.manager.lock().expect("manager lock poisoned").events();
         let before = crate::plugin_runtime::events::CommandBefore {
             id: id.clone(),

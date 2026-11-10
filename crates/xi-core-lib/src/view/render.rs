@@ -271,13 +271,8 @@ impl View {
                 self.selection.get_annotations(visible_range, self, rope).to_json();
             let find_annotations =
                 self.find.iter().map(|f| f.get_annotations(visible_range, self, rope).to_json());
-            let plugin_annotations =
-                self.annotations.iter_range(self, rope, visible_range).map(|a| a.to_json());
 
-            iter::once(selection_annotations)
-                .chain(find_annotations)
-                .chain(plugin_annotations)
-                .collect::<Vec<_>>()
+            iter::once(selection_annotations).chain(find_annotations).collect::<Vec<_>>()
         } else {
             Vec::new()
         };
@@ -703,10 +698,6 @@ impl View {
         // Any edit cancels a drag. This is good behavior for edits initiated through
         // the front-end, but perhaps not for async edits.
         self.drag_state = None;
-
-        // all annotations that come after the edit need to be invalidated
-        let (iv, _) = delta.summary();
-        self.annotations.invalidate(iv);
 
         // update only find highlights affected by change
         for find in &mut self.find {

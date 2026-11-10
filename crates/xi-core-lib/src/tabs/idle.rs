@@ -297,102 +297,10 @@ impl CoreState {
 
     /// Handles changes in plugin files.
     #[cfg(feature = "notify")]
-    pub(super) fn handle_plugin_fs_event(&mut self, event: Event) {
+    pub(super) fn handle_plugin_fs_event(&mut self, _event: Event) {
         // The v2 host reloads outside the core lock on the next plugin cycle.
         if let Some(host) = self.plugin_host.as_ref() {
             host.request_reload();
         }
-        use notify::event::*;
-        match event.kind {
-            EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
-                self.plugins.load_from_paths(&[event.paths[0].clone()]).into_iter().for_each(
-                    |err| {
-                        let message = format!("error loading plugin {err:?}");
-                        warn!("{message}");
-                        self.peer.alert(message);
-                    },
-                );
-                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
-                    if plugin.activates_on_startup()
-                        || self
-                            .views
-                            .values()
-                            .map(|view| {
-                                self.config_manager
-                                    .get_buffer_language(view.borrow().get_buffer_id())
-                            })
-                            .any(|language| plugin.receives_updates_for(&language))
-                    {
-                        self.do_start_plugin(ViewId(0), &plugin.name);
-                    }
-                }
-            }
-            // the way FSEvents on macOS work, we want to verify that this path
-            // has actually be removed before we do anything.
-            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
-                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
-                    self.do_stop_plugin(ViewId(0), &plugin.name);
-                    self.plugins.remove_named(&plugin.name);
-                }
-            }
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-                let old = &event.paths[0];
-                let new = &event.paths[1];
-                if let Some(old_plugin) = self.plugins.get_from_path(old) {
-                    self.do_stop_plugin(ViewId(0), &old_plugin.name);
-                    self.plugins.remove_named(&old_plugin.name);
-                }
-
-                self.plugins.load_from_paths(std::slice::from_ref(new)).into_iter().for_each(
-                    |err| {
-                        let message = format!("error loading plugin {err:?}");
-                        warn!("{message}");
-                        self.peer.alert(message);
-                    },
-                );
-                if let Some(new_plugin) = self.plugins.get_from_path(new) {
-                    if new_plugin.activates_on_startup()
-                        || self
-                            .views
-                            .values()
-                            .map(|view| {
-                                self.config_manager
-                                    .get_buffer_language(view.borrow().get_buffer_id())
-                            })
-                            .any(|language| new_plugin.receives_updates_for(&language))
-                    {
-                        self.do_start_plugin(ViewId(0), &new_plugin.name);
-                    }
-                }
-            }
-            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
-            | EventKind::Remove(RemoveKind::Any) => {
-                if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
-                    self.do_stop_plugin(ViewId(0), &plugin.name);
-                    if plugin.activates_on_startup()
-                        || self
-                            .views
-                            .values()
-                            .map(|view| {
-                                self.config_manager
-                                    .get_buffer_language(view.borrow().get_buffer_id())
-                            })
-                            .any(|language| plugin.receives_updates_for(&language))
-                    {
-                        self.do_start_plugin(ViewId(0), &plugin.name);
-                    }
-                }
-            }
-            _ => (),
-        }
-
-        self.views.keys().for_each(|view_id| {
-            let available_plugins = self
-                .plugins
-                .iter()
-                .map(|plugin| ClientPluginInfo { name: plugin.name.clone(), running: true })
-                .collect::<Vec<_>>();
-            self.peer.available_plugins(*view_id, &available_plugins);
-        });
     }
 }

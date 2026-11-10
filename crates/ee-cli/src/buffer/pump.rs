@@ -176,11 +176,6 @@ impl BufferManager {
         std::mem::take(&mut self.pending_agent_tool_results)
     }
 
-    /// Full v2 plugin status snapshot used by `ee do plugins`.
-    pub(crate) fn plugin_status(&self) -> &crate::plugin_ui::PluginStatusSnapshot {
-        &self.plugin_ui.status
-    }
-
     pub(crate) fn drain_pending_ui_actions(&mut self) -> Vec<PendingUiAction> {
         std::mem::take(&mut self.pending_ui_actions)
     }

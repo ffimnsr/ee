@@ -551,51 +551,51 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 
 **Work items:**
 
-- [ ] Delete old plugin crates and modules.
-  - [ ] Delete `crates/xi-plugin-lib/**`.
-  - [ ] Delete `crates/xi-plugin-derive/**`.
-  - [ ] Delete `crates/xi-core-lib/src/plugins/**`.
-  - [ ] Delete `crates/xi-core-lib/src/tabs/{plugins,plugin_lifecycle,plugin_events}.rs`.
-  - [ ] Delete `crates/xi-core-lib/src/event_context/plugins.rs`.
-  - [ ] Delete old plugin fields from `CoreState`, `EventContext`, and `make_context`.
-  - [ ] Delete `CoreNotification::Plugin`, `CorePluginNotification`, and old plugin control RPC.
-  - [ ] Delete `Client::{plugin_started, plugin_stopped, plugin_terminated, available_plugins}` and `ClientPluginInfo`.
-  - [ ] Delete `xi_core_lib::{plugin_manifest, plugin_rpc}` re-exports.
-- [ ] Clean workspace and dependencies.
-  - [ ] Remove `xi-plugin-lib` and `xi-plugin-derive` from root `Cargo.toml` members and workspace dependencies.
-  - [ ] Remove `wasmtime`, `seccomp`, and `windows-sys` from `xi-core-lib/Cargo.toml` after Phase 6 moves them.
-  - [ ] Add `ee-plugin-runtime` to `ee-cli` for plugin diagnostics only.
-  - [ ] Remove any old plugin imports from `ee-cli`, `xi-lsp-lib`, and provider crates.
-- [ ] Update packaging and installers.
-  - [ ] Update `scripts/install-plugins.sh` to install v2 manifest and native/Wasm entry layout.
-  - [ ] Update `install.sh` `install_plugin_assets` to validate `manifest_version = 2` before copying.
-  - [ ] Update `.github/workflows/release.yml` build and package steps for the v2 plugin layout.
-  - [ ] Update `.github/workflows/fuzz.yml` target name and matrix.
-  - [ ] Update any `tasks.yaml` entries that reference old plugin paths.
-- [ ] Update test harnesses.
-  - [ ] Update `ee-cli/src/tests/helpers.rs` `install_test_lsp_plugin` to copy the v2 manifest.
-  - [ ] Replace old `PluginDescription` construction in `ee-cli/src/tests/notifications.rs` with v2 status/contribution fixtures.
-  - [ ] Replace `probe_running_plugins` / `PluginCatalog` tests in `ee-cli/src/plugins_cmd.rs` with runtime diagnostics tests.
-  - [ ] Update `ee-cli/src/tests/commands.rs` for `ee do plugins list/ls` diagnostics output.
-  - [ ] Remove `test_assets` or fixture references that depend on old plugin manifests.
-- [ ] Update CLI plugin management.
-  - [ ] Implement `ee do plugins list` using `PluginManager::diagnostics()`.
-  - [ ] Implement `ee do plugins validate [path]` using manifest v2 validation.
-  - [ ] Implement `ee do plugins schema` writing `schemas/plugin-manifest-v2.json`.
-  - [ ] Add CLI tests for list, validate, schema, blocked workspace plugin, and invalid v1 manifest rejection.
-- [ ] Regenerate schemas and snapshots.
-  - [ ] Regenerate `schemas/ee-config.schema.json` with the new `[plugins]` section.
-  - [ ] Generate `schemas/plugin-manifest-v2.json` from `ManifestV2`.
-  - [ ] Update snapshots for contribution payloads, diagnostics, and LSP manifest.
-- [ ] Run deletion gates.
-  - [ ] Assert `test ! -d crates/xi-plugin-lib`.
-  - [ ] Assert `test ! -d crates/xi-plugin-derive`.
-  - [ ] Assert no `manifest_version = 1`, `xi_plugin`, `xi-plugin-lib`, `plugin_rpc`, `HostNotification`, `PluginNotification`, `CoreProxy`, or `PluginCatalog` in `crates`, `scripts`, `fuzz`, `.github`, or `Cargo.toml`.
-  - [ ] Assert no old LSP `Action::Request*` or `EditNotification` LSP variants remain.
+- [x] Delete old plugin crates and modules.
+  - [x] Delete `crates/xi-plugin-lib/**`.
+  - [x] Delete `crates/xi-plugin-derive/**`.
+  - [x] Delete `crates/xi-core-lib/src/plugins/**`.
+  - [x] Delete `crates/xi-core-lib/src/tabs/{plugins,plugin_lifecycle,plugin_events}.rs`.
+  - [x] Delete `crates/xi-core-lib/src/event_context/plugins.rs`.
+  - [x] Delete old plugin fields from `CoreState`, `EventContext`, and `make_context`.
+  - [x] Delete `CoreNotification::Plugin`, `CorePluginNotification`, and old plugin control RPC.
+  - [x] Delete `Client::{plugin_started, plugin_stopped, plugin_terminated, available_plugins}` and `ClientPluginInfo`.
+  - [x] Delete `xi_core_lib::{plugin_manifest, plugin_rpc}` re-exports.
+- [x] Clean workspace and dependencies.
+  - [x] Remove `xi-plugin-lib` and `xi-plugin-derive` from root `Cargo.toml` members and workspace dependencies.
+  - [x] Remove `wasmtime`, `seccomp`, and `windows-sys` from `xi-core-lib/Cargo.toml` after Phase 6 moves them.
+  - [x] Add `ee-plugin-runtime` to `ee-cli` for plugin diagnostics only.
+  - [x] Remove any old plugin imports from `ee-cli`, `xi-lsp-lib`, and provider crates.
+- [x] Update packaging and installers.
+  - [x] Update `scripts/install-plugins.sh` to install v2 manifest and native/Wasm entry layout.
+  - [x] Update `install.sh` `install_plugin_assets` to validate `manifest_version = 2` before copying.
+  - [x] Update `.github/workflows/release.yml` build and package steps for the v2 plugin layout.
+  - [x] Update `.github/workflows/fuzz.yml` target name and matrix.
+  - [x] Update any `tasks.yaml` entries that reference old plugin paths.
+- [x] Update test harnesses.
+  - [x] Update `ee-cli/src/tests/helpers.rs` `install_test_lsp_plugin` to copy the v2 manifest.
+  - [x] Replace old `PluginDescription` construction in `ee-cli/src/tests/notifications.rs` with v2 status/contribution fixtures.
+  - [x] Replace `probe_running_plugins` / `PluginCatalog` tests in `ee-cli/src/plugins_cmd.rs` with runtime diagnostics tests.
+  - [x] Update `ee-cli/src/tests/commands.rs` for `ee do plugins list/ls` diagnostics output.
+  - [x] Remove `test_assets` or fixture references that depend on old plugin manifests.
+- [x] Update CLI plugin management.
+  - [x] Implement `ee do plugins list` using `PluginManager::diagnostics()`.
+  - [x] Implement `ee do plugins validate [path]` using manifest v2 validation.
+  - [x] Implement `ee do plugins schema` writing `schemas/plugin-manifest-v2.json`.
+  - [x] Add CLI tests for list, validate, schema, blocked workspace plugin, and invalid v1 manifest rejection.
+- [x] Regenerate schemas and snapshots.
+  - [x] Regenerate `schemas/ee-config.schema.json` with the new `[plugins]` section.
+  - [x] Generate `schemas/plugin-manifest-v2.json` from `ManifestV2`.
+  - [x] Update snapshots for contribution payloads, diagnostics, and LSP manifest.
+- [x] Run deletion gates.
+  - [x] Assert `test ! -d crates/xi-plugin-lib`.
+  - [x] Assert `test ! -d crates/xi-plugin-derive`.
+  - [x] Assert no `manifest_version = 1`, `xi_plugin`, `xi-plugin-lib`, `plugin_rpc`, `HostNotification`, `PluginNotification`, `CoreProxy`, or `PluginCatalog` in `crates`, `scripts`, `fuzz`, `.github`, or `Cargo.toml`.
+  - [x] Assert no old LSP `Action::Request*` or `EditNotification` LSP variants remain.
 - [ ] Run full validation.
-  - [ ] `cargo fmt --all --check`.
-  - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
-  - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
+  - [x] `cargo fmt --all --check`.
+  - [x] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+  - [x] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
   - [ ] `./scripts/test-workspace-summary.sh`.
   - [ ] `cargo test --quiet -p ee-plugin-api`.
   - [ ] `cargo test --quiet -p ee-plugin-runtime`.
@@ -610,7 +610,7 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
   - [ ] Assert agent replay fixtures remain deterministic.
   - [ ] Assert a v2 plugin can register a command, status item, panel, decoration, agent tool, and model adapter.
   - [ ] Assert a v1 manifest is rejected with a typed diagnostic.
-  - [ ] Assert `tasks.yaml` `lf` reports no new file over 1,000 LOC.
+  - [x] Assert `tasks.yaml` `lf` reports no new file over 1,000 LOC.
 
 **Acceptance criteria:**
 

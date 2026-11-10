@@ -771,7 +771,7 @@ impl LanguageServerClient {
     pub fn request_document_formatting<CB>(
         &mut self,
         view_id: ViewId,
-        options: Option<xi_core_lib::plugin_rpc::FormattingOptions>,
+        options: Option<ee_plugin_api::model::FormattingOptions>,
         on_result: CB,
     ) -> Result<u64, LspError>
     where
@@ -787,7 +787,7 @@ impl LanguageServerClient {
             )));
         }
 
-        let options = options.unwrap_or(xi_core_lib::plugin_rpc::FormattingOptions {
+        let options = options.unwrap_or(ee_plugin_api::model::FormattingOptions {
             tab_size: 4,
             insert_spaces: true,
         });

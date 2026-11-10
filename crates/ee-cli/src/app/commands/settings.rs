@@ -603,10 +603,10 @@ impl App {
                 // Whole-buffer policy-allowed: diagnostic offset→line/col requires full text mirror.
                 let (line, col) = line_col_for_offset(&buf.lines, diagnostic.range.start);
                 let severity = match diagnostic.severity {
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => "error",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Warning => "warning",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Information => "info",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Hint => "hint",
+                    ee_plugin_api::model::DiagnosticSeverity::Error => "error",
+                    ee_plugin_api::model::DiagnosticSeverity::Warning => "warning",
+                    ee_plugin_api::model::DiagnosticSeverity::Information => "info",
+                    ee_plugin_api::model::DiagnosticSeverity::Hint => "hint",
                 };
                 (
                     diagnostic.range.start,

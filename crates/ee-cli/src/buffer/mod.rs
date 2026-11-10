@@ -8,11 +8,11 @@ pub(crate) use std::thread;
 pub(crate) use std::thread::JoinHandle;
 pub(crate) use std::time::{Duration, Instant, SystemTime};
 
+pub(crate) use ee_plugin_api::model::{Diagnostic, SelectionRange, SymbolItem};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use xi_core_lib::XiCore;
 pub(crate) use xi_core_lib::config::Table;
-pub(crate) use xi_core_lib::plugin_rpc::{Diagnostic, SelectionRange, SymbolItem};
 pub(crate) use xi_core_lib::rpc::{FoldRangePreview, LineReplacement};
 pub(crate) use xi_rpc::RpcLoop;
 
