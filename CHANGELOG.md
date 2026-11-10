@@ -42,6 +42,47 @@
 - add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
+## 0.11.12 - 2026-11-10
+
+### Features
+
+- add system clipboard integration (`69d301a`)
+- implement contracts for cordis style plugin system (`eb5cd02`)
+- implement plugin loader and lifecycle (`fed54bb`)
+- apply plugin system on editor and expose editor services (`8a551fb`)
+- add v2 plugin contribution registry (`0af86e8`)
+- migrate LSP plugin to v2 runtime (`a69c057`)
+- add v2 agent plugin host and agent.* services (`87acab1`)
+- add native sandbox and capability-gated wasm transport (`cdfb599`)
+- cut over to the v2 plugin system (`d8b10f0`)
+- route frontend ui events to the owning plugin (`e8f2a35`)
+- replace bundled plugins on reinstall and add mk uninstall (`4117d98`)
+
+
+### Fixes
+
+- deliver v2 status updates and contribution removals (`d821d82`)
+- keep native plugins alive under seccomp and reset wasm budgets (`ca778c6`)
+- wait for the full frame batch in acp harnesses (`e1e6134`)
+
+
+### Documentation
+
+- add document for upgrading to cordis style plugin system (`3556376`)
+
+
+### CI
+
+- install mold in lint and docs jobs (`926dba1`)
+- gate all-features tests to manual runs and tolerate platform build failures (`2c16c1c`)
+- pin the fuzz target triple to the runner host (`9b20226`)
+
+
+### Maintenance
+
+- link with mold and trim debug info (`d20e30d`)
+
+
 ## 0.11.11 - 2026-10-16
 
 ### Features
