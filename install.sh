@@ -394,6 +394,17 @@ install_plugin_assets() {
     done
 
     ensure try_sudo mkdir -p -- "${PLUGIN_DIR}"
+    # Replace each bundled plugin directory instead of copying over it: a stale
+    # file from an older plugin layout would otherwise survive the upgrade.
+    # Only bundle-owned directories are touched, never user-added plugins.
+    for _plugin_dir in "${_plugin_src}"/*/; do
+        [ -d "${_plugin_dir}" ] || continue
+        _plugin_name=$(basename -- "${_plugin_dir}")
+        [ -n "${_plugin_name}" ] || continue
+        if [ -e "${PLUGIN_DIR}/${_plugin_name}" ]; then
+            ensure try_sudo rm -rf -- "${PLUGIN_DIR}/${_plugin_name}"
+        fi
+    done
     ensure try_sudo cp -R -- "${_plugin_src}/." "${PLUGIN_DIR}/"
     echo "Installed bundled plugins to ${PLUGIN_DIR}"
 }

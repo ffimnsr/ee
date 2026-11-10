@@ -99,10 +99,32 @@ EE_INSTALL_LOCAL_PACKAGE="$tarball" \
     --sudo true >/dev/null
 [[ ! -e "$bin_dir_without_agent/ee-openrouter-agent" ]]
 
+# A reinstall replaces bundle-owned plugin directories, so stale files from an
+# older plugin layout cannot survive, while user-added plugins stay untouched.
+printf 'legacy\n' >"$plugin_dir/xi-lsp-plugin/stale-v1-artifact"
+mkdir -p "$plugin_dir/user-plugin"
+printf 'keep\n' >"$plugin_dir/user-plugin/keep.txt"
+
+EE_INSTALL_LOCAL_PACKAGE="$tarball" \
+  sh "$script_path" \
+    --arch x86_64-unknown-linux-musl \
+    --bin-dir "$bin_dir_without_agent" \
+    --runtime-dir "$runtime_dir" \
+    --plugin-dir "$plugin_dir" \
+    --doc-dir "$doc_dir" \
+    --license-dir "$license_dir" \
+    --without-openrouter-agent \
+    --sudo true >/dev/null
+[[ ! -e "$plugin_dir/xi-lsp-plugin/stale-v1-artifact" ]]
+[[ -f "$plugin_dir/xi-lsp-plugin/manifest.toml" ]]
+[[ -f "$plugin_dir/xi-lsp-plugin/bin/xi-lsp-plugin" ]]
+[[ -f "$plugin_dir/user-plugin/keep.txt" ]]
+
 # ── plugin manifest validation ──────────────────────────────────────────────
 invalid_root="$tmpdir/ee-invalid-plugin"
 mkdir -p "$invalid_root/share/ee/plugins/old-plugin/bin"
 cp "$package_root/ee" "$invalid_root/ee"
+cp "$package_root/ee-openrouter-agent" "$invalid_root/ee-openrouter-agent"
 legacy_manifest_version=1
 cat >"$invalid_root/share/ee/plugins/old-plugin/manifest.toml" <<EOF
 manifest_version = ${legacy_manifest_version}

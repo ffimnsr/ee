@@ -29,13 +29,31 @@ tasks:
     description: Check that documentation builds without errors.
   install:
     commands:
-      - cargo install --root "$HOME/.local" --path crates/ee-cli --bin ee --all-features
-      - cargo install --root "$HOME/.local" --path crates/ee-openrouter-agent --bin ee-openrouter-agent
+      - cargo install --root "$HOME/.local" --path crates/ee-cli --bin ee --all-features --force
+      - cargo install --root "$HOME/.local" --path crates/ee-openrouter-agent --bin ee-openrouter-agent --force
       - name: Install bundled tree-sitter runtime
-        command: ./scripts/install-tree-sitter-runtime.sh
+        command: ./scripts/install-tree-sitter-runtime.sh --force
       - name: Install bundled plugins
-        command: ./scripts/install-plugins.sh
-    description: Install ee-editor and OpenRouter ACP agent at ~/.local/bin using cargo.
+        command: ./scripts/install-plugins.sh --force
+    description: Install ee-editor and OpenRouter ACP agent at ~/.local/bin using cargo, replacing previous installs.
+  uninstall:
+    commands:
+      - pkill -TERM -f '[x]i-lsp-plugin' || true
+      - pkill -TERM -x ee || true
+      - pkill -TERM -x ee-openrouter-agent || true
+      - cargo uninstall ee-cli 2>/dev/null || true
+      - cargo uninstall ee-openrouter-agent 2>/dev/null || true
+      - cargo uninstall --root "$HOME/.local" ee-cli 2>/dev/null || true
+      - cargo uninstall --root "$HOME/.local" ee-openrouter-agent 2>/dev/null || true
+      - rm -f "$HOME/.local/bin/ee" "$HOME/.local/bin/ee-openrouter-agent" "$HOME/.cargo/bin/ee" "$HOME/.cargo/bin/ee-openrouter-agent"
+      - rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ee"
+      - rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ee"
+      - rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ee"
+      - rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/doc/ee" "${XDG_DATA_HOME:-$HOME/.local/share}/licenses/ee"
+      - sed -i '\|eval "$(ee do completions |d' "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null || true
+      - sed -i '\|eval "$(ee completions |d' "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null || true
+      - rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/ee.fish"
+    description: Remove ee binaries, plugins, runtime assets, user config, logs, sessions, cached workspace memory, and shell completion hooks. Deletes the secrets vault too.
   install-githooks:
     commands:
       - rm -rf .git/hooks

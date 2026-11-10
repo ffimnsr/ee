@@ -14,11 +14,15 @@ Options:
   --manifest-path FILE Plugin manifest source path.
   --binary-path FILE   Prebuilt plugin binary source path. Skips cargo build.
   --debug              Build plugin with debug profile instead of release.
+  --force              Remove the plugin's previous install directory first,
+                       so stale files from an older plugin layout cannot
+                       survive a reinstall. Sibling plugins are untouched.
   -h, --help           Show this help.
 
 Examples:
   scripts/install-plugins.sh
   scripts/install-plugins.sh --debug
+  scripts/install-plugins.sh --force
   scripts/install-plugins.sh --plugin-dir "$HOME/.config/ee/plugins"
 EOF
 }
@@ -59,6 +63,21 @@ validate_manifest_v2() {
   fi
 }
 
+# `--force` deletes `$plugin_dir/$plugin_name`, so the name has to be a plain
+# single path segment and the entry a relative path that cannot escape it.
+validate_plugin_paths() {
+  local name="$1" entry="$2"
+
+  if [[ -z "$name" || "$name" == "." || "$name" == ".." || "$name" == */* ]]; then
+    printf 'error: invalid plugin name %q: must be a single path segment\n' "$name" >&2
+    exit 1
+  fi
+  if [[ -z "$entry" || "$entry" == /* || "$entry" == ../* || "$entry" == */../* || "$entry" == */.. ]]; then
+    printf 'error: invalid plugin entry %q: must stay inside the plugin directory\n' "$entry" >&2
+    exit 1
+  fi
+}
+
 main() {
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,6 +86,7 @@ main() {
   local manifest_path="$repo_root/crates/xi-lsp-lib/manifest.toml"
   local binary_path=""
   local profile="release"
+  local force=0
 
   while (($# > 0)); do
     case "$1" in
@@ -84,6 +104,10 @@ main() {
         ;;
       --debug)
         profile="debug"
+        shift
+        ;;
+      --force)
+        force=1
         shift
         ;;
       -h|--help)
@@ -112,6 +136,7 @@ main() {
     printf 'error: manifest is missing name, kind, or entry: %s\n' "$manifest_path" >&2
     exit 1
   fi
+  validate_plugin_paths "$plugin_name" "$plugin_entry"
 
   if [[ -z "$binary_path" ]]; then
     local cargo_cmd=(cargo build -p ee-xi-lsp-lib --bin xi-lsp-plugin)
@@ -132,6 +157,10 @@ main() {
 
   local install_dir="$plugin_dir/$plugin_name"
   local entry_path="$install_dir/$plugin_entry"
+  if ((force)) && [[ -e "$install_dir" ]]; then
+    rm -rf -- "$install_dir"
+    printf 'removed previous installation at %s\n' "$install_dir"
+  fi
   mkdir -p "$(dirname "$entry_path")"
   install_file_atomically "$manifest_path" "$install_dir/manifest.toml" 0644
   if [[ "$plugin_kind" == "wasm" ]]; then

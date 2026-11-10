@@ -84,6 +84,53 @@ custom_output="$({
 [[ -f "$custom_plugin_root/xi-lsp-plugin/bin/xi-lsp-plugin" ]]
 [[ "$custom_output" == *"bundled plugins installed at $custom_plugin_root"* ]]
 
+# A reinstall without --force overwrites known files but keeps stale ones.
+stale_marker="$installed_plugin_dir/stale-v1-artifact"
+sibling_dir="$plugin_root/other-plugin"
+printf 'legacy\n' >"$stale_marker"
+mkdir -p "$sibling_dir"
+printf 'keep\n' >"$sibling_dir/keep.txt"
+
+bash "$script_path" \
+  --plugin-dir "$plugin_root" \
+  --manifest-path "$manifest_path" \
+  --binary-path "$binary_path" \
+  >/dev/null
+[[ -f "$stale_marker" ]]
+
+# --force drops the plugin's previous directory so no stale artifact survives.
+force_output="$({
+  bash "$script_path" \
+    --plugin-dir "$plugin_root" \
+    --manifest-path "$manifest_path" \
+    --binary-path "$binary_path" \
+    --force
+})" 
+[[ ! -e "$stale_marker" ]]
+[[ -f "$installed_plugin_dir/manifest.toml" ]]
+[[ -f "$installed_binary" ]]
+cmp "$binary_path" "$installed_binary"
+[[ "$force_output" == *"removed previous installation at $installed_plugin_dir"* ]]
+[[ -f "$sibling_dir/keep.txt" ]]
+
+unsafe_manifest="$tmpdir/unsafe-manifest.toml"
+cat >"$unsafe_manifest" <<'EOF'
+manifest_version = 2
+name = "../escape"
+kind = "native"
+entry = "bin/xi-lsp-plugin"
+EOF
+if bash "$script_path" \
+  --plugin-dir "$tmpdir/unsafe-plugins" \
+  --manifest-path "$unsafe_manifest" \
+  --binary-path "$binary_path" \
+  --force 2>"$tmpdir/unsafe-output"; then
+  echo 'install-plugins.sh accepted an unsafe plugin name' >&2
+  exit 1
+fi
+grep -qF 'invalid plugin name' "$tmpdir/unsafe-output"
+[[ ! -e "$tmpdir/escape" ]]
+
 invalid_manifest="$tmpdir/invalid-manifest.toml"
 legacy_manifest_version=1
 cat >"$invalid_manifest" <<EOF
