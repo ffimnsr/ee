@@ -20,6 +20,7 @@ jobs:
   bench-smoke:
     name: Bench smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -32,4 +33,4 @@ jobs:
         with:
           make-default: false
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench -p ee-cli --bench vlf --no-run
+      - run: cargo bench -p ee-cli --bench vlf --no-run --locked
