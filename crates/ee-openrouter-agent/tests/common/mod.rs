@@ -186,19 +186,26 @@ impl Harness {
                 if pending.len() < count {
                     pending.extend(self.handle.take_outbound());
                 }
-                let mut collected = Vec::with_capacity(count);
-                while collected.len() < count {
-                    match pending.pop_front() {
-                        Some(JsonRpcFrame::Single(message)) => collected.push(message),
-                        Some(batch) => {
-                            panic!(
-                                "a batch response is queued; use a batch-aware harness instead: {batch:?}"
-                            )
+                // Drain only a full batch: returning a partial one makes callers
+                // that index `frames[count - 1]` panic when the responder is slow.
+                // Partial frames stay queued for the next attempt.
+                if pending.len() < count {
+                    Vec::new()
+                } else {
+                    let mut collected = Vec::with_capacity(count);
+                    while collected.len() < count {
+                        match pending.pop_front() {
+                            Some(JsonRpcFrame::Single(message)) => collected.push(message),
+                            Some(batch) => {
+                                panic!(
+                                    "a batch response is queued; use a batch-aware harness instead: {batch:?}"
+                                )
+                            }
+                            None => break,
                         }
-                        None => break,
                     }
+                    collected
                 }
-                collected
             };
             if !frames.is_empty() {
                 return frames;
