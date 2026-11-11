@@ -189,6 +189,7 @@ impl OrchestratorRuntime {
             rubber_duck,
             rubber_duck_triggers: Mutex::new(RubberDuckTriggerController::default()),
             last_repair_stop: Mutex::new(None),
+            runtime_snapshots: Mutex::new(HashMap::new()),
         }
     }
     /// Installs an observe-only observer on the runtime event recorder.

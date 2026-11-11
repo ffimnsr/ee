@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::budget::BudgetSnapshot;
 use crate::policy::ToolPolicy;
-use crate::prompt::context::RuntimeSnapshot;
+use crate::prompt::context::{RuntimeSection, RuntimeSnapshot};
 use crate::prompt::delegation::depth_line;
 use crate::prompt::error::PromptError;
 use crate::prompt::render::{Section, render_sections};
@@ -95,7 +95,11 @@ pub(crate) fn render(inputs: &RuntimeContextInputs<'_>) -> Result<RuntimeSnapsho
         sections.push(Section::for_slot(&EE_TURN_GUIDANCE, guidance)?);
     }
     let text = render_sections(&sections, &BTreeMap::new(), None)?;
-    Ok(RuntimeSnapshot { text })
+    let runtime_sections = sections
+        .iter()
+        .map(|section| RuntimeSection::new(section.slot, section.order, section.text.trim()))
+        .collect();
+    Ok(RuntimeSnapshot { text, sections: runtime_sections, ..RuntimeSnapshot::default() })
 }
 
 /// Appends the strategy guidance and any finite-budget pressure notice.
@@ -117,7 +121,11 @@ pub(crate) fn append_turn_guidance(
         blocks.push(notice);
     }
     if !blocks.is_empty() {
-        snapshot.push_block(&blocks.join("\n\n"));
+        snapshot.push_section(RuntimeSection::new(
+            EE_TURN_GUIDANCE.name,
+            EE_TURN_GUIDANCE.order,
+            blocks.join("\n\n"),
+        ));
     }
 }
 
@@ -413,7 +421,7 @@ mod tests {
 
     #[test]
     fn append_guidance_and_pressure_notice() {
-        let mut snapshot = RuntimeSnapshot { text: "base".into() };
+        let mut snapshot = RuntimeSnapshot { text: "base".into(), ..RuntimeSnapshot::default() };
         let budget = BudgetSnapshot {
             iterations_used: 15,
             iterations_max: Some(16),
@@ -433,11 +441,13 @@ mod tests {
         append_turn_guidance(&mut snapshot, Some("Turn guidance: x"), Some(&budget));
         assert!(snapshot.text.starts_with("base\n\nTurn guidance: x\n\nTurn budget:"));
         assert!(snapshot.text.contains("1 model call(s)"));
+        assert_eq!(snapshot.sections.len(), 1);
+        assert_eq!(snapshot.sections[0].name, "EE_TURN_GUIDANCE");
     }
 
     #[test]
     fn append_without_guidance_or_pressure_is_a_no_op() {
-        let mut snapshot = RuntimeSnapshot { text: "base".into() };
+        let mut snapshot = RuntimeSnapshot { text: "base".into(), ..RuntimeSnapshot::default() };
         append_turn_guidance(&mut snapshot, None, None);
         assert_eq!(snapshot.text, "base");
     }

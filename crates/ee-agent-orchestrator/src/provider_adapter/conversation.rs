@@ -326,6 +326,8 @@ pub(super) struct PromptBundleInputs<'a> {
     pub(super) policy: &'a ToolPolicy,
     pub(super) advertised_tools: &'a [String],
     pub(super) mcp_servers: &'a [String],
+    /// Test seam for trusted user instructions; `None` reads the process env.
+    pub(super) global_config_root: Option<&'a std::path::Path>,
 }
 
 /// Builds the stable prompt and runtime snapshot for one session mode.
@@ -354,6 +356,10 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
     // Recompute every turn: instruction files are attack surface, so a stale
     // snapshot is never carried in history. `TurnSystemContext` replays only
     // the current snapshot ahead of the current prompt.
+    bundle.global = match inputs.global_config_root {
+        Some(root) => crate::prompt::global::discover_at(root),
+        None => crate::prompt::global::discover(),
+    };
     bundle.workspace = crate::prompt::workspace::discover(inputs.cwd, inputs.workspace_roots);
     Ok(bundle)
 }
@@ -378,6 +384,7 @@ mod tests {
             policy: &ToolPolicy::default(),
             advertised_tools: &[],
             mcp_servers: &[],
+            global_config_root: None,
         })
         .expect("bundle");
 
@@ -386,6 +393,40 @@ mod tests {
         assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
         assert!(message.text_content().contains("project rule"));
         assert!(bundle.workspace[0].path.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn prompt_bundle_loads_trusted_global_instructions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global = temp.path().join("ee");
+        std::fs::create_dir_all(&global).expect("global config dir");
+        std::fs::write(global.join("AGENTS.md"), "global rule").expect("write global rule");
+        std::fs::write(temp.path().join("AGENTS.md"), "workspace rule").expect("write rule");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: Some(&global),
+        })
+        .expect("bundle");
+
+        assert_eq!(bundle.global.len(), 1);
+        assert_eq!(bundle.global[0].message.trust, TrustLevel::UserInstructionTrusted);
+        assert!(bundle.global[0].message.text_content().contains("global rule"));
+        assert_eq!(bundle.workspace.len(), 1);
+        assert_eq!(bundle.workspace[0].message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(!bundle.stable.contains("global rule"), "global text never joins stable prompt");
+        assert!(
+            !bundle.stable.contains("workspace rule"),
+            "workspace text never joins stable prompt"
+        );
     }
 
     #[test]
@@ -403,6 +444,7 @@ mod tests {
             policy: &policy,
             advertised_tools: &[],
             mcp_servers: &[],
+            global_config_root: None,
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");

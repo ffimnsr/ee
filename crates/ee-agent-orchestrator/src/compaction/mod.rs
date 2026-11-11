@@ -13,12 +13,22 @@
 use serde::{Deserialize, Serialize};
 
 use crate::budget::BudgetSnapshot;
+use crate::error::OrchestratorError;
 use crate::events::OrchestratorEvent;
 use crate::memory::MemoryStore;
 use crate::memory_compaction::{MemoryCompactionConfig, is_protected_key};
 use crate::model::ModelMessage;
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::tasks::{TaskGraph, TaskStatus};
+
+pub mod pipeline;
+
+pub use pipeline::{
+    CompactPlan, CompactionInput, CompactionStageCounts, CompactionStrategy,
+    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy,
+};
+
+static DEFAULT_STRATEGY: DefaultCompactionStrategy = DefaultCompactionStrategy;
 
 /// Default bound on the serialized compaction context sent to the model.
 pub const DEFAULT_COMPACT_MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -39,6 +49,16 @@ pub struct CompactionConfig {
     /// Maximum serialized bytes of compaction context (task graph, memory,
     /// recent conversation/events, validation facts, budget) sent to model.
     pub max_input_bytes: usize,
+    /// Host-approved compaction strategy name. Only built-in strategies load.
+    #[serde(default = "default_compaction_strategy")]
+    pub strategy: String,
+}
+
+/// Default strategy name for configuration and serde defaults.
+pub const DEFAULT_COMPACTION_STRATEGY: &str = "default";
+
+fn default_compaction_strategy() -> String {
+    DEFAULT_COMPACTION_STRATEGY.to_string()
 }
 
 impl Default for CompactionConfig {
@@ -46,6 +66,24 @@ impl Default for CompactionConfig {
         Self {
             memory: MemoryCompactionConfig::default(),
             max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
+            strategy: default_compaction_strategy(),
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Rejects unknown strategy names before a turn starts.
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        self.select().map(|_| ())
+    }
+
+    /// Resolves the configured host-approved strategy.
+    pub fn select(&self) -> Result<&'static dyn CompactionStrategy, OrchestratorError> {
+        match self.strategy.as_str() {
+            DEFAULT_COMPACTION_STRATEGY => Ok(&DEFAULT_STRATEGY),
+            other => Err(OrchestratorError::InvalidState(format!(
+                "unknown compaction strategy {other:?}; supported: {DEFAULT_COMPACTION_STRATEGY}"
+            ))),
         }
     }
 }
@@ -64,6 +102,12 @@ pub struct CompactTurnReport {
     pub summary_bytes: usize,
     /// Bytes of the compaction context retained in the model request.
     pub retained_context_bytes: usize,
+    /// Read-only tool results rewritten by lossless pruning.
+    pub pruned_tool_results: usize,
+    /// Rewrites caused by byte-identical duplicate read results.
+    pub deduped_messages: usize,
+    /// Oldest messages dropped by the compaction window.
+    pub dropped_messages: usize,
 }
 
 impl CompactTurnReport {
@@ -71,10 +115,13 @@ impl CompactTurnReport {
     #[must_use]
     pub fn to_status_text(&self) -> String {
         SensitiveDataGuard::new().redact(&format!(
-            "Session compacted: merged {} duplicate facts, decayed {} low-value observations, preserved {} protected items; stored {} summary bytes; retained {} context bytes",
+            "Session compacted: merged {} duplicate facts, decayed {} low-value observations, preserved {} protected items; pruned {} read-only results ({} exact duplicates); dropped {} old messages; stored {} summary bytes; retained {} context bytes",
             self.merged_duplicates,
             self.decayed_observations,
             self.preserved_protected,
+            self.pruned_tool_results,
+            self.deduped_messages,
+            self.dropped_messages,
             self.summary_bytes,
             self.retained_context_bytes,
         ))
@@ -433,14 +480,28 @@ mod tests {
             preserved_protected: 3,
             summary_bytes: 120,
             retained_context_bytes: 4_000,
+            pruned_tool_results: 2,
+            deduped_messages: 1,
+            dropped_messages: 4,
         };
         let text = report.to_status_text();
         assert!(text.contains("merged 2 duplicate facts"), "{text}");
         assert!(text.contains("decayed 1 low-value observations"), "{text}");
         assert!(text.contains("preserved 3 protected items"), "{text}");
+        assert!(text.contains("pruned 2 read-only results (1 exact duplicates)"), "{text}");
+        assert!(text.contains("dropped 4 old messages"), "{text}");
         assert!(text.contains("stored 120 summary bytes"), "{text}");
         assert!(text.contains("retained 4000 context bytes"), "{text}");
         assert_eq!(SensitiveDataGuard::new().redact(&text), text, "already redacted");
+    }
+
+    #[test]
+    fn unknown_strategy_fails_validation() {
+        let config =
+            CompactionConfig { strategy: "plugin-unknown".into(), ..CompactionConfig::default() };
+        assert!(config.validate().is_err());
+        assert!(config.select().is_err());
+        CompactionConfig::default().validate().expect("default strategy is valid");
     }
 
     #[test]

@@ -39,6 +39,9 @@ impl OrchestratorRuntime {
         metadata: RecoveryTurnMetadata,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let session_id = ctx.session_id.to_string();
+        // Resume always starts from a full runtime snapshot: a checkpoint may
+        // predate the retained delta base.
+        self.clear_runtime_plane(&session_id);
         let Some((checkpoint_id, checkpoint)) =
             self.checkpoints.load_latest(&session_id).map_err(|error| {
                 OrchestratorError::Serialization(format!(
@@ -97,10 +100,13 @@ impl OrchestratorRuntime {
             prompt_messages.extend(Transcript::from_prompt(&ctx).messages);
         }
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
+        let full_runtime = prompt.runtime.clone();
         TurnSystemContext {
             history: resume.transcript,
             memory,
             stable: (!prompt.stable.trim().is_empty()).then_some(prompt.stable),
+            global: prompt.global,
+            retained_runtime: None,
             runtime: prompt.runtime,
             workspace: prompt.workspace,
             mcp: prompt.mcp,
@@ -111,6 +117,7 @@ impl OrchestratorRuntime {
             .with_capture_metadata(metadata.checkpoint_context, metadata.evidence_refs);
         let model = self.models.default_adapter()?;
         let policy = self.policy();
+        let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine = LoopEngine::new(
             self.config.clone(),
             model,
@@ -125,6 +132,7 @@ impl OrchestratorRuntime {
                 memory: Some(self.memory.clone()),
                 checkpoint: Some(handle),
                 resume_state: Some(resumed),
+                truncation_flag: Some(truncation_flag.clone()),
                 ..LoopOptions::default()
             },
         );
@@ -141,6 +149,12 @@ impl OrchestratorRuntime {
         let outcome = engine
             .run_transcript(&mut transcript, session_id.clone(), sink, client, cancel, task)
             .await;
+        if outcome.is_ok()
+            && !truncation_flag.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(runtime) = full_runtime
+        {
+            self.commit_runtime_plane(&session_id, &runtime);
+        }
         match outcome {
             Ok(result) => {
                 self.checkpoints.delete_session(&session_id);
@@ -293,6 +307,9 @@ impl OrchestratorRuntime {
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
         let model = self.models.default_adapter()?;
         let policy = self.policy();
+        let mut options = options;
+        let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        options.truncation_flag = Some(truncation_flag.clone());
         let engine = LoopEngine::new(
             self.config.clone(),
             model,
@@ -304,12 +321,27 @@ impl OrchestratorRuntime {
         );
         let mut context =
             TurnSystemContext { history, memory, task_context, ..TurnSystemContext::default() };
+        let session_id = ctx.session_id.to_string();
+        let mut full_runtime = None;
         if let Some(prompt) = prompt {
             context.stable = (!prompt.stable.trim().is_empty()).then_some(prompt.stable);
-            context.runtime = prompt.runtime;
+            context.global = prompt.global;
             context.workspace = prompt.workspace;
             context.mcp = prompt.mcp;
+            if let Some(runtime) = prompt.runtime {
+                let (plane, retained) = self.runtime_plane(&session_id, &runtime);
+                context.runtime = Some(plane);
+                context.retained_runtime = retained;
+                full_runtime = Some(runtime);
+            }
         }
-        engine.run_with_system_context(ctx, sink, client, cancel, task, context).await
+        let result = engine.run_with_system_context(ctx, sink, client, cancel, task, context).await;
+        if result.is_ok()
+            && !truncation_flag.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(runtime) = full_runtime
+        {
+            self.commit_runtime_plane(&session_id, &runtime);
+        }
+        result
     }
 }

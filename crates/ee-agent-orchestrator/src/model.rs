@@ -40,6 +40,13 @@ pub const TOOL_RESULT_PRUNE_TAIL: usize = 1024;
 /// Exact marker substituted for the pruned middle span.
 pub const TOOL_RESULT_PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
+/// Message metadata key: the tool name that produced a result.
+pub const TOOL_NAME_METADATA_KEY: &str = "tool_name";
+/// Message metadata key: the tool's side-effect class label.
+pub const TOOL_SIDE_EFFECT_METADATA_KEY: &str = "tool_side_effect";
+/// Message metadata key: the primary path argument of a read/write tool.
+pub const TOOL_PATH_METADATA_KEY: &str = "tool_path";
+
 /// Boxed future returned by [`ModelAdapter`] methods.
 ///
 /// The box keeps the trait object-safe without depending on `async-trait`.
@@ -506,6 +513,29 @@ impl Transcript {
     /// Appends a tool observation carrying the stable tool-call id.
     pub fn push_tool_result(&mut self, tool_call_id: impl Into<String>, result: ToolResult) {
         self.messages.push(ModelMessage::tool_result(tool_call_id, result));
+    }
+
+    /// Appends a tool observation with classification metadata.
+    ///
+    /// Compaction may only prune results whose side-effect class is `read`, so
+    /// write, execute, delegate, approval, validation, and evidence results
+    /// are never rewritten.
+    pub fn push_tool_result_classified(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        result: ToolResult,
+        tool_name: &str,
+        side_effect: &str,
+        path: Option<&str>,
+    ) {
+        let mut entries = vec![
+            (TOOL_NAME_METADATA_KEY.to_string(), tool_name.to_string()),
+            (TOOL_SIDE_EFFECT_METADATA_KEY.to_string(), side_effect.to_string()),
+        ];
+        if let Some(path) = path {
+            entries.push((TOOL_PATH_METADATA_KEY.to_string(), path.to_string()));
+        }
+        self.messages.push(ModelMessage::tool_result(tool_call_id, result).with_metadata(entries));
     }
 
     /// Appends a subagent summary message (subagent phase).

@@ -198,6 +198,7 @@ impl OrchestratorConfig {
                 "turn_timeout must be positive when set; omit it for unlimited".into(),
             ));
         }
+        self.compaction.validate()?;
         Ok(())
     }
 }

@@ -385,6 +385,7 @@ impl AgentProvider for OrchestratorProvider {
                 policy: policy.policy(),
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
+                global_config_root: None,
             })?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
@@ -612,6 +613,7 @@ impl AgentProvider for OrchestratorProvider {
                 policy: policy.policy(),
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
+                global_config_root: None,
             })?;
             bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
             let cleanup =

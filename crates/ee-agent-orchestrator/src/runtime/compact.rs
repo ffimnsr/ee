@@ -176,7 +176,7 @@ impl OrchestratorRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_compact_turn_recording(
         &self,
-        _ctx: PromptContext,
+        ctx: PromptContext,
         sink: UpdateSink,
         cancel: watch::Receiver<bool>,
         instructions: Option<String>,
@@ -187,25 +187,33 @@ impl OrchestratorRuntime {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
+        // Compaction changes the session summary; the next turn must resend a
+        // full runtime snapshot rather than a delta against pre-compaction state.
+        self.clear_runtime_plane(&ctx.session_id.to_string());
         // Stage every memory mutation. Failed compaction leaves live memory
         // byte-for-byte unchanged.
         let original_memory = self.memory.lock().expect("memory store poisoned").clone();
-        let mut staged_memory = original_memory.clone();
-        let deterministic = compact_memory(&mut staged_memory, &self.config.compaction.memory);
         let tasks = self.tasks.lock().expect("task graph poisoned").clone();
         let budget_snapshot = self.budget.lock().expect("budget tracker poisoned").snapshot();
         let recent_events = events.events();
-        let context = build_compaction_context(
-            &tasks,
-            &staged_memory,
-            &recent_messages,
-            &recent_events,
-            &budget_snapshot,
-            self.config.compaction.max_input_bytes,
-        );
+        let strategy = self.config.compaction.select()?;
+        let plan = strategy.plan(&crate::compaction::CompactionInput {
+            tasks: &tasks,
+            memory: &original_memory,
+            memory_config: &self.config.compaction.memory,
+            recent_messages: &recent_messages,
+            recent_events: &recent_events,
+            budget: &budget_snapshot,
+            max_input_bytes: self.config.compaction.max_input_bytes,
+            instructions: instructions.as_deref(),
+        });
+        let deterministic = plan.deterministic;
+        let counts = plan.counts;
+        let context = plan.context;
+        let mut staged_memory = plan.staged_memory;
         // 3. One model call, no tools, bounded by the per-turn timeout and
         //    observing cancellation before and after.
-        let mut system = build_compaction_prompt(instructions.as_deref());
+        let mut system = plan.prompt;
         if !context.is_empty() {
             system.push_str("\n\n## Session evidence\n");
             system.push_str(&context);
@@ -318,6 +326,9 @@ impl OrchestratorRuntime {
             preserved_protected: deterministic.preserved_protected,
             summary_bytes,
             retained_context_bytes,
+            pruned_tool_results: counts.pruned_tool_results,
+            deduped_messages: counts.deduped_messages,
+            dropped_messages: counts.dropped_messages,
         };
         let _ = sink.agent_message_chunk("compact-report", report.to_status_text());
         Ok(prompt_result_with_usage(ee_agent_protocol::StopReason::EndTurn, response.usage))

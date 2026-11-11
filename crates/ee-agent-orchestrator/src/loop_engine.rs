@@ -85,6 +85,8 @@ pub(crate) struct LoopOptions {
     /// Incoming resume state when this run continues an interrupted turn;
     /// completed tool results are reused instead of replayed.
     pub resume_state: Option<ResumeState>,
+    /// Set when transcript truncation removed the retained runtime base.
+    pub truncation_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for LoopOptions {
@@ -101,6 +103,7 @@ impl Default for LoopOptions {
             memory: None,
             checkpoint: None,
             resume_state: None,
+            truncation_flag: None,
         }
     }
 }
@@ -242,7 +245,7 @@ impl LoopEngine {
         let turn = self.run_loop(
             transcript,
             track.clone(),
-            session_id,
+            session_id.clone(),
             sink,
             client,
             cancel,
@@ -276,6 +279,13 @@ impl LoopEngine {
             )
         {
             self.capture_checkpoint(transcript, &track, &task, true).await;
+        }
+        // A truncated transcript may have dropped the retained full runtime
+        // snapshot; the next turn must resend it in full.
+        if transcript.truncation().is_some()
+            && let Some(flag) = &self.options.truncation_flag
+        {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         outcome
     }
@@ -537,7 +547,14 @@ impl LoopEngine {
                     if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
-                    transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    let path = crate::tool_cache::path_argument(&intent.arguments);
+                    transcript.push_tool_result_classified(
+                        intent.tool_call_id.clone(),
+                        result,
+                        &intent.name,
+                        SideEffectClass::Read.as_str(),
+                        path.as_deref(),
+                    );
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
                 }
@@ -627,7 +644,19 @@ impl LoopEngine {
                     if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
-                    transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    match class {
+                        Some(class) => {
+                            let path = crate::tool_cache::path_argument(&intent.arguments);
+                            transcript.push_tool_result_classified(
+                                intent.tool_call_id.clone(),
+                                result,
+                                &intent.name,
+                                class.as_str(),
+                                path.as_deref(),
+                            );
+                        }
+                        None => transcript.push_tool_result(intent.tool_call_id.clone(), result),
+                    }
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
                 }

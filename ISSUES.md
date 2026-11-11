@@ -1055,3 +1055,294 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - Stable prompts contain no runtime facts.
 - Snapshots contain no DSH product or repository content.
 - Full validation passes under the memory guard.
+
+---
+
+# Unified Harness Runtime Plan — Phases 2, 3, 4, 6
+
+Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepseek-harness-agent-mode-prompt-capture.md](docs/upgrades/deepseek-harness-agent-mode-prompt-capture.md)
+
+**Scope:** this plan adds only the selected harness work. Phase numbers are local to this plan. Phase 1 repo router/state and Phase 5 worktree isolation are excluded.
+
+**Goal:** unify repo-level instructions with the `ee` agent runtime: trusted global instructions, cache-friendly runtime deltas, lossless-before-lossy compaction, append-only model-visible logging, evidence-gated stop, event parity, and deterministic integration gates.
+
+**Execution order:** Phase 2 → Phase 4a → Phase 3 → Phase 4b → Phase 6.
+
+Reason: Phase 4a creates the durable session log. Phase 3 projects the compaction funnel from it. Phase 4b uses it for stop evidence and checkpoint branching. Phase 2 is independent and can start immediately.
+
+**Fixed decisions already made (do not re-litigate):**
+
+- Session log stores full local content. Content-addressed message bodies live under the owner-only state directory; exports redact; telemetry never receives raw prompts.
+- Global instructions use a new `TrustLevel::UserInstructionTrusted` scope. Workspace instructions remain untrusted and cannot override global or system policy.
+- Runtime delta is emitted only when the previous full snapshot is still retained. First turn, resume, compaction, transcript truncation, or missing previous snapshot always emits a full snapshot.
+- Stop gate applies to every changed turn. Answer-only turns bypass it.
+- Branch from checkpoint replays the full session log when present. When absent, branch task/memory/budget only and mark the result `conversation_unreplayed`.
+- No compatibility shim for old flat prompt strings, old transcript behavior, or old checkpoint branches.
+- New logic lives in new modules where the target file is near or above 1,000 LOC. Existing large files receive call sites only.
+- Tests use `tempfile`, temp XDG/state homes, and no real user config or session directories.
+
+**Parallel map:**
+
+| Phase | Can start after | Write scope | Blocks |
+|---|---|---|---|
+| 2 Prompt scope + runtime delta | now | `src/prompt/**`, `src/trust.rs`, `provider_adapter/**`, runtime prompt call sites | 6 |
+| 4a Session log | 2 | `src/session_log.rs`, `src/model.rs`, `src/loop_engine.rs`, host/CLI session paths | 3, 4b, 6 |
+| 3 Compaction funnel + strategy | 4a | `src/compaction/**`, `src/runtime/compact.rs`, `src/config.rs` | 6 |
+| 4b Stop gate + events + branch | 4a | `src/loop_engine.rs`, `src/completion.rs`, `src/final_response.rs`, `src/plugin_runtime/**`, `src/checkpoint.rs` | 6 |
+| 6 Integration gates | 2, 3, 4 | tests and validation commands | — |
+
+## Phase 2 — Prompt Scope and Runtime Delta
+
+**Goal:** load trusted user-level instructions and stop resending unchanged runtime facts every turn.
+
+**Overview:** this phase adds a global instruction scope and section-level runtime snapshots. The stable system prompt remains byte-identical across turns and never contains cwd, workspace roots, sandbox, approval, agent identity, or instruction-file content.
+
+**Rules:**
+
+- Global instructions are host-user-controlled and trusted relative to workspace files, but remain below system policy.
+- Global instruction discovery is `$XDG_CONFIG_HOME/ee/AGENTS.md`, falling back to `~/.config/ee/AGENTS.md`.
+- Workspace instructions stay `WorkspaceInstructionUntrusted`; they never override global or system policy.
+- Runtime facts remain a host-owned user-role snapshot with `TrustLevel::SystemPolicy` and `metadata["ee_prompt"] = "runtime_context"`.
+- Delta mode never omits a section that changed. Unchanged sections are named, not repeated.
+- Full snapshot is mandatory after resume, compaction, transcript truncation, or whenever the previous full snapshot is absent from retained history.
+- No global instruction text enters the stable prompt.
+
+**Work items:**
+
+- [x] Add `src/prompt/global.rs`.
+  - [x] Discover `$XDG_CONFIG_HOME/ee/AGENTS.md`, then `~/.config/ee/AGENTS.md`.
+  - [x] Reuse workspace loader sanitization, canonicalization, and byte caps.
+  - [x] Reject symlink escape outside the user config directory.
+  - [x] Return at most one global instruction message.
+- [x] Add `TrustLevel::UserInstructionTrusted`.
+  - [x] Label `user_instruction`.
+  - [x] Return false from `is_untrusted`.
+  - [x] Keep injection scanning and redaction for diagnostics.
+  - [x] Extend label round-trip and role-trust tests.
+- [x] Extend prompt assembly.
+  - [x] Add `global` instruction messages to `PromptBundle` and `TurnSystemContext`.
+  - [x] Apply order: stable system → global instructions → memory → history → workspace → runtime → current prompt.
+  - [x] Assert global text never appears in stable prompt.
+- [x] Add runtime section snapshots.
+  - [x] Add `RuntimeSection { name, order, text, hash }` and `RuntimeSnapshotMode::{Full, Delta}`.
+  - [x] Keep `RuntimeSnapshot.text` as the complete rendered text for full mode.
+  - [x] Track previous section hashes and `previous_full_retained` per provider session.
+  - [x] Render delta text with changed sections and an `Unchanged sections:` line.
+  - [x] Force full mode on first turn, resume, compaction, truncation, or missing previous snapshot.
+- [x] Add tests.
+  - [x] Temp XDG global instruction loads and is labeled `user_instruction`.
+  - [x] Workspace `AGENTS.md` cannot override a global rule.
+  - [x] Symlink escape and over-budget global file are skipped with markers.
+  - [x] Two turns with identical cwd/policy emit no full resend.
+  - [x] cwd change emits only `WORKING_DIRECTORY`.
+  - [x] Truncation/resume/compaction emits full snapshot.
+
+**Acceptance criteria:**
+
+- [x] Global instructions load only from a temp XDG path in tests.
+- [x] Stable prompt bytes are unchanged across turns with different cwd/policy.
+- [x] Workspace instruction text is never promoted to system policy.
+- [x] Runtime delta contains every changed section and no stale section value.
+- [x] `cargo test --quiet -p ee-agent-orchestrator prompt::` passes.
+
+## Phase 3 — Compaction Funnel and Pluggable Strategy
+
+**Goal:** make compaction lossless before lossy and replaceable without changing default output.
+
+**Overview:** this phase formalizes the existing prune, window, deterministic memory, and LLM summary steps into one ordered pipeline. It runs only on the `/compact` path and never mutates live memory until the staged result commits.
+
+**Rules:**
+
+- Request projection and lossless pruning happen before any LLM summary.
+- Only read-only tool results may be deduplicated: byte-identical duplicates and reads superseded by a later read of the same path.
+- Never deduplicate write, execute, delegate, approval, validation, or evidence results.
+- Protected memory keys (`decision:`, `constraint:`, `validation:`) survive every stage.
+- Default strategy must produce byte-identical output when no prune applies.
+- A failed compaction leaves live memory byte-for-byte unchanged.
+- No untrusted plugin strategy loads without host approval.
+
+**Work items:**
+
+- [x] Add `src/compaction/pipeline.rs`.
+  - [x] Define ordered stages: request projection, lossless prune, window, deterministic memory, LLM summary.
+  - [x] Define `CompactPlan` with bounded context, prompt, and per-stage counts.
+  - [x] Define `CompactionStrategy` trait at the consumer boundary; planning is synchronous, the LLM call stays in the runtime.
+  - [x] Add `DefaultCompactionStrategy` preserving current behavior.
+- [x] Implement lossless prune.
+  - [x] Deduplicate byte-identical read results, keeping the newest occurrence.
+  - [x] Replace superseded reads with `[... duplicate tool result elided ...]`.
+  - [x] Record `pruned_tool_results`, `deduped_messages`, and `dropped_messages` in `CompactTurnReport`.
+  - [x] Keep durable transcript and checkpoint evidence untouched; prune only the compaction view.
+- [x] Extend configuration.
+  - [x] Add serde-default `compaction.strategy` selecting the default strategy by name.
+  - [x] Reject unknown strategy names at validation time.
+  - [x] Preserve existing `memory` and `max_input_bytes` behavior.
+- [x] Wire the pipeline into `runtime/compact.rs`.
+  - [x] Run pipeline stages in order before the model call.
+  - [x] Keep staged-memory commit, summary validation, cancellation, timeout, and usage checks unchanged.
+- [x] Add tests.
+  - [x] Exact duplicate read result is pruned once and counted.
+  - [x] Superseded read is pruned; later read survives.
+  - [x] Write/execute/delegate results are never pruned.
+  - [x] Protected decisions, constraints, and validation facts survive.
+  - [x] Default strategy output is byte-identical when no prune applies.
+  - [x] Unknown strategy fails config validation.
+
+**Acceptance criteria:**
+
+- [x] Funnel order is asserted by test.
+- [x] Live memory is unchanged after failed compaction.
+- [x] `cargo test --quiet -p ee-agent-orchestrator compaction` passes.
+- [x] No new unbounded buffer or full-transcript copy is introduced.
+
+## Phase 4 — Session Log, Stop Gate, Events, and Branch
+
+### Phase 4a — Append-Only Session Log
+
+**Goal:** make every model-visible request reconstructable from a durable append-only log.
+
+**Overview:** the current `Transcript` drops oldest messages to stay under the memory limit, and durable checkpoints retain zero transcript messages. This phase separates the durable log from the bounded request view. Full local content is allowed; exports redact; telemetry never receives raw prompts.
+
+**Rules:**
+
+- Every message visible to a model request must have a log entry before the model call.
+- Log write failure fails the turn closed before the model call.
+- The durable log is append-only; windowing and truncation affect only the request view.
+- Message bodies are content-addressed and stored under the owner-only state directory.
+- Session log files are owner-readable/writable only.
+- Export paths redact secret-like values; internal reconstruction keeps the original content.
+- Checkpoints keep their bounded summary and do not embed the full transcript.
+
+**Work items:**
+
+- [ ] Add `src/session_log.rs`.
+  - [ ] Define append-only record kinds: turn start/stop, message appended, model request, compaction applied, checkpoint created, branch created.
+  - [ ] Define `SessionMessageRecord` with message id, role, trust, content hash, turn, iteration, and tool-call id.
+  - [ ] Define `ModelRequestRecord` with ordered message ids, tool-schema hash, budget snapshot, model id, and projection hash.
+  - [ ] Store message bodies as content-addressed files owned by the session.
+  - [ ] Add bounded retention and per-session size validation.
+  - [ ] Add a `SessionLogSink` trait; file-backed implementation lives in host/CLI wiring, in-memory implementation serves tests.
+- [ ] Separate durable log from request view.
+  - [ ] Make `Transcript::push_*` append to the log through the sink.
+  - [ ] Keep `Transcript.messages` as the bounded view used by the loop.
+  - [ ] `enforce_memory_limit` records truncation and never deletes log records.
+  - [ ] Resume replays the log into a bounded view under the configured memory limit.
+- [ ] Wire request recording in `loop_engine` and `runtime/compact.rs`.
+  - [ ] Record the effective post-prune request, not the unprojected transcript.
+  - [ ] Fail before `model.complete` if the request record cannot be appended.
+  - [ ] Record compaction model calls with the same invariant.
+- [ ] Add reconstruction invariant tests.
+  - [ ] Rebuild every recorded request from log + content store; assert message order, roles, trust, tool ids, schema hash, and projection hash.
+  - [ ] Truncation does not remove reconstructable messages.
+  - [ ] Resume reconstructs the same current request view.
+  - [ ] Log write failure prevents model invocation.
+  - [ ] Secret-like values are absent from exported JSONL but present in internal reconstruction.
+
+**Acceptance criteria:**
+
+- [ ] No model call succeeds without a matching `ModelRequestRecord`.
+- [ ] Every model-visible message is reconstructable from the session log.
+- [ ] Transcript truncation is a view operation only.
+- [ ] Session log tests use temp state directories only.
+- [ ] `cargo test --quiet -p ee-agent-orchestrator session_log` passes.
+
+### Phase 4b — Stop Gate, Event Parity, and Checkpoint Branch
+
+**Goal:** prevent unverified changed turns from claiming completion, expose missing lifecycle events, and branch safely from checkpoints.
+
+**Overview:** `FinalResponse::can_finish` already derives from observed evidence, but the loop can return `EndTurn` when the model says it is complete. This phase installs the gate at that call site for every changed turn. It also adds step/stop events and a log-backed branch path.
+
+**Rules:**
+
+- Gate every changed turn; bypass answer-only turns with no changed files.
+- Gate uses `derive_completion` and `FinalResponse::can_finish`; model prose never counts as evidence.
+- A blocked gate may run bounded repair, otherwise it returns a blocker; it never changes `EndTurn` into a fake success.
+- Plugin listeners may veto a stop but cannot override mandatory evidence or policy.
+- Event names are external contract; add names, never rename existing ones.
+- Branch replays the exact log prefix when available; otherwise mark `conversation_unreplayed` and branch only task/memory/budget.
+
+**Work items:**
+
+- [ ] Add `StopGate` and call site.
+  - [ ] Add `StopGateOutcome::{Allow, Repair, Blocked}`.
+  - [ ] Invoke before `LoopEngine` returns `EndTurn` on `response.completed`.
+  - [ ] Skip when no changed files were observed.
+  - [ ] Allow verified completion.
+  - [ ] Run bounded repair when configured and budget allows; otherwise return a blocker.
+  - [ ] Keep cancellation, timeout, and stuck detection unchanged.
+- [ ] Add lifecycle events.
+  - [ ] Add `AgentStepBefore` (`agent.step.before`) with session, task, iteration, and advertised tool count.
+  - [ ] Add `AgentStopBefore` (`agent.stop.before`) with bounded completion state, changed-file count, and evidence ids.
+  - [ ] Map both in `AgentBridge` and add stable-name tests.
+  - [ ] Document `agent.tool.before` as the existing `tools/pre-execute` equivalent; mandatory policy runs first.
+- [ ] Add checkpoint branch.
+  - [ ] Add `SessionLog::branch_from(session_id, checkpoint_seq)` returning a new session id.
+  - [ ] Replay log messages up to the checkpoint sequence into the new bounded view.
+  - [ ] When no log exists, branch task/memory/budget only and set `conversation_unreplayed`.
+  - [ ] Reject branch on missing checkpoint or mismatched session.
+- [ ] Add tests.
+  - [ ] Model says complete with no evidence → gate blocks or repairs.
+  - [ ] Verified evidence → gate allows `EndTurn`.
+  - [ ] Answer-only turn bypasses the gate.
+  - [ ] Plugin stop veto is honored; mandatory gate denial wins.
+  - [ ] Branch replays the exact prefix or reports `conversation_unreplayed`.
+  - [ ] Event payloads never carry prompt text or raw tool output.
+
+**Acceptance criteria:**
+
+- [ ] Changed turns cannot claim success without verified evidence.
+- [ ] Stop gate behavior is deterministic and replay-safe.
+- [ ] New event names are stable-contract tested.
+- [ ] Branch output identifies whether conversation was replayed.
+- [ ] `cargo test --quiet -p ee-agent-orchestrator completion` and `plugin_runtime` pass.
+
+## Phase 6 — Integration Gates
+
+**Goal:** prove Phases 2, 3, and 4 are coherent, deterministic, and regression-free.
+
+**Overview:** this phase adds no product behavior. It runs the full local gate set and the existing replay/evaluation gates that guard prompt, policy, and model-default changes.
+
+**Rules:**
+
+- Do not run plain `cargo test`; use `--quiet` and the memory guard for full suites.
+- Tests must not read real user config, plugin roots, or session directories.
+- Prompt changes require the replay/evaluation gate before default model, prompt, route, or policy changes land.
+- Any failure names the phase, fixture, or invariant that failed.
+
+**Work items:**
+
+- [ ] Run format/lint/docs.
+  - [ ] `cargo fmt --all --check`.
+  - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+  - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
+- [ ] Run targeted phase tests.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator prompt::`.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator compaction`.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator session_log`.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator completion`.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator plugin_runtime`.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator checkpoint`.
+- [ ] Run replay/evaluation gates.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`.
+  - [ ] `cargo test --quiet -p ee-agent-host --test orchestrated_replay --locked`.
+  - [ ] Existing phase fixture matrix gate.
+- [ ] Run full workspace.
+  - [ ] `scripts/run-tests-memguard.sh cargo test --quiet --workspace --all-features --locked`.
+  - [ ] Or `mk ci` when the full local gate is desired.
+- [ ] Verify invariants.
+  - [ ] Every model request reconstructable from session log.
+  - [ ] Transcript truncation never deletes durable log records.
+  - [ ] Runtime delta falls back to full snapshot on resume/truncation/compaction.
+  - [ ] Protected memory survives compaction funnel.
+  - [ ] Stop gate blocks unverified changed turns.
+  - [ ] `agent.step.before` and `agent.stop.before` names are stable.
+  - [ ] No real home/config/session paths in tests.
+- [ ] Update this plan's checkboxes only after each gate passes.
+
+**Acceptance criteria:**
+
+- [ ] All targeted and full gates pass under the memory guard.
+- [ ] Replay traces remain deterministic with and without plugins.
+- [ ] Stable prompt is byte-identical across turns.
+- [ ] No raw prompt or tool output enters telemetry/export paths.
+- [ ] Phase 2, 3, and 4 checklists are complete before Phase 6 is marked done.

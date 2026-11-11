@@ -30,6 +30,11 @@ pub enum TrustLevel {
     /// These are attacker-controlled in shared workspaces, so they are untrusted
     /// even though the orchestrator injects them deliberately.
     WorkspaceInstructionUntrusted,
+    /// Host-user instruction files (`$XDG_CONFIG_HOME/ee/AGENTS.md`).
+    ///
+    /// The local user owns this file, so it is trusted relative to workspace
+    /// content. It still sits below system, developer, and host policy.
+    UserInstructionTrusted,
     /// Instructions supplied by a configured MCP server.
     ///
     /// Remote prose is data, not policy: it is untrusted even though the host
@@ -48,6 +53,7 @@ impl TrustLevel {
             Self::ToolOutputUntrusted => "tool_output",
             Self::SubagentSummaryUntrusted => "subagent_summary",
             Self::WorkspaceInstructionUntrusted => "workspace_instruction",
+            Self::UserInstructionTrusted => "user_instruction",
             Self::McpServerUntrusted => "mcp_server",
         }
     }
@@ -148,6 +154,7 @@ mod tests {
             (TrustLevel::ToolOutputUntrusted, "tool_output"),
             (TrustLevel::SubagentSummaryUntrusted, "subagent_summary"),
             (TrustLevel::WorkspaceInstructionUntrusted, "workspace_instruction"),
+            (TrustLevel::UserInstructionTrusted, "user_instruction"),
             (TrustLevel::McpServerUntrusted, "mcp_server"),
         ];
         for (level, label) in cases {
@@ -182,6 +189,15 @@ mod tests {
             .with_trust(TrustLevel::WorkspaceInstructionUntrusted);
         assert_eq!(message.trust.label(), "workspace_instruction");
         assert!(message.trust.is_untrusted());
+    }
+
+    #[test]
+    fn user_instructions_are_trusted_relative_to_workspace_files() {
+        let message = ModelMessage::text(ModelRole::User, "global rule")
+            .with_trust(TrustLevel::UserInstructionTrusted);
+        assert_eq!(message.trust.label(), "user_instruction");
+        assert!(!message.trust.is_untrusted());
+        assert!(TrustLevel::WorkspaceInstructionUntrusted.is_untrusted());
     }
 
     #[test]

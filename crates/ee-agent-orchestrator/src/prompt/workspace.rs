@@ -33,7 +33,7 @@ pub(crate) const INSTRUCTION_TOTAL_BYTES: usize = 64 * 1024;
 /// Per-source read ceiling before truncation.
 pub(crate) const INSTRUCTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// Bytes reserved for the budget notice so it stays inside the total budget.
-const NOTICE_RESERVE_BYTES: usize = 256;
+pub(crate) const NOTICE_RESERVE_BYTES: usize = 256;
 
 /// Frame header shown to the model before any instruction content.
 pub(crate) const INSTRUCTION_HEADER: &str = concat!(
@@ -58,12 +58,12 @@ struct ChainDirectory {
 }
 
 #[derive(Debug)]
-struct InstructionFile {
-    display_path: String,
-    content: String,
-    digest: [u8; 32],
-    original_bytes: usize,
-    source_truncated: bool,
+pub(crate) struct InstructionFile {
+    pub(crate) display_path: String,
+    pub(crate) content: String,
+    pub(crate) digest: [u8; 32],
+    pub(crate) original_bytes: usize,
+    pub(crate) source_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -175,7 +175,11 @@ fn skipped_path(path: &Path) -> bool {
 }
 
 /// Loads one candidate, rejecting paths that escape the owning root.
-fn load(path: &Path, root: &Path, sanitize: bool) -> Option<InstructionFile> {
+///
+/// Shared with the trusted user-level loader so both instruction scopes use
+/// the same canonicalization, symlink-escape, source-cap, and sanitization
+/// contract.
+pub(crate) fn load(path: &Path, root: &Path, sanitize: bool) -> Option<InstructionFile> {
     let canonical_root = canonical_or_owned(root);
     let canonical = std::fs::canonicalize(path).ok()?;
     if !canonical.starts_with(&canonical_root) {

@@ -497,6 +497,8 @@ impl OrchestratorRuntime {
                     history: Vec::new(),
                     memory,
                     stable,
+                    global: prompt.global,
+                    retained_runtime: None,
                     runtime: prompt.runtime,
                     workspace: prompt.workspace,
                     mcp: prompt.mcp,

@@ -8,6 +8,7 @@ pub(crate) mod budget_notice;
 pub(crate) mod context;
 pub(crate) mod delegation;
 pub(crate) mod error;
+pub(crate) mod global;
 pub(crate) mod mcp;
 pub(crate) mod render;
 pub(crate) mod repeat_guard;
@@ -161,6 +162,8 @@ pub(crate) struct PromptInputs<'a> {
 pub struct PromptBundle {
     /// Stable system prompt, empty when nothing is emitted.
     pub stable: String,
+    /// Trusted user-level instruction messages, when discovery produced any.
+    pub global: Vec<WorkspaceMessage>,
     /// Runtime snapshot, when the builder produced one.
     pub runtime: Option<RuntimeSnapshot>,
     /// Workspace instruction messages, when discovery produced any.
@@ -220,7 +223,7 @@ pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptErr
     })?;
     let runtime = (!runtime.text.trim().is_empty()).then_some(runtime);
 
-    Ok(PromptBundle { stable, runtime, workspace: Vec::new(), mcp: Vec::new() })
+    Ok(PromptBundle { stable, runtime, global: Vec::new(), workspace: Vec::new(), mcp: Vec::new() })
 }
 
 /// `ee` plan-mode contract: the existing deliverable format plus one payload.

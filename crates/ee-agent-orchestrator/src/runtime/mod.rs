@@ -7,6 +7,7 @@
 //! tools) live inside the runtime, so provider code only interacts with the
 //! ACP framework surface.
 
+pub(crate) use std::collections::HashMap;
 pub(crate) use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) use sha2::{Digest, Sha256};
@@ -25,9 +26,7 @@ pub(crate) use crate::checkpoint::{
 pub(crate) use crate::checkpoint_store::{CheckpointHandle, CheckpointStore};
 pub(crate) use crate::child_registry::{ChildCancelResult, ChildRegistry, ChildSnapshot};
 pub(crate) use crate::command_intelligence::ValidationCommandFailure;
-pub(crate) use crate::compaction::{
-    CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
-};
+pub(crate) use crate::compaction::{CompactTurnReport, SESSION_SUMMARY_KEY};
 pub(crate) use crate::config::OrchestratorConfig;
 pub(crate) use crate::context_planner::{
     ContextInvalidation, ContextPlan, ContextPlanCache, ContextPlanner, ContextPlannerConfig,
@@ -41,7 +40,6 @@ pub(crate) use crate::final_response::{
 };
 pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions};
 pub(crate) use crate::memory::{MemoryItem, MemoryStore};
-pub(crate) use crate::memory_compaction::compact_memory;
 pub(crate) use crate::metrics::OrchestratorMetrics;
 pub(crate) use crate::model::{
     ModelAdapter, ModelMessage, ModelRequest, ModelRole, Transcript, prompt_result_with_usage,
@@ -52,7 +50,7 @@ pub(crate) use crate::plan_compiler::{PlanCompiler, PlanInput};
 pub(crate) use crate::policy::PolicyEngine;
 pub(crate) use crate::progress::ProgressTracker;
 pub(crate) use crate::prompt::PromptBundle;
-pub(crate) use crate::prompt::context::TurnSystemContext;
+pub(crate) use crate::prompt::context::{RuntimeSnapshotState, TurnSystemContext};
 pub(crate) use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 pub(crate) use crate::repair::{
     RepairController, RepairDecision, RepairFailureSummary, RepairProgress, RepairReason,
@@ -208,6 +206,8 @@ pub struct OrchestratorRuntime {
     /// Typed terminal repair stop from latest production turn. This never upgrades
     /// host completion evidence; it only blocks unsupported completion claims.
     last_repair_stop: Mutex<Option<RepairStopReason>>,
+    /// Retained full runtime snapshot per session, used to project deltas.
+    runtime_snapshots: Mutex<HashMap<String, RuntimeSnapshotState>>,
 }
 
 mod compact;

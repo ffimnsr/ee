@@ -263,7 +263,9 @@ pub use command_intelligence::{
     ValidationCommandMetadata, ValidationEscalation, ValidationScope,
 };
 pub use compaction::{
-    CompactTurnReport, CompactionConfig, DEFAULT_COMPACT_MAX_INPUT_BYTES, SESSION_SUMMARY_KEY,
+    CompactPlan, CompactTurnReport, CompactionConfig, CompactionInput, CompactionStageCounts,
+    CompactionStrategy, DEFAULT_COMPACT_MAX_INPUT_BYTES, DEFAULT_COMPACTION_STRATEGY,
+    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy, SESSION_SUMMARY_KEY,
     build_compaction_context, build_compaction_prompt,
 };
 pub use completion::{
