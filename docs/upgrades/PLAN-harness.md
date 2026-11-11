@@ -94,20 +94,20 @@ Orders are copied from DSH. "Emitter" is the `ee` module that supplies text. "St
 | 600 | `TEAM_POLICY` | `team:policy` | — | omit (no shared task board) |
 | 800 | `PTC_ONLY` | `tools:ptc-only` | — | omit (no `run_code`) |
 | 900 | `FILE_REFERENCE` | `context:file-reference` | `prompt/sections.rs` | conditional (client sends resource links) |
-| 1000 | `TOOL_BASH` | `tool:bash`, `tool:git` | `prompt/tool_guidance.rs` | conditional (`create_terminal` or `ee_git_diff`) |
+| 1000 | `TOOL_BASH` | `tool:bash`, `tool:git`, `tool:terminal-proxy`, `tool:git-status` | `prompt/tool_guidance.rs` | conditional (native terminal, proxy terminal, or git tools) |
 | 1010 | `TOOL_PWSH` | `tool:pwsh` | — | omit (no PowerShell tool) |
-| 1100 | `TOOL_READ` | `tool:read` | `prompt/tool_guidance.rs` | conditional (`read_file`) |
-| 1200 | `TOOL_WRITE` | `tool:write` | `prompt/tool_guidance.rs` | conditional (`write_file`) |
+| 1100 | `TOOL_READ` | `tool:read`, `tool:read-buffer`, `tool:read-text-file` | `prompt/tool_guidance.rs` | conditional (`read_file` or editor buffer/disk reads) |
+| 1200 | `TOOL_WRITE` | `tool:write`, `tool:file-create`, `tool:fs-mutate` | `prompt/tool_guidance.rs` | conditional (`write_file` or editor filesystem writes) |
 | 1300 | `TOOL_EDIT` | `tool:edit` | `prompt/tool_guidance.rs` | conditional (`ee_replace_text`) |
 | 1350 | `TOOL_APPLY_PATCH` | `tool:apply_patch` | `prompt/tool_guidance.rs` | conditional (`ee_apply_patch`) |
-| 1400 | `TOOL_GLOB` | `tool:glob` | `prompt/tool_guidance.rs` | conditional (`ee_search_files`) |
-| 1500 | `TOOL_GREP` | `tool:grep` | `prompt/tool_guidance.rs` | conditional (`ee_search_text_regex`) |
+| 1400 | `TOOL_GLOB` | `tool:glob`, `tool:list-directory` | `prompt/tool_guidance.rs` | conditional (file search or directory listing) |
+| 1500 | `TOOL_GREP` | `tool:grep`, `tool:search-text` | `prompt/tool_guidance.rs` | conditional (regex or literal workspace search) |
 | 1600 | `TOOL_JOBS` | `tool:jobs` | — | deferred (terminals are not jobs) |
 | 1700 | `TOOL_PTY` | `tool:pty` | `prompt/tool_guidance.rs` | conditional (terminal session tools) |
 | 2000 | `TOOL_WEB_SEARCH` | `tool:web_search` | `prompt/tool_guidance.rs` | conditional (`ee_web_search`) |
-| 2100 | `TOOL_WEB_FETCH` | `tool:web_fetch` | `prompt/tool_guidance.rs` | conditional (`ee_fetch_url`) |
-| 2200 | `TOOL_LSP` | `tool:lsp` | `prompt/tool_guidance.rs` | conditional (diagnostics and symbol tools) |
-| 2300 | `TOOL_SESSION_QUERY` | `tool:session-query` | — | deferred |
+| 2100 | `TOOL_WEB_FETCH` | `tool:web_fetch`, `tool:browser` | `prompt/tool_guidance.rs` | conditional (`ee_fetch_url` or browser retrieval) |
+| 2200 | `TOOL_LSP` | `tool:lsp`, `tool:code-actions`, `tool:rename-symbol`, `tool:dependency-map` | `prompt/tool_guidance.rs` | conditional (diagnostics, symbols, code actions, renames, dependency maps) |
+| 2300 | `TOOL_SESSION_QUERY` | `tool:session-query`, `tool:session-memory`, `tool:workspace-memory-write`, `tool:turn-evidence` | `prompt/tool_guidance.rs` | conditional (session notes, workspace memory, or turn evidence) |
 | 2400 | `TOOL_GOAL` | `tool:goal` | — | omit (no goal tools) |
 | 2500 | `TOOL_SCHEDULE` | `tool:schedule` | — | omit (no scheduler) |
 | 2600 | `TOOL_WORKFLOW` | `tool:workflow` | — | omit (no workflow tool) |

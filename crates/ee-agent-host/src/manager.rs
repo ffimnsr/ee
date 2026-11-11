@@ -50,13 +50,13 @@ pub trait FakeTransportFactory: Send + Sync + 'static {
 }
 
 /// Resolved agents-mode configuration the manager operates on.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AgentManagerConfig {
     /// Agent id → launch config.
     pub agents: BTreeMap<String, AgentProcessConfig>,
     /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
     /// hosting on every connection; the agent still has to advertise
-    /// `mcp_capabilities.acp`).
+    /// `mcp_capabilities.acp`). Enabled by default.
     pub ee_proxy_enabled: bool,
     /// Resolved workspace-memory settings. The editor enables memory by
     /// default via `[agents.workspace_memory]`; hosts may opt out explicitly.
@@ -66,6 +66,18 @@ pub struct AgentManagerConfig {
     /// spawning a subprocess.
     #[cfg(feature = "test-utils")]
     pub fake_transports: BTreeMap<String, Arc<dyn FakeTransportFactory>>,
+}
+
+impl Default for AgentManagerConfig {
+    fn default() -> Self {
+        Self {
+            agents: BTreeMap::new(),
+            ee_proxy_enabled: true,
+            workspace_memory: WorkspaceMemoryHostConfig::default(),
+            #[cfg(feature = "test-utils")]
+            fake_transports: BTreeMap::new(),
+        }
+    }
 }
 
 impl std::fmt::Debug for AgentManagerConfig {

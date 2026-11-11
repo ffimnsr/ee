@@ -227,8 +227,10 @@ impl App {
                 },
             );
         }
-        // Always host policy-governed editor MCP for ACP-native agents. Explicit
-        // proxy configuration remains required only for stdio fallback.
+        // Always host policy-governed editor MCP for ACP-native agents. The
+        // host default is already enabled; keep it explicit for editor
+        // sessions. Explicit `[mcp.proxy]` configuration is still required
+        // only for the stdio fallback entry.
         config.ee_proxy_enabled = true;
         // Heal known first-run config requirements at launch so upgrades and
         // manually configured installs never hit a missing-config launcher

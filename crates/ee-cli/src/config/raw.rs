@@ -447,7 +447,8 @@ pub(crate) struct AgentServerToml {
 pub(crate) struct McpToml {
     #[serde(default)]
     pub servers: BTreeMap<String, McpServerToml>,
-    /// ee MCP proxy mode (off by default).
+    /// ee MCP proxy mode. Raw layers may omit it; agents mode defaults it on
+    /// unless a layer explicitly sets `enabled = false`.
     #[serde(default)]
     pub proxy: Option<McpProxyToml>,
 }

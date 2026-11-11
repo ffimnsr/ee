@@ -778,12 +778,14 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] `TOOL_SUBAGENT` for `delegate_task`, including role names and evidence markers. DSH registration name `tool:subagent`; the earlier `tool:<subagent-tool>` template was corrected.
   - [x] `FILE_REFERENCE` for ACP resource links: decided `omit` in Phase 6. No tool name exists to gate on, and `read_file` owns file access.
   - [x] Declare `GUIDANCE_EXEMPT` with reasons for `ask_user` and any unguided built-in.
+    - [x] Every pinned `ee` proxy tool in `ee_mcp::STABLE_TOOL_NAMES` now has a guidance row; the blanket `ee_` exemption was removed so a new proxy tool without guidance fails a test.
+    - [x] Covered families: buffer/disk reads, file create/overwrite/write, filesystem mutation, directory listing, literal search, code actions, rename/format, dependency maps, proxy terminals, git status/diffs/changed files, browser retrieval, session notes, workspace memory, and turn evidence.
   - [x] Gate is policy-derived: `OrchestratorRuntime::advertised_tool_names` filters registered tools through `PolicyEngine::check`.
   - [x] Rebuild the stable prompt after prompt-scoped MCP registration so conditional web-tool guidance tracks the turn.
 - [x] Add tool-name extraction helper and `requires` validation.
 - [x] Add consistency tests.
   - [x] Every mentioned tool is advertised.
-  - [x] Every advertised tool is guided or exempt (built-in universe read from `ToolRegistry::register_builtins`).
+  - [x] Every advertised tool is guided or exempt (built-in universe read from `ToolRegistry::register_builtins`, proxy universe read from `ee_mcp::STABLE_TOOL_NAMES`).
   - [x] Typo in `requires` fails.
   - [x] Plan/ask prompts mention no write, execute, or delegate tool.
 - [x] Add prompt coverage per tool set: read-only, write, execute, delegation, MCP web (presence assertions; byte snapshots stay Phase 6).

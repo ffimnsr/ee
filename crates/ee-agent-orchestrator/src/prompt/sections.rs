@@ -40,34 +40,57 @@ pub(crate) const PTC_ONLY: Slot =
     Slot { name: "PTC_ONLY", order: 800, registrations: &["tools:ptc-only"] };
 pub(crate) const FILE_REFERENCE: Slot =
     Slot { name: "FILE_REFERENCE", order: 900, registrations: &["context:file-reference"] };
-pub(crate) const TOOL_BASH: Slot =
-    Slot { name: "TOOL_BASH", order: 1000, registrations: &["tool:bash", "tool:git"] };
+pub(crate) const TOOL_BASH: Slot = Slot {
+    name: "TOOL_BASH",
+    order: 1000,
+    registrations: &["tool:bash", "tool:git", "tool:terminal-proxy", "tool:git-status"],
+};
 pub(crate) const TOOL_PWSH: Slot =
     Slot { name: "TOOL_PWSH", order: 1010, registrations: &["tool:pwsh"] };
-pub(crate) const TOOL_READ: Slot =
-    Slot { name: "TOOL_READ", order: 1100, registrations: &["tool:read"] };
-pub(crate) const TOOL_WRITE: Slot =
-    Slot { name: "TOOL_WRITE", order: 1200, registrations: &["tool:write"] };
+pub(crate) const TOOL_READ: Slot = Slot {
+    name: "TOOL_READ",
+    order: 1100,
+    registrations: &["tool:read", "tool:read-buffer", "tool:read-text-file"],
+};
+pub(crate) const TOOL_WRITE: Slot = Slot {
+    name: "TOOL_WRITE",
+    order: 1200,
+    registrations: &["tool:write", "tool:file-create", "tool:fs-mutate"],
+};
 pub(crate) const TOOL_EDIT: Slot =
     Slot { name: "TOOL_EDIT", order: 1300, registrations: &["tool:edit"] };
 pub(crate) const TOOL_APPLY_PATCH: Slot =
     Slot { name: "TOOL_APPLY_PATCH", order: 1350, registrations: &["tool:apply_patch"] };
 pub(crate) const TOOL_GLOB: Slot =
-    Slot { name: "TOOL_GLOB", order: 1400, registrations: &["tool:glob"] };
+    Slot { name: "TOOL_GLOB", order: 1400, registrations: &["tool:glob", "tool:list-directory"] };
 pub(crate) const TOOL_GREP: Slot =
-    Slot { name: "TOOL_GREP", order: 1500, registrations: &["tool:grep"] };
+    Slot { name: "TOOL_GREP", order: 1500, registrations: &["tool:grep", "tool:search-text"] };
 pub(crate) const TOOL_JOBS: Slot =
     Slot { name: "TOOL_JOBS", order: 1600, registrations: &["tool:jobs"] };
 pub(crate) const TOOL_PTY: Slot =
     Slot { name: "TOOL_PTY", order: 1700, registrations: &["tool:pty"] };
 pub(crate) const TOOL_WEB_SEARCH: Slot =
     Slot { name: "TOOL_WEB_SEARCH", order: 2000, registrations: &["tool:web_search"] };
-pub(crate) const TOOL_WEB_FETCH: Slot =
-    Slot { name: "TOOL_WEB_FETCH", order: 2100, registrations: &["tool:web_fetch"] };
-pub(crate) const TOOL_LSP: Slot =
-    Slot { name: "TOOL_LSP", order: 2200, registrations: &["tool:lsp"] };
-pub(crate) const TOOL_SESSION_QUERY: Slot =
-    Slot { name: "TOOL_SESSION_QUERY", order: 2300, registrations: &["tool:session-query"] };
+pub(crate) const TOOL_WEB_FETCH: Slot = Slot {
+    name: "TOOL_WEB_FETCH",
+    order: 2100,
+    registrations: &["tool:web_fetch", "tool:browser"],
+};
+pub(crate) const TOOL_LSP: Slot = Slot {
+    name: "TOOL_LSP",
+    order: 2200,
+    registrations: &["tool:lsp", "tool:code-actions", "tool:rename-symbol", "tool:dependency-map"],
+};
+pub(crate) const TOOL_SESSION_QUERY: Slot = Slot {
+    name: "TOOL_SESSION_QUERY",
+    order: 2300,
+    registrations: &[
+        "tool:session-query",
+        "tool:session-memory",
+        "tool:workspace-memory-write",
+        "tool:turn-evidence",
+    ],
+};
 pub(crate) const TOOL_GOAL: Slot =
     Slot { name: "TOOL_GOAL", order: 2400, registrations: &["tool:goal"] };
 pub(crate) const TOOL_SCHEDULE: Slot =
@@ -227,18 +250,38 @@ mod tests {
         ),
         ("TOOL_BASH", SlotStatus::Conditional, "terminal or git tools advertised"),
         ("TOOL_PWSH", SlotStatus::Omit, "no pwsh tool"),
-        ("TOOL_READ", SlotStatus::Conditional, "read_file advertised"),
-        ("TOOL_WRITE", SlotStatus::Conditional, "write_file advertised"),
+        ("TOOL_READ", SlotStatus::Conditional, "read_file or editor buffer read tools advertised"),
+        (
+            "TOOL_WRITE",
+            SlotStatus::Conditional,
+            "write_file or editor filesystem write tools advertised",
+        ),
         ("TOOL_EDIT", SlotStatus::Conditional, "ee_replace_text advertised"),
         ("TOOL_APPLY_PATCH", SlotStatus::Conditional, "ee_apply_patch advertised"),
-        ("TOOL_GLOB", SlotStatus::Conditional, "ee_search_files advertised"),
-        ("TOOL_GREP", SlotStatus::Conditional, "ee_search_text_regex advertised"),
+        ("TOOL_GLOB", SlotStatus::Conditional, "file search or directory listing tools advertised"),
+        (
+            "TOOL_GREP",
+            SlotStatus::Conditional,
+            "regex or literal workspace search tools advertised",
+        ),
         ("TOOL_JOBS", SlotStatus::Omit, "no job tools"),
         ("TOOL_PTY", SlotStatus::Conditional, "terminal session tools advertised"),
         ("TOOL_WEB_SEARCH", SlotStatus::Conditional, "ee_web_search advertised"),
-        ("TOOL_WEB_FETCH", SlotStatus::Conditional, "ee_fetch_url advertised"),
-        ("TOOL_LSP", SlotStatus::Conditional, "diagnostics and symbol tools advertised"),
-        ("TOOL_SESSION_QUERY", SlotStatus::Omit, "no session-query tool"),
+        (
+            "TOOL_WEB_FETCH",
+            SlotStatus::Conditional,
+            "ee_fetch_url or browser retrieval tools advertised",
+        ),
+        (
+            "TOOL_LSP",
+            SlotStatus::Conditional,
+            "diagnostics, symbol, code-action, or dependency tools advertised",
+        ),
+        (
+            "TOOL_SESSION_QUERY",
+            SlotStatus::Conditional,
+            "session notes, workspace memory, or turn-evidence tools advertised",
+        ),
         ("TOOL_GOAL", SlotStatus::Omit, "no goal tools"),
         ("TOOL_SCHEDULE", SlotStatus::Omit, "no schedule tools"),
         ("TOOL_WORKFLOW", SlotStatus::Omit, "no workflow tools"),

@@ -88,7 +88,8 @@ pub struct AgentConnectionOptions {
     pub protocol_version: ProtocolVersion,
     /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
     /// hosting for this connection; the agent still has to advertise
-    /// `mcp_capabilities.acp` before anything is served).
+    /// `mcp_capabilities.acp` before anything is served). Enabled by default;
+    /// hosts opt out explicitly when they do not want editor tools exposed.
     pub ee_proxy_enabled: bool,
     /// Maximum prompt requests sent concurrently on one agent connection.
     /// Additional cross-session prompts wait FIFO; same-session overlap rejects.
@@ -103,7 +104,7 @@ impl Default for AgentConnectionOptions {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             protocol_version: ProtocolVersion::V1,
-            ee_proxy_enabled: false,
+            ee_proxy_enabled: true,
             max_concurrent_prompts: DEFAULT_MAX_CONCURRENT_PROMPTS,
             ee_proxy_tool_profile: EeProxyToolProfile::Full,
         }
