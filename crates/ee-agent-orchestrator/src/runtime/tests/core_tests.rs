@@ -32,7 +32,7 @@ async fn runtime_runs_one_complete_turn_with_fake_model() {
     assert!(request.task.id.as_str().starts_with("task-"));
     assert!(request.tools.iter().any(|tool| tool.name == "echo"));
     assert_eq!(request.budget.iterations_used, 1);
-    assert_eq!(request.budget.iterations_max, 16);
+    assert_eq!(request.budget.iterations_max, None);
 
     // Updates stream in order: plan, thought chunk, then message chunk.
     assert!(matches!(next_update(&mut rx).await, SessionUpdate::Plan(_)));
@@ -142,7 +142,8 @@ async fn runtime_stops_when_loop_iteration_budget_exhausted() {
         ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-2", "echo", json!({}))]),
         ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-3", "echo", json!({}))]),
     ]);
-    let config = OrchestratorConfig { max_loop_iterations: 2, ..OrchestratorConfig::default() };
+    let config =
+        OrchestratorConfig { max_loop_iterations: Some(2), ..OrchestratorConfig::default() };
     let (sink, client, _rx) = plumbing();
     let runtime = OrchestratorRuntime::new(config, Arc::new(model.clone()));
     runtime.register_tool(tool).expect("registers echo");

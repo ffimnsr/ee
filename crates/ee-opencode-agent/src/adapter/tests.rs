@@ -263,15 +263,15 @@ async fn codec_cancellation_maps_to_orchestrator_cancellation() {
 #[test]
 fn orchestrator_config_carries_opencode_identity_budgets_and_recovery() {
     let mut config = test_config(OpenCodeSurface::Zen, "gpt-5.5");
-    config.max_iterations = 7;
+    config.max_iterations = Some(7);
     config.context_window = 123_456;
     let session_state_dir = PathBuf::from("/tmp/ee-opencode-agent-config-test");
 
     let provider_config = opencode_orchestrator_config(&config, session_state_dir.clone());
 
     assert_eq!(provider_config.implementation.name, "ee-opencode-agent");
-    assert_eq!(provider_config.orchestrator.max_loop_iterations, 7);
-    assert_eq!(provider_config.orchestrator.max_model_calls, 7);
+    assert_eq!(provider_config.orchestrator.max_loop_iterations, Some(7));
+    assert_eq!(provider_config.orchestrator.max_model_calls, Some(7));
     assert_eq!(provider_config.orchestrator.context_window_tokens, 123_456);
     assert_eq!(provider_config.session_state_dir.as_ref(), Some(&session_state_dir));
     assert!(

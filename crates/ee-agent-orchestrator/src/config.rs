@@ -10,22 +10,17 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::CompactionConfig;
+use crate::error::OrchestratorError;
 use crate::reflection::ReflectionConfig;
 use crate::repair::RepairConfig;
 use crate::rubber_duck_config::RubberDuckConfig;
 use crate::rubber_duck_trigger::RubberDuckTriggerConfig;
 use crate::stuck::StuckConfig;
 
-/// Default maximum loop iterations per turn.
-pub const DEFAULT_MAX_LOOP_ITERATIONS: usize = 16;
-/// Default maximum tool calls per turn.
-pub const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 180;
 /// Default maximum subagent nesting depth.
 pub const DEFAULT_MAX_SUBAGENT_DEPTH: usize = 2;
 /// Default maximum concurrently running subagents.
 pub const DEFAULT_MAX_PARALLEL_SUBAGENTS: usize = 4;
-/// Default per-turn wall-clock limit: 300 seconds.
-pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default per-tool-call wall-clock limit: 120 seconds.
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default per-subagent wall-clock limit: 300 seconds.
@@ -38,14 +33,10 @@ fn default_subagent_stall_timeout() -> Duration {
 }
 /// Default memory byte limit: 1 MiB.
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 1024 * 1024;
-/// Default maximum model adapter calls per turn.
-pub const DEFAULT_MAX_MODEL_CALLS: usize = 16;
 /// Default maximum subagent spawns per turn across all depths.
 pub const DEFAULT_MAX_SUBAGENTS_PER_TURN: usize = 8;
-/// Default maximum accumulated model output bytes per turn: 1 MiB.
-pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Default maximum concurrently running independent read-only tools.
-pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 4;
+pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 10;
 /// Default model context-window size in tokens, reported as the ACP
 /// `usage_update` context-window denominator.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
@@ -130,17 +121,16 @@ pub const DEFAULT_AUTO_RESUME_MAX: u32 = 1;
 /// floating-point pressure knob).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
-    /// Maximum model-call iterations per turn; the loop stops with a
-    /// budget-exceeded error before exceeding this.
-    pub max_loop_iterations: usize,
-    /// Maximum tool calls per turn across all iterations.
-    pub max_tool_calls_per_turn: usize,
+    /// Maximum model-call iterations per turn; `None` is unlimited.
+    pub max_loop_iterations: Option<usize>,
+    /// Maximum tool calls per turn across all iterations; `None` is unlimited.
+    pub max_tool_calls_per_turn: Option<usize>,
     /// Maximum subagent nesting depth (subagent phase).
     pub max_subagent_depth: usize,
     /// Maximum concurrently running subagents (subagent phase).
     pub max_parallel_subagents: usize,
-    /// Per-turn wall-clock limit.
-    pub turn_timeout: Duration,
+    /// Per-turn wall-clock limit; `None` is unlimited.
+    pub turn_timeout: Option<Duration>,
     /// Per-tool-call wall-clock limit.
     pub tool_timeout: Duration,
     /// Per-subagent wall-clock limit (subagent phase).
@@ -151,13 +141,13 @@ pub struct OrchestratorConfig {
     pub subagent_stall_timeout: Duration,
     /// Memory store byte limit.
     pub memory_limit_bytes: usize,
-    /// Maximum model adapter invocations per turn; the loop stops with a
-    /// budget-exceeded error before the next call.
-    pub max_model_calls: usize,
+    /// Maximum model adapter invocations per turn; `None` is unlimited.
+    pub max_model_calls: Option<usize>,
     /// Maximum subagent spawns per turn across all depths.
     pub max_subagents: usize,
-    /// Maximum accumulated model output bytes (text + reasoning) per turn.
-    pub max_output_bytes: usize,
+    /// Maximum accumulated model output bytes (text + reasoning) per turn;
+    /// `None` is unlimited.
+    pub max_output_bytes: Option<usize>,
     /// Maximum concurrently running independent read-only tools in one
     /// planned batch; write/execute tools always run serially.
     pub max_parallel_tools: usize,
@@ -186,21 +176,47 @@ pub struct OrchestratorConfig {
     pub rubber_duck_triggers: RubberDuckTriggerConfig,
 }
 
+impl OrchestratorConfig {
+    /// Rejects zero-valued finite caps, which would silently stop a turn before
+    /// its first model or tool call.
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        let zero_counts = [
+            (self.max_loop_iterations, "max_loop_iterations"),
+            (self.max_model_calls, "max_model_calls"),
+            (self.max_tool_calls_per_turn, "max_tool_calls_per_turn"),
+            (self.max_output_bytes, "max_output_bytes"),
+        ];
+        for (value, name) in zero_counts {
+            if value == Some(0) {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "{name} must be positive when set; omit it for unlimited"
+                )));
+            }
+        }
+        if self.turn_timeout.is_some_and(|limit| limit.is_zero()) {
+            return Err(OrchestratorError::InvalidState(
+                "turn_timeout must be positive when set; omit it for unlimited".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            max_loop_iterations: DEFAULT_MAX_LOOP_ITERATIONS,
-            max_tool_calls_per_turn: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+            max_loop_iterations: None,
+            max_tool_calls_per_turn: None,
             max_subagent_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
             max_parallel_subagents: DEFAULT_MAX_PARALLEL_SUBAGENTS,
-            turn_timeout: DEFAULT_TURN_TIMEOUT,
+            turn_timeout: None,
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
             subagent_timeout: DEFAULT_SUBAGENT_TIMEOUT,
             subagent_stall_timeout: DEFAULT_SUBAGENT_STALL_TIMEOUT,
             memory_limit_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
-            max_model_calls: DEFAULT_MAX_MODEL_CALLS,
+            max_model_calls: None,
             max_subagents: DEFAULT_MAX_SUBAGENTS_PER_TURN,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            max_output_bytes: None,
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             max_input_tokens: None,
             max_output_tokens: None,
@@ -223,19 +239,19 @@ mod tests {
     #[test]
     fn defaults_use_expected_knobs() {
         let config = OrchestratorConfig::default();
-        assert_eq!(config.max_loop_iterations, 16);
-        assert_eq!(config.max_tool_calls_per_turn, 180);
+        assert_eq!(config.max_loop_iterations, None);
+        assert_eq!(config.max_tool_calls_per_turn, None);
         assert_eq!(config.max_subagent_depth, 2);
         assert_eq!(config.max_parallel_subagents, 4);
-        assert_eq!(config.turn_timeout, Duration::from_secs(300));
+        assert_eq!(config.turn_timeout, None);
         assert_eq!(config.tool_timeout, Duration::from_secs(120));
         assert_eq!(config.subagent_timeout, Duration::from_secs(300));
         assert_eq!(config.subagent_stall_timeout, Duration::from_secs(60));
         assert_eq!(config.memory_limit_bytes, 1024 * 1024);
-        assert_eq!(config.max_model_calls, 16);
+        assert_eq!(config.max_model_calls, None);
         assert_eq!(config.max_subagents, 8);
-        assert_eq!(config.max_output_bytes, 1024 * 1024);
-        assert_eq!(config.max_parallel_tools, 4);
+        assert_eq!(config.max_output_bytes, None);
+        assert_eq!(config.max_parallel_tools, 10);
         assert_eq!(config.max_input_tokens, None);
         assert_eq!(config.max_output_tokens, None);
         assert_eq!(config.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
@@ -261,20 +277,34 @@ mod tests {
     }
 
     #[test]
+    fn zero_finite_caps_are_rejected() {
+        for config in [
+            OrchestratorConfig { max_loop_iterations: Some(0), ..Default::default() },
+            OrchestratorConfig { max_model_calls: Some(0), ..Default::default() },
+            OrchestratorConfig { max_tool_calls_per_turn: Some(0), ..Default::default() },
+            OrchestratorConfig { max_output_bytes: Some(0), ..Default::default() },
+            OrchestratorConfig { turn_timeout: Some(Duration::ZERO), ..Default::default() },
+        ] {
+            assert!(config.validate().is_err(), "zero finite caps must fail validation");
+        }
+        OrchestratorConfig::default().validate().expect("unlimited defaults are valid");
+    }
+
+    #[test]
     fn serde_roundtrip_preserves_config() {
         let config = OrchestratorConfig {
-            max_loop_iterations: 4,
-            max_tool_calls_per_turn: 8,
+            max_loop_iterations: Some(4),
+            max_tool_calls_per_turn: Some(8),
             max_subagent_depth: 1,
             max_parallel_subagents: 2,
-            turn_timeout: Duration::from_secs(10),
+            turn_timeout: Some(Duration::from_secs(10)),
             tool_timeout: Duration::from_secs(5),
             subagent_timeout: Duration::from_secs(20),
             subagent_stall_timeout: Duration::from_secs(7),
             memory_limit_bytes: 4096,
-            max_model_calls: 6,
+            max_model_calls: Some(6),
             max_subagents: 3,
-            max_output_bytes: 2048,
+            max_output_bytes: Some(2048),
             max_parallel_tools: 3,
             max_input_tokens: Some(1000),
             max_output_tokens: Some(2000),
@@ -300,18 +330,18 @@ mod tests {
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
-        assert_eq!(restored.max_loop_iterations, 4);
-        assert_eq!(restored.max_tool_calls_per_turn, 8);
+        assert_eq!(restored.max_loop_iterations, Some(4));
+        assert_eq!(restored.max_tool_calls_per_turn, Some(8));
         assert_eq!(restored.max_subagent_depth, 1);
         assert_eq!(restored.max_parallel_subagents, 2);
-        assert_eq!(restored.turn_timeout, Duration::from_secs(10));
+        assert_eq!(restored.turn_timeout, Some(Duration::from_secs(10)));
         assert_eq!(restored.tool_timeout, Duration::from_secs(5));
         assert_eq!(restored.subagent_timeout, Duration::from_secs(20));
         assert_eq!(restored.subagent_stall_timeout, Duration::from_secs(7));
         assert_eq!(restored.memory_limit_bytes, 4096);
-        assert_eq!(restored.max_model_calls, 6);
+        assert_eq!(restored.max_model_calls, Some(6));
         assert_eq!(restored.max_subagents, 3);
-        assert_eq!(restored.max_output_bytes, 2048);
+        assert_eq!(restored.max_output_bytes, Some(2048));
         assert_eq!(restored.max_parallel_tools, 3);
         assert_eq!(restored.max_input_tokens, Some(1000));
         assert_eq!(restored.max_output_tokens, Some(2000));

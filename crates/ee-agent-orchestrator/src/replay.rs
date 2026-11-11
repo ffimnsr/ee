@@ -421,7 +421,10 @@ pub fn endless_loop_replay(calls: usize) -> ReplayScript {
     }
     events.push(OrchestratorEvent::TurnStopped { stop_reason: "budget_exceeded".into() });
     ReplayScript::new("loop forever", "s-1")
-        .with_config(OrchestratorConfig { max_loop_iterations: 3, ..OrchestratorConfig::default() })
+        .with_config(OrchestratorConfig {
+            max_loop_iterations: Some(3),
+            ..OrchestratorConfig::default()
+        })
         .with_model_responses(endless_tool_loop_script(calls))
         .with_tool_response("read_file", ToolResult::success("file contents"))
         .with_expected_events(events)

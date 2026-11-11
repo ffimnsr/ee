@@ -62,7 +62,7 @@ fn recovery_provider(model: Arc<DelayedModel>, auto_resume_max: u32) -> Orchestr
     OrchestratorProvider::with_policy(
         OrchestratorProviderConfig {
             orchestrator: OrchestratorConfig {
-                turn_timeout: std::time::Duration::from_millis(500),
+                turn_timeout: Some(std::time::Duration::from_millis(500)),
                 recovery,
                 // Scripted text-only responses make no task-graph
                 // progress; disable the no-progress rule for the test.
@@ -99,7 +99,7 @@ fn durable_recovery_provider(
     OrchestratorProvider::with_policy(
         OrchestratorProviderConfig {
             orchestrator: OrchestratorConfig {
-                turn_timeout: std::time::Duration::from_millis(500),
+                turn_timeout: Some(std::time::Duration::from_millis(500)),
                 recovery,
                 stuck: crate::stuck::StuckConfig {
                     max_no_progress_iterations: 100,

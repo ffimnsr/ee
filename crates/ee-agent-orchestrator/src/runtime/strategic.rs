@@ -452,13 +452,8 @@ impl OrchestratorRuntime {
         session_id: &str,
         provider: &str,
     ) -> Result<(), OrchestratorError> {
-        let remaining = self
-            .budget
-            .lock()
-            .expect("budget tracker poisoned")
-            .deadline_remaining()
-            .unwrap_or(self.config.turn_timeout);
-        if remaining.is_zero() {
+        let remaining = self.budget.lock().expect("budget tracker poisoned").deadline_remaining();
+        if remaining.is_some_and(|remaining| remaining.is_zero()) {
             return Err(OrchestratorError::DeadlineExceeded(
                 "repair budget deadline elapsed".into(),
             ));

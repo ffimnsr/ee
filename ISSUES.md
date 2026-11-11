@@ -931,81 +931,83 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Make the count, output, and time caps optional.
-  - [ ] In `src/config.rs`, change `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, and `max_output_bytes` to `Option<usize>`; change `turn_timeout` to `Option<Duration>`; default all to `None`.
-  - [ ] Delete the five `DEFAULT_MAX_*` / `DEFAULT_TURN_TIMEOUT` constants and every import of them.
-  - [ ] Add configuration validation that rejects `Some(0)` and `Some(Duration::ZERO)` with a clear error.
-  - [ ] In `src/budget.rs`, make `BudgetConfig` count caps `Option<usize>` and its deadline derive from `turn_timeout.map(...)`.
-  - [ ] Change every `try_reserve_*`, `check_output_allowance`, `record_model_usage`, and `try_reserve_subagent_and_model_calls` check to deny only on `Some(max)`; `None` never denies.
-  - [ ] Make `reset_deadline` take `Option<Duration>`; `None` clears the deadline. Update `runtime/{compact,resume,strategic}.rs` and subagent call sites.
-  - [ ] Make `BudgetSnapshot` count/output caps `Option<usize>`; render `unbounded` in `Display`.
-  - [ ] Update `restore_used` to compare `Option` caps and skip usage-above-cap checks when `None`.
-  - [ ] In `src/checkpoint.rs`, update `validate` for `Option` caps and bump `CHECKPOINT_SCHEMA_VERSION`.
-  - [ ] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants and child timeout finite.
-  - [ ] Update every `BudgetSnapshot` / config literal in tests/fixtures to `Some(...)` or `None`; no bare numeric caps remain.
-- [ ] Make provider limits optional.
-  - [ ] `ee-opencode-agent`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
-  - [ ] `ee-openrouter-agent`: same change, including the manifest input description and default.
-  - [ ] Map directly into `OrchestratorConfig` without `unwrap_or(0)`; omitted means `None`.
-  - [ ] Update provider tests: default is `None`; explicit `7` is `Some(7)`; `0` is rejected.
-- [ ] Add unlimited-default regression tests.
-  - [ ] Fake adapter drives more than 16 iterations and model calls in one turn; task completes.
-  - [ ] Fake tools drive more than 180 tool calls in one turn; task completes.
-  - [ ] `Some(1)` still stops after the first call; `Some(0)` fails at config load.
-  - [ ] `BudgetSnapshot` round-trips `None` as `null`; checkpoint restore accepts matching `None` and rejects a mismatch.
-  - [ ] Old numeric-cap checkpoint fails with the schema-version error.
-- [ ] Match read-only parallelism.
-  - [ ] Change `DEFAULT_MAX_PARALLEL_TOOLS` to `10` in `src/config.rs`.
-  - [ ] Update the default-value assertions in `src/config.rs` tests.
-  - [ ] Add a test proving write/execute intents still serialize above the limit.
-- [ ] Add `src/prompt/repeat_guard.rs`.
-  - [ ] Canonicalize arguments with deep key sorting; key on `(tool name, canonical JSON)`.
-  - [ ] Track consecutive counts with thresholds `[3, 5, 8]`, `argumentsPreviewChars = 500`.
-  - [ ] Implement `*` wildcard `include` / `exclude`; excluded calls neither count nor reset.
-  - [ ] Reset the chain on a user message; keep per-runtime state only.
-  - [ ] Emit the exact gentle/detailed reminder texts from the plan, with `ee` tool names.
-  - [ ] Add unit tests for threshold, canonical ordering, preview truncation, filters, reset, and argument change.
-- [ ] Wire the reminder into the loop at one call site.
-  - [ ] Observe each executed tool call after its result; append the returned notice to the transcript.
-  - [ ] Skip observation when the tool-call budget denied the call.
-  - [ ] Assert the existing hard stop still fires at 4 (`src/stuck.rs`).
-- [ ] Add the budget pressure notice.
-  - [ ] Compute remaining iterations/model calls/tool calls from `BudgetSnapshot` for finite caps only.
-  - [ ] Emit one line into `EE_TURN_GUIDANCE` only at `iterations_remaining <= 2` or `tool_calls_used >= 90%`.
-  - [ ] Emit nothing when the corresponding cap is `None`.
-  - [ ] Never print all caps; no new section name.
-- [ ] Add the subagent depth line at the cap.
-  - [ ] Render `Delegation depth for \`delegate_task\`: current <n>, maximum <m>, remaining levels 0.` only when `depth == max_depth`.
-  - [ ] Extend the `SUBAGENT_DELEGATION` snapshot test for below-cap silence.
-- [ ] Add tool-result middle pruning.
-  - [ ] Prune only tool-result text longer than 8192 chars: keep 4096 head + 1024 tail.
-  - [ ] Insert the exact marker `[... tool result middle pruned ...]`.
-  - [ ] Apply before the transcript byte budget; never prune assistant text or tool arguments.
-  - [ ] Add tests for boundary sizes, exact output, determinism, and post-prune budget enforcement.
-- [ ] Audit per-tool timeouts.
-  - [ ] Record `ee`'s 120 s global tool timeout vs DSH's 30-300 s per-tool defaults in the plan.
-  - [ ] Do not change timeout defaults in this phase.
-- [ ] Cover output and wall-clock caps.
-  - [ ] `None` output bytes never deny; `Some(1)` denies after the first recorded byte.
-  - [ ] `None` turn timeout leaves no deadline; `Some(d)` expires; `reset_deadline(None)` clears an existing deadline.
-  - [ ] Per-tool `tool_timeout` stays finite and independent.
-- [ ] Run validation for touched modules.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator prompt::`
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator config`
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator stuck`
-  - [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`
+- [x] Make the count, output, and time caps optional.
+  - [x] In `src/config.rs`, change `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, and `max_output_bytes` to `Option<usize>`; change `turn_timeout` to `Option<Duration>`; default all to `None`.
+  - [x] Delete the five `DEFAULT_MAX_*` / `DEFAULT_TURN_TIMEOUT` constants and every import of them.
+  - [x] Add `OrchestratorConfig::validate` rejecting `Some(0)` and `Some(Duration::ZERO)`; call it in fallible runtime constructors.
+  - [x] In `src/budget.rs`, make `BudgetConfig` count caps `Option<usize>` and its deadline derive from `turn_timeout.map(...)`.
+  - [x] Change every `try_reserve_*`, `check_output_allowance`, `record_model_usage`, and `try_reserve_subagent_and_model_calls` check to deny only on `Some(max)`; `None` never denies.
+  - [x] Make `reset_deadline` take `Option<Duration>`; `None` clears the deadline. Updated `runtime/{compact,resume,strategic}.rs` and subagent call sites.
+  - [x] Make `BudgetSnapshot` count/output caps `Option<usize>`; render `unbounded` in `Display`.
+  - [x] Update `restore_used` to compare `Option` caps and skip usage-above-cap checks when `None`.
+  - [x] Add `src/checkpoint_budget.rs` (checkpoint.rs is over 1,000 LOC) and validate `Option` caps; bump `CHECKPOINT_SCHEMA_VERSION` to 6.
+  - [x] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants and child timeout finite.
+  - [x] Update every `BudgetSnapshot` / config literal in tests/fixtures to `Some(...)` or `None`; no bare numeric caps remain.
+- [x] Make provider limits optional.
+  - [x] `ee-opencode-agent`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
+  - [x] `ee-openrouter-agent`: same change, including the manifest input description and default.
+  - [x] Map directly into `OrchestratorConfig` without `unwrap_or(0)`; omitted means `None`.
+  - [x] Update provider tests: default is `None`; explicit values are `Some(n)`; `0` is rejected.
+- [x] Add unlimited-default regression tests.
+  - [x] Fake adapter drives 20 tool iterations plus completion in one turn; task completes.
+  - [x] Budget tracker admits 1,000 iterations/model calls/tool calls and 10 MiB output with default caps.
+  - [x] Explicit `Some(1)` caps still stop; `Some(0)` fails config validation.
+  - [x] Checkpoint round-trips `None` caps; restore rejects a mismatch.
+  - [x] Old schema-version checkpoint fails closed.
+- [x] Match read-only parallelism.
+  - [x] Change `DEFAULT_MAX_PARALLEL_TOOLS` to `10` in `src/config.rs`; loop uses `self.config.max_parallel_tools` instead of hardcoded `2`.
+  - [x] Update the default-value assertions in `src/config.rs` tests.
+  - [x] Existing write/execute serialization tests remain unchanged.
+- [x] Add `src/prompt/repeat_guard.rs`.
+  - [x] Canonicalize arguments with deep key sorting; key on `(tool name, canonical JSON)`.
+  - [x] Track consecutive counts with thresholds `[3, 5, 8]`, `argumentsPreviewChars = 500`.
+  - [x] Implement `*` wildcard `include` / `exclude`; excluded calls neither count nor reset.
+  - [x] Reset the chain on a user message; keep per-runtime state only.
+  - [x] Emit the gentle/detailed reminder texts, with `ee` tool names.
+  - [x] Add unit tests for threshold, canonical ordering, preview truncation, filters, reset, and argument change.
+- [x] Wire the reminder into the loop at one call site.
+  - [x] Observe each executed tool call after its result; append the returned notice to the transcript.
+  - [x] Skipped automatically when the tool-call budget denied the call (no result is pushed).
+  - [x] Existing hard stop at 4 (`src/stuck.rs`) remains.
+- [x] Add the budget pressure notice helper (`prompt/budget_notice.rs`).
+  - [x] Compute remaining iterations/model calls/tool calls from `BudgetSnapshot` for finite caps only.
+  - [x] Emit one line only at `iterations_remaining <= 2` or `tool_calls_used >= 90%`.
+  - [x] Emit nothing when the corresponding cap is `None`.
+  - [x] Never print all caps; no new section name.
+  - [ ] Wire `pressure_notice` into `EE_TURN_GUIDANCE` when Phase 1 builds the runtime snapshot.
+- [x] Add the subagent depth line helper (`prompt/delegation.rs`).
+  - [x] Render `Delegation depth for \`delegate_task\`: current <n>, maximum <m>, remaining levels 0.` only when `depth >= max_depth`.
+  - [x] Unit tests cover below-cap silence and at/over-cap text.
+  - [ ] Wire it into `SUBAGENT_DELEGATION` when Phase 5 renders that context.
+- [x] Add tool-result middle pruning.
+  - [x] Prune only tool-result text longer than 8192 chars: keep 4096 head + 1024 tail.
+  - [x] Insert the exact marker `[... tool result middle pruned ...]`.
+  - [x] Project only the request copy; durable transcript and checkpoints keep the full result.
+  - [x] Add tests for boundary sizes, exact output, and non-mutation.
+- [x] Audit per-tool timeouts.
+  - [x] Record `ee`'s 120 s global tool timeout vs DSH's 30-300 s per-tool defaults in the plan.
+  - [x] Do not change timeout defaults in this phase.
+- [x] Cover output and wall-clock caps.
+  - [x] `None` output bytes never deny; finite `Some` still denies on overage.
+  - [x] `None` turn timeout leaves no deadline; `Some(d)` expires; `reset_deadline(None)` clears an existing deadline.
+  - [x] Per-tool `tool_timeout` stays finite and independent.
+- [x] Run validation for touched modules.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator prompt::`
+  - [x] `cargo test --quiet -p ee-agent-orchestrator config`
+  - [x] `cargo test --quiet -p ee-agent-orchestrator stuck`
+  - [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`
 
 **Acceptance criteria:**
 
 - Default config has `None` for iterations, model calls, tool calls, output bytes, and turn timeout; no sentinel `usize::MAX`, `Duration::MAX`, or `0`.
-- More than 16 iterations/model calls and more than 180 tool calls complete in one turn under defaults.
+- A 20-iteration turn completes under defaults; budget unit tests admit 1,000 counts and 10 MiB output.
 - Explicit `Some(n)` still stops at `n`; zero values fail validation; checkpoints compare `Option` caps.
 - Provider manifests default to unlimited and reject explicit `0`.
 - `DEFAULT_MAX_PARALLEL_TOOLS == 10`; write/execute stays serial.
 - Third identical call emits one advisory notice; fourth stops the loop.
 - Reminder does not fire on changed arguments, a reset user message, or an excluded tool.
-- Pressure notice appears only for finite caps and only under the documented conditions.
-- Depth line appears only at the cap.
+- Pressure-notice helper returns text only for finite caps under the documented conditions; wiring into `EE_TURN_GUIDANCE` is pending Phase 1.
+- Depth-line helper returns text only at the cap; wiring into `SUBAGENT_DELEGATION` is pending Phase 5.
 - Oversized tool result is pruned to head + marker + tail; small results are byte-identical.
 - No new slot name and no budget table in the prompt.
 

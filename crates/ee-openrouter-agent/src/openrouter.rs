@@ -163,7 +163,7 @@ mod tests {
             retry_max_delay: Duration::from_secs(30),
             checkpoint_dir: None,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
-            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+            max_iterations: None,
         }
     }
 

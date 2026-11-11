@@ -35,7 +35,7 @@ use crate::tools::SideEffectClass;
 /// v5 stores structured generic-subagent handoffs and excludes transcripts,
 /// tool arguments, and tool summaries from durable payloads. Earlier checkpoint
 /// schemas fail closed and are never migrated silently.
-pub const CHECKPOINT_SCHEMA_VERSION: u32 = 5;
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 6;
 /// Maximum opaque context-source labels retained with one checkpoint.
 pub const MAX_CHECKPOINT_CONTEXT_SOURCES: usize = 16;
 /// Maximum opaque host evidence references retained with one checkpoint.
@@ -497,35 +497,7 @@ impl OrchestratorCheckpoint {
         }
         self.tasks.validate_references()?;
         self.id_generator.validate()?;
-        let budget = &self.budget;
-        let caps_match = budget.iterations_max == self.config.max_loop_iterations
-            && budget.model_calls_max == self.config.max_model_calls
-            && budget.tool_calls_max == self.config.max_tool_calls_per_turn
-            && budget.subagents_max == self.config.max_subagents
-            && budget.output_bytes_max == self.config.max_output_bytes
-            && budget.input_tokens_max == self.config.max_input_tokens
-            && budget.output_tokens_max == self.config.max_output_tokens;
-        if !caps_match {
-            return Err(OrchestratorError::InvalidState(
-                "budget snapshot caps differ from checkpoint config".into(),
-            ));
-        }
-        if budget.iterations_used > budget.iterations_max
-            || budget.model_calls_used > budget.model_calls_max
-            || budget.tool_calls_used > budget.tool_calls_max
-            || budget.subagents_used > budget.subagents_max
-            || budget.output_bytes_used > budget.output_bytes_max
-            || budget
-                .input_tokens_used
-                .is_some_and(|used| used > budget.input_tokens_max.unwrap_or(usize::MAX))
-            || budget
-                .output_tokens_used
-                .is_some_and(|used| used > budget.output_tokens_max.unwrap_or(usize::MAX))
-        {
-            return Err(OrchestratorError::InvalidState(
-                "budget snapshot usage exceeds its caps".into(),
-            ));
-        }
+        crate::checkpoint_budget::validate_budget(&self.budget, &self.config)?;
         if self.memory.limit_bytes() != self.config.memory_limit_bytes {
             return Err(OrchestratorError::InvalidState(format!(
                 "checkpoint memory limit {} differs from config limit {}",
@@ -774,7 +746,10 @@ mod tests {
     /// A valid checkpoint whose task graph holds a completed child task and
     /// whose subagent tree records that child's outcome.
     fn sample_checkpoint() -> OrchestratorCheckpoint {
-        let config = OrchestratorConfig::default();
+        sample_checkpoint_with(OrchestratorConfig::default())
+    }
+
+    fn sample_checkpoint_with(config: OrchestratorConfig) -> OrchestratorCheckpoint {
         let mut tasks = TaskGraph::new();
         let root = tasks.create_root("plan", "plan");
         let mut child = tasks.create_child(&root.id, "worker", "do the work").expect("child");
@@ -860,7 +835,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 5);
+        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 6);
         assert_eq!(sample_checkpoint().schema_version(), CHECKPOINT_SCHEMA_VERSION);
     }
 
@@ -1245,6 +1220,18 @@ mod tests {
     }
 
     #[test]
+    fn old_numeric_cap_checkpoint_fails_closed() {
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["schema_version"] = serde_json::json!(5);
+        });
+        let error = checkpoint.validate().expect_err("old schema rejected");
+        assert!(
+            matches!(error, OrchestratorError::Serialization(ref reason) if reason.contains("unsupported checkpoint schema version")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn budget_snapshot_caps_are_validated_on_restore() {
         let checkpoint = patched(&sample_checkpoint(), |value| {
             value["budget"]["iterations_max"] = serde_json::json!(999);
@@ -1258,7 +1245,9 @@ mod tests {
 
     #[test]
     fn budget_snapshot_used_over_cap_is_rejected() {
-        let checkpoint = patched(&sample_checkpoint(), |value| {
+        let config =
+            OrchestratorConfig { max_loop_iterations: Some(16), ..OrchestratorConfig::default() };
+        let checkpoint = patched(&sample_checkpoint_with(config), |value| {
             value["budget"]["iterations_used"] = serde_json::json!(10_000);
         });
         let error = checkpoint.validate().expect_err("over-cap usage rejected");

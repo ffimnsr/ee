@@ -628,6 +628,22 @@ mod tests {
         memory
             .insert(crate::memory::MemoryItem::from_task("cwd", "/work", root.id.clone()))
             .expect("inserts");
+        let budget = crate::budget::BudgetSnapshot {
+            iterations_used: 0,
+            iterations_max: config.max_loop_iterations,
+            model_calls_used: 0,
+            model_calls_max: config.max_model_calls,
+            tool_calls_used: 0,
+            tool_calls_max: config.max_tool_calls_per_turn,
+            subagents_used: 0,
+            subagents_max: config.max_subagents,
+            output_bytes_used: 0,
+            output_bytes_max: config.max_output_bytes,
+            input_tokens_used: None,
+            input_tokens_max: config.max_input_tokens,
+            output_tokens_used: None,
+            output_tokens_max: config.max_output_tokens,
+        };
         OrchestratorCheckpoint::new(
             "test",
             config,
@@ -635,22 +651,7 @@ mod tests {
             tasks,
             memory,
             TranscriptSummary::from_transcript(&[]),
-            crate::budget::BudgetSnapshot {
-                iterations_used: 0,
-                iterations_max: 16,
-                model_calls_used: 0,
-                model_calls_max: 16,
-                tool_calls_used: 0,
-                tool_calls_max: 180,
-                subagents_used: 0,
-                subagents_max: 8,
-                output_bytes_used: 0,
-                output_bytes_max: 1024 * 1024,
-                input_tokens_used: None,
-                input_tokens_max: None,
-                output_tokens_used: None,
-                output_tokens_max: None,
-            },
+            budget,
             SubagentTreeState::new(),
             IdGeneratorState::new(),
         )

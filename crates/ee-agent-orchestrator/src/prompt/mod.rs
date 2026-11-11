@@ -5,9 +5,12 @@
 //! not wired into the turn loop yet; Phase 1 replaces the flat context strings.
 #![allow(dead_code)] // Phase 0 contracts are consumed by Phase 1; remove after wiring.
 
+pub(crate) mod budget_notice;
 pub(crate) mod context;
+pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod render;
+pub(crate) mod repeat_guard;
 pub(crate) mod sections;
 
 use std::collections::BTreeMap;

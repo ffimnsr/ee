@@ -347,17 +347,17 @@ impl SubagentManager {
         // Reduced config: generic children inherit bounded root settings;
         // rubber ducks receive dedicated limits strictly below root defaults.
         let mut child_config = OrchestratorConfig {
-            max_loop_iterations: request.role.max_iterations,
-            turn_timeout: remaining_timeout,
+            max_loop_iterations: Some(request.role.max_iterations),
+            turn_timeout: Some(remaining_timeout),
             ..self.config.clone()
         };
         if is_rubber_duck {
-            child_config.max_loop_iterations = RUBBER_DUCK_MAX_ITERATIONS;
-            child_config.max_model_calls = RUBBER_DUCK_MAX_MODEL_CALLS;
-            child_config.max_tool_calls_per_turn = RUBBER_DUCK_MAX_TOOL_CALLS;
+            child_config.max_loop_iterations = Some(RUBBER_DUCK_MAX_ITERATIONS);
+            child_config.max_model_calls = Some(RUBBER_DUCK_MAX_MODEL_CALLS);
+            child_config.max_tool_calls_per_turn = Some(RUBBER_DUCK_MAX_TOOL_CALLS);
             child_config.memory_limit_bytes = RUBBER_DUCK_MAX_CONTEXT_BYTES;
-            child_config.max_output_bytes = RUBBER_DUCK_MAX_OUTPUT_BYTES;
-            child_config.turn_timeout = RUBBER_DUCK_TIMEOUT.min(remaining_timeout);
+            child_config.max_output_bytes = Some(RUBBER_DUCK_MAX_OUTPUT_BYTES);
+            child_config.turn_timeout = Some(RUBBER_DUCK_TIMEOUT.min(remaining_timeout));
             child_config.tool_timeout = RUBBER_DUCK_TOOL_TIMEOUT.min(self.config.tool_timeout);
             child_config.max_subagent_depth = RUBBER_DUCK_MAX_RECURSION_DEPTH;
             child_config.max_subagents = 0;

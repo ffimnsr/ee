@@ -38,6 +38,7 @@ impl OrchestratorRuntime {
         models: ModelRegistry,
         policy: PolicyEngine,
     ) -> Result<Self, OrchestratorError> {
+        config.validate()?;
         Self::with_shared_model_registry(config, Arc::new(models), policy)
     }
     /// Creates a runtime from a process-owned shared registry. Adapters and
@@ -47,6 +48,7 @@ impl OrchestratorRuntime {
         models: Arc<ModelRegistry>,
         policy: PolicyEngine,
     ) -> Result<Self, OrchestratorError> {
+        config.validate()?;
         models.default_adapter()?;
         let memory = MemoryStore::new(config.memory_limit_bytes);
         Ok(Self::from_stores(

@@ -460,7 +460,7 @@ async fn resume_rejects_provider_mismatch_and_expired_sessions() {
     // A checkpoint beyond the cumulative session cap is discarded.
     let runtime = OrchestratorRuntime::new(
         OrchestratorConfig {
-            turn_timeout: Duration::from_millis(40),
+            turn_timeout: Some(Duration::from_millis(40)),
             recovery: crate::config::RecoveryConfig {
                 enabled: true,
                 session_timeout: Some(Duration::from_secs(1)),

@@ -134,7 +134,8 @@ async fn fixture_delegate_then_answer_produces_stable_event_sequence() {
 #[tokio::test]
 async fn fixture_endless_tool_loop_stops_via_iteration_budget() {
     let model = Arc::new(FakeModel::new(endless_tool_loop_script(6)));
-    let config = OrchestratorConfig { max_loop_iterations: 3, ..OrchestratorConfig::default() };
+    let config =
+        OrchestratorConfig { max_loop_iterations: Some(3), ..OrchestratorConfig::default() };
     let runtime = OrchestratorRuntime::new(config, model.clone());
     runtime.register_tool(read_file_tool()).expect("registers read_file");
     let (sink, client, _rx) = plumbing();

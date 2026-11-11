@@ -36,6 +36,7 @@ use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_re
 use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
 use crate::prompt::context::TurnSystemContext;
+use crate::prompt::repeat_guard::{RepeatGuard, RepeatGuardConfig};
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
@@ -238,34 +239,31 @@ impl LoopEngine {
                 .as_ref()
                 .map_or_else(current_unix_millis, |resume| resume.first_started_at_millis),
         }));
-        let turn = tokio::time::timeout(
-            self.config.turn_timeout,
-            self.run_loop(
-                transcript,
-                track.clone(),
-                session_id,
-                sink,
-                client,
-                cancel,
-                task.clone(),
-            ),
+        let turn = self.run_loop(
+            transcript,
+            track.clone(),
+            session_id,
+            sink,
+            client,
+            cancel,
+            task.clone(),
         );
-        let outcome = match turn.await {
-            Ok(outcome) => outcome,
-            Err(_elapsed) => {
-                self.events.record(OrchestratorEvent::Error {
-                    error: format!(
-                        "turn exceeded configured turn_timeout ({:?})",
-                        self.config.turn_timeout
-                    ),
-                });
-                self.events
-                    .record(OrchestratorEvent::TurnStopped { stop_reason: "timeout".into() });
-                Err(OrchestratorError::Timeout(format!(
-                    "turn exceeded configured turn_timeout ({:?})",
-                    self.config.turn_timeout
-                )))
+        let outcome = if let Some(limit) = self.config.turn_timeout {
+            match tokio::time::timeout(limit, turn).await {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    self.events.record(OrchestratorEvent::Error {
+                        error: format!("turn exceeded configured turn_timeout ({limit:?})"),
+                    });
+                    self.events
+                        .record(OrchestratorEvent::TurnStopped { stop_reason: "timeout".into() });
+                    Err(OrchestratorError::Timeout(format!(
+                        "turn exceeded configured turn_timeout ({limit:?})"
+                    )))
+                }
             }
+        } else {
+            turn.await
         };
         // Deadline and timeout stops persist a recovery checkpoint (the
         // in-flight marker rides along when a tool was mid-execution).
@@ -329,6 +327,7 @@ impl LoopEngine {
         let mut empty_responses = 0usize;
         let mut message_seq = 0usize;
         let mut detector = StuckDetector::new(self.config.stuck);
+        let mut repeat_guard = RepeatGuard::new(RepeatGuardConfig::default());
         let graph_handle = self.graph.clone();
         // Per-turn token usage aggregated across every model call; rounds
         // with unknown usage are skipped, never counted as zero.
@@ -368,7 +367,8 @@ impl LoopEngine {
             // Untrusted tool output and subagent summaries are labeled,
             // wrapped, and scanned for prompt-injection phrases before the
             // model sees them; suspicious text never changes policy.
-            let prepared = crate::prompt_injection::prepare_request(transcript.messages());
+            let request_messages = transcript.request_messages();
+            let prepared = crate::prompt_injection::prepare_request(&request_messages);
             for detection in &prepared.detections {
                 self.events.record(OrchestratorEvent::SuspiciousContentDetected {
                     trust: detection.trust,
@@ -496,7 +496,7 @@ impl LoopEngine {
                 let runner = ParallelToolRunner::new(
                     self.executor.clone(),
                     self.tools.clone(),
-                    2,
+                    self.config.max_parallel_tools,
                     self.events.clone(),
                 );
                 let outcomes = runner
@@ -538,6 +538,7 @@ impl LoopEngine {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
                     transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
                 }
             } else {
@@ -627,6 +628,7 @@ impl LoopEngine {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
                     transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
                 }
             }
@@ -1177,7 +1179,8 @@ mod tests {
 
     #[tokio::test]
     async fn max_loop_iterations_stops_before_infinite_loop() {
-        let config = OrchestratorConfig { max_loop_iterations: 3, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_loop_iterations: Some(3), ..OrchestratorConfig::default() };
         let model = FakeModel::new(vec![
             ModelResponse::new().text("still working"),
             ModelResponse::new().text("still working"),
@@ -1199,6 +1202,34 @@ mod tests {
                 stop_reason: "budget_exceeded".into(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn unlimited_defaults_allow_more_than_sixteen_iterations() {
+        let mut responses: Vec<_> = (0..20)
+            .map(|index| {
+                ModelResponse::new().tool_intents(vec![ToolIntent::new(
+                    format!("tc-{index}"),
+                    "echo",
+                    json!({ "text": index.to_string() }),
+                )])
+            })
+            .collect();
+        responses.push(ModelResponse::new().text("done").completed());
+        let model = FakeModel::new(responses);
+        let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events,
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine.run(prompt("hello world"), sink, client, cancel_rx, task(), None).await;
+        assert_eq!(result.expect("turn succeeds").stop_reason, StopReason::EndTurn);
+        assert_eq!(model.call_count(), 21, "20 tool iterations plus the final completion");
     }
 
     #[tokio::test]
@@ -1245,8 +1276,10 @@ mod tests {
 
     #[tokio::test]
     async fn max_tool_calls_stops_before_unbounded_tool_use() {
-        let config =
-            OrchestratorConfig { max_tool_calls_per_turn: 1, ..OrchestratorConfig::default() };
+        let config = OrchestratorConfig {
+            max_tool_calls_per_turn: Some(1),
+            ..OrchestratorConfig::default()
+        };
         let tool = echo_tool();
         let tool_intent = || ToolIntent::new("tc-1", "echo", json!({ "text": "hi" }));
         let model = FakeModel::new(vec![
@@ -1398,7 +1431,8 @@ mod tests {
             ModelResponse::new().text("two"),
             ModelResponse::new().text("three"),
         ]);
-        let config = OrchestratorConfig { max_model_calls: 2, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_model_calls: Some(2), ..OrchestratorConfig::default() };
         let (sink, client, _rx) = plumbing();
         let events = EventRecorder::new();
         let engine = engine_with(config, Arc::new(model.clone()), echo_tool(), events.clone());
@@ -1408,7 +1442,7 @@ mod tests {
         assert!(matches!(error, Err(OrchestratorError::BudgetExceeded(_))));
         assert_eq!(model.call_count(), 2, "third call was budget-denied before invocation");
         // The snapshot handed to the model carries the model-call cap.
-        assert_eq!(model.requests()[0].budget.model_calls_max, 2);
+        assert_eq!(model.requests()[0].budget.model_calls_max, Some(2));
         assert_eq!(model.requests()[1].budget.model_calls_used, 2);
         assert!(
             events.events().contains(&OrchestratorEvent::TurnStopped {
@@ -1420,7 +1454,8 @@ mod tests {
     #[tokio::test]
     async fn output_byte_budget_stops_loop_on_violating_response() {
         let model = FakeModel::new(vec![ModelResponse::new().text("x".repeat(200)).completed()]);
-        let config = OrchestratorConfig { max_output_bytes: 100, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_output_bytes: Some(100), ..OrchestratorConfig::default() };
         let (sink, client, _rx) = plumbing();
         let events = EventRecorder::new();
         let engine = engine_with(config, Arc::new(model.clone()), echo_tool(), events.clone());
@@ -1719,7 +1754,7 @@ mod tests {
         // never calls tools: the no-progress detector stops the turn before
         // the iteration budget.
         let config =
-            OrchestratorConfig { max_loop_iterations: 16, ..OrchestratorConfig::default() };
+            OrchestratorConfig { max_loop_iterations: Some(16), ..OrchestratorConfig::default() };
         let model = FakeModel::new(vec![
             ModelResponse::new().text("one"),
             ModelResponse::new().text("two"),

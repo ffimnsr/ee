@@ -163,7 +163,7 @@ impl FakeTransportFactory for LiveOpenRouterTransport {
                 let mut config =
                     openrouter_orchestrator_config(&self.config, self.session_state_dir.clone());
                 if let Some(turn_timeout) = turn_timeout {
-                    config.orchestrator.turn_timeout = turn_timeout;
+                    config.orchestrator.turn_timeout = Some(turn_timeout);
                 }
                 if let Some(auto_resume_max) = auto_resume_max {
                     config.orchestrator.recovery.auto_resume_max = auto_resume_max;
@@ -296,7 +296,7 @@ fn openrouter_fixture_config() -> OpenRouterConfig {
         compact_max_input_bytes: 65_536,
         context_window: 128_000,
         auto_compact_threshold_percent: 80,
-        max_iterations: 16,
+        max_iterations: Some(16),
         retry_max_attempts: 0,
         retry_base_delay: Duration::from_millis(1),
         retry_max_delay: Duration::from_millis(10),

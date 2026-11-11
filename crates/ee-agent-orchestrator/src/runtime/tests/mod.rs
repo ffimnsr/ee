@@ -137,7 +137,7 @@ impl ModelAdapter for DelayedModel {
 
 fn recovery_config(turn_timeout: Duration) -> OrchestratorConfig {
     OrchestratorConfig {
-        turn_timeout,
+        turn_timeout: Some(turn_timeout),
         recovery: crate::config::RecoveryConfig {
             enabled: true,
             ..crate::config::RecoveryConfig::default()

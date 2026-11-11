@@ -117,7 +117,7 @@ mod tests {
             compact_max_input_bytes: 65_536,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
             auto_compact_threshold_percent: 80,
-            max_iterations: 16,
+            max_iterations: Some(16),
             retry_max_attempts: 0,
             retry_base_delay: Duration::from_millis(1),
             retry_max_delay: Duration::from_millis(10),
@@ -135,14 +135,14 @@ mod tests {
     #[test]
     fn shared_iteration_cap_applies_to_loop_and_model_call_budgets() {
         let mut config = config(true);
-        config.max_iterations = 64;
+        config.max_iterations = Some(64);
 
         let orchestrator =
             openrouter_orchestrator_config(&config, PathBuf::from("/tmp/ee-agent-sessions"))
                 .orchestrator;
 
-        assert_eq!(orchestrator.max_loop_iterations, 64);
-        assert_eq!(orchestrator.max_model_calls, 64);
+        assert_eq!(orchestrator.max_loop_iterations, Some(64));
+        assert_eq!(orchestrator.max_model_calls, Some(64));
     }
 
     #[test]

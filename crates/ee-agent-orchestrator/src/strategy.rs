@@ -1567,7 +1567,8 @@ mod tests {
         for strategy in
             [TurnStrategy::ToolLoop, TurnStrategy::PlanThenExecute, TurnStrategy::ResearchThenEdit]
         {
-            let config = OrchestratorConfig { max_model_calls: 1, ..OrchestratorConfig::default() };
+            let config =
+                OrchestratorConfig { max_model_calls: Some(1), ..OrchestratorConfig::default() };
             let model = Arc::new(FakeModel::new(vec![
                 ModelResponse::new().text("first"),
                 ModelResponse::new().text("second").completed(),
@@ -1589,7 +1590,8 @@ mod tests {
         }
 
         // SimpleAnswer fits its single call inside the same budget cap.
-        let config = OrchestratorConfig { max_model_calls: 1, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_model_calls: Some(1), ..OrchestratorConfig::default() };
         let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("first")]));
         let (result, _, _, _, model) = run(
             config,

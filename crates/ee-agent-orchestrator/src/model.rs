@@ -31,6 +31,15 @@ use crate::trust::{TrustLevel, trust_for_role};
 /// Cap on diagnostic metadata entries; keeps provider metadata bounded.
 pub const MAX_METADATA_ENTRIES: usize = 16;
 
+/// Tool-result characters above which the middle is pruned for the request.
+pub const TOOL_RESULT_PRUNE_THRESHOLD: usize = 8192;
+/// Characters kept from the start of an oversized tool result.
+pub const TOOL_RESULT_PRUNE_HEAD: usize = 4096;
+/// Characters kept from the end of an oversized tool result.
+pub const TOOL_RESULT_PRUNE_TAIL: usize = 1024;
+/// Exact marker substituted for the pruned middle span.
+pub const TOOL_RESULT_PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
+
 /// Boxed future returned by [`ModelAdapter`] methods.
 ///
 /// The box keeps the trait object-safe without depending on `async-trait`.
@@ -165,6 +174,39 @@ impl ModelMessage {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+impl ModelMessage {
+    /// Returns a request copy with an oversized tool-result middle pruned.
+    ///
+    /// Only `text_output` is rewritten; structured output, arguments, and
+    /// assistant text are untouched. Returns `None` when nothing changes.
+    #[must_use]
+    pub(crate) fn with_pruned_tool_result(&self) -> Option<Self> {
+        let mut message = self.clone();
+        let mut changed = false;
+        for block in &mut message.content {
+            if let ModelContent::ToolResult { result, .. } = block
+                && let Some(pruned) = prune_tool_result_text(&result.text_output)
+            {
+                result.text_output = pruned;
+                changed = true;
+            }
+        }
+        changed.then_some(message)
+    }
+}
+
+/// Prunes the middle of one oversized tool-result string by characters.
+#[must_use]
+pub(crate) fn prune_tool_result_text(text: &str) -> Option<String> {
+    if text.chars().count() <= TOOL_RESULT_PRUNE_THRESHOLD {
+        return None;
+    }
+    let head: String = text.chars().take(TOOL_RESULT_PRUNE_HEAD).collect();
+    let tail: String =
+        text.chars().rev().take(TOOL_RESULT_PRUNE_TAIL).collect::<String>().chars().rev().collect();
+    Some(format!("{head}{TOOL_RESULT_PRUNE_MARKER}{tail}"))
 }
 
 /// Normalized request handed to [`ModelAdapter::complete`].
@@ -471,6 +513,16 @@ impl Transcript {
         self.messages.push(ModelMessage::text(ModelRole::Subagent, summary));
     }
 
+    /// Request projection: tool-result middles pruned without mutating the
+    /// durable transcript used by checkpoints and replay.
+    #[must_use]
+    pub(crate) fn request_messages(&self) -> Vec<ModelMessage> {
+        self.messages
+            .iter()
+            .map(|message| message.with_pruned_tool_result().unwrap_or_else(|| message.clone()))
+            .collect()
+    }
+
     /// Text of the newest assistant message, when it carries any — used as
     /// the bounded summary a subagent returns to its parent.
     #[must_use]
@@ -636,15 +688,15 @@ mod tests {
             tools: vec![ToolDefinition::new("read_file", "reads a file")],
             budget: BudgetSnapshot {
                 iterations_used: 1,
-                iterations_max: 16,
+                iterations_max: Some(16),
                 model_calls_used: 1,
-                model_calls_max: 16,
+                model_calls_max: Some(16),
                 tool_calls_used: 0,
-                tool_calls_max: 32,
+                tool_calls_max: Some(32),
                 subagents_used: 0,
                 subagents_max: 8,
                 output_bytes_used: 0,
-                output_bytes_max: 1024 * 1024,
+                output_bytes_max: Some(1024 * 1024),
                 input_tokens_used: None,
                 input_tokens_max: None,
                 output_tokens_used: None,
@@ -839,6 +891,46 @@ mod tests {
         transcript.push_assistant(&ModelResponse::new().text("hi"));
         transcript.enforce_memory_limit(1_000);
         assert!(transcript.truncation().is_none());
+    }
+
+    #[test]
+    fn tool_result_prune_keeps_head_marker_and_tail() {
+        let text = format!(
+            "{}{}{}",
+            "h".repeat(TOOL_RESULT_PRUNE_HEAD),
+            "m".repeat(TOOL_RESULT_PRUNE_THRESHOLD),
+            "t".repeat(TOOL_RESULT_PRUNE_TAIL)
+        );
+        let pruned = prune_tool_result_text(&text).expect("oversized result prunes");
+        assert!(pruned.starts_with(&"h".repeat(TOOL_RESULT_PRUNE_HEAD)));
+        assert!(pruned.ends_with(&"t".repeat(TOOL_RESULT_PRUNE_TAIL)));
+        assert!(pruned.contains(TOOL_RESULT_PRUNE_MARKER));
+        assert!(!pruned.contains(&"m".repeat(10)), "middle removed");
+    }
+
+    #[test]
+    fn tool_result_prune_leaves_threshold_untouched() {
+        let text = "x".repeat(TOOL_RESULT_PRUNE_THRESHOLD);
+        assert!(prune_tool_result_text(&text).is_none());
+        assert!(prune_tool_result_text("short").is_none());
+    }
+
+    #[test]
+    fn request_projection_does_not_mutate_transcript() {
+        let mut transcript = Transcript::new();
+        let oversized = format!("{}{}", "a".repeat(TOOL_RESULT_PRUNE_THRESHOLD), "b".repeat(10));
+        transcript.push_tool_result("tc-1", ToolResult::success(&oversized));
+        let projected = transcript.request_messages();
+        let projected_text = match &projected[0].content[0] {
+            ModelContent::ToolResult { result, .. } => result.text_output.as_str(),
+            other => panic!("expected tool result, got {other:?}"),
+        };
+        assert!(projected_text.contains(TOOL_RESULT_PRUNE_MARKER));
+        let durable_text = match &transcript.messages()[0].content[0] {
+            ModelContent::ToolResult { result, .. } => result.text_output.as_str(),
+            other => panic!("expected tool result, got {other:?}"),
+        };
+        assert_eq!(durable_text, oversized, "durable transcript keeps the full result");
     }
 
     #[test]

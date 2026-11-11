@@ -40,7 +40,7 @@ fn test_config() -> Config {
         ),
         checkpoint_dir: None,
         context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
-        max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+        max_iterations: None,
     }
 }
 
@@ -806,7 +806,8 @@ async fn orchestrated_mode_respects_max_tool_calls_budget() {
         response_with_tool_call("call_2", "read_file", "/tmp/b"),
     ]);
     let adapter = OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
-    let config = OrchestratorConfig { max_tool_calls_per_turn: 1, ..OrchestratorConfig::default() };
+    let config =
+        OrchestratorConfig { max_tool_calls_per_turn: Some(1), ..OrchestratorConfig::default() };
     let (handle, task) = spawn_server(adapter, config);
     let session_id = new_session(&handle, 1).await;
 

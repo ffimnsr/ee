@@ -39,10 +39,10 @@ async fn rubber_duck_uses_fixed_read_only_contract_and_returns_verified_report()
 
     let calls = model.requests();
     let child = &calls[1];
-    assert_eq!(child.budget.iterations_max, RUBBER_DUCK_MAX_ITERATIONS);
-    assert_eq!(child.budget.model_calls_max, RUBBER_DUCK_MAX_MODEL_CALLS);
-    assert_eq!(child.budget.tool_calls_max, RUBBER_DUCK_MAX_TOOL_CALLS);
-    assert_eq!(child.budget.output_bytes_max, RUBBER_DUCK_MAX_OUTPUT_BYTES);
+    assert_eq!(child.budget.iterations_max, Some(RUBBER_DUCK_MAX_ITERATIONS));
+    assert_eq!(child.budget.model_calls_max, Some(RUBBER_DUCK_MAX_MODEL_CALLS));
+    assert_eq!(child.budget.tool_calls_max, Some(RUBBER_DUCK_MAX_TOOL_CALLS));
+    assert_eq!(child.budget.output_bytes_max, Some(RUBBER_DUCK_MAX_OUTPUT_BYTES));
     assert!(!child.tools.is_empty(), "safe read discovery remains available");
     assert!(child.tools.iter().all(rubber_duck_allows_tool));
     assert!(child.tools.iter().all(|tool| tool.side_effect_class == SideEffectClass::Read));

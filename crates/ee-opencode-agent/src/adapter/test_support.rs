@@ -58,7 +58,7 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         reasoning_effort: None,
         system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
         timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
-        max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+        max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
         retry: RetryPolicy {
             max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,

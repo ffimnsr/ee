@@ -132,10 +132,10 @@ pub fn setup_manifest() -> SetupManifest {
             },
             SetupInput {
                 key: String::from("max_iterations"),
-                label: String::from("Maximum tool-loop iterations per prompt turn"),
-                default: Some(
-                    ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string(),
+                label: String::from(
+                    "Maximum tool-loop iterations per prompt turn (blank = unlimited)",
                 ),
+                default: None,
                 config: SetupInputConfig { env: String::from("OPENCODE_MAX_ITERATIONS") },
             },
             SetupInput {
@@ -243,13 +243,9 @@ pub struct Args {
     #[arg(long, env = "OPENCODE_TIMEOUT_MS", default_value_t = DEFAULT_TIMEOUT_MS, value_parser = parse_positive_u64)]
     timeout_ms: u64,
     /// Maximum tool-loop iterations, and model calls, per prompt turn.
-    #[arg(
-        long,
-        env = "OPENCODE_MAX_ITERATIONS",
-        default_value_t = ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
-        value_parser = parse_positive_usize
-    )]
-    max_iterations: usize,
+    /// Omit for unlimited.
+    #[arg(long, env = "OPENCODE_MAX_ITERATIONS", value_parser = parse_positive_usize)]
+    max_iterations: Option<usize>,
     /// Model context-window size in tokens, used for the ACP `usage_update`.
     #[arg(long, env = "OPENCODE_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS, value_parser = parse_positive_u64)]
     context_window: u64,
@@ -289,7 +285,7 @@ impl Args {
             reasoning_effort: None,
             system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+            max_iterations: None,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
@@ -320,7 +316,7 @@ pub struct Config {
     /// Per-request timeout.
     pub timeout: Duration,
     /// Maximum tool-loop iterations, and model calls, per prompt turn.
-    pub max_iterations: usize,
+    pub max_iterations: Option<usize>,
     /// Context-window size reported to the client.
     pub context_window: u64,
     /// Retry policy for rate-limited and transient failures.

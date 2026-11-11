@@ -162,6 +162,7 @@
 
 pub mod budget;
 pub mod checkpoint;
+mod checkpoint_budget;
 pub mod checkpoint_store;
 mod child_registry;
 pub mod command_intelligence;

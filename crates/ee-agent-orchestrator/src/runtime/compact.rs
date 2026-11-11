@@ -251,12 +251,12 @@ impl OrchestratorRuntime {
         }
         events.record(OrchestratorEvent::ModelRequested { iteration: 1 });
         let request = ModelRequest::new(transcript, Vec::new(), budget_snapshot, task);
-        let response = match tokio::time::timeout(
-            self.config.turn_timeout,
-            model.complete(request, cancel.clone()),
-        )
-        .await
-        {
+        let call = model.complete(request, cancel.clone());
+        let response = match if let Some(limit) = self.config.turn_timeout {
+            tokio::time::timeout(limit, call).await
+        } else {
+            Ok(call.await)
+        } {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return Err(error.into()),
             Err(_) => {

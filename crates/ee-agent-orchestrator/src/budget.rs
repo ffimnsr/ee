@@ -26,16 +26,16 @@ use crate::events::{EventRecorder, OrchestratorEvent};
 /// which derives the wall-clock deadline from the configured turn timeout.
 #[derive(Debug, Clone)]
 pub struct BudgetConfig {
-    /// Maximum loop iterations per turn.
-    pub max_iterations: usize,
-    /// Maximum model adapter invocations per turn.
-    pub max_model_calls: usize,
-    /// Maximum tool calls per turn.
-    pub max_tool_calls: usize,
+    /// Maximum loop iterations per turn; `None` is unlimited.
+    pub max_iterations: Option<usize>,
+    /// Maximum model adapter invocations per turn; `None` is unlimited.
+    pub max_model_calls: Option<usize>,
+    /// Maximum tool calls per turn; `None` is unlimited.
+    pub max_tool_calls: Option<usize>,
     /// Maximum subagent spawns per turn across all depths.
     pub max_subagents: usize,
-    /// Maximum accumulated model output bytes (text + reasoning) per turn.
-    pub max_output_bytes: usize,
+    /// Maximum accumulated model output bytes per turn; `None` is unlimited.
+    pub max_output_bytes: Option<usize>,
     /// Optional per-turn input-token cap; unknown usage fails closed.
     pub max_input_tokens: Option<usize>,
     /// Optional per-turn output-token cap; unknown usage fails closed.
@@ -57,7 +57,7 @@ impl BudgetConfig {
             max_output_bytes: config.max_output_bytes,
             max_input_tokens: config.max_input_tokens,
             max_output_tokens: config.max_output_tokens,
-            deadline: Some(Instant::now() + config.turn_timeout),
+            deadline: config.turn_timeout.map(|limit| Instant::now() + limit),
         }
     }
 }
@@ -68,24 +68,24 @@ impl BudgetConfig {
 pub struct BudgetSnapshot {
     /// Loop iterations consumed so far.
     pub iterations_used: usize,
-    /// Loop iteration cap.
-    pub iterations_max: usize,
+    /// Loop iteration cap; `None` is unlimited.
+    pub iterations_max: Option<usize>,
     /// Model calls consumed so far.
     pub model_calls_used: usize,
-    /// Model-call cap per turn.
-    pub model_calls_max: usize,
+    /// Model-call cap per turn; `None` is unlimited.
+    pub model_calls_max: Option<usize>,
     /// Tool calls consumed so far.
     pub tool_calls_used: usize,
-    /// Tool-call cap per turn.
-    pub tool_calls_max: usize,
+    /// Tool-call cap per turn; `None` is unlimited.
+    pub tool_calls_max: Option<usize>,
     /// Subagent spawns consumed so far.
     pub subagents_used: usize,
     /// Subagent-spawn cap per turn.
     pub subagents_max: usize,
     /// Accumulated model output bytes.
     pub output_bytes_used: usize,
-    /// Accumulated output-byte cap.
-    pub output_bytes_max: usize,
+    /// Output-byte cap; `None` is unlimited.
+    pub output_bytes_max: Option<usize>,
     /// Accumulated input tokens; `None` while unknown.
     pub input_tokens_used: Option<usize>,
     /// Optional per-turn input-token cap.
@@ -99,19 +99,20 @@ pub struct BudgetSnapshot {
 impl std::fmt::Display for BudgetSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let opt = |v: &Option<usize>| v.map_or_else(|| "?".to_string(), |n| n.to_string());
+        let cap = |v: &Option<usize>| v.map_or_else(|| "unbounded".to_string(), |n| n.to_string());
         write!(
             f,
             "iterations {}/{} model {}/{} tools {}/{} subagents {}/{} output {}B/{}B input_tokens {}/{} output_tokens {}/{}",
             self.iterations_used,
-            self.iterations_max,
+            cap(&self.iterations_max),
             self.model_calls_used,
-            self.model_calls_max,
+            cap(&self.model_calls_max),
             self.tool_calls_used,
-            self.tool_calls_max,
+            cap(&self.tool_calls_max),
             self.subagents_used,
             self.subagents_max,
             self.output_bytes_used,
-            self.output_bytes_max,
+            cap(&self.output_bytes_max),
             opt(&self.input_tokens_used),
             opt(&self.input_tokens_max),
             opt(&self.output_tokens_used),
@@ -130,11 +131,11 @@ pub struct BudgetTracker {
     output_bytes_used: usize,
     input_tokens_used: Option<usize>,
     output_tokens_used: Option<usize>,
-    max_iterations: usize,
-    max_model_calls: usize,
-    max_tool_calls: usize,
+    max_iterations: Option<usize>,
+    max_model_calls: Option<usize>,
+    max_tool_calls: Option<usize>,
     max_subagents: usize,
-    max_output_bytes: usize,
+    max_output_bytes: Option<usize>,
     max_input_tokens: Option<usize>,
     max_output_tokens: Option<usize>,
     deadline: Option<Instant>,
@@ -187,10 +188,11 @@ impl BudgetTracker {
     /// or the wall-clock deadline has passed.
     pub fn try_reserve_iteration(&mut self) -> Result<(), OrchestratorError> {
         self.check_deadline()?;
-        if self.iterations_used >= self.max_iterations {
+        if let Some(max) = self.max_iterations
+            && self.iterations_used >= max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max loop iterations exceeded ({})",
-                self.max_iterations
+                "max loop iterations exceeded ({max})"
             )));
         }
         self.iterations_used += 1;
@@ -202,10 +204,11 @@ impl BudgetTracker {
     /// invocation, so denied calls are never made.
     pub fn try_reserve_model_call(&mut self) -> Result<(), OrchestratorError> {
         self.check_deadline()?;
-        if self.model_calls_used >= self.max_model_calls {
+        if let Some(max) = self.max_model_calls
+            && self.model_calls_used >= max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max model calls exceeded ({})",
-                self.max_model_calls
+                "max model calls exceeded ({max})"
             )));
         }
         self.model_calls_used += 1;
@@ -216,10 +219,11 @@ impl BudgetTracker {
     /// or the wall-clock deadline has passed.
     pub fn try_reserve_tool_call(&mut self) -> Result<(), OrchestratorError> {
         self.check_deadline()?;
-        if self.tool_calls_used >= self.max_tool_calls {
+        if let Some(max) = self.max_tool_calls
+            && self.tool_calls_used >= max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max tool calls per turn exceeded ({})",
-                self.max_tool_calls
+                "max tool calls per turn exceeded ({max})"
             )));
         }
         self.tool_calls_used += 1;
@@ -255,10 +259,11 @@ impl BudgetTracker {
                 self.max_subagents
             )));
         }
-        if self.model_calls_used.saturating_add(model_calls) > self.max_model_calls {
+        if let Some(max) = self.max_model_calls
+            && self.model_calls_used.saturating_add(model_calls) > max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max model calls exceeded ({})",
-                self.max_model_calls
+                "max model calls exceeded ({max})"
             )));
         }
         self.subagents_used += 1;
@@ -270,10 +275,11 @@ impl BudgetTracker {
     /// that will produce output.  The actual bytes are recorded by
     /// [`BudgetTracker::record_model_usage`].
     pub fn check_output_allowance(&self) -> Result<(), OrchestratorError> {
-        if self.output_bytes_used >= self.max_output_bytes {
+        if let Some(max) = self.max_output_bytes
+            && self.output_bytes_used >= max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max output bytes exceeded ({})",
-                self.max_output_bytes
+                "max output bytes exceeded ({max})"
             )));
         }
         Ok(())
@@ -291,10 +297,12 @@ impl BudgetTracker {
         output_tokens: Option<usize>,
     ) -> Result<(), OrchestratorError> {
         self.output_bytes_used += output_bytes;
-        if self.output_bytes_used > self.max_output_bytes {
+        if let Some(max) = self.max_output_bytes
+            && self.output_bytes_used > max
+        {
             return Err(OrchestratorError::BudgetExceeded(format!(
-                "max output bytes exceeded (used {}, max {})",
-                self.output_bytes_used, self.max_output_bytes
+                "max output bytes exceeded (used {}, max {max})",
+                self.output_bytes_used
             )));
         }
         if let Some(max) = self.max_input_tokens {
@@ -350,11 +358,11 @@ impl BudgetTracker {
         Ok(())
     }
 
-    /// Re-anchors the wall-clock deadline to `now + turn_timeout` (a fresh
-    /// turn slice).  Cumulative counters are untouched, so resumed slices
-    /// keep their caps while restarting only the clock.
-    pub fn reset_deadline(&mut self, turn_timeout: Duration) {
-        self.deadline = Some(Instant::now() + turn_timeout);
+    /// Re-anchors the wall-clock deadline to `now + limit`, or clears it when
+    /// unlimited. Cumulative counters are untouched, so resumed slices keep
+    /// their caps while restarting only the clock.
+    pub fn reset_deadline(&mut self, limit: Option<Duration>) {
+        self.deadline = limit.map(|limit| Instant::now() + limit);
     }
 
     /// Remaining time until the wall-clock deadline, if one is set.
@@ -369,19 +377,19 @@ impl BudgetTracker {
     /// configured caps or when any used counter exceeds its cap, so a
     /// checkpoint built under different limits is never resumed silently.
     pub fn restore_used(&mut self, used: &BudgetSnapshot) -> Result<(), OrchestratorError> {
-        let caps = [
-            (used.iterations_max, self.max_iterations, "iterations"),
-            (used.model_calls_max, self.max_model_calls, "model calls"),
-            (used.tool_calls_max, self.max_tool_calls, "tool calls"),
-            (used.subagents_max, self.max_subagents, "subagents"),
-            (used.output_bytes_max, self.max_output_bytes, "output bytes"),
-        ];
-        for (snapshot_max, tracker_max, name) in caps {
-            if snapshot_max != tracker_max {
-                return Err(OrchestratorError::InvalidState(format!(
-                    "budget snapshot {name} cap {snapshot_max:?} differs from configured {tracker_max:?}"
-                )));
-            }
+        if used.iterations_max != self.max_iterations
+            || used.model_calls_max != self.max_model_calls
+            || used.tool_calls_max != self.max_tool_calls
+            || used.output_bytes_max != self.max_output_bytes
+        {
+            return Err(OrchestratorError::InvalidState(
+                "budget snapshot count caps differ from configured caps".into(),
+            ));
+        }
+        if used.subagents_max != self.max_subagents {
+            return Err(OrchestratorError::InvalidState(
+                "budget snapshot subagent cap differs from configured cap".into(),
+            ));
         }
         if used.input_tokens_max != self.max_input_tokens
             || used.output_tokens_max != self.max_output_tokens
@@ -394,15 +402,22 @@ impl BudgetTracker {
             (used.iterations_used, self.max_iterations, "iterations"),
             (used.model_calls_used, self.max_model_calls, "model calls"),
             (used.tool_calls_used, self.max_tool_calls, "tool calls"),
-            (used.subagents_used, self.max_subagents, "subagents"),
             (used.output_bytes_used, self.max_output_bytes, "output bytes"),
         ];
         for (used_value, max_value, name) in used_values {
-            if used_value > max_value {
+            if let Some(max_value) = max_value
+                && used_value > max_value
+            {
                 return Err(OrchestratorError::InvalidState(format!(
                     "budget snapshot {name} used {used_value} exceeds cap {max_value}"
                 )));
             }
+        }
+        if used.subagents_used > self.max_subagents {
+            return Err(OrchestratorError::InvalidState(format!(
+                "budget snapshot subagents used {} exceeds cap {}",
+                used.subagents_used, self.max_subagents
+            )));
         }
         if let Some(used_value) = used.input_tokens_used
             && used_value > self.max_input_tokens.unwrap_or(usize::MAX)
@@ -461,8 +476,8 @@ mod tests {
 
     fn config_with(iterations: usize, tools: usize) -> OrchestratorConfig {
         OrchestratorConfig {
-            max_loop_iterations: iterations,
-            max_tool_calls_per_turn: tools,
+            max_loop_iterations: Some(iterations),
+            max_tool_calls_per_turn: Some(tools),
             ..OrchestratorConfig::default()
         }
     }
@@ -493,7 +508,8 @@ mod tests {
 
     #[test]
     fn model_call_budget_is_enforced() {
-        let config = OrchestratorConfig { max_model_calls: 2, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_model_calls: Some(2), ..OrchestratorConfig::default() };
         let mut tracker = BudgetTracker::new(&config);
         tracker.try_reserve_model_call().expect("first");
         tracker.try_reserve_model_call().expect("second");
@@ -502,7 +518,7 @@ mod tests {
             matches!(error, OrchestratorError::BudgetExceeded(ref r) if r.contains("max model calls"))
         );
         assert_eq!(tracker.snapshot().model_calls_used, 2);
-        assert_eq!(tracker.snapshot().model_calls_max, 2);
+        assert_eq!(tracker.snapshot().model_calls_max, Some(2));
     }
 
     #[test]
@@ -523,7 +539,7 @@ mod tests {
     fn combined_critic_reservation_is_atomic() {
         let config = OrchestratorConfig {
             max_subagents: 1,
-            max_model_calls: 1,
+            max_model_calls: Some(1),
             ..OrchestratorConfig::default()
         };
         let mut tracker = BudgetTracker::new(&config);
@@ -541,7 +557,8 @@ mod tests {
 
     #[test]
     fn output_byte_budget_is_enforced_on_record() {
-        let config = OrchestratorConfig { max_output_bytes: 50, ..OrchestratorConfig::default() };
+        let config =
+            OrchestratorConfig { max_output_bytes: Some(50), ..OrchestratorConfig::default() };
         let mut tracker = BudgetTracker::new(&config);
         tracker.check_output_allowance().expect("allowance remains");
         tracker.record_model_usage(30, None, None).expect("within budget");
@@ -551,7 +568,7 @@ mod tests {
             matches!(error, OrchestratorError::BudgetExceeded(ref r) if r.contains("max output bytes"))
         );
         assert_eq!(tracker.snapshot().output_bytes_used, 60);
-        assert_eq!(tracker.snapshot().output_bytes_max, 50);
+        assert_eq!(tracker.snapshot().output_bytes_max, Some(50));
         assert!(
             tracker.check_output_allowance().is_err(),
             "no allowance remains once the cap is consumed"
@@ -633,6 +650,36 @@ mod tests {
         assert!(tracker.check_deadline().is_err(), "expired deadline fails");
     }
 
+    #[test]
+    fn unlimited_defaults_never_deny_by_count_or_bytes() {
+        let mut tracker = BudgetTracker::new(&OrchestratorConfig::default());
+        for _ in 0..1_000 {
+            tracker.try_reserve_iteration().expect("iterations unlimited");
+            tracker.try_reserve_model_call().expect("model calls unlimited");
+            tracker.try_reserve_tool_call().expect("tool calls unlimited");
+        }
+        tracker.record_model_usage(10 * 1024 * 1024, None, None).expect("output unlimited");
+        assert_eq!(tracker.snapshot().iterations_max, None);
+        assert_eq!(tracker.snapshot().model_calls_max, None);
+        assert_eq!(tracker.snapshot().tool_calls_max, None);
+        assert_eq!(tracker.snapshot().output_bytes_max, None);
+        assert!(tracker.snapshot().to_string().contains("unbounded"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reset_deadline_none_clears_an_existing_deadline() {
+        let config = OrchestratorConfig {
+            turn_timeout: Some(Duration::from_secs(5)),
+            ..OrchestratorConfig::default()
+        };
+        let mut tracker = BudgetTracker::new(&config);
+        assert!(tracker.deadline_remaining().is_some());
+        tracker.reset_deadline(None);
+        assert_eq!(tracker.deadline_remaining(), None);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tracker.try_reserve_model_call().expect("cleared deadline never expires");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn no_deadline_means_no_remaining_time() {
         let config = BudgetConfig {
@@ -647,7 +694,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn from_config_anchors_deadline_to_turn_timeout() {
         let config = OrchestratorConfig {
-            turn_timeout: Duration::from_secs(5),
+            turn_timeout: Some(Duration::from_secs(5)),
             ..OrchestratorConfig::default()
         };
         let mut tracker = BudgetTracker::new(&config);
@@ -662,9 +709,9 @@ mod tests {
         tracker.try_reserve_iteration().expect("reserves");
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.iterations_used, 1);
-        assert_eq!(snapshot.iterations_max, 16);
+        assert_eq!(snapshot.iterations_max, Some(16));
         assert_eq!(snapshot.tool_calls_used, 0);
-        assert_eq!(snapshot.tool_calls_max, 32);
+        assert_eq!(snapshot.tool_calls_max, Some(32));
     }
 
     #[test]

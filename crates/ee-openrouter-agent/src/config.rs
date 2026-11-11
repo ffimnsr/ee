@@ -124,10 +124,8 @@ pub fn setup_manifest() -> SetupManifest {
             },
             SetupInput {
                 key: String::from("max_iterations"),
-                label: String::from("Maximum iterations"),
-                default: Some(
-                    ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string(),
-                ),
+                label: String::from("Maximum iterations (blank = unlimited)"),
+                default: None,
                 config: SetupInputConfig { env: String::from("OPENROUTER_MAX_ITERATIONS") },
             },
         ],
@@ -286,13 +284,9 @@ pub struct Args {
     )]
     auto_compact_threshold_percent: u8,
     /// Maximum model–tool iterations and model calls per orchestrated turn.
-    #[arg(
-        long,
-        env = "OPENROUTER_MAX_ITERATIONS",
-        default_value_t = ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
-        value_parser = parse_positive_usize,
-    )]
-    max_iterations: usize,
+    /// Omit for unlimited.
+    #[arg(long, env = "OPENROUTER_MAX_ITERATIONS", value_parser = parse_positive_usize)]
+    max_iterations: Option<usize>,
     /// Run in orchestrated mode: ee-agent-orchestrator owns the model–tool
     /// loop and OpenRouter acts as the model adapter instead of the simple
     /// provider mode. Default after parity; opt out for fallback diagnostics.
@@ -366,7 +360,7 @@ pub struct Config {
     /// a reported near-limit request. Zero disables automatic compaction.
     pub auto_compact_threshold_percent: u8,
     /// Shared maximum for model–tool iterations and model calls per turn.
-    pub max_iterations: usize,
+    pub max_iterations: Option<usize>,
     /// Maximum transient/429 retries per model call before failing the turn.
     pub retry_max_attempts: u32,
     /// Initial retry backoff (doubles per attempt, capped at
@@ -530,7 +524,7 @@ mod tests {
             compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
             auto_compact_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+            max_iterations: None,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
@@ -561,10 +555,7 @@ mod tests {
             config.auto_compact_threshold_tokens(),
             Some(DEFAULT_CONTEXT_WINDOW_TOKENS * 80 / 100)
         );
-        assert_eq!(
-            config.max_iterations,
-            ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS
-        );
+        assert_eq!(config.max_iterations, None);
         assert_eq!(config.retry_max_attempts, DEFAULT_RETRY_MAX_ATTEMPTS);
         assert_eq!(config.retry_base_delay, Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS));
         assert_eq!(config.retry_max_delay, Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS));
@@ -596,10 +587,7 @@ mod tests {
         assert_eq!(manifest.inputs[4].key, "rubber_duck_mode");
         assert_eq!(manifest.inputs[4].config.env, "OPENROUTER_RUBBER_DUCK_MODE");
         assert_eq!(manifest.inputs[9].key, "max_iterations");
-        assert_eq!(
-            manifest.inputs[9].default.as_deref(),
-            Some(ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string().as_str())
-        );
+        assert_eq!(manifest.inputs[9].default, None);
         assert_eq!(manifest.inputs[9].config.env, "OPENROUTER_MAX_ITERATIONS");
     }
 
@@ -663,13 +651,13 @@ mod tests {
         let parsed = Args::try_parse_from(["ee-openrouter-agent", "--max-iterations", "64"])
             .expect("CLI iteration cap parses");
         let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
-        assert_eq!(config.max_iterations, 64);
+        assert_eq!(config.max_iterations, Some(64));
 
         let _env = EnvGuard::set("OPENROUTER_MAX_ITERATIONS", "32");
         let parsed = Args::try_parse_from(["ee-openrouter-agent"])
             .expect("environment iteration cap parses");
         let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
-        assert_eq!(config.max_iterations, 32);
+        assert_eq!(config.max_iterations, Some(32));
     }
 
     #[test]

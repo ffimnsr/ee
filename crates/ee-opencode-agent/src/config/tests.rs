@@ -35,7 +35,7 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         reasoning_effort: None,
         system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
         timeout_ms: DEFAULT_TIMEOUT_MS,
-        max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+        max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
         retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
         retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
@@ -52,7 +52,7 @@ fn dotenv(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn explicit_args_resolve_the_route_and_keep_the_knobs() {
     let mut args = args(Some("go"), Some("kimi-k3"));
     args.timeout_ms = 5_000;
-    args.max_iterations = 7;
+    args.max_iterations = Some(7);
     args.context_window = 32_768;
     args.retry_max_attempts = 4;
     args.system_prompt = String::from("custom");
@@ -64,7 +64,7 @@ fn explicit_args_resolve_the_route_and_keep_the_knobs() {
     assert_eq!(config.route.model_id, "kimi-k3");
     assert_eq!(config.route.surface, OpenCodeSurface::Go);
     assert_eq!(config.timeout, Duration::from_secs(5));
-    assert_eq!(config.max_iterations, 7);
+    assert_eq!(config.max_iterations, Some(7));
     assert_eq!(config.context_window, 32_768);
     assert_eq!(config.retry.max_attempts, 4);
     assert_eq!(config.system_prompt, "custom");

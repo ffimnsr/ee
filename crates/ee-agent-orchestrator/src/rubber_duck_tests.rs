@@ -48,7 +48,7 @@ fn finding() -> CritiqueFinding {
 
 fn harness(response: ModelResponse, mut config: OrchestratorConfig) -> Harness {
     config.max_subagents = config.max_subagents.max(1);
-    config.max_model_calls = config.max_model_calls.max(2);
+    config.max_model_calls = Some(config.max_model_calls.unwrap_or(0).max(2));
     let root = FakeModel::new(vec![]);
     let critic = FakeModel::new(vec![response]);
     let mut models = ModelRegistry::new();

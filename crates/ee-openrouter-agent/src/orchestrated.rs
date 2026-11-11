@@ -103,7 +103,7 @@ pub fn openrouter_orchestrated_provider_with_turn_timeout(
     turn_timeout: std::time::Duration,
 ) -> OrchestratorProvider {
     let mut provider_config = openrouter_orchestrator_config(config, session_state_dir);
-    provider_config.orchestrator.turn_timeout = turn_timeout;
+    provider_config.orchestrator.turn_timeout = Some(turn_timeout);
     OrchestratorProvider::with_policy(
         provider_config,
         Arc::new(adapter),

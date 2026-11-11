@@ -1,6 +1,6 @@
 # ee Agent Prompt Sections — Design + Plan
 
-Status: **Phase 0 implemented; Phases 1–6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
+Status: **Phase 0 and Phase 5b core implemented; Phases 1–4, 5, and 6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
 
 Reference capture: [deepseek-harness-agent-mode-prompt-capture.md](deepseek-harness-agent-mode-prompt-capture.md) (vendored DSH `0.2.2-rc.1`, commit `fcc0ad4`).
 
@@ -613,7 +613,7 @@ Security tests:
 | 3 Workspace | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | Root-to-cwd discovery, trust label, dynamic updates |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | `PLAN_POLICY` + ask/write sections; plan payload preserved |
 | 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | `TOOL_SUBAGENT`, `MCP_SERVERS`, `SUBAGENT_DELEGATION`, checkpoint prompt |
-| 5b Limits + repetition | 2 | `src/{config,budget,checkpoint,model}.rs`, `src/stuck.rs` call site, `src/prompt/repeat_guard.rs`, `src/prompt/runtime_context.rs`, `src/subagents/manager.rs`, `crates/ee-{opencode,openrouter}-agent` | Unlimited default, opt-in caps, parallelism 10, advisory repeat reminder, pressure notice, depth line, tool-result middle prune |
+| 5b Limits + repetition | 2 | `src/{config,budget,checkpoint,model}.rs`, `src/checkpoint_budget.rs`, `src/stuck.rs` call site, `src/prompt/{repeat_guard,budget_notice,delegation}.rs`, `src/subagents/manager.rs`, `crates/ee-{opencode,openrouter}-agent` | **Core done:** unlimited default, opt-in caps, parallelism 10, repeat reminder, tool-result prune, notice/depth helpers. Wiring notice/depth into runtime contexts follows Phase 1/5 |
 | 6 Deferred slots + gates | 2, 3, 4, 5, 5b | tests, `src/prompt/sections.rs` | Inert slots documented; full validation; snapshots committed |
 
 ## 17. Risks and open questions
