@@ -8,7 +8,7 @@ authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Provider-neutral OpenAI-compatible Chat Completions transport, codec, and normalized model adapter."
 
 [dependencies]
-ee-acp-agent-server.workspace = true
+ee-agent-acp-server.workspace = true
 ee-agent-orchestrator.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

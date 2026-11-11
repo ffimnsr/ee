@@ -18,7 +18,7 @@ fn manifest_depends_on_acp_server_not_host_or_cli() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("orchestrator manifest exists");
     assert!(
-        manifest.contains("ee-acp-agent-server"),
+        manifest.contains("ee-agent-acp-server"),
         "orchestrator depends on the ACP server framework"
     );
     assert!(
@@ -52,7 +52,7 @@ fn examples_and_tests_stay_network_free_by_default() {
 
 #[test]
 fn adapter_implements_framework_agent_provider() {
-    fn assert_provider<P: ee_acp_agent_server::AgentProvider>() {}
+    fn assert_provider<P: ee_agent_acp_server::AgentProvider>() {}
     assert_provider::<OrchestratorProvider>();
 }
 

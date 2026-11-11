@@ -12,7 +12,7 @@ pub(crate) use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) use sha2::{Digest, Sha256};
 
-pub(crate) use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
+pub(crate) use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
 pub(crate) use ee_agent_protocol::{
     COMPACT_COMMAND_NAME, ContentBlock, RecoverableFault, SessionUpdate, UsageUpdate,
     parse_slash_command,

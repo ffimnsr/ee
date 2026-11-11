@@ -88,12 +88,12 @@ xi-core-lib.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
+ee-agent-acp-server = { workspace = true, features = ["test-utils"] }
 ee-agent-host = { workspace = true, features = ["test-utils"] }
 ee-agent-orchestrator.workspace = true
 ee-mcp = { workspace = true, features = ["test-utils"] }
-ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
-ee-opencode-agent = { path = "../ee-opencode-agent" }
+ee-agent-openrouter = { path = "../ee-agent-openrouter", features = ["test-utils"] }
+ee-agent-opencode = { path = "../ee-agent-opencode" }
 futures.workspace = true
 insta.workspace = true
 tempfile.workspace = true

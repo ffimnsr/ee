@@ -5,7 +5,7 @@
 //! silently fall back to a different wire format.  One connection speaks
 //! exactly one negotiated version after `initialize`; this module only answers
 //! which versions are supported, the per-connection surface selection happens
-//! in the server framework (`ee-acp-agent-server`) and the host.
+//! in the server framework (`ee-agent-acp-server`) and the host.
 
 use agent_client_protocol::schema::ProtocolVersion;
 

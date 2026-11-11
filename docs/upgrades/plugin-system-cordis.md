@@ -958,8 +958,8 @@ Port before deleting:
 
 ### 11.4 Provider crates and remote plugins
 
-- `ee-openrouter-agent` and `ee-opencode-agent` construct the orchestrator/runtime. They must create the `AgentPluginHost`, register their model adapters, and load agent-target plugins.
-- `ee-acp-agent-server` stays the ACP protocol framework; plugin host ownership sits in `ee-agent-orchestrator` so providers share one registration path.
+- `ee-agent-openrouter` and `ee-agent-opencode` construct the orchestrator/runtime. They must create the `AgentPluginHost`, register their model adapters, and load agent-target plugins.
+- `ee-agent-acp-server` stays the ACP protocol framework; plugin host ownership sits in `ee-agent-orchestrator` so providers share one registration path.
 - `ee-agent-host` (client side) forwards plugin health and agent tool results to the frontend; it does not execute agent plugins.
 - `ee-mcp` tools and MCP servers are exposed through `agent.tools`; existing MCP policy, approval, redaction, and manifest gating remain host-owned.
 - ACP agent providers and MCP servers are remote plugin transports, not in-process plugins. They contribute tools/models/structured updates only.
@@ -1044,7 +1044,7 @@ Naming note: keep `ee-xi-lsp-lib` and the `xi-lsp-plugin` binary name initially 
 | SDK helpers | `ChunkCache`, `StateCache`, `View`, `CoreProxy` are old trait plumbing | Rebuild in `ee-plugin-sdk` on snapshots/services |
 | Derive macro | `#[xi_plugin]` generates old `Plugin` impl | Replace with `ee-plugin-derive` `#[plugin]` |
 | LSP plugin internals | `plugin_impl.rs`, `conversion_utils.rs`, `document_symbols.rs`, `language_server_client.rs` use old types | Rewrite around v2 services/commands/events |
-| Agent providers | `ee-openrouter-agent`, `ee-opencode-agent` build registries directly | Create `AgentPluginHost` and register adapters |
+| Agent providers | `ee-agent-openrouter`, `ee-agent-opencode` build registries directly | Create `AgentPluginHost` and register adapters |
 | MCP/ACP | Separate config adapters | Expose through `agent.tools`/`agent.models`; remote transport, not in-process plugin |
 | Runtime loader | Grammar/query catalog is backend infrastructure | Keep in `runtime_loader`; expose read-only via `editor.syntax` |
 | Resource monitoring | Native sandbox/RSS/CPU logic in core plugin module | Move to `ee-plugin-runtime/health.rs` |
@@ -1192,7 +1192,7 @@ Work items:
 - Implement `agent.tools`, `agent.models`, `agent.policy`, `agent.context`, `agent.strategies`, `agent.sessions`, `agent.validation`.
 - Register built-in tools/models through the service path; keep `ToolRegistry` and `ServerTool` behavior.
 - Add event emission at turn, model, tool, approval, subagent, validation, and session boundaries.
-- Wire `ee-openrouter-agent` and `ee-opencode-agent` to create the host and register adapters.
+- Wire `ee-agent-openrouter` and `ee-agent-opencode` to create the host and register adapters.
 - Implement session/turn-scoped registration and disposal; reuse MCP per-prompt lifecycle.
 - Forward plugin health to `ee-agent-host` / frontend.
 - Add tests for tool registration, policy bail ordering, model adapter registration, session disposal, mandatory approval non-bypass, MCP tool gating, and deterministic replay.

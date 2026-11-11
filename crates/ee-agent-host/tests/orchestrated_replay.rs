@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ee_acp_agent_server::{
+use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
     MemoryTransportHandle,
 };
@@ -18,12 +18,12 @@ use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentEvent, AgentThread, DenyAllHandler, TurnBlocker,
     TurnTerminalStatus,
 };
+use ee_agent_openrouter::config::Config;
+use ee_agent_openrouter::orchestrated::{
+    openrouter_orchestrated_provider, test_support::ScriptedOpenRouterCompletion,
+};
 use ee_agent_protocol::{
     ContentBlock, Error as RpcError, RawJsonRpcMessage, RequestId, TextContent,
-};
-use ee_openrouter_agent::config::Config;
-use ee_openrouter_agent::orchestrated::{
-    openrouter_orchestrated_provider, test_support::ScriptedOpenRouterCompletion,
 };
 use futures::channel::mpsc as futures_mpsc;
 use futures::{StreamExt, sink, stream};

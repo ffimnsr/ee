@@ -30,7 +30,7 @@ tasks:
   install:
     commands:
       - cargo install --root "$HOME/.local" --path crates/ee-cli --bin ee --all-features --force
-      - cargo install --root "$HOME/.local" --path crates/ee-openrouter-agent --bin ee-openrouter-agent --force
+      - cargo install --root "$HOME/.local" --path crates/ee-agent-openrouter --bin ee-agent-openrouter --force
       - name: Install bundled tree-sitter runtime
         command: ./scripts/install-tree-sitter-runtime.sh --force
       - name: Install bundled plugins
@@ -40,12 +40,12 @@ tasks:
     commands:
       - pkill -TERM -f '[x]i-lsp-plugin' || true
       - pkill -TERM -x ee || true
-      - pkill -TERM -x ee-openrouter-agent || true
+      - pkill -TERM -x ee-agent-openrouter || true
       - cargo uninstall ee-cli 2>/dev/null || true
-      - cargo uninstall ee-openrouter-agent 2>/dev/null || true
+      - cargo uninstall ee-agent-openrouter 2>/dev/null || true
       - cargo uninstall --root "$HOME/.local" ee-cli 2>/dev/null || true
-      - cargo uninstall --root "$HOME/.local" ee-openrouter-agent 2>/dev/null || true
-      - rm -f "$HOME/.local/bin/ee" "$HOME/.local/bin/ee-openrouter-agent" "$HOME/.cargo/bin/ee" "$HOME/.cargo/bin/ee-openrouter-agent"
+      - cargo uninstall --root "$HOME/.local" ee-agent-openrouter 2>/dev/null || true
+      - rm -f "$HOME/.local/bin/ee" "$HOME/.local/bin/ee-agent-openrouter" "$HOME/.cargo/bin/ee" "$HOME/.cargo/bin/ee-agent-openrouter"
       - rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ee"
       - rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ee"
       - rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ee"

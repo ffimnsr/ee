@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ee_acp_agent_server::{
+use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
     MemoryTransportHandle,
 };
@@ -22,13 +22,13 @@ use ee_agent_host::{
     EvidenceCheck, EvidenceRevision, FakeTransportFactory, SafeFollowUp, TurnBlocker,
     TurnObservation, TurnTerminalStatus,
 };
-use ee_agent_protocol::{ContentBlock, RawJsonRpcMessage};
-use ee_openrouter_agent::config::Config as OpenRouterConfig;
-use ee_openrouter_agent::orchestrated::{
+use ee_agent_openrouter::config::Config as OpenRouterConfig;
+use ee_agent_openrouter::orchestrated::{
     openrouter_orchestrated_policy, openrouter_orchestrated_provider,
     openrouter_orchestrated_provider_with_turn_timeout, openrouter_orchestrator_config,
     test_support::ScriptedOpenRouterCompletion,
 };
+use ee_agent_protocol::{ContentBlock, RawJsonRpcMessage};
 use ee_plugin_api::model::{Diagnostic, DiagnosticSeverity, Range};
 use futures::channel::mpsc as futures_mpsc;
 use futures::{StreamExt, sink, stream};

@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ee_acp_agent_server::{ClientBridge, ProviderError, UpdateSink, UpdateSinkError};
+use ee_agent_acp_server::{ClientBridge, ProviderError, UpdateSink, UpdateSinkError};
 use ee_agent_protocol::{
     ContentBlock, CreateElicitationRequest, CreateTerminalRequest, ElicitationFormMode,
     ElicitationMode, ElicitationSchema, ElicitationScope, ElicitationSessionScope,
@@ -1174,8 +1174,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use ee_acp_agent_server::server::OutboundEvent;
-    use ee_acp_agent_server::{ClientBridge, UpdateSink};
+    use ee_agent_acp_server::server::OutboundEvent;
+    use ee_agent_acp_server::{ClientBridge, UpdateSink};
     use ee_agent_protocol::{
         RawJsonRpcMessage, RequestId, Response, SessionId, SessionUpdate, ToolCallStatus,
     };

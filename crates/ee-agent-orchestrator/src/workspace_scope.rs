@@ -249,11 +249,11 @@ mod tests {
     }
 
     fn plumbing() -> (
-        ee_acp_agent_server::UpdateSink,
-        ee_acp_agent_server::ClientBridge,
-        tokio::sync::mpsc::UnboundedReceiver<ee_acp_agent_server::server::OutboundEvent>,
+        ee_agent_acp_server::UpdateSink,
+        ee_agent_acp_server::ClientBridge,
+        tokio::sync::mpsc::UnboundedReceiver<ee_agent_acp_server::server::OutboundEvent>,
     ) {
-        use ee_acp_agent_server::{ClientBridge, UpdateSink};
+        use ee_agent_acp_server::{ClientBridge, UpdateSink};
         use std::time::Duration;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (
@@ -266,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn read_outside_scope_is_denied_before_bridge_call() {
         use crate::tools::ToolErrorKind;
-        use ee_acp_agent_server::server::OutboundEvent;
+        use ee_agent_acp_server::server::OutboundEvent;
         use ee_agent_protocol::{SessionId, SessionUpdate};
         use tokio::sync::watch;
 
@@ -301,10 +301,10 @@ mod tests {
     }
 
     async fn next_update(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<ee_acp_agent_server::server::OutboundEvent>,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<ee_agent_acp_server::server::OutboundEvent>,
     ) -> ee_agent_protocol::SessionUpdate {
         match rx.recv().await.expect("outbound event queued") {
-            ee_acp_agent_server::server::OutboundEvent::Update { update, .. } => *update,
+            ee_agent_acp_server::server::OutboundEvent::Update { update, .. } => *update,
             other => panic!("expected update event, got {other:?}"),
         }
     }

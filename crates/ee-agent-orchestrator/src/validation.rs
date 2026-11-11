@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::time::{Instant, SystemTime};
 
-use ee_acp_agent_server::{ClientBridge, UpdateSink};
+use ee_agent_acp_server::{ClientBridge, UpdateSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 

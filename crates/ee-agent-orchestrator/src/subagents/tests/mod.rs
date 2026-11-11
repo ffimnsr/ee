@@ -2,8 +2,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ee_acp_agent_server::server::OutboundEvent;
-use ee_acp_agent_server::{ClientBridge, PromptContext, UpdateSink};
+use ee_agent_acp_server::server::OutboundEvent;
+use ee_agent_acp_server::{ClientBridge, PromptContext, UpdateSink};
 use ee_agent_protocol::{ContentBlock, SessionId, SessionUpdate, StopReason, TextContent};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};

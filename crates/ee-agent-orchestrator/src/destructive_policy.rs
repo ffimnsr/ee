@@ -68,8 +68,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ee_acp_agent_server::server::OutboundEvent;
-    use ee_acp_agent_server::{ClientBridge, UpdateSink};
+    use ee_agent_acp_server::server::OutboundEvent;
+    use ee_agent_acp_server::{ClientBridge, UpdateSink};
     use ee_agent_protocol::{RequestId, Response, SessionId, SessionUpdate, ToolCallStatus};
     use serde_json::json;
     use tokio::sync::{mpsc, watch};

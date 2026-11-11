@@ -1,7 +1,7 @@
 //! Host ↔ framework compatibility.
 //!
 //! The real host connection stack (`AgentConnection`, SDK transport,
-//! reducer, permission broker) drives a real `ee-acp-agent-server` server
+//! reducer, permission broker) drives a real `ee-agent-acp-server` server
 //! over an in-process line bridge — no external binaries, no network.  This
 //! proves the two crates still interoperate after provider refactors:
 //! initialize handshake, session creation, prompt with streamed update, and
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ee_acp_agent_server::{
+use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
     JsonRpcFrame, LoadSessionContext, MemoryTransport, MemoryTransportHandle, NewSessionContext,
     PromptContext, PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,

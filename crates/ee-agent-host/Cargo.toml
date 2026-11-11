@@ -34,11 +34,11 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
+ee-agent-acp-server = { workspace = true, features = ["test-utils"] }
 ee-agent-host = { path = ".", features = ["test-utils"] }
 # Live replay tests need orchestrator deterministic fakes.
 ee-agent-orchestrator = { path = "../ee-agent-orchestrator", features = ["test-utils"] }
-ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
+ee-agent-openrouter = { path = "../ee-agent-openrouter", features = ["test-utils"] }
 rusqlite.workspace = true
 tempfile.workspace = true
 

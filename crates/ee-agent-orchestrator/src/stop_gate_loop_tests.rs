@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ee_acp_agent_server::{ClientBridge, PromptContext, UpdateSink};
+use ee_agent_acp_server::{ClientBridge, PromptContext, UpdateSink};
 use ee_agent_protocol::{ContentBlock, SessionId, StopReason, TextContent};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -30,7 +30,7 @@ fn task() -> TaskNode {
 }
 
 fn plumbing()
--> (UpdateSink, ClientBridge, mpsc::UnboundedReceiver<ee_acp_agent_server::server::OutboundEvent>) {
+-> (UpdateSink, ClientBridge, mpsc::UnboundedReceiver<ee_agent_acp_server::server::OutboundEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
     (
         UpdateSink::new_for_test(SessionId::new("s-1"), tx.clone()),

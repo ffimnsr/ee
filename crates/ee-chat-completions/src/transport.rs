@@ -10,7 +10,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use ee_acp_agent_server::ProviderError;
+use ee_agent_acp_server::ProviderError;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 

@@ -17,11 +17,11 @@ cat >"$package_root/ee" <<'EOF'
 exit 0
 EOF
 chmod +x "$package_root/ee"
-cat >"$package_root/ee-openrouter-agent" <<'EOF'
+cat >"$package_root/ee-agent-openrouter" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$package_root/ee-openrouter-agent"
+chmod +x "$package_root/ee-agent-openrouter"
 
 cat >"$package_root/README.md" <<'EOF'
 # ee
@@ -76,14 +76,14 @@ output="$({
 })"
 
 [[ -f "$bin_dir/ee" ]]
-[[ -f "$bin_dir/ee-openrouter-agent" ]]
+[[ -f "$bin_dir/ee-agent-openrouter" ]]
 [[ -f "$runtime_dir/queries/rust/indents.scm" ]]
 [[ -f "$plugin_dir/xi-lsp-plugin/manifest.toml" ]]
 [[ -f "$plugin_dir/xi-lsp-plugin/bin/xi-lsp-plugin" ]]
 [[ -f "$doc_dir/ee/README.md" ]]
 [[ -f "$license_dir/ee/LICENSE" ]]
 [[ -f "$license_dir/ee/LICENSE-APACHE" ]]
-[[ "$output" == *"Installed ee-openrouter-agent to $bin_dir"* ]]
+[[ "$output" == *"Installed ee-agent-openrouter to $bin_dir"* ]]
 [[ "$output" == *"Installed tree-sitter runtime to $runtime_dir"* ]]
 [[ "$output" == *"Installed bundled plugins to $plugin_dir"* ]]
 
@@ -97,7 +97,7 @@ EE_INSTALL_LOCAL_PACKAGE="$tarball" \
     --license-dir "$license_dir" \
     --without-openrouter-agent \
     --sudo true >/dev/null
-[[ ! -e "$bin_dir_without_agent/ee-openrouter-agent" ]]
+[[ ! -e "$bin_dir_without_agent/ee-agent-openrouter" ]]
 
 # A reinstall replaces bundle-owned plugin directories, so stale files from an
 # older plugin layout cannot survive, while user-added plugins stay untouched.
@@ -124,7 +124,7 @@ EE_INSTALL_LOCAL_PACKAGE="$tarball" \
 invalid_root="$tmpdir/ee-invalid-plugin"
 mkdir -p "$invalid_root/share/ee/plugins/old-plugin/bin"
 cp "$package_root/ee" "$invalid_root/ee"
-cp "$package_root/ee-openrouter-agent" "$invalid_root/ee-openrouter-agent"
+cp "$package_root/ee-agent-openrouter" "$invalid_root/ee-agent-openrouter"
 legacy_manifest_version=1
 cat >"$invalid_root/share/ee/plugins/old-plugin/manifest.toml" <<EOF
 manifest_version = ${legacy_manifest_version}

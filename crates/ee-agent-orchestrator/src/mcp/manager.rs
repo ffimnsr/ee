@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ee_acp_agent_server::ClientBridge;
+use ee_agent_acp_server::ClientBridge;
 use ee_agent_protocol::{DisconnectMcpRequest, McpConnectionId, McpServerAcpId, McpServerStdio};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, Implementation,
@@ -762,7 +762,7 @@ impl crate::tools::ServerTool for McpBackedTool {
     fn execute(
         &self,
         arguments: serde_json::Value,
-        _client: ee_acp_agent_server::ClientBridge,
+        _client: ee_agent_acp_server::ClientBridge,
         _cancel: watch::Receiver<bool>,
         _context: crate::tools::ToolCallContext,
     ) -> crate::tools::ToolFuture<crate::tools::ToolResult> {
@@ -954,7 +954,7 @@ mod fake_server_tests {
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
-    use ee_acp_agent_server::server::OutboundEvent;
+    use ee_agent_acp_server::server::OutboundEvent;
     use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RawJsonRpcParams, Response};
     use ee_mcp::fake::{FakeMcpScript, FakeMcpServer, FakeMcpTransport, FakeMcpTransportFactory};
     use serde_json::{Value, json};

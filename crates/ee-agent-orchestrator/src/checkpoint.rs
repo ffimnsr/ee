@@ -344,7 +344,7 @@ pub struct OrchestratorCheckpoint {
     /// Where this snapshot came from (e.g. `checkpoint`, `session/load`).
     pub provenance: String,
     /// Provider identity that produced the checkpoint (workspace+provider
-    /// provenance for crash restore); e.g. `ee-openrouter-agent`.
+    /// provenance for crash restore); e.g. `ee-agent-openrouter`.
     pub provider: String,
     /// Wall-clock millis when the checkpoint was captured.
     pub created_at_millis: u64,
@@ -861,7 +861,7 @@ mod tests {
             base.budget,
             base.subagents.clone(),
             base.id_generator,
-            "ee-openrouter-agent",
+            "ee-agent-openrouter",
             1_700_000_000_000,
             Some(ResumeState {
                 transcript: vec![ModelMessage::text(ModelRole::User, "hello")],
@@ -885,7 +885,7 @@ mod tests {
             }),
         )
         .expect("recovery checkpoint is valid");
-        assert_eq!(checkpoint.provider, "ee-openrouter-agent");
+        assert_eq!(checkpoint.provider, "ee-agent-openrouter");
         let json = serde_json::to_string(&checkpoint).expect("serializes");
         let restored: OrchestratorCheckpoint = serde_json::from_str(&json).expect("parses");
         assert_eq!(restored, checkpoint);

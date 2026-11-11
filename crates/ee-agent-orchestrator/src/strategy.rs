@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
+use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -943,8 +943,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ee_acp_agent_server::server::OutboundEvent;
-    use ee_acp_agent_server::{ClientBridge, UpdateSink};
+    use ee_agent_acp_server::server::OutboundEvent;
+    use ee_agent_acp_server::{ClientBridge, UpdateSink};
     use ee_agent_protocol::{ContentBlock, SessionId, StopReason, TextContent};
     use serde_json::json;
     use tokio::sync::{mpsc, watch};

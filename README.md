@@ -560,11 +560,11 @@ Known families: `openai`, `anthropic`, `google`, `deepseek`, `meta`, `mistral`, 
 
 ### LLM session compaction (`/compact`)
 
-Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
+Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-agent-openrouter` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
 
 `/compact` asks the configured model for a continuation summary and shrinks long session context:
 
-- **`ee-openrouter-agent` (simple provider)** replaces its stored history with the summary plus a recent tail. Tunables (all also `--<flag>` CLI options):
+- **`ee-agent-openrouter` (simple provider)** replaces its stored history with the summary plus a recent tail. Tunables (all also `--<flag>` CLI options):
   - `OPENROUTER_COMPACT_MIN_MESSAGES` (default `16`) — stored messages below this make `/compact` a no-op without a model call.
   - `OPENROUTER_COMPACT_RETAINED_TAIL` (default `8`) — messages kept verbatim at the tail after compaction; tool-call/tool-result pairs stay consistent.
   - `OPENROUTER_COMPACT_MAX_INPUT_BYTES` (default `65536`) — serialized history bound for the compaction request; oldest messages drop first.

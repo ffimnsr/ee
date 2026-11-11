@@ -2,7 +2,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use ee_acp_agent_server::{
+use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, JsonRpcFrame, MemoryTransport,
     MemoryTransportHandle,
 };

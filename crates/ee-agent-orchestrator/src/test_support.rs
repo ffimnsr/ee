@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use ee_acp_agent_server::ClientBridge;
+use ee_agent_acp_server::ClientBridge;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 

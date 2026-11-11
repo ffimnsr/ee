@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use ee_acp_agent_server::ProviderError;
+use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, StreamSink,
 };

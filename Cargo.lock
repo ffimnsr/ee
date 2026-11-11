@@ -1449,10 +1449,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "ee-acp-agent-server"
+name = "ee-agent-acp-server"
 version = "0.11.12"
 dependencies = [
- "ee-acp-agent-server",
+ "ee-agent-acp-server",
  "ee-agent-protocol",
  "futures",
  "serde",
@@ -1467,13 +1467,13 @@ version = "0.11.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "ee-acp-agent-server",
+ "ee-agent-acp-server",
  "ee-agent-host",
  "ee-agent-memory",
+ "ee-agent-openrouter",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
  "ee-mcp",
- "ee-openrouter-agent",
  "futures",
  "reqwest 0.12.28",
  "rmcp",
@@ -1504,10 +1504,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-agent-opencode"
+version = "0.11.12"
+dependencies = [
+ "clap",
+ "dirs",
+ "ee-agent-acp-server",
+ "ee-agent-opencode",
+ "ee-agent-orchestrator",
+ "ee-agent-protocol",
+ "ee-chat-completions",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ee-agent-openrouter"
+version = "0.11.12"
+dependencies = [
+ "clap",
+ "dirs",
+ "ee-agent-acp-server",
+ "ee-agent-orchestrator",
+ "ee-agent-protocol",
+ "ee-chat-completions",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ee-agent-orchestrator"
 version = "0.11.12"
 dependencies = [
- "ee-acp-agent-server",
+ "ee-agent-acp-server",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
  "ee-mcp",
@@ -1537,7 +1570,7 @@ dependencies = [
 name = "ee-chat-completions"
 version = "0.11.12"
 dependencies = [
- "ee-acp-agent-server",
+ "ee-agent-acp-server",
  "ee-agent-orchestrator",
  "reqwest 0.12.28",
  "serde_json",
@@ -1559,13 +1592,13 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
- "ee-acp-agent-server",
+ "ee-agent-acp-server",
  "ee-agent-host",
+ "ee-agent-opencode",
+ "ee-agent-openrouter",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
  "ee-mcp",
- "ee-opencode-agent",
- "ee-openrouter-agent",
  "ee-plugin-api",
  "ee-plugin-runtime",
  "ee-xi-core-lib",
@@ -1620,39 +1653,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "ee-opencode-agent"
-version = "0.11.12"
-dependencies = [
- "clap",
- "dirs",
- "ee-acp-agent-server",
- "ee-agent-orchestrator",
- "ee-agent-protocol",
- "ee-chat-completions",
- "ee-opencode-agent",
- "reqwest 0.12.28",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "ee-openrouter-agent"
-version = "0.11.12"
-dependencies = [
- "clap",
- "dirs",
- "ee-acp-agent-server",
- "ee-agent-orchestrator",
- "ee-agent-protocol",
- "ee-chat-completions",
- "reqwest 0.12.28",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

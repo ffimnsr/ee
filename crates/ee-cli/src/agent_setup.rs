@@ -1,6 +1,6 @@
 //! Interactive setup for local and ACP Registry agent servers.
 //!
-//! Local `ee-*-agent` candidates provide a bounded versioned `--ee-config`
+//! Local `ee-agent-*` candidates provide a bounded versioned `--ee-config`
 //! manifest. Registry agents use registry launch metadata only; authentication
 //! and provider configuration remain owned by each external agent.
 
@@ -311,9 +311,7 @@ fn discover_agents(directory: &Path) -> Result<Vec<AgentCandidate>, String> {
 }
 
 fn is_agent_file_name(name: &str) -> bool {
-    name.strip_prefix("ee-")
-        .and_then(|name| name.strip_suffix("-agent"))
-        .is_some_and(|name| !name.is_empty())
+    name.strip_prefix("ee-agent-").is_some_and(|name| !name.is_empty())
 }
 
 fn is_executable_file(path: &Path) -> Result<bool, String> {
@@ -586,8 +584,8 @@ mod tests {
         let mut candidates = [
             SetupCandidate::Registry(Box::new(registry)),
             SetupCandidate::Local(AgentCandidate {
-                path: PathBuf::from("/tmp/ee-zulu-agent"),
-                file_name: String::from("ee-zulu-agent"),
+                path: PathBuf::from("/tmp/ee-agent-zulu"),
+                file_name: String::from("ee-agent-zulu"),
             }),
         ];
 
@@ -598,19 +596,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_file_name_requires_nonempty_ee_name_agent_pattern() {
-        assert!(is_agent_file_name("ee-openrouter-agent"));
-        assert!(is_agent_file_name("ee-a-agent"));
-        assert!(!is_agent_file_name("ee--agent"));
-        assert!(!is_agent_file_name("openrouter-agent"));
-        assert!(!is_agent_file_name("ee-openrouter"));
+    fn agent_file_name_requires_nonempty_ee_agent_name_pattern() {
+        assert!(is_agent_file_name("ee-agent-openrouter"));
+        assert!(is_agent_file_name("ee-agent-a"));
+        assert!(!is_agent_file_name("ee-agent-"));
+        assert!(!is_agent_file_name("agent-openrouter"));
+        assert!(!is_agent_file_name("ee-openrouter-agent"));
     }
 
     #[test]
     fn discovery_only_returns_executable_agent_servers() {
         let temp = tempfile::tempdir().expect("temp directory");
-        let executable = temp.path().join("ee-openrouter-agent");
-        let not_executable = temp.path().join("ee-other-agent");
+        let executable = temp.path().join("ee-agent-openrouter");
+        let not_executable = temp.path().join("ee-agent-other");
         let unrelated = temp.path().join("ee-not-agent.txt");
         fs::write(&executable, "#!/bin/sh\n").expect("write executable");
         fs::write(&not_executable, "#!/bin/sh\n").expect("write non-executable");
@@ -625,7 +623,7 @@ mod tests {
         let candidates = discover_agents(temp.path()).expect("discover agents");
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].file_name, "ee-openrouter-agent");
+        assert_eq!(candidates[0].file_name, "ee-agent-openrouter");
     }
 
     #[cfg(unix)]
@@ -634,7 +632,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let temp = tempfile::tempdir().expect("temp directory");
-        let agent = temp.path().join("ee-example-agent");
+        let agent = temp.path().join("ee-agent-example");
         fs::write(
             &agent,
             "#!/bin/sh\nprintf '%s' '{\"schema_version\":1,\"agent\":{\"id\":\"example\",\"display_name\":\"Example\"},\"env_vars\":[],\"inputs\":[]}'\n",
@@ -684,13 +682,13 @@ mod tests {
 
     // ── OpenCode provider setup (Phase 5 integration) ────────────────────
 
-    /// The OpenCode agent ships as one more local `ee-*-agent` binary, so the
+    /// The OpenCode agent ships as one more local `ee-agent-*` binary, so the
     /// generic discovery pattern has to accept it unchanged.
     #[test]
     fn opencode_agent_discovers_as_one_local_provider() {
-        assert!(is_agent_file_name("ee-opencode-agent"));
+        assert!(is_agent_file_name("ee-agent-opencode"));
 
-        let manifest = ee_opencode_agent::config::setup_manifest();
+        let manifest = ee_agent_opencode::config::setup_manifest();
         assert_eq!(manifest.agent.id, "opencode");
         assert_eq!(manifest.agent.display_name, "OpenCode");
         assert!(!manifest.agent.id.contains("openrouter"), "not an OpenRouter alias");
@@ -701,17 +699,17 @@ mod tests {
     /// setup path enforces, including unique environment destinations.
     #[test]
     fn opencode_manifest_passes_host_setup_validation_with_explicit_surface_selection() {
-        let manifest = validate_manifest(ee_opencode_agent::config::setup_manifest())
+        let manifest = validate_manifest(ee_agent_opencode::config::setup_manifest())
             .expect("host setup accepts the OpenCode manifest");
 
         let key = manifest
             .env_vars
             .iter()
-            .find(|env| env.name == ee_opencode_agent::config::API_KEY_ENV)
+            .find(|env| env.name == ee_agent_opencode::config::API_KEY_ENV)
             .expect("api key variable");
         assert!(key.required && key.secret, "the OpenCode key is required and secret");
 
-        for env in [ee_opencode_agent::config::SURFACE_ENV, ee_opencode_agent::config::MODEL_ENV] {
+        for env in [ee_agent_opencode::config::SURFACE_ENV, ee_agent_opencode::config::MODEL_ENV] {
             let input = manifest
                 .inputs
                 .iter()
@@ -725,7 +723,7 @@ mod tests {
     /// host never claims billing, balance, usage, or account capability.
     #[test]
     fn opencode_manifest_keeps_provider_claims_with_provider() {
-        let manifest = ee_opencode_agent::config::setup_manifest();
+        let manifest = ee_agent_opencode::config::setup_manifest();
         let mut text = vec![manifest.agent.display_name.clone()];
         text.extend(manifest.env_vars.iter().map(|env| env.description.clone()));
         text.extend(manifest.inputs.iter().map(|input| input.label.clone()));

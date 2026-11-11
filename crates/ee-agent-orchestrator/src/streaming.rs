@@ -12,7 +12,7 @@
 //! emitted stay, later chunks are dropped, and the merged turn records that
 //! it was cancelled.
 
-use ee_acp_agent_server::UpdateSink;
+use ee_agent_acp_server::UpdateSink;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
@@ -259,7 +259,7 @@ where
 mod tests {
     use super::*;
 
-    use ee_acp_agent_server::server::OutboundEvent;
+    use ee_agent_acp_server::server::OutboundEvent;
     use ee_agent_protocol::{SessionId, SessionUpdate};
     use tokio::sync::mpsc;
 

@@ -494,7 +494,7 @@ fn agent_setup_writes_complete_server_to_global_config_only() {
 
     let path = configure_global_agent_server_with_env(
         "openrouter",
-        Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+        Path::new("/home/example/.local/bin/ee-agent-openrouter"),
         &[String::from("--stdio")],
         &values,
         &env,
@@ -509,7 +509,7 @@ fn agent_setup_writes_complete_server_to_global_config_only() {
     assert_eq!(document["agents"]["default_agent"].as_str(), Some("openrouter"));
     assert_eq!(
         document["agents"]["servers"]["openrouter"]["command"].as_str(),
-        Some("/home/example/.local/bin/ee-openrouter-agent")
+        Some("/home/example/.local/bin/ee-agent-openrouter")
     );
     assert_eq!(
         document["agents"]["servers"]["openrouter"]["args"],
@@ -538,7 +538,7 @@ fn agent_setup_local_scope_writes_secret_references_into_workspace_config() {
     let path = configure_agent_server_with_env(
         ConfigScope::Local,
         "openrouter",
-        Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+        Path::new("/home/example/.local/bin/ee-agent-openrouter"),
         &[String::from("--stdio")],
         &BTreeMap::from([
             (String::from("OPENROUTER_MODEL"), String::from("example/model")),
@@ -557,7 +557,7 @@ fn agent_setup_local_scope_writes_secret_references_into_workspace_config() {
     assert_eq!(workspace["agents"]["default_agent"].as_str(), Some("openrouter"));
     assert_eq!(
         workspace["agents"]["servers"]["openrouter"]["command"].as_str(),
-        Some("/home/example/.local/bin/ee-openrouter-agent")
+        Some("/home/example/.local/bin/ee-agent-openrouter")
     );
     assert_eq!(
         workspace["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_MODEL"].as_str(),
@@ -577,7 +577,7 @@ fn agent_setup_local_scope_writes_secret_references_into_workspace_config() {
     // workspace trust gate applies at resolve time.
     let settings = load_for(&env);
     let server = settings.agents.servers.get("openrouter").expect("merged server");
-    assert_eq!(server.command, "/home/example/.local/bin/ee-openrouter-agent");
+    assert_eq!(server.command, "/home/example/.local/bin/ee-agent-openrouter");
     let api_key = server.env.get("OPENROUTER_API_KEY").expect("env value");
     assert_eq!(api_key.raw, "secret://agent.openrouter.OPENROUTER_API_KEY");
     assert_eq!(api_key.layer, ConfigLayerKind::Ancestor);
@@ -597,7 +597,7 @@ fn agent_setup_local_scope_without_secrets_writes_only_workspace_config() {
     let path = configure_agent_server_with_env(
         ConfigScope::Local,
         "helper",
-        Path::new("/home/example/.local/bin/ee-helper-agent"),
+        Path::new("/home/example/.local/bin/ee-agent-helper"),
         &[],
         &values,
         &env,

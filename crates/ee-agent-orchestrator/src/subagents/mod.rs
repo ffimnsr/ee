@@ -27,7 +27,7 @@ pub(crate) use std::fmt;
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::{Arc, Mutex, RwLock};
 
-pub(crate) use ee_acp_agent_server::{ClientBridge, UpdateSink};
+pub(crate) use ee_agent_acp_server::{ClientBridge, UpdateSink};
 pub(crate) use ee_agent_protocol::SessionId;
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use tokio::sync::{Semaphore, mpsc, watch};

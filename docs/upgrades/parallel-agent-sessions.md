@@ -96,12 +96,12 @@ Full agent config reference: [Config and schema](../../wiki/config.md#agent-proc
 
 ### One ee-owned OpenRouter root and critic
 
-`ee-openrouter-agent` owns both model calls inside one process. Configure contrasting root/critic model ids and families at startup; keep API key in secure process environment, never checked-in config:
+`ee-agent-openrouter` owns both model calls inside one process. Configure contrasting root/critic model ids and families at startup; keep API key in secure process environment, never checked-in config:
 
 ```toml
 [agents.servers.openrouter]
 label = "OpenRouter root + critic"
-command = "ee-openrouter-agent"
+command = "ee-agent-openrouter"
 
 [agents.servers.openrouter.env]
 OPENROUTER_MODEL = "<ROOT_MODEL_ID>"

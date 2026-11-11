@@ -17,7 +17,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use ee_acp_agent_server::{ClientBridge, ProviderError};
+use ee_agent_acp_server::{ClientBridge, ProviderError};
 use ee_agent_protocol::{
     ConnectMcpRequest, DisconnectMcpRequest, McpConnectionId, McpServerAcpId,
     MessageMcpNotification, MessageMcpRequest,
@@ -195,7 +195,7 @@ impl Transport<RoleClient> for AcpBridgeTransport {
 mod tests {
     use std::sync::Arc;
 
-    use ee_acp_agent_server::server::OutboundEvent;
+    use ee_agent_acp_server::server::OutboundEvent;
     use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RawJsonRpcParams, Response};
     use rmcp::model::{ClientNotification, ClientRequest, RequestId, ServerResult};
     use serde_json::{Value, json};

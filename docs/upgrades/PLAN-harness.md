@@ -486,7 +486,7 @@ DSH caps concurrency, repeats, time, and delegation, but **not turns or total to
 - `BudgetSnapshot` carries `Option<usize>` caps; `Display` renders `unbounded`.
 - `restore_used` compares `Option` caps and only rejects a usage above a configured `Some(max)`.
 - Bump `CHECKPOINT_SCHEMA_VERSION` because the serialized cap shape changes; old checkpoints fail closed instead of being migrated.
-- `ee-opencode-agent` and `ee-openrouter-agent` expose `max_iterations` as optional; omit means unlimited, explicit `0` fails validation.
+- `ee-agent-opencode` and `ee-agent-openrouter` expose `max_iterations` as optional; omit means unlimited, explicit `0` fails validation.
 - Subagent roles and rubber-duck recursion keep finite local caps (`Some(role.max_iterations)`); they are child safety budgets, not the root default. A child timeout remains finite.
 - `stuck.rs`, host cancellation, and per-tool `tool_timeout` remain. Those are behavioral/execution guards, not step counters.
 - No prompt text advertises a cap. A pressure notice exists only for a finite opt-in cap.

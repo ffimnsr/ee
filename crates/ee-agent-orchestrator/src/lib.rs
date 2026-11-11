@@ -1,20 +1,20 @@
 //! Optional server-side orchestration layer above
-//! [`ee-acp-agent-server`](https://docs.rs/ee-acp-agent-server).
+//! [`ee-agent-acp-server`](https://docs.rs/ee-agent-acp-server).
 //!
 //! This crate provides provider-agnostic agent-loop primitives for
 //! server-side agent binaries: a bounded model–tool loop, a typed tool
 //! registry, task and memory stores, budgets, policy gates, and (in later
 //! phases) subagent delegation.  It sits *above* the ACP protocol runtime:
 //! [`OrchestratorRuntime::run_turn`] consumes a framework
-//! [`PromptContext`](ee_acp_agent_server::PromptContext), streams updates
-//! through an [`UpdateSink`](ee_acp_agent_server::UpdateSink), and makes
+//! [`PromptContext`](ee_agent_acp_server::PromptContext), streams updates
+//! through an [`UpdateSink`](ee_agent_acp_server::UpdateSink), and makes
 //! agent → client calls through a
-//! [`ClientBridge`](ee_acp_agent_server::ClientBridge).  Model calls are
+//! [`ClientBridge`](ee_agent_acp_server::ClientBridge).  Model calls are
 //! delegated to provider-supplied [`ModelAdapter`] implementations, so the
 //! orchestrator never depends on a specific model backend.
 //!
 //! The crate is optional: providers may serve ACP directly through
-//! `ee-acp-agent-server` without it.  It is server-side only and never
+//! `ee-agent-acp-server` without it.  It is server-side only and never
 //! depends on editor/client-side crates (`ee-agent-host`, `ee-cli`).
 //!
 //! # Module map
@@ -64,7 +64,7 @@
 //!   intended write scopes of concurrent subagents are rejected before spawn
 //!   and locks are released on completion or cancellation.
 //! - [`provider_adapter`] — [`OrchestratorProvider`]: wraps the runtime as an
-//!   ACP [`AgentProvider`](ee_acp_agent_server::AgentProvider).
+//!   ACP [`AgentProvider`](ee_agent_acp_server::AgentProvider).
 //! - [`checkpoint`] — serializable session snapshots with fail-closed restore
 //!   validation, provenance reports, and deterministic id generator state.
 //! - [`session_log`] — append-only per-session log: content-addressed message

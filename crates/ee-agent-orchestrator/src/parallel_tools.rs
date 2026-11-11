@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ee_acp_agent_server::{ClientBridge, UpdateSink};
+use ee_agent_acp_server::{ClientBridge, UpdateSink};
 use tokio::sync::watch;
 
 use crate::error::OrchestratorError;
@@ -151,8 +151,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ee_acp_agent_server::server::OutboundEvent;
-    use ee_acp_agent_server::{ClientBridge, UpdateSink};
+    use ee_agent_acp_server::server::OutboundEvent;
+    use ee_agent_acp_server::{ClientBridge, UpdateSink};
     use ee_agent_protocol::SessionId;
     use serde_json::{Value, json};
     use tokio::sync::{mpsc, watch};

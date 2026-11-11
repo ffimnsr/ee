@@ -356,7 +356,7 @@ mod tests {
         fn execute(
             &self,
             _arguments: serde_json::Value,
-            _client: ee_acp_agent_server::ClientBridge,
+            _client: ee_agent_acp_server::ClientBridge,
             _cancel: watch::Receiver<bool>,
             _context: crate::tools::ToolCallContext,
         ) -> crate::tools::ToolFuture<ToolResult> {

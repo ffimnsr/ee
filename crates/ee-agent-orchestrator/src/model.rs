@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use ee_acp_agent_server::PromptContext;
+use ee_agent_acp_server::PromptContext;
 use ee_agent_protocol::ContentBlock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -321,8 +321,8 @@ impl ModelUsage {
 pub(crate) fn prompt_result_with_usage(
     stop_reason: ee_agent_protocol::StopReason,
     usage: ModelUsage,
-) -> ee_acp_agent_server::PromptResult {
-    let mut result = ee_acp_agent_server::PromptResult::new(stop_reason);
+) -> ee_agent_acp_server::PromptResult {
+    let mut result = ee_agent_acp_server::PromptResult::new(stop_reason);
     if let Some(usage) = usage.acp_usage() {
         result = result.usage(usage);
     }
@@ -734,7 +734,7 @@ pub trait ModelAdapter: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use ee_acp_agent_server::PromptContext;
+    use ee_agent_acp_server::PromptContext;
     use ee_agent_protocol::{
         AudioContent, ContentBlock, ImageContent, ResourceLink, SessionId, TextContent,
     };

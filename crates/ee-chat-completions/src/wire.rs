@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ee_acp_agent_server::ProviderError;
+use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelContent, ModelMessage, ModelResponse, ModelRole, ModelUsage, ToolDefinition, ToolIntent,
 };

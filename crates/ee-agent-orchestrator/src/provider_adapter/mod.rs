@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ee_acp_agent_server::{
+use ee_agent_acp_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
     PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
 };

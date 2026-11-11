@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use ee_acp_agent_server::PromptResult;
+use ee_agent_acp_server::PromptResult;
 use ee_agent_protocol::{RecoverableError, RecoverableFault};
 
 use crate::checkpoint::{OrchestratorCheckpoint, current_unix_millis};

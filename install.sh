@@ -8,7 +8,7 @@
 REPO_OWNER="ffimnsr"
 REPO_NAME="ee"
 PACKAGE_NAME="ee"
-OPENROUTER_AGENT_NAME="ee-openrouter-agent"
+OPENROUTER_AGENT_NAME="ee-agent-openrouter"
 
 main() {
     if [ "${KSH_VERSION-}" = 'Version JM 93t+ 2010-03-05' ]; then

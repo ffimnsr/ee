@@ -458,8 +458,8 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
   - [x] Apply effects for tool results, context updates, and session control.
   - [x] Add tests for event order, bail precedence, effect application, and cancellation.
 - [x] Wire provider crates.
-  - [x] Update `ee-openrouter-agent` to construct `AgentPluginHost` and register its model adapter.
-  - [x] Update `ee-opencode-agent` to construct `AgentPluginHost` and register its model adapter.
+  - [x] Update `ee-agent-openrouter` to construct `AgentPluginHost` and register its model adapter.
+  - [x] Update `ee-agent-opencode` to construct `AgentPluginHost` and register its model adapter.
   - [x] Update `ee-agent-host` to forward plugin health/status to the frontend.
   - [x] Add tests for provider construction and adapter registration.
 - [x] Bridge MCP and remote ACP into the service path.
@@ -475,8 +475,8 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 **Acceptance criteria:**
 
 - `cargo test --quiet -p ee-agent-orchestrator` passes.
-- `cargo test --quiet -p ee-openrouter-agent` passes.
-- `cargo test --quiet -p ee-opencode-agent` passes.
+- `cargo test --quiet -p ee-agent-openrouter` passes.
+- `cargo test --quiet -p ee-agent-opencode` passes.
 - `cargo test --quiet -p ee-agent-host` passes.
 - Mandatory approval and destructive policy tests prove plugin listeners cannot bypass host rules.
 - Replay fixtures remain deterministic.
@@ -950,8 +950,8 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants and child timeout finite.
   - [x] Update every `BudgetSnapshot` / config literal in tests/fixtures to `Some(...)` or `None`; no bare numeric caps remain.
 - [x] Make provider limits optional.
-  - [x] `ee-opencode-agent`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
-  - [x] `ee-openrouter-agent`: same change, including the manifest input description and default.
+  - [x] `ee-agent-opencode`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
+  - [x] `ee-agent-openrouter`: same change, including the manifest input description and default.
   - [x] Map directly into `OrchestratorConfig` without `unwrap_or(0)`; omitted means `None`.
   - [x] Update provider tests: default is `None`; explicit values are `Some(n)`; `0` is rejected.
 - [x] Add unlimited-default regression tests.

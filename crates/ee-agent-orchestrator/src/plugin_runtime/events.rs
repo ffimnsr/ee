@@ -308,9 +308,9 @@ mod tests {
             for forbidden in ["prompt", "transcript", "tool_output", "arguments"] {
                 assert!(!object.contains_key(forbidden), "payload leaked {forbidden}");
             }
-            assert!(!object.values().any(|value| value
-                .as_str()
-                .is_some_and(|text| text.contains("ignore previous instructions"))));
+            assert!(!object.values().any(|value| {
+                value.as_str().is_some_and(|text| text.contains("ignore previous instructions"))
+            }));
         }
     }
 

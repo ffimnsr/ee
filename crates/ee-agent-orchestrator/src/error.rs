@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use ee_acp_agent_server::ProviderError;
+use ee_agent_acp_server::ProviderError;
 
 /// Orchestrator-level failure, distinct from framework and provider errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn provider_error_mapping_preserves_kind() {
-        use ee_acp_agent_server::ProviderError;
+        use ee_agent_acp_server::ProviderError;
         let cases: Vec<(OrchestratorError, ProviderError)> = vec![
             (
                 OrchestratorError::ModelFailure("m".into()),
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn provider_error_mapping_hits_expected_jsonrpc_codes() {
-        use ee_acp_agent_server::ProviderError;
+        use ee_agent_acp_server::ProviderError;
         let denied: ProviderError = OrchestratorError::PolicyDenied("no".into()).into();
         assert_eq!(denied.jsonrpc_code(), -32001);
         let cancelled: ProviderError = OrchestratorError::Cancellation.into();

@@ -113,7 +113,7 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.prepend_system("Memory facts:\n...");
         assert_eq!(transcript.messages()[0].trust, TrustLevel::SystemPolicy);
-        let ctx = ee_acp_agent_server::PromptContext::new(
+        let ctx = ee_agent_acp_server::PromptContext::new(
             ee_agent_protocol::SessionId::new("s-1"),
             vec![ee_agent_protocol::ContentBlock::Text(ee_agent_protocol::TextContent::new(
                 "hello",
