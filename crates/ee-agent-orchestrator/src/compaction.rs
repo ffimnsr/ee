@@ -81,22 +81,45 @@ impl CompactTurnReport {
     }
 }
 
-/// Builds the compaction prompt asking the model for the sections a
-/// continuation summary must preserve; optional user instructions are
-/// appended verbatim.
+/// Builds the compaction checkpoint instruction.
+///
+/// Section order follows DeepSeek Harness's compaction engine so a continuation
+/// summary has the same shape. `ee` keeps its own evidence fields as context
+/// (task graph, memory facts, validation facts, budget) and drops the DSH
+/// `Pending Jobs` section because `ee` advertises no job tools. Optional user
+/// instructions are appended verbatim.
 #[must_use]
 pub fn build_compaction_prompt(instructions: Option<&str>) -> String {
     let mut prompt = String::from(
-        "Write a compact continuation summary of this agent session. Cover:\n\
-         - the user goal\n\
-         - completed work\n\
-         - the current state\n\
-         - important files and symbols\n\
-         - decisions and constraints\n\
-         - pending work\n\
-         - validation status\n\
-         - risks and errors\n\
-         Keep the summary high-signal and provenance-aware: preserve facts a continuation needs.",
+        "You are acting as a compaction engine for this coding agent session. Condense the \
+         conversation ABOVE into a structured checkpoint that lets another model resume the \
+         work with no loss of essential context.\n\n\
+         Output EXACTLY the Markdown structure below. Keep every section, in order. Use terse \
+         bullets, not prose paragraphs. Write \"(none)\" for an empty section; never drop a \
+         section.\n\n\
+         ## Primary Request and Intent\n\
+         - [the user's original and evolving goals; quote verbatim where the exact wording matters]\n\n\
+         ## Key Technical Concepts\n\
+         - [technologies, frameworks, patterns, and conventions in play]\n\n\
+         ## Files and Code\n\
+         - [exact path: why it matters, key changes or snippets]\n\n\
+         ## Errors and Fixes\n\
+         - [error: how it was resolved, plus any related user feedback]\n\n\
+         ## Current Work\n\
+         - [precisely what was in progress at this checkpoint]\n\n\
+         ## Next Step\n\
+         - [the single next action, in line with the most recent request, or \"(none)\"]\n\n\
+         ## Critical Context\n\
+         - [decisions and rationale, constraints, user preferences, open questions, \
+         validation status, and data needed to continue]\n\n\
+         Rules:\n\
+         - Preserve exact file paths, commands, error strings, identifiers, numeric values, \
+         function signatures, and syntax fragments.\n\
+         - Capture user feedback and explicit instructions faithfully, especially corrections.\n\
+         - Record validation evidence exactly as observed; never claim a check passed without \
+         evidence, and say when validation could not run.\n\
+         - Do not mention this summarization request or that the context was compacted.\n\
+         - Output only the checkpoint text. Do not call any tool or take any other action.",
     );
     if let Some(instructions) = instructions.filter(|text| !text.trim().is_empty()) {
         prompt.push_str("\nAdditional instructions: ");
@@ -282,17 +305,31 @@ mod tests {
     fn compaction_prompt_covers_required_sections() {
         let prompt = build_compaction_prompt(None);
         for section in [
-            "user goal",
-            "completed work",
-            "current state",
-            "important files and symbols",
-            "decisions and constraints",
-            "pending work",
-            "validation status",
-            "risks and errors",
+            "## Primary Request and Intent",
+            "## Key Technical Concepts",
+            "## Files and Code",
+            "## Errors and Fixes",
+            "## Current Work",
+            "## Next Step",
+            "## Critical Context",
         ] {
             assert!(prompt.contains(section), "prompt must cover {section:?}");
         }
+        assert!(!prompt.contains("## Pending Jobs"), "no job tools exist: {prompt}");
+        let mut order = Vec::new();
+        for section in [
+            "## Primary Request and Intent",
+            "## Key Technical Concepts",
+            "## Files and Code",
+            "## Errors and Fixes",
+            "## Current Work",
+            "## Next Step",
+            "## Critical Context",
+        ] {
+            order.push(prompt.find(section).expect("section present"));
+        }
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{prompt}");
+        assert!(prompt.contains("never claim a check passed"), "{prompt}");
     }
 
     #[test]
@@ -301,6 +338,24 @@ mod tests {
         assert!(prompt.contains("keep API v2"), "{prompt}");
         assert!(prompt.contains("Additional instructions"), "{prompt}");
         assert!(!build_compaction_prompt(None).contains("Additional instructions"));
+    }
+
+    #[test]
+    fn compaction_prompt_ports_no_foreign_product_or_tool_names() {
+        let prompt = build_compaction_prompt(None);
+        for forbidden in [
+            "DeepSeek",
+            "deepseek",
+            "Harness",
+            "dsh",
+            "apply_patch",
+            "run_code",
+            "job_output",
+            "@path",
+            "Pending Jobs",
+        ] {
+            assert!(!prompt.contains(forbidden), "compaction prompt leaks {forbidden:?}");
+        }
     }
 
     #[test]

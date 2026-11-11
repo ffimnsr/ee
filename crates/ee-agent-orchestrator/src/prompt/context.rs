@@ -6,6 +6,7 @@
 
 use crate::context_planner::ContextPlan;
 use crate::model::{ModelMessage, ModelRole, Transcript};
+use crate::prompt::mcp::McpInstructionMessage;
 use crate::trust::TrustLevel;
 
 /// Exact prefix of the runtime-context snapshot message.
@@ -58,6 +59,8 @@ pub(crate) struct TurnSystemContext {
     pub runtime: Option<RuntimeSnapshot>,
     /// Workspace instruction messages delivered after retained history.
     pub workspace: Vec<WorkspaceMessage>,
+    /// MCP server instruction messages delivered after the runtime snapshot.
+    pub mcp: Vec<McpInstructionMessage>,
 }
 
 impl TurnSystemContext {
@@ -83,6 +86,7 @@ impl TurnSystemContext {
         if let Some(runtime) = self.runtime.filter(|snapshot| !snapshot.text.trim().is_empty()) {
             messages.push(runtime_message(&runtime.text));
         }
+        messages.extend(self.mcp.into_iter().map(|instruction| instruction.message));
         messages.extend(prompt_messages);
         transcript.messages = messages;
         if let Some(task_context) = self.task_context {
@@ -99,7 +103,7 @@ impl TurnSystemContext {
 fn is_refreshable_prompt(message: &ModelMessage) -> bool {
     matches!(
         message.metadata.get("ee_prompt").map(String::as_str),
-        Some("runtime_context" | "workspace_instructions")
+        Some("runtime_context" | "workspace_instructions" | "mcp_server_instructions")
     )
 }
 
@@ -171,6 +175,62 @@ mod tests {
                 "current".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mcp_instructions_follow_the_runtime_snapshot() {
+        use crate::prompt::mcp::McpInstructionMessage;
+        use crate::trust::TrustLevel;
+
+        let mut transcript = Transcript::new();
+        let context = TurnSystemContext {
+            runtime: Some(RuntimeSnapshot { text: "cwd".into() }),
+            mcp: vec![McpInstructionMessage {
+                server: "docs".into(),
+                message: ModelMessage::text(ModelRole::User, "server instructions")
+                    .with_trust(TrustLevel::McpServerUntrusted)
+                    .with_metadata([("ee_prompt".into(), "mcp_server_instructions".into())]),
+            }],
+            ..TurnSystemContext::default()
+        };
+        context.apply_to_transcript(
+            &mut transcript,
+            vec![ModelMessage::text(ModelRole::User, "current")],
+        );
+
+        let texts: Vec<_> = transcript.messages.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                format!("{RUNTIME_CONTEXT_HEADER}\n\ncwd"),
+                "server instructions".to_string(),
+                "current".to_string(),
+            ]
+        );
+        assert_eq!(transcript.messages[1].trust, TrustLevel::McpServerUntrusted);
+    }
+
+    #[test]
+    fn stale_mcp_instructions_are_replaced_by_the_fresh_snapshot() {
+        use crate::prompt::mcp::McpInstructionMessage;
+
+        let stale = ModelMessage::text(ModelRole::User, "old server instructions")
+            .with_metadata([("ee_prompt".into(), "mcp_server_instructions".into())]);
+        let context = TurnSystemContext {
+            history: vec![stale],
+            mcp: vec![McpInstructionMessage {
+                server: "docs".into(),
+                message: ModelMessage::text(ModelRole::User, "new server instructions"),
+            }],
+            ..TurnSystemContext::default()
+        };
+        let mut transcript = Transcript::new();
+        context.apply_to_transcript(
+            &mut transcript,
+            vec![ModelMessage::text(ModelRole::User, "current")],
+        );
+        let texts: Vec<_> = transcript.messages.iter().map(text).collect();
+        assert_eq!(texts, vec!["new server instructions".to_string(), "current".to_string()]);
     }
 
     #[test]

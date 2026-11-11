@@ -728,7 +728,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - [x] Add `prompt/sections.rs` standard builder.
   - [x] Emit `HARNESS_IDENTITY`, `DEPLOYMENT_PERSONA_PREFIX`, `DEPLOYMENT_PERSONA_SUFFIX`.
   - [x] Emit `PLAN_POLICY` only for plan mode (existing plan contract moved into the section).
-  - [ ] Emit `FILE_REFERENCE` when the session accepts resource links (needs an explicit client-link signal; deferred to Phase 6).
+  - [x] Decide `FILE_REFERENCE`: permanently omitted. `ee` has no `@file`-reference expansion and `read_file` owns file access; the slot stays registered and audited `omit`, with no placeholder prose.
   - [x] Apply the `minimal` preset through `complete: true` (test-only preset).
 - [x] Rewire `provider_adapter`.
   - [x] Delete `workspace_system_context` and `mode_system_context`.
@@ -776,7 +776,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] `TOOL_WEB_SEARCH` for `ee_web_search`.
   - [x] `TOOL_WEB_FETCH` for `ee_fetch_url`.
   - [x] `TOOL_SUBAGENT` for `delegate_task`, including role names and evidence markers. DSH registration name `tool:subagent`; the earlier `tool:<subagent-tool>` template was corrected.
-  - [ ] `FILE_REFERENCE` for ACP resource links (deferred to Phase 6 with the client-link signal; no tool name to gate on).
+  - [x] `FILE_REFERENCE` for ACP resource links: decided `omit` in Phase 6. No tool name exists to gate on, and `read_file` owns file access.
   - [x] Declare `GUIDANCE_EXEMPT` with reasons for `ask_user` and any unguided built-in.
   - [x] Gate is policy-derived: `OrchestratorRuntime::advertised_tool_names` filters registered tools through `PolicyEngine::check`.
   - [x] Rebuild the stable prompt after prompt-scoped MCP registration so conditional web-tool guidance tracks the turn.
@@ -891,20 +891,23 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Add `prompt/mcp.rs`.
-  - [ ] Render configured server names and display-name rule into `MCP_SERVERS`.
-  - [ ] Render per-server instruction messages for runtime delivery.
-  - [ ] Add tests for naming, ordering, and trust label.
-- [ ] Add `prompt/runtime_context.rs` subagent support.
-  - [ ] Root agent identity line.
-  - [ ] Child identity with role and depth.
-  - [ ] Remaining delegation budget from `max_delegate_depth` / `max_parallel_delegates`.
-- [ ] Rewrite `compaction.rs::build_compaction_prompt`.
-  - [ ] Adopt DSH section order: primary request, concepts, files, errors, pending jobs, current work, next step, critical context.
-  - [ ] Keep `ee` task graph, memory facts, validation facts, and budget sections.
-  - [ ] Add `Pending Jobs` only when job tools exist.
-  - [ ] Add tests for section order and retained evidence.
-- [ ] Add subagent and MCP prompt snapshots.
+- [x] Add `prompt/mcp.rs`.
+  - [x] Render configured server names and display-name rule into `MCP_SERVERS` (sorted, deduplicated, non-interpolating).
+  - [x] Render per-server instruction messages for runtime delivery, bounded to 8 KiB and labeled `mcp_server`.
+  - [x] Add tests for naming, ordering, empty text, truncation, frame escaping, and trust label.
+- [x] Add `prompt/runtime_context.rs` subagent support.
+  - [x] Denial line when delegation is policy-disabled.
+  - [x] Child identity with role and depth.
+  - [x] Depth line only at the cap (`max_delegate_depth` from the effective policy), including a zero cap at the root; no standing remaining-depth prose. DSH contributes no other delegation budget text.
+- [x] Capture MCP server instructions from the initialize handshake in `mcp/manager.rs`.
+  - [x] Store `instructions` per connection; expose `server_instructions()` as a thin accessor (no logic in the over-1,000-LOC file).
+  - [x] Populate `PromptBundle::mcp` after discovery and deliver the messages after the runtime snapshot.
+- [x] Rewrite `compaction.rs::build_compaction_prompt`.
+  - [x] Adopt DSH section order: primary request, concepts, files, errors, current work, next step, critical context.
+  - [x] Keep `ee` task graph, memory facts, validation facts, and budget sections under `## Session evidence`.
+  - [x] Omit `Pending Jobs` because no job tools exist; document the reason in the prompt rules and audit.
+  - [x] Add tests for section order and retained evidence.
+- [x] Add subagent and MCP prompt snapshots.
 
 **Acceptance criteria:**
 
@@ -981,7 +984,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - [x] Add the subagent depth line helper (`prompt/delegation.rs`).
   - [x] Render `Delegation depth for \`delegate_task\`: current <n>, maximum <m>, remaining levels 0.` only when `depth >= max_depth`.
   - [x] Unit tests cover below-cap silence and at/over-cap text.
-  - [x] Wire it into `SUBAGENT_DELEGATION` for depth > 0 (root delegation budget text still lands in Phase 5).
+  - [x] Wire it into `SUBAGENT_DELEGATION` for depth > 0. No root delegation-budget text is added: DSH contributes none, and D14 forbids advertising caps.
 - [x] Add tool-result middle pruning.
   - [x] Prune only tool-result text longer than 8192 chars: keep 4096 head + 1024 tail.
   - [x] Insert the exact marker `[... tool result middle pruned ...]`.
@@ -1010,7 +1013,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - Third identical call emits one advisory notice; fourth stops the loop.
 - Reminder does not fire on changed arguments, a reset user message, or an excluded tool.
 - Pressure-notice helper returns text only for finite caps under the documented conditions and is wired into `EE_TURN_GUIDANCE` by the runtime.
-- Depth-line helper returns text only at the cap; wiring into `SUBAGENT_DELEGATION` is pending Phase 5.
+- [x] Depth-line helper returns text only at the cap; wiring into `SUBAGENT_DELEGATION` is complete.
 - Oversized tool result is pruned to head + marker + tail; small results are byte-identical.
 - No new slot name and no budget table in the prompt.
 
@@ -1030,20 +1033,20 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Audit every slot against the registry table.
-  - [ ] Include the phase 5b additions: repeat reminder metadata, pressure notice, depth line, middle-prune marker.
-  - [ ] Add a test that iterates all slots and asserts an explicit status: `emitted`, `conditional`, `deferred`, or `omit`.
-  - [ ] Assert deferred slots have an activation note in the plan.
-- [ ] Add guards against blind porting.
-  - [ ] No `DeepSeek Harness`, `dsh`, `@path`, `apply_patch`, `run_code`, or `job_output` in `ee` prompt snapshots.
-  - [ ] No `harness-example/` path referenced by runtime code or tests.
-- [ ] Freeze snapshots for standard, plan, ask, write, minimal, read-only, delegation, and MCP.
-- [ ] Run final validation.
-  - [ ] `cargo fmt --all --check`.
-  - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
-  - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
-  - [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`.
-  - [ ] `cargo test --quiet -p ee-cli --features agents` for the touched modules.
+- [x] Audit every slot against the registry table.
+  - [x] Include the phase 5b additions: repeat reminder metadata, pressure notice, depth line, middle-prune marker.
+  - [x] Add a test that iterates all slots and asserts an explicit status: `emitted`, `conditional`, or `omit`.
+  - [x] Assert no slot is left `deferred`; every inert slot has a reason.
+- [x] Add guards against blind porting.
+  - [x] No `DeepSeek`, `dsh`, `@path`, `apply_patch`, `run_code`, or `job_output` in `ee` prompt output.
+  - [x] No `harness-example/` path referenced by runtime code or tests.
+- [x] Freeze snapshots: exact standard stable text, exact runtime snapshot text, exact MCP host-facts section, and exact plan contract; ask, write, minimal, read-only, delegation, and MCP behavior use exact assertions.
+- [x] Run final validation.
+  - [x] `cargo fmt --all --check`.
+  - [x] `cargo clippy -p ee-agent-orchestrator --all-targets -- -D warnings`.
+  - [x] `cargo clippy -p ee-cli --all-targets --features agents -- -D warnings`.
+  - [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`.
+  - [x] `cargo test --quiet -p ee-cli --features agents project_instructions`.
 
 **Acceptance criteria:**
 

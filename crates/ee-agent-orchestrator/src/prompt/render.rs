@@ -69,7 +69,6 @@ impl Section {
     }
 
     /// Enables or disables `{{variable}}` interpolation.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_interpolation(mut self, interpolate: bool) -> Self {
         self.interpolate = interpolate;

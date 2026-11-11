@@ -185,11 +185,13 @@ fn delegation_text(agent: AgentIdentity<'_>, allow_delegate: bool) -> Option<Str
             serde_json::to_string(agent.name).unwrap_or_else(|_| "\"subagent\"".into()),
             agent.depth
         ));
-        if let Some(max_depth) = agent.max_depth
-            && let Some(line) = depth_line(agent.depth, max_depth)
-        {
-            parts.push(line);
-        }
+    }
+    // DSH emits `tool:<name>:depth` only at the cap, including a zero cap at
+    // the root. Below the cap it contributes nothing.
+    if let Some(max_depth) = agent.max_depth
+        && let Some(line) = depth_line(agent.depth, max_depth)
+    {
+        parts.push(line);
     }
     if !allow_delegate {
         parts.push("Subagent delegation is denied for this mode.".to_string());
@@ -228,6 +230,33 @@ mod tests {
             turn_guidance: None,
             mode_policy: ModePolicy::Write,
         }
+    }
+
+    #[test]
+    fn exact_runtime_snapshot_is_frozen() {
+        let cwd = Path::new("/workspace");
+        let snapshot = render(&inputs(cwd, &[], SandboxMode::WorkspaceWrite, ApprovalMode::Ask))
+            .expect("renders");
+        assert_eq!(
+            snapshot.text,
+            concat!(
+                "Current working directory: \"/workspace\".\n\n",
+                "Workspace roots:\n- \"/workspace\"\n\n",
+                "Built-in file and terminal tools require absolute paths. Resolve relative ",
+                "paths against the current working directory before calling any tool. Paths ",
+                "must stay inside the configured workspace roots.\n\n",
+                "Current file policy: workspace-write. Writes are allowed under the session ",
+                "workspace roots listed above; paths outside them are denied.\n\n",
+                "Terminal execution is denied by host policy.\n\n",
+                "Approval prompts are enabled for writes and execution. Without an available ",
+                "answerer, the request fails closed.\n\n",
+                "Subagent delegation is denied for this mode.\n\n",
+                "Current session mode: write. Implement the task with the advertised tools. ",
+                "Host approval remains required for writes and execution; a denied approval ",
+                "is final, so choose a different approach instead of retrying with elevated ",
+                "options.",
+            )
+        );
     }
 
     #[test]
@@ -330,6 +359,23 @@ mod tests {
         };
         let snapshot = render(&below).expect("renders");
         assert!(!snapshot.text.contains("remaining levels 0"));
+    }
+
+    #[test]
+    fn zero_cap_at_root_emits_the_depth_line() {
+        let cwd = Path::new("/work/project");
+        let roots = [root("/work/project")];
+        let at_zero = RuntimeContextInputs {
+            allow_delegate: true,
+            agent: AgentIdentity { name: "root", depth: 0, max_depth: Some(0) },
+            ..inputs(cwd, &roots, SandboxMode::WorkspaceWrite, ApprovalMode::Ask)
+        };
+        let snapshot = render(&at_zero).expect("renders");
+        assert!(
+            snapshot.text.contains("current 0, maximum 0, remaining levels 0"),
+            "{}",
+            snapshot.text
+        );
     }
 
     #[test]

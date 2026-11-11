@@ -103,6 +103,7 @@ impl OrchestratorRuntime {
             stable: (!prompt.stable.trim().is_empty()).then_some(prompt.stable),
             runtime: prompt.runtime,
             workspace: prompt.workspace,
+            mcp: prompt.mcp,
             task_context: None,
         }
         .apply_to_transcript(&mut transcript, prompt_messages);
@@ -307,6 +308,7 @@ impl OrchestratorRuntime {
             context.stable = (!prompt.stable.trim().is_empty()).then_some(prompt.stable);
             context.runtime = prompt.runtime;
             context.workspace = prompt.workspace;
+            context.mcp = prompt.mcp;
         }
         engine.run_with_system_context(ctx, sink, client, cancel, task, context).await
     }

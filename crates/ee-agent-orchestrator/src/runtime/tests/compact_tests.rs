@@ -23,7 +23,7 @@ async fn compact_turn_preserves_protected_memory_and_invokes_no_tools() {
     let crate::model::ModelContent::Text(system) = &calls[0].transcript[0].content[0] else {
         panic!("expected system text");
     };
-    assert!(system.contains("Write a compact continuation summary"), "{system}");
+    assert!(system.contains("You are acting as a compaction engine"), "{system}");
 
     // The summary is stored as model-derived session memory; protected
     // keys survive; the deterministic pass merged the duplicates.
@@ -89,9 +89,9 @@ async fn compact_turn_context_is_byte_bounded() {
     let crate::model::ModelContent::Text(system) = &calls[0].transcript[0].content[0] else {
         panic!("expected system text");
     };
-    // The compaction context itself is bounded to 300 bytes; the prompt
-    // text is separate, so the system message stays well under 1 KiB.
-    assert!(system.len() < 1_024, "system message bounded: {} bytes", system.len());
+    // The compaction context itself is bounded to 300 bytes; the fixed
+    // checkpoint instruction is separate and must stay near 2 KiB.
+    assert!(system.len() < 2_048, "system message bounded: {} bytes", system.len());
     assert!(system.contains("obs:49"), "newest memory retained: {system}");
     assert!(!system.contains("obs:0"), "oldest memory dropped for the bound: {system}");
 }

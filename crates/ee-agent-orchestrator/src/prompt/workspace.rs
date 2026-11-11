@@ -291,7 +291,7 @@ fn section_bytes(file: &InstructionFile) -> usize {
     "Instructions from: \n\n".len() + file.display_path.len() + file.content.len() + 2
 }
 
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(text.len());
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;

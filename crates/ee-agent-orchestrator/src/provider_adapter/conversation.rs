@@ -316,36 +316,45 @@ pub(super) fn default_model_labels(
         )
 }
 
+/// Inputs for one prompt-bundle build.
+pub(super) struct PromptBundleInputs<'a> {
+    pub(super) cwd: &'a std::path::Path,
+    pub(super) workspace_roots: &'a [std::path::PathBuf],
+    pub(super) provider: &'a str,
+    pub(super) model: &'a str,
+    pub(super) mode: &'a SessionModeId,
+    pub(super) policy: &'a ToolPolicy,
+    pub(super) advertised_tools: &'a [String],
+    pub(super) mcp_servers: &'a [String],
+}
+
 /// Builds the stable prompt and runtime snapshot for one session mode.
-pub(super) fn prompt_bundle(
-    cwd: &std::path::Path,
-    workspace_roots: &[std::path::PathBuf],
-    provider: &str,
-    model: &str,
-    mode: &SessionModeId,
-    policy: &ToolPolicy,
-    advertised_tools: &[String],
-) -> Result<PromptBundle, ProviderError> {
+pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBundle, ProviderError> {
     let mut bundle = crate::prompt::build(&PromptInputs {
-        mode,
-        provider,
-        model,
-        cwd,
-        workspace_roots,
-        sandbox: SandboxMode::from_policy(policy),
-        allow_execute: policy.allow_execute,
-        approval: ApprovalMode::from_policy(policy),
-        allow_delegate: policy.allow_delegate,
-        agent: AgentIdentity { name: "root", depth: 0, max_depth: None },
+        mode: inputs.mode,
+        provider: inputs.provider,
+        model: inputs.model,
+        cwd: inputs.cwd,
+        workspace_roots: inputs.workspace_roots,
+        sandbox: SandboxMode::from_policy(inputs.policy),
+        allow_execute: inputs.policy.allow_execute,
+        approval: ApprovalMode::from_policy(inputs.policy),
+        allow_delegate: inputs.policy.allow_delegate,
+        agent: AgentIdentity {
+            name: "root",
+            depth: 0,
+            max_depth: Some(inputs.policy.max_delegate_depth),
+        },
         turn_guidance: None,
-        advertised_tools,
+        advertised_tools: inputs.advertised_tools,
+        mcp_servers: inputs.mcp_servers,
         preset: PromptPreset::Standard,
     })
     .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))?;
     // Recompute every turn: instruction files are attack surface, so a stale
     // snapshot is never carried in history. `TurnSystemContext` replays only
     // the current snapshot ahead of the current prompt.
-    bundle.workspace = crate::prompt::workspace::discover(cwd, workspace_roots);
+    bundle.workspace = crate::prompt::workspace::discover(inputs.cwd, inputs.workspace_roots);
     Ok(bundle)
 }
 
@@ -360,15 +369,16 @@ mod tests {
         std::fs::write(temp.path().join("AGENTS.md"), "project rule").expect("write rule");
         let roots = vec![temp.path().to_path_buf()];
         let mode = SessionModeId::new("write");
-        let bundle = prompt_bundle(
-            temp.path(),
-            &roots,
-            "test",
-            "test-model",
-            &mode,
-            &ToolPolicy::default(),
-            &[],
-        )
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+        })
         .expect("bundle");
 
         assert_eq!(bundle.workspace.len(), 1);
@@ -376,5 +386,30 @@ mod tests {
         assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
         assert!(message.text_content().contains("project rule"));
         assert!(bundle.workspace[0].path.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn zero_delegate_depth_emits_the_cap_line() {
+        let roots: Vec<std::path::PathBuf> = Vec::new();
+        let mode = SessionModeId::new("write");
+        let policy =
+            ToolPolicy { allow_delegate: true, max_delegate_depth: 0, ..ToolPolicy::default() };
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: std::path::Path::new("/workspace"),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &policy,
+            advertised_tools: &[],
+            mcp_servers: &[],
+        })
+        .expect("bundle");
+        let runtime = bundle.runtime.expect("runtime context");
+        assert!(
+            runtime.text.contains("current 0, maximum 0, remaining levels 0"),
+            "{}",
+            runtime.text
+        );
     }
 }

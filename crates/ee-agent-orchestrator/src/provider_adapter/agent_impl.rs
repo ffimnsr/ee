@@ -7,7 +7,6 @@ use super::conversation::model_history;
 use super::conversation::next_session_number;
 use super::conversation::normalize_workspace_roots;
 use super::conversation::persist_session_snapshot;
-use super::conversation::prompt_bundle;
 use super::conversation::record_agent_message;
 use super::conversation::record_final_response;
 use super::conversation::record_user_message;
@@ -15,6 +14,7 @@ use super::conversation::replay_conversation;
 use super::conversation::restore_runtime_from_checkpoint;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
+use super::conversation::{PromptBundleInputs, prompt_bundle};
 use super::*;
 
 impl AgentProvider for OrchestratorProvider {
@@ -374,15 +374,18 @@ impl AgentProvider for OrchestratorProvider {
                 .expect("telemetry recorder poisoned")
                 .start_turn(&telemetry_turn, telemetry_attribution);
             let policy = runtime.policy();
-            let bundle = prompt_bundle(
-                &workspace,
-                &workspace_roots,
-                &provider_label,
-                &model_label,
-                &mode,
-                policy.policy(),
-                &runtime.advertised_tool_names(),
-            )?;
+            let mcp_server_names: Vec<String> =
+                mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
+            let bundle = prompt_bundle(PromptBundleInputs {
+                cwd: &workspace,
+                workspace_roots: &workspace_roots,
+                provider: &provider_label,
+                model: &model_label,
+                mode: &mode,
+                policy: policy.policy(),
+                advertised_tools: &runtime.advertised_tool_names(),
+                mcp_servers: &mcp_server_names,
+            })?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
             // expose tools; the runtime still routes the turn to its
@@ -553,6 +556,7 @@ impl AgentProvider for OrchestratorProvider {
             let mut manager =
                 McpSessionManager::new(mcp_servers, client.clone(), cancel.clone(), mcp_policy);
             let mut diagnostics = manager.discover_all().await;
+            let mcp_instructions = manager.server_instructions();
             let manager = Arc::new(manager);
             let mut registered = Vec::new();
             // Mirror prompt-scoped MCP tools through `agent.tools` so scope
@@ -599,15 +603,17 @@ impl AgentProvider for OrchestratorProvider {
             emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
             // Rebuild the stable prompt now that prompt-scoped MCP tools are
             // registered: guidance must name only tools the model can call.
-            let bundle = prompt_bundle(
-                &workspace,
-                &workspace_roots,
-                &provider_label,
-                &model_label,
-                &mode,
-                policy.policy(),
-                &runtime.advertised_tool_names(),
-            )?;
+            let mut bundle = prompt_bundle(PromptBundleInputs {
+                cwd: &workspace,
+                workspace_roots: &workspace_roots,
+                provider: &provider_label,
+                model: &model_label,
+                mode: &mode,
+                policy: policy.policy(),
+                advertised_tools: &runtime.advertised_tool_names(),
+                mcp_servers: &mcp_server_names,
+            })?;
+            bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
             let cleanup =
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
             // The framework's cancellation watch flips on `session/cancel`

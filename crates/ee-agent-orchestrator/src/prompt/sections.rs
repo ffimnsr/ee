@@ -200,6 +200,109 @@ pub(crate) fn runtime_slot(name: &str) -> Option<&'static Slot> {
 mod tests {
     use super::*;
 
+    /// What the `ee` builder does with a registered slot.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SlotStatus {
+        /// Always emitted by the standard preset.
+        Emitted,
+        /// Emitted only when a mode, tool set, or MCP fact is present.
+        Conditional,
+        /// Registered, no producer, tracked for a later phase.
+        Deferred,
+        /// Registered, intentionally no producer in `ee`.
+        Omit,
+    }
+
+    /// Stable-plane audit. Every registered slot must appear exactly once.
+    const STABLE_AUDIT: &[(&str, SlotStatus, &str)] = &[
+        ("HARNESS_IDENTITY", SlotStatus::Emitted, "identity line"),
+        ("DEPLOYMENT_PERSONA_PREFIX", SlotStatus::Emitted, "provider/model persona"),
+        ("PLAN_POLICY", SlotStatus::Conditional, "plan mode only"),
+        ("TEAM_POLICY", SlotStatus::Omit, "no team tools"),
+        ("PTC_ONLY", SlotStatus::Omit, "no programmatic tool calling"),
+        (
+            "FILE_REFERENCE",
+            SlotStatus::Omit,
+            "no @file-reference expansion; read_file owns file access",
+        ),
+        ("TOOL_BASH", SlotStatus::Conditional, "terminal tools advertised"),
+        ("TOOL_PWSH", SlotStatus::Omit, "no pwsh tool"),
+        ("TOOL_READ", SlotStatus::Conditional, "read_file advertised"),
+        ("TOOL_WRITE", SlotStatus::Conditional, "write_file advertised"),
+        ("TOOL_EDIT", SlotStatus::Omit, "no edit tool; write_file replaces files"),
+        ("TOOL_APPLY_PATCH", SlotStatus::Omit, "no patch tool"),
+        ("TOOL_GLOB", SlotStatus::Omit, "no glob tool"),
+        ("TOOL_GREP", SlotStatus::Omit, "no grep tool"),
+        ("TOOL_JOBS", SlotStatus::Omit, "no job tools"),
+        ("TOOL_PTY", SlotStatus::Conditional, "terminal session tools advertised"),
+        ("TOOL_WEB_SEARCH", SlotStatus::Conditional, "ee_web_search advertised"),
+        ("TOOL_WEB_FETCH", SlotStatus::Conditional, "ee_fetch_url advertised"),
+        ("TOOL_LSP", SlotStatus::Omit, "no LSP tool"),
+        ("TOOL_SESSION_QUERY", SlotStatus::Omit, "no session-query tool"),
+        ("TOOL_GOAL", SlotStatus::Omit, "no goal tools"),
+        ("TOOL_SCHEDULE", SlotStatus::Omit, "no schedule tools"),
+        ("TOOL_WORKFLOW", SlotStatus::Omit, "no workflow tools"),
+        ("TOOL_RALPH", SlotStatus::Omit, "no ralph loop"),
+        ("TOOL_SUBAGENT", SlotStatus::Conditional, "delegate_task advertised"),
+        ("TOOL_REPORT", SlotStatus::Omit, "no report producer"),
+        ("TOOL_COMPUTER_USE", SlotStatus::Omit, "no browser/computer tools"),
+        ("MCP_SERVERS", SlotStatus::Conditional, "session configured MCP servers"),
+        ("TOOLS_SDK", SlotStatus::Omit, "no tools SDK"),
+        ("DELIVERABLE_FILE_REFERENCES", SlotStatus::Omit, "no deliverable file references"),
+        ("STRUCTURED_OUTPUT", SlotStatus::Omit, "no structured subagents"),
+        ("HARNESS_SOURCE", SlotStatus::Omit, "no source-attribution surface"),
+        ("WEB_SURFACE", SlotStatus::Omit, "no web GUI surface"),
+        ("DEPLOYMENT_PERSONA_SUFFIX", SlotStatus::Emitted, "host-authority suffix"),
+    ];
+
+    /// Runtime-plane audit. `HARNESS_SOURCE` and `WEB_SURFACE` repeat the
+    /// stable slot names because DSH registers them in both planes.
+    const RUNTIME_AUDIT: &[(&str, SlotStatus, &str)] = &[
+        ("WORKING_DIRECTORY", SlotStatus::Emitted, "required context"),
+        ("SANDBOX_POLICY", SlotStatus::Emitted, "policy-derived file policy"),
+        ("APPROVAL_POLICY", SlotStatus::Emitted, "policy-derived approval"),
+        (
+            "SUBAGENT_DELEGATION",
+            SlotStatus::Conditional,
+            "subagent identity, depth cap, or denied delegation",
+        ),
+        ("EE_MODE_POLICY", SlotStatus::Conditional, "ask/write/unknown mode text"),
+        ("EE_TURN_GUIDANCE", SlotStatus::Conditional, "strategy guidance emitted"),
+        ("MCP_SERVER_INSTRUCTIONS", SlotStatus::Conditional, "a server supplied instructions"),
+        ("HARNESS_SOURCE", SlotStatus::Omit, "no source-attribution surface"),
+        ("WEB_SURFACE", SlotStatus::Omit, "no web GUI surface"),
+    ];
+
+    fn assert_audit_covers(registry: &[Slot], audit: &[(&str, SlotStatus, &str)]) {
+        let mut audited = std::collections::BTreeSet::new();
+        for (name, _, reason) in audit {
+            assert!(!reason.trim().is_empty(), "{name} has no audit reason");
+            assert!(audited.insert(*name), "{name} is audited twice");
+        }
+        for slot in registry {
+            assert!(audited.contains(slot.name), "{} is registered but not audited", slot.name);
+        }
+        for name in &audited {
+            assert!(
+                registry.iter().any(|slot| slot.name == *name),
+                "{name} is audited but not registered"
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_slot_has_one_audit_entry() {
+        assert_audit_covers(STABLE_SECTIONS, STABLE_AUDIT);
+        assert_audit_covers(CONTEXT_SECTIONS, RUNTIME_AUDIT);
+    }
+
+    #[test]
+    fn undocumented_deferrals_are_absent() {
+        for (name, status, _) in STABLE_AUDIT.iter().chain(RUNTIME_AUDIT) {
+            assert_ne!(*status, SlotStatus::Deferred, "{name} must be decided, not deferred");
+        }
+    }
+
     #[test]
     fn stable_orders_match_dsh() {
         let expected = [

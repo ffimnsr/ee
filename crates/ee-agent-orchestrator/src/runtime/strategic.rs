@@ -499,6 +499,7 @@ impl OrchestratorRuntime {
                     stable,
                     runtime: prompt.runtime,
                     workspace: prompt.workspace,
+                    mcp: prompt.mcp,
                     task_context: Some(context_plan),
                 },
             )

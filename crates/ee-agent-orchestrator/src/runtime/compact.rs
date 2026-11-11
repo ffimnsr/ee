@@ -207,7 +207,7 @@ impl OrchestratorRuntime {
         //    observing cancellation before and after.
         let mut system = build_compaction_prompt(instructions.as_deref());
         if !context.is_empty() {
-            system.push_str("\n\nSession context:\n");
+            system.push_str("\n\n## Session evidence\n");
             system.push_str(&context);
         }
         if let Some(prompt) = prompt {

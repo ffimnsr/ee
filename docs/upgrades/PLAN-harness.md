@@ -1,6 +1,6 @@
 # ee Agent Prompt Sections — Design + Plan
 
-Status: **Phases 0, 1, 2, 3, 4, and 5b core implemented; Phases 5–6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
+Status: **Phases 0–6 implemented; no deferred prompt slots remain** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
 
 Reference capture: [deepseek-harness-agent-mode-prompt-capture.md](deepseek-harness-agent-mode-prompt-capture.md) (vendored DSH `0.2.2-rc.1`, commit `fcc0ad4`).
 
@@ -274,10 +274,10 @@ The advertised set is policy-derived: `OrchestratorRuntime::advertised_tool_name
 
 ### 6.6 `MCP_SERVERS`
 
-Split host facts from remote instruction text:
+Implemented in `prompt/mcp.rs`:
 
-- Stable system section: configured server names, `mcp_<server>_<tool>` display-name rule, and that MCP output is untrusted. This is a host fact and belongs in the cached prefix.
-- Runtime snapshot extension `MCP_SERVER_INSTRUCTIONS` (order 140, registration `mcp:<server>`): server-supplied instruction text, one message per server, labeled `mcp_server`, never system policy.
+- Stable system section (`registration = mcp-resource-servers`, `interpolate = false`): sorted, deduplicated configured server names, the generated display-name rule, and that MCP output is untrusted. This is a host fact and belongs in the stable prefix.
+- Runtime messages `MCP_SERVER_INSTRUCTIONS` (order 140, registration `mcp:<server>`): server-supplied instruction text, one untrusted user-role message per server, label `mcp_server`, metadata `ee_prompt=mcp_server_instructions`. Empty text emits nothing; each body is redacted, bounded to 8 KiB with an explicit truncation marker, and any `</system-reminder>` close tag is escaped.
 
 DSH puts `mcp:<server>` text into the system prompt. `ee` improvement: remote-supplied prose must not gain system authority. The slot name is preserved; the position moves to the runtime plane.
 
@@ -350,7 +350,7 @@ DSH also sends repeat-call reminders, job notices, subagent settlement notices, 
 | `tool_guidance.rs` | Per-tool guidance table keyed by advertised name | < 600 LOC |
 | `workspace.rs` | Instruction discovery, dedupe, budget, rendering, trust label | < 600 LOC |
 | `mcp.rs` | Server fact render and per-server instruction messages | < 250 LOC |
-| `compaction.rs` | DSH-shaped checkpoint instruction adapted to `ee` facts | < 200 LOC |
+| `compaction.rs` (existing crate module) | DSH-shaped checkpoint instruction adapted to `ee` facts | < 250 LOC added |
 
 Wiring constraints:
 
@@ -398,6 +398,7 @@ Target transcript for one turn:
 [history] prior user/assistant/tool messages
 [user]    workspace instruction snapshot (if any, labeled workspace_instruction)
 [user]    runtime context snapshot (if any, metadata ee_prompt=runtime_context)
+[user]    MCP server instructions (zero or more, labeled mcp_server)
 [user]    current prompt
 ```
 
@@ -407,7 +408,7 @@ Target transcript for one turn:
 crate::prompt::context::apply_to_transcript(&mut transcript, context);
 ```
 
-No other code mutates transcript order. `prepend_system` remains for memory facts only, or is replaced by the same helper.
+No other code mutates transcript order. `prepend_system` remains for memory facts only, or is replaced by the same helper. `is_refreshable_prompt` drops restored `runtime_context`, `workspace_instructions`, and `mcp_server_instructions` messages before the fresh planes are inserted.
 
 Why a user-role runtime message:
 
@@ -422,6 +423,7 @@ Why a user-role runtime message:
 - MCP server-supplied instruction text uses label `mcp_server` and is also untrusted.
 - Web/tool/subagent content keeps existing labels. `prompt_injection.rs` stays the single guard; no prompt section may weaken it.
 - Runtime snapshot is host-authored: paths, modes, and booleans only. It never embeds tool output, model output, or workspace file text.
+- MCP server instructions are a separate untrusted message per server (`TrustLevel::McpServerUntrusted`, label `mcp_server`, metadata `ee_prompt=mcp_server_instructions`). They are redacted, bounded, and frame-escaped; they never join the stable prefix or the trusted runtime snapshot.
 - Plan, ask, and read-only modes derive sandbox/approval text from `ToolPolicy`; prose cannot re-grant a denied capability.
 - `ee` never emits escalation guidance when `allow_host_approved_side_effects = false`.
 
@@ -545,7 +547,7 @@ Do not emit it while the budget is healthy or when the cap is `None`; a notice o
 
 | Prompt | DSH behavior | `ee` plan |
 |---|---|---|
-| Compaction | 8-section checkpoint schema | Keep `ee` evidence fields (task graph, memory facts, validation facts, budget) and adopt the DSH section *order*; add `Pending Jobs` only if job tools exist |
+| Compaction | 8-section checkpoint schema | **Done:** adopt the DSH section order, omit `Pending Jobs` (no job tools), keep `ee` task graph, memory facts, validation facts, and budget under `## Session evidence` |
 | Session title | separate short prompt | Keep `ee` task summary; not part of this plan |
 | Plan mode | system section + tool gating | `PLAN_POLICY` + existing payload contract |
 | Auto-review | separate reviewer call with fixed policy | `ee` uses `rubber_duck`; never merge reviewer text into the main prompt |
@@ -563,6 +565,9 @@ Snapshot tests (exact strings, fixed inputs):
 3. `minimal` preset: `complete` identity + `WORKING_DIRECTORY` only.
 4. Read-only preset: `SANDBOX_POLICY` denies writes and execution; no escalation text.
 5. MCP fixture: server facts in the stable section; server instructions in runtime messages.
+6. Slot audit: every registered stable and runtime slot has exactly one status (`emitted`, `conditional`, `omit`) with a reason; no slot stays deferred.
+7. Anti-blind-port guard: standard and plan prompts contain no `DeepSeek`, `dsh`, `apply_patch`, `run_code`, `job_output`, `harness-example/`, or `@path` token.
+8. Byte snapshots: exact standard stable text, exact runtime snapshot text, exact MCP host-facts section, and exact plan contract.
 
 Invariant tests:
 
@@ -632,15 +637,15 @@ Security tests:
 | 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs`, `src/runtime/prompt_views.rs`, `provider_adapter/{conversation,agent_impl}.rs` | **Done:** eight conditional `TOOL_*` rows for advertised `ee` tools, policy-derived gate, prompt rebuild after MCP registration, bidirectional consistency tests |
 | 3 Workspace | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | **Done:** root-to-cwd (and per-root) discovery, content dedupe, 64 KiB budget, untrusted `workspace_instruction` snapshot, prompt-plane replacement on resume, host tool aligned |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `src/prompt/runtime_context.rs`, `provider_adapter/mod.rs` | **Done:** `PLAN_POLICY` in plan mode; ask/write/unknown text in `EE_MODE_POLICY`; guidance stays policy-gated; plan payload contract preserved; ask/write lifecycle tests |
-| 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | `TOOL_SUBAGENT`, `MCP_SERVERS`, `SUBAGENT_DELEGATION`, checkpoint prompt |
-| 5b Limits + repetition | 2 | `src/{config,budget,checkpoint,model}.rs`, `src/checkpoint_budget.rs`, `src/stuck.rs` call site, `src/prompt/{repeat_guard,budget_notice,delegation}.rs`, `src/subagents/manager.rs`, `crates/ee-{opencode,openrouter}-agent` | **Core done:** unlimited default, opt-in caps, parallelism 10, repeat reminder, tool-result prune, notice/depth helpers. Wiring notice/depth into runtime contexts follows Phase 1/5 |
-| 6 Deferred slots + gates | 2, 3, 4, 5, 5b | tests, `src/prompt/sections.rs` | Inert slots documented; full validation; snapshots committed |
+| 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | **Done:** `MCP_SERVERS` host facts, untrusted per-server `MCP_SERVER_INSTRUCTIONS` messages, instruction capture from the MCP initialize handshake, DSH-shaped compaction checkpoint, delegation identity/depth/denial |
+| 5b Limits + repetition | 2 | `src/{config,budget,checkpoint,model}.rs`, `src/checkpoint_budget.rs`, `src/stuck.rs` call site, `src/prompt/{repeat_guard,budget_notice,delegation}.rs`, `src/subagents/manager.rs`, `crates/ee-{opencode,openrouter}-agent` | **Done:** unlimited default, opt-in caps, parallelism 10, repeat reminder, tool-result prune, notice/depth helpers wired |
+| 6 Deferred slots + gates | 2, 3, 4, 5, 5b | tests, `src/prompt/sections.rs` | **Done:** slot audit, anti-blind-port guards, byte snapshots, `FILE_REFERENCE` decision, full validation |
 
 ## 17. Risks and open questions
 
 - **Prompt caching is not implemented by any current `ee` adapter.** The runtime split is still correct, but it will not show a cache win until an adapter sends cache markers. Do not claim one.
 - **Model adherence to user-role runtime facts.** DSH relies on it. If `ee` models treat the snapshot as user instruction, the fix is a system reminder line, not a return to flat system context.
-- **Tool-parity pressure.** Users may expect `edit`, `grep`, `glob`, and `apply_patch` because the section names exist. Keep the "registered but inert" rule visible in docs and do not emit placeholders.
+- **Tool-parity pressure.** Users may expect `edit`, `grep`, `glob`, and `apply_patch` because the section names exist. Every such slot is audited `omit` in `sections.rs` with a reason. `FILE_REFERENCE` is permanently `omit`: `ee` has no `@file`-reference expansion and `read_file` owns file access. Keep the "registered but inert" rule visible and do not emit placeholders.
 - **Workspace instruction prompt-injection surface.** Discovery increases the text an attacker can place in the prompt. The trust label and injection scan are mandatory, not optional.
 - **Unbounded default can burn tokens or run for hours.** This is the requested behavior, matching DSH/Codex. Mitigations are behavioral, not numeric: stuck detection, per-tool timeouts, and user cancellation. `max_output_bytes` / `turn_timeout` remain opt-in. Surface running totals in events/UI so the user can stop it.
 - **Opt-in cap wiring is easy to get wrong.** `None` must mean unlimited in every reservation path, snapshot restore, checkpoint validation, and provider manifest. A single `unwrap_or(0)` turns `None` into an immediate stop. Test each path explicitly.
@@ -706,3 +711,14 @@ Checked directly against `packages/core/agent-loop`, `packages/core/tools`, `pac
 - PTC: 1024 subcalls/minute, 10 parallel subcalls.
 
 `ee` verified in `crates/ee-agent-orchestrator/src/{config,budget,stuck,model,checkpoint}.rs` and both provider crates. Conclusion: default `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, `max_output_bytes`, and `turn_timeout` to `None`; keep stuck detection, per-tool timeouts, and opt-in `Some(...)` caps; adopt DSH's advisory/pruning mechanisms.
+
+## Appendix D — Phase 5/6 verification delta
+
+Checked against the vendored tree and the implementation:
+
+- DSH publishes no budget section and no turn/total-tool-call cap; `ee` matches with `None` defaults and an opt-in pressure notice.
+- `SUBAGENT_DELEGATION` in DSH contributes only `tool:<name>:depth` at the cap. `ee` matches that line and adds identity/denial facts; it does not advertise the remaining depth while delegation is possible.
+- MCP server instructions are the only DSH prompt text that gains system authority by position. `ee` keeps the slot name but moves the text to an untrusted runtime message labeled `mcp_server`.
+- DSH compaction persists a checkpoint with `Pending Jobs`. `ee` has no job tools, so that section stays omitted while the remaining order and `(none)` rule are adopted.
+- `FILE_REFERENCE` stays registered and inert: no `@path` expansion exists, and inventing one would change tool semantics rather than prompt structure.
+- Slot audit statuses live with the registry (`prompt/sections.rs`), so adding a slot without a decision fails a test.

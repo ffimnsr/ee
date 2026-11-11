@@ -30,6 +30,11 @@ pub enum TrustLevel {
     /// These are attacker-controlled in shared workspaces, so they are untrusted
     /// even though the orchestrator injects them deliberately.
     WorkspaceInstructionUntrusted,
+    /// Instructions supplied by a configured MCP server.
+    ///
+    /// Remote prose is data, not policy: it is untrusted even though the host
+    /// deliberately surfaced it for the server's own tools.
+    McpServerUntrusted,
 }
 
 impl TrustLevel {
@@ -43,6 +48,7 @@ impl TrustLevel {
             Self::ToolOutputUntrusted => "tool_output",
             Self::SubagentSummaryUntrusted => "subagent_summary",
             Self::WorkspaceInstructionUntrusted => "workspace_instruction",
+            Self::McpServerUntrusted => "mcp_server",
         }
     }
 
@@ -55,6 +61,7 @@ impl TrustLevel {
             Self::ToolOutputUntrusted
                 | Self::SubagentSummaryUntrusted
                 | Self::WorkspaceInstructionUntrusted
+                | Self::McpServerUntrusted
         )
     }
 }
@@ -141,6 +148,7 @@ mod tests {
             (TrustLevel::ToolOutputUntrusted, "tool_output"),
             (TrustLevel::SubagentSummaryUntrusted, "subagent_summary"),
             (TrustLevel::WorkspaceInstructionUntrusted, "workspace_instruction"),
+            (TrustLevel::McpServerUntrusted, "mcp_server"),
         ];
         for (level, label) in cases {
             assert_eq!(level.label(), label);

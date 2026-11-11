@@ -140,6 +140,8 @@ struct McpConnection {
     /// the handshake fails before a service exists.
     acp: Option<McpConnectionId>,
     tools: Vec<McpToolInfo>,
+    /// Server-supplied instructions from the initialize handshake.
+    instructions: Option<String>,
 }
 
 /// Why a server's discovery failed (bounded, secret-free).
@@ -197,6 +199,7 @@ impl McpSessionManager {
                 running: Arc::new(Mutex::new(None)),
                 acp: None,
                 tools: Vec::new(),
+                instructions: None,
             })
             .collect();
         Self {
@@ -342,6 +345,7 @@ impl McpSessionManager {
         };
         *self.connections[index].running.lock().await = Some(running);
         self.connections[index].acp = Some(connection_id);
+        self.capture_instructions(index).await;
         self.list_tools(index, name).await
     }
 
@@ -377,6 +381,7 @@ impl McpSessionManager {
                         ))
                     })?;
                 *self.connections[index].running.lock().await = Some(running);
+                self.capture_instructions(index).await;
                 return self.list_tools(index, name).await;
             }
         }
@@ -390,7 +395,22 @@ impl McpSessionManager {
                 ))
             })?;
         *self.connections[index].running.lock().await = Some(running);
+        self.capture_instructions(index).await;
         self.list_tools(index, name).await
+    }
+
+    /// Stores the server-supplied instructions from the initialize handshake.
+    /// The handshake has already completed, so this is a read of peer info and
+    /// never another round trip.
+    async fn capture_instructions(&mut self, index: usize) {
+        let instructions = {
+            let guard = self.connections[index].running.lock().await;
+            guard
+                .as_ref()
+                .and_then(|running| running.peer_info())
+                .and_then(|info| info.instructions.clone())
+        };
+        self.connections[index].instructions = instructions;
     }
 
     /// Runs `tools/list` (paginated) and converts the tools.
@@ -437,6 +457,22 @@ impl McpSessionManager {
             .collect();
         definitions.sort_by(|a, b| a.name.cmp(&b.name));
         definitions
+    }
+
+    /// Server names and the instructions each supplied during initialize.
+    ///
+    /// Returned in session order; the prompt layer owns redaction, bounding,
+    /// and trust labeling.
+    #[must_use]
+    pub(crate) fn server_instructions(&self) -> Vec<(String, String)> {
+        self.connections
+            .iter()
+            .filter_map(|connection| {
+                let instructions = connection.instructions.as_ref()?.trim();
+                (!instructions.is_empty())
+                    .then(|| (connection.descriptor.name.clone(), instructions.to_string()))
+            })
+            .collect()
     }
 
     /// Executes one model tool intent through MCP `tools/call`.
