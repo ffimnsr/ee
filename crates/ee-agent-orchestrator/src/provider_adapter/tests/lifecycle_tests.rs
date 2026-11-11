@@ -321,6 +321,72 @@ async fn provider_adapter_prompt_includes_runtime_context() {
 }
 
 #[tokio::test]
+async fn ask_mode_prompt_is_read_only_and_write_mode_guides_writes() {
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().text("direct answer").completed(),
+        ModelResponse::new().text("implemented").completed(),
+    ]));
+    let policy = PolicyEngine::new(
+        crate::policy::ToolPolicy {
+            allow_write: true,
+            allow_execute: true,
+            allow_delegate: true,
+            ..crate::policy::ToolPolicy::default()
+        }
+        .allow_side_effect_subclass(crate::destructive_policy::SideEffectSubclass::Overwrite),
+    );
+    let provider = OrchestratorProvider::with_policy(
+        OrchestratorProviderConfig::default(),
+        model.clone(),
+        policy,
+    );
+    let (handle, task) = spawn_server(provider);
+
+    let session_id = new_session(&handle, 1).await;
+    handle.send(request(2, "session/prompt", prompt_params(&session_id, "what does this do?")));
+    drain_mcp_diagnostics(&handle).await;
+    assert_eq!(request_result(next_response_frame(&handle).await)["stopReason"], "end_turn");
+
+    handle.send(request(
+        3,
+        "session/set_mode",
+        json!({ "sessionId": session_id, "modeId": WRITE_MODE_ID }),
+    ));
+    assert_eq!(request_result(handle.next_frame().await), json!({}));
+    handle.send(request(4, "session/prompt", prompt_params(&session_id, "change it")));
+    drain_mcp_diagnostics(&handle).await;
+    assert_eq!(request_result(next_response_frame(&handle).await)["stopReason"], "end_turn");
+
+    let requests = model.requests();
+    let ask = requests[0]
+        .transcript
+        .iter()
+        .map(crate::model::ModelMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(ask.contains("Current session mode: ask."), "{ask}");
+    assert!(!ask.contains("`write_file` replaces"), "ask mode must not guide writes: {ask}");
+    assert!(
+        !ask.contains("Run shell commands through `create_terminal`"),
+        "ask mode must not guide execution: {ask}"
+    );
+    assert!(!ask.contains("Use `delegate_task`"), "ask mode must not guide delegation: {ask}");
+
+    let write = requests[1]
+        .transcript
+        .iter()
+        .map(crate::model::ModelMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(write.contains("Current session mode: write."), "{write}");
+    assert!(write.contains("`write_file` replaces the whole file"), "{write}");
+    let write_tools = requests[1].tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
+    assert!(write_tools.contains(&"write_file"), "{write_tools:?}");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test]
 async fn provider_adapter_prompt_executes_tool_through_client_bridge() {
     let model = Arc::new(FakeModel::new(vec![
         ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(

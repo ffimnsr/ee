@@ -326,7 +326,7 @@ pub(super) fn prompt_bundle(
     policy: &ToolPolicy,
     advertised_tools: &[String],
 ) -> Result<PromptBundle, ProviderError> {
-    crate::prompt::build(&PromptInputs {
+    let mut bundle = crate::prompt::build(&PromptInputs {
         mode,
         provider,
         model,
@@ -341,5 +341,40 @@ pub(super) fn prompt_bundle(
         advertised_tools,
         preset: PromptPreset::Standard,
     })
-    .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))
+    .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))?;
+    // Recompute every turn: instruction files are attack surface, so a stale
+    // snapshot is never carried in history. `TurnSystemContext` replays only
+    // the current snapshot ahead of the current prompt.
+    bundle.workspace = crate::prompt::workspace::discover(cwd, workspace_roots);
+    Ok(bundle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trust::TrustLevel;
+
+    #[test]
+    fn prompt_bundle_loads_workspace_instructions_as_untrusted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("AGENTS.md"), "project rule").expect("write rule");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(
+            temp.path(),
+            &roots,
+            "test",
+            "test-model",
+            &mode,
+            &ToolPolicy::default(),
+            &[],
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle.workspace.len(), 1);
+        let message = &bundle.workspace[0].message;
+        assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(message.text_content().contains("project rule"));
+        assert!(bundle.workspace[0].path.contains("AGENTS.md"));
+    }
 }

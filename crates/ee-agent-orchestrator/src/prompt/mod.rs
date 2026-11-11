@@ -13,6 +13,7 @@ pub(crate) mod repeat_guard;
 pub(crate) mod runtime_context;
 pub(crate) mod sections;
 pub(crate) mod tool_guidance;
+pub(crate) mod workspace;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,58 @@ pub(crate) enum ApprovalMode {
     Ask,
     /// Approval is unavailable; actions that need it are denied.
     Never,
+}
+
+/// Session mode expressed as prompt policy.
+///
+/// `PLAN_POLICY` is a stable DSH slot and owns plan-mode prose. Ask and write
+/// are `ee`-specific modes with no DSH slot, so their policy text travels in
+/// the runtime snapshot as `EE_MODE_POLICY`. Unknown modes stay conservative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModePolicy {
+    /// Read-only investigation and a direct answer.
+    Ask,
+    /// Read-only investigation and a plan deliverable.
+    Plan,
+    /// Implementation with the advertised tools.
+    Write,
+    /// Unrecognized mode; tools must not change state.
+    Unknown,
+}
+
+impl ModePolicy {
+    /// Maps the ACP session mode id to prompt policy.
+    #[must_use]
+    pub(crate) fn from_mode(mode: &SessionModeId) -> Self {
+        match mode.to_string().as_str() {
+            "ask" => Self::Ask,
+            "plan" => Self::Plan,
+            "write" => Self::Write,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Runtime mode text; plan mode is owned by the stable `PLAN_POLICY` slot.
+    #[must_use]
+    pub(crate) fn runtime_text(self) -> Option<&'static str> {
+        match self {
+            Self::Ask => Some(
+                "Current session mode: ask. Answer the user's request directly and use \
+                 read-only tools when needed. Do not modify files, execute commands, \
+                 or delegate.",
+            ),
+            Self::Write => Some(
+                "Current session mode: write. Implement the task with the advertised tools. \
+                 Host approval remains required for writes and execution; a denied \
+                 approval is final, so choose a different approach instead of retrying \
+                 with elevated options.",
+            ),
+            Self::Plan => None,
+            Self::Unknown => {
+                Some("Current session mode is not recognized. Do not invoke tools or make changes.")
+            }
+        }
+    }
 }
 
 /// Agent identity and delegation position.
@@ -112,6 +165,7 @@ pub struct PromptBundle {
 
 /// Builds the stable prompt and runtime snapshot.
 pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptError> {
+    let mode_policy = ModePolicy::from_mode(inputs.mode);
     let sections = match inputs.preset {
         #[cfg(test)]
         PromptPreset::Minimal => vec![
@@ -126,7 +180,7 @@ pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptErr
                     "You are a coding agent powered by the {{provider}}/{{model}} model.",
                 )?,
             ];
-            if inputs.mode.to_string() == PLAN_MODE_ID {
+            if mode_policy == ModePolicy::Plan {
                 sections.push(Section::for_slot(&PLAN_POLICY, PLAN_POLICY_TEXT)?);
             }
             sections.extend(tool_guidance::sections(inputs.advertised_tools)?);
@@ -153,14 +207,12 @@ pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptErr
         allow_delegate: inputs.allow_delegate,
         agent: inputs.agent,
         turn_guidance: inputs.turn_guidance,
+        mode_policy,
     })?;
     let runtime = (!runtime.text.trim().is_empty()).then_some(runtime);
 
     Ok(PromptBundle { stable, runtime, workspace: Vec::new() })
 }
-
-/// Mode id that activates `PLAN_POLICY`.
-const PLAN_MODE_ID: &str = "plan";
 
 /// `ee` plan-mode contract: the existing deliverable format plus one payload.
 const PLAN_POLICY_TEXT: &str = r#"You are in plan mode. Investigate with read-only tools when needed, then return a concrete implementation plan, not a general explanation or a promise to investigate later.
@@ -255,6 +307,41 @@ mod tests {
     fn write_mode_omits_plan_policy() {
         let bundle = build(&inputs("test", "test-model")).expect("builds");
         assert!(!bundle.stable.contains("You are in plan mode."));
+        let runtime = bundle.runtime.expect("runtime context");
+        assert!(runtime.text.contains("Current session mode: write."));
+    }
+
+    #[test]
+    fn ask_mode_is_read_only_and_direct() {
+        let mode: &'static SessionModeId = Box::leak(Box::new(SessionModeId::new("ask")));
+        let mut inputs = inputs("test", "test-model");
+        inputs.mode = mode;
+        let bundle = build(&inputs).expect("builds");
+        assert!(!bundle.stable.contains("You are in plan mode."));
+        let runtime = bundle.runtime.expect("runtime context");
+        assert!(runtime.text.contains("Current session mode: ask."));
+        assert!(runtime.text.contains("Do not modify files, execute commands, or delegate."));
+        assert!(!runtime.text.contains("Current session mode: write."));
+    }
+
+    #[test]
+    fn unknown_mode_is_conservative() {
+        let mode: &'static SessionModeId = Box::leak(Box::new(SessionModeId::new("future")));
+        let mut inputs = inputs("test", "test-model");
+        inputs.mode = mode;
+        let runtime = build(&inputs).expect("builds").runtime.expect("runtime context");
+        assert!(runtime.text.contains("Current session mode is not recognized."));
+        assert!(runtime.text.contains("Do not invoke tools or make changes."));
+    }
+
+    #[test]
+    fn plan_mode_runtime_does_not_repeat_plan_policy() {
+        let mode: &'static SessionModeId = Box::leak(Box::new(SessionModeId::new("plan")));
+        let mut inputs = inputs("test", "test-model");
+        inputs.mode = mode;
+        let bundle = build(&inputs).expect("builds");
+        let runtime = bundle.runtime.expect("runtime context");
+        assert!(!runtime.text.contains("Current session mode: plan."));
     }
 
     fn names(tools: &[&str]) -> Vec<String> {

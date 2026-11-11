@@ -146,8 +146,9 @@ pub(crate) const STABLE_SECTIONS: &[Slot] = &[
     DEPLOYMENT_PERSONA_SUFFIX,
 ];
 
-// Runtime-context slots. `EE_TURN_GUIDANCE` and `MCP_SERVER_INSTRUCTIONS` are
-// additive `ee` extensions; DSH has no equivalent.
+// Runtime-context slots. `EE_MODE_POLICY`, `EE_TURN_GUIDANCE`, and
+// `MCP_SERVER_INSTRUCTIONS` are additive `ee` extensions; DSH has no
+// equivalent.
 pub(crate) const WORKING_DIRECTORY: Slot =
     Slot { name: "WORKING_DIRECTORY", order: 100, registrations: &["working-directory:current"] };
 pub(crate) const SANDBOX_POLICY: Slot =
@@ -159,6 +160,8 @@ pub(crate) const SUBAGENT_DELEGATION: Slot = Slot {
     order: 120,
     registrations: &["subagent:identity", "subagent:delegation", "tool:<name>:depth"],
 };
+pub(crate) const EE_MODE_POLICY: Slot =
+    Slot { name: "EE_MODE_POLICY", order: 125, registrations: &["ee:mode-policy"] };
 pub(crate) const RUNTIME_HARNESS_SOURCE: Slot =
     Slot { name: "HARNESS_SOURCE", order: 200, registrations: &["harness:source"] };
 pub(crate) const RUNTIME_WEB_SURFACE: Slot =
@@ -174,6 +177,7 @@ pub(crate) const CONTEXT_SECTIONS: &[Slot] = &[
     SANDBOX_POLICY,
     APPROVAL_POLICY,
     SUBAGENT_DELEGATION,
+    EE_MODE_POLICY,
     EE_TURN_GUIDANCE,
     MCP_SERVER_INSTRUCTIONS,
     RUNTIME_HARNESS_SOURCE,
@@ -245,6 +249,7 @@ mod tests {
             ("SANDBOX_POLICY", 110),
             ("APPROVAL_POLICY", 115),
             ("SUBAGENT_DELEGATION", 120),
+            ("EE_MODE_POLICY", 125),
             ("EE_TURN_GUIDANCE", 130),
             ("MCP_SERVER_INSTRUCTIONS", 140),
             ("HARNESS_SOURCE", 200),

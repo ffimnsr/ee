@@ -78,7 +78,7 @@ impl TurnSystemContext {
         if let Some(facts) = self.memory.filter(|text| !text.trim().is_empty()) {
             messages.push(ModelMessage::text(ModelRole::System, format!("Memory facts:\n{facts}")));
         }
-        messages.extend(self.history);
+        messages.extend(self.history.into_iter().filter(|message| !is_refreshable_prompt(message)));
         messages.extend(self.workspace.into_iter().map(|workspace| workspace.message));
         if let Some(runtime) = self.runtime.filter(|snapshot| !snapshot.text.trim().is_empty()) {
             messages.push(runtime_message(&runtime.text));
@@ -89,6 +89,18 @@ impl TurnSystemContext {
             task_context.apply_to_transcript(transcript);
         }
     }
+}
+
+/// Prompt-plane messages that the current turn rebuilds from live state.
+///
+/// A resumed transcript can contain an earlier workspace snapshot or runtime
+/// snapshot. Keeping it would duplicate stale facts after the fresh planes are
+/// appended, so both are dropped before the current snapshot is inserted.
+fn is_refreshable_prompt(message: &ModelMessage) -> bool {
+    matches!(
+        message.metadata.get("ee_prompt").map(String::as_str),
+        Some("runtime_context" | "workspace_instructions")
+    )
 }
 
 /// Builds the runtime snapshot as host policy, not user input.
@@ -178,6 +190,43 @@ mod tests {
         assert_eq!(runtime.trust, TrustLevel::SystemPolicy);
         assert_eq!(runtime.metadata.get("ee_prompt").map(String::as_str), Some("runtime_context"));
         assert!(runtime.text_content().starts_with(RUNTIME_CONTEXT_HEADER));
+    }
+
+    #[test]
+    fn stale_prompt_planes_are_replaced_by_the_fresh_snapshot() {
+        let mut transcript = Transcript::new();
+        let stale_workspace = ModelMessage::text(ModelRole::User, "old workspace")
+            .with_trust(TrustLevel::WorkspaceInstructionUntrusted)
+            .with_metadata([("ee_prompt".into(), "workspace_instructions".into())]);
+        let stale_runtime = ModelMessage::text(ModelRole::User, "old cwd")
+            .with_metadata([("ee_prompt".into(), "runtime_context".into())]);
+        let repeat = ModelMessage::text(ModelRole::User, "repeat reminder")
+            .with_metadata([("ee_prompt".into(), "repeat_reminder".into())]);
+        let context = TurnSystemContext {
+            history: vec![stale_workspace, stale_runtime, repeat],
+            workspace: vec![WorkspaceMessage {
+                path: "AGENTS.md".into(),
+                message: ModelMessage::text(ModelRole::User, "new workspace")
+                    .with_trust(TrustLevel::WorkspaceInstructionUntrusted),
+            }],
+            runtime: Some(RuntimeSnapshot { text: "new cwd".into() }),
+            ..TurnSystemContext::default()
+        };
+        context.apply_to_transcript(
+            &mut transcript,
+            vec![ModelMessage::text(ModelRole::User, "current")],
+        );
+
+        let texts: Vec<_> = transcript.messages.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "repeat reminder".to_string(),
+                "new workspace".to_string(),
+                format!("{RUNTIME_CONTEXT_HEADER}\n\nnew cwd"),
+                "current".to_string(),
+            ]
+        );
     }
 
     #[test]

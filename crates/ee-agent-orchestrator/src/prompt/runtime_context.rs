@@ -18,9 +18,10 @@ use crate::prompt::delegation::depth_line;
 use crate::prompt::error::PromptError;
 use crate::prompt::render::{Section, render_sections};
 use crate::prompt::sections::{
-    APPROVAL_POLICY, EE_TURN_GUIDANCE, SANDBOX_POLICY, SUBAGENT_DELEGATION, WORKING_DIRECTORY,
+    APPROVAL_POLICY, EE_MODE_POLICY, EE_TURN_GUIDANCE, SANDBOX_POLICY, SUBAGENT_DELEGATION,
+    WORKING_DIRECTORY,
 };
-use crate::prompt::{AgentIdentity, ApprovalMode, SandboxMode};
+use crate::prompt::{AgentIdentity, ApprovalMode, ModePolicy, SandboxMode};
 
 /// Typed facts that produce the runtime snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +42,8 @@ pub(crate) struct RuntimeContextInputs<'a> {
     pub agent: AgentIdentity<'a>,
     /// Per-turn strategy text, when the runtime produced any.
     pub turn_guidance: Option<&'a str>,
+    /// Session mode policy; plan mode is expressed by the stable slot instead.
+    pub mode_policy: ModePolicy,
 }
 
 impl SandboxMode {
@@ -84,6 +87,9 @@ pub(crate) fn render(inputs: &RuntimeContextInputs<'_>) -> Result<RuntimeSnapsho
     ];
     if let Some(text) = delegation_text(inputs.agent, inputs.allow_delegate) {
         sections.push(Section::for_slot(&SUBAGENT_DELEGATION, text)?);
+    }
+    if let Some(text) = inputs.mode_policy.runtime_text() {
+        sections.push(Section::for_slot(&EE_MODE_POLICY, text)?);
     }
     if let Some(guidance) = inputs.turn_guidance.filter(|text| !text.trim().is_empty()) {
         sections.push(Section::for_slot(&EE_TURN_GUIDANCE, guidance)?);
@@ -220,6 +226,7 @@ mod tests {
             allow_delegate: false,
             agent: AgentIdentity { name: "root", depth: 0, max_depth: None },
             turn_guidance: None,
+            mode_policy: ModePolicy::Write,
         }
     }
 
@@ -323,6 +330,27 @@ mod tests {
         };
         let snapshot = render(&below).expect("renders");
         assert!(!snapshot.text.contains("remaining levels 0"));
+    }
+
+    #[test]
+    fn mode_policy_text_is_rendered_before_turn_guidance() {
+        let cwd = Path::new("/work/project");
+        let roots = [root("/work/project")];
+        let ask = RuntimeContextInputs {
+            mode_policy: ModePolicy::Ask,
+            turn_guidance: Some("Turn guidance: strategy=Direct"),
+            ..inputs(cwd, &roots, SandboxMode::ReadOnly, ApprovalMode::Never)
+        };
+        let snapshot = render(&ask).expect("renders");
+        let mode_at = snapshot.text.find("Current session mode: ask.").expect("mode text");
+        let guidance_at = snapshot.text.find("Turn guidance: strategy=Direct").expect("guidance");
+        assert!(mode_at < guidance_at, "{}", snapshot.text);
+
+        let plan = RuntimeContextInputs {
+            mode_policy: ModePolicy::Plan,
+            ..inputs(cwd, &roots, SandboxMode::ReadOnly, ApprovalMode::Never)
+        };
+        assert!(!render(&plan).expect("renders").text.contains("Current session mode: plan."));
     }
 
     #[test]

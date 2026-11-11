@@ -48,7 +48,7 @@ pub(crate) const TOOL_GUIDANCE: &[ToolGuidance] = &[
         slot: &TOOL_WRITE,
         registration: "tool:write",
         requires: &["write_file"],
-        text: "`write_file` replaces the whole file. Pass an absolute path and the complete intended content, never a fragment or a placeholder. The host must approve the write, and approval may be denied. Do not report a change until the write tool result confirms it.",
+        text: "`write_file` replaces the whole file. Read an existing file before overwriting it, and preserve every unrelated line exactly; there is no patch tool, so reconstruct the full content deliberately. Pass an absolute path and the complete intended content, never a fragment or a placeholder. The host must approve the write, and approval may be denied. Do not report a change until the write tool result confirms it.",
     },
     ToolGuidance {
         slot: &TOOL_BASH,

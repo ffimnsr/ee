@@ -180,6 +180,9 @@ pub(crate) fn project_instructions(
     let mut sources = Vec::new();
     for (name, kind, precedence, cap) in [
         ("AGENTS.md", "agent_instructions", 10, INSTRUCTION_BYTES),
+        ("CLAUDE.md", "agent_instructions", 11, INSTRUCTION_BYTES),
+        ("AGENTS.local.md", "agent_instructions", 12, INSTRUCTION_BYTES),
+        ("CLAUDE.local.md", "agent_instructions", 13, INSTRUCTION_BYTES),
         ("RULE.md", "rule", 20, INSTRUCTION_BYTES),
         (".ee.toml", "workspace_config", 30, CONFIG_BYTES),
     ] {
@@ -291,6 +294,30 @@ fn safe_config_summary(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_instructions_include_local_overlays_in_precedence_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for name in ["AGENTS.md", "CLAUDE.md", "AGENTS.local.md", "CLAUDE.local.md"] {
+            std::fs::write(temp.path().join(name), format!("{name} content")).expect("write");
+        }
+        std::fs::write(temp.path().join("RULE.md"), "rule content").expect("write rule");
+        let result = project_instructions(temp.path()).expect("instructions");
+        let names = result
+            .sources
+            .iter()
+            .filter_map(|source| {
+                std::path::Path::new(&source.path).file_name().map(|name| name.to_string_lossy())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["AGENTS.md", "CLAUDE.md", "AGENTS.local.md", "CLAUDE.local.md", "RULE.md"]
+        );
+        assert_eq!(result.sources[0].precedence, 10);
+        assert_eq!(result.sources[1].precedence, 11);
+        assert_eq!(result.sources[3].precedence, 13);
+    }
 
     #[test]
     fn notes_reject_secret_assignments_and_stay_scoped() {

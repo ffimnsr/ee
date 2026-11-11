@@ -813,23 +813,23 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Add `prompt/workspace.rs`.
-  - [ ] Discover `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, `CLAUDE.local.md` from root to cwd.
-  - [ ] Include root-only `RULE.md` and sanitized `.ee.toml`.
-  - [ ] Dedupe by content hash; deeper files win conflicts.
-  - [ ] Apply 64 KiB total and 1 MiB source caps with truncation markers.
-  - [ ] Render `Instructions from: "<path>"` blocks.
-  - [ ] Track combined content hash for dynamic refresh.
-- [ ] Add `TrustLevel::WorkspaceInstructionUntrusted` with label `workspace_instruction`.
-  - [ ] Return true from `is_untrusted`.
-  - [ ] Extend `prompt_injection` wrapping and detection tests.
-- [ ] Wire discovery in `ee-cli/src/app/agent_knowledge.rs`.
-  - [ ] Reuse `project_instructions` file reading and sanitization; do not duplicate it.
-  - [ ] Pass sources into the agent session once at session start.
-- [ ] Add dynamic refresh hooks.
-  - [ ] Recompute after `read_file` / `write_file` / `ee_project_instructions` touches a candidate.
-  - [ ] Emit an update message only when the hash changes; remove when files disappear.
-- [ ] Add tests for precedence, dedupe, caps, injection detection, refresh, removal, and path escape rejection.
+- [x] Add `prompt/workspace.rs`.
+  - [x] Discover `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, `CLAUDE.local.md` from each root toward cwd.
+  - [x] Include root-only `RULE.md` and redacted `.ee.toml`.
+  - [x] Dedupe by trimmed content hash; render broad-to-specific so deeper files win conflicts.
+  - [x] Apply 64 KiB total and 1 MiB source caps with truncation markers.
+  - [x] Render `Instructions from: <path>` blocks inside an escaped `<system-reminder>` frame.
+  - [x] Refresh by rebuilding the bundle every prompt; `TurnSystemContext` replaces earlier prompt-plane messages on resume.
+- [x] Add `TrustLevel::WorkspaceInstructionUntrusted` with label `workspace_instruction`.
+  - [x] Return true from `is_untrusted`.
+  - [x] Extend trust and injection detection tests.
+- [x] Align host instruction discovery in `ee-cli/src/app/agent_knowledge.rs`.
+  - [x] Add `CLAUDE.md`, `AGENTS.local.md`, and `CLAUDE.local.md` to `project_instructions` with precedence 11–13.
+  - [x] Keep `.ee.toml` sanitization; orchestrator owns the session prompt snapshot.
+- [x] Add refresh behavior.
+  - [x] Recompute on every prompt bundle build, including the post-MCP rebuild.
+  - [x] Drop stale `ee_prompt=workspace_instructions` history before inserting the fresh snapshot; deleted files disappear.
+- [x] Add tests for precedence, dedupe, caps, injection detection, frame escaping, sanitization, and path escape rejection.
 
 **Acceptance criteria:**
 
@@ -854,19 +854,19 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Rewrite plan text in `prompt/sections.rs`.
-  - [ ] Investigation rules, deliverable sections, `## Open questions` then payload.
-  - [ ] Explicit prohibition on writes, execution, and delegation.
-  - [ ] Keep the payload shape and hidden-Markdown note.
-- [ ] Add ask-mode text: answer directly, read-only tools only, no mutation or delegation.
-- [ ] Add write-mode text: implement with advertised tools; host approval remains required.
-- [ ] Gate tool guidance by mode-advertised tool set.
-- [ ] Remove `mode_system_context` and its call site.
-- [ ] Extend plan-mode tests.
-  - [ ] Payload still parses through `parse_plan_items`.
-  - [ ] Snapshot contains `## Plan`, `## Validation`, `## Open questions`.
-  - [ ] Snapshot contains no write/execute/delegate tool names.
-- [ ] Add ask-mode and write-mode snapshots.
+- [x] Rewrite plan text in the prompt module.
+  - [x] Investigation rules, deliverable sections, `## Open questions` then payload.
+  - [x] Explicit prohibition on writes, execution, and delegation.
+  - [x] Keep the payload shape and hidden-Markdown note.
+- [x] Add ask-mode text: answer directly, read-only tools only, no mutation or delegation (`EE_MODE_POLICY` runtime slot).
+- [x] Add write-mode text: implement with advertised tools; host approval remains required (`EE_MODE_POLICY` runtime slot).
+- [x] Gate tool guidance by mode-advertised tool set.
+- [x] Remove `mode_system_context` and its call site.
+- [x] Extend plan-mode tests.
+  - [x] Payload still parses through `parse_plan_items`.
+  - [x] Snapshot contains `## Plan`, `## Validation`, `## Open questions`.
+  - [x] Snapshot contains no write/execute/delegate tool names.
+- [x] Add ask-mode and write-mode snapshots.
 
 **Acceptance criteria:**
 

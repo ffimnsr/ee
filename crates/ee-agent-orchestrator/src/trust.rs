@@ -1,11 +1,11 @@
 //! Trust labels for transcript and memory content.
 //!
 //! Every normalized message and memory item carries a [`TrustLevel`] so the
-//! loop engine can distinguish system policy, user prompts, model output,
-//! tool output, and subagent summaries.  File contents, terminal output, tool
-//! results, and subagent summaries are **untrusted** by default: they may
-//! contain prompt-injection attempts and can never override
-//! system/developer/orchestrator policy.
+//! loop engine can distinguish system policy, user prompts, model output, tool
+//! output, repository instructions, and subagent summaries.  File contents,
+//! terminal output, tool results, workspace instruction files, and subagent
+//! summaries are **untrusted** by default: they may contain prompt-injection
+//! attempts and can never override system/developer/orchestrator policy.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,11 @@ pub enum TrustLevel {
     ToolOutputUntrusted,
     /// Subagent summaries merged from child runs.
     SubagentSummaryUntrusted,
+    /// Repository instruction files (`AGENTS.md`, `CLAUDE.md`, ...).
+    ///
+    /// These are attacker-controlled in shared workspaces, so they are untrusted
+    /// even though the orchestrator injects them deliberately.
+    WorkspaceInstructionUntrusted,
 }
 
 impl TrustLevel {
@@ -37,6 +42,7 @@ impl TrustLevel {
             Self::ModelOutput => "model_output",
             Self::ToolOutputUntrusted => "tool_output",
             Self::SubagentSummaryUntrusted => "subagent_summary",
+            Self::WorkspaceInstructionUntrusted => "workspace_instruction",
         }
     }
 
@@ -44,7 +50,12 @@ impl TrustLevel {
     /// cannot modify instructions.
     #[must_use]
     pub fn is_untrusted(self) -> bool {
-        matches!(self, Self::ToolOutputUntrusted | Self::SubagentSummaryUntrusted)
+        matches!(
+            self,
+            Self::ToolOutputUntrusted
+                | Self::SubagentSummaryUntrusted
+                | Self::WorkspaceInstructionUntrusted
+        )
     }
 }
 
@@ -129,6 +140,7 @@ mod tests {
             (TrustLevel::ModelOutput, "model_output"),
             (TrustLevel::ToolOutputUntrusted, "tool_output"),
             (TrustLevel::SubagentSummaryUntrusted, "subagent_summary"),
+            (TrustLevel::WorkspaceInstructionUntrusted, "workspace_instruction"),
         ];
         for (level, label) in cases {
             assert_eq!(level.label(), label);
@@ -154,6 +166,14 @@ mod tests {
                 _ => assert!(!trust.is_untrusted(), "{role:?} must be trusted"),
             }
         }
+    }
+
+    #[test]
+    fn workspace_instructions_are_untrusted() {
+        let message = ModelMessage::text(ModelRole::User, "repository rule")
+            .with_trust(TrustLevel::WorkspaceInstructionUntrusted);
+        assert_eq!(message.trust.label(), "workspace_instruction");
+        assert!(message.trust.is_untrusted());
     }
 
     #[test]
