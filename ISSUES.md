@@ -621,3 +621,426 @@ Reference: [plugin-system-cordis.md](docs/upgrades/plugin-system-cordis.md)
 - `schemas/plugin-manifest-v2.json` and `schemas/ee-config.schema.json` are current.
 - Release and install scripts package v2 manifests only.
 - No old plugin crate, module, manifest parser, RPC type, or lifecycle path remains in the repository.
+
+# DeepSeek Harness Prompt Sections Implementation Plan
+
+Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepseek-harness-agent-mode-prompt-capture.md](docs/upgrades/deepseek-harness-agent-mode-prompt-capture.md)
+
+## Execution Overview
+
+**Goal:** give `ee agent mode` the same ordered prompt-section structure as DeepSeek Harness while keeping `ee` tool names, policy, plan payload, injection guard, and subagent evidence rules authoritative.
+
+**Overview:** Phase 0 freezes the registry and renderer with no behavior change. Phase 1 replaces the two flat context strings with a stable prompt bundle plus a runtime snapshot. Phase 2 adds per-tool guidance and the prose/schema consistency gate. Phases 3, 4, 5, and 5b are independent after Phase 1/2. Phase 5b makes turn/tool-call limits unlimited by default (opt-in `Some(n)`), then matches DSH's concurrency, repeat, depth, and pruning mechanisms. Phase 6 closes deferred slots, freezes snapshots, and runs full validation.
+
+**Fixed decisions already made (do not re-litigate):**
+
+- Section slot names, registration names, and numeric orders are DSH names verbatim. No renames, no `EE_` prefixes on DSH slots.
+- `ee` keeps canonical tool names (`read_file`, `write_file`, `create_terminal`, `delegate_task`, ...). DSH prose is rewritten; DSH tool names are not advertised.
+- Stable system prompt contains no cwd, roots, sandbox, approval, agent identity, or skill catalog.
+- Runtime facts travel as a host-owned user-role snapshot; `WORKING_DIRECTORY` is the only required context.
+- Repository instruction files are untrusted data, never system policy.
+- `prompt_injection.rs` stays the single trust guard; `prompt_injection` policy text is never replaced by prompt prose.
+- Plan mode keeps the `<!-- ee-plan ... -->` payload contract.
+- Turn/model/tool-call limits default to `None` (unlimited); users may opt into `Some(n)`. DSH has no turn or total-tool-call cap. Concurrency (10), repeats (advisory at 3/5/8), timeouts, depth, and active-subagent counts remain bounded.
+- No compatibility shims, no dual context emission, no feature flag to restore the old flat strings.
+- New logic lives in `crates/ee-agent-orchestrator/src/prompt/`. Files already over 1,000 LOC receive delegation call sites only.
+
+**Parallel map:**
+
+| Phase | Can start after | Write scope | Blocks |
+|---|---|---|---|
+| 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | 1 |
+| 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/turn.rs` | 2, 3, 4 |
+| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs` + tests | 5, 6 |
+| 3 Workspace instructions | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | 6 |
+| 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | 6 |
+| 5 Delegation, MCP, compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | 6 |
+| 5b Limits and repetition | 2 | `src/config.rs`, `src/stuck.rs` call site, `src/prompt/repeat_guard.rs`, `src/prompt/runtime_context.rs`, `src/model.rs` | 6 |
+| 6 Deferred slots + gates | 2, 3, 4, 5, 5b | tests, `src/prompt/sections.rs` | — |
+
+## Phase 0 — Shared contracts
+
+**Goal:** create the section registry, renderer, and transcript-context type so later phases never invent ad-hoc strings.
+
+**Overview:** this phase adds `src/prompt/` and moves `TurnSystemContext` out of `loop_engine.rs`. It changes no rendered prompt. All DSH slot names and orders exist as constants with tests.
+
+**Rules:**
+
+- `SECTION_ORDERS` and `CONTEXT_ORDERS` mirror DSH exact values, including unused slots.
+- Both slot names and registration names exist; registration names own identity and duplicate detection.
+- Renderer is pure: no env, cwd, clock, or global state.
+- Every error is a typed `PromptError` variant; no stringly errors.
+- Each new file stays below 1,000 LOC.
+
+**Work items:**
+
+- [ ] Add `prompt/sections.rs`.
+  - [ ] Define all stable slot constants and orders from DSH `SECTION_ORDERS`.
+  - [ ] Define all runtime slot constants and orders from DSH `CONTEXT_ORDERS`.
+  - [ ] Define registration-name constants (`harness:identity`, `deployment:persona-prefix`, `tool:read`, `mcp:<server>` template, ...).
+  - [ ] Add the `EE_TURN_GUIDANCE` extension constant at order 130.
+  - [ ] Add a test asserting every name/order pair against a hardcoded expected table.
+- [ ] Add `prompt/render.rs`.
+  - [ ] Implement `Section`, sort by `(order, registration)`, drop empty, join with `\n\n`.
+  - [ ] Implement strict `{{variable}}` interpolation with unknown, undefined, and malformed errors.
+  - [ ] Implement `interpolate: false`, `complete`, duplicate-registration, and byte-budget errors.
+  - [ ] Add tests for ordering ties, empty sections, braces, complete collision, and unknown variables.
+- [ ] Add `prompt/error.rs` with `PromptError` variants and `Display`.
+- [ ] Add `prompt/context.rs`.
+  - [ ] Move `TurnSystemContext` from `loop_engine.rs`.
+  - [ ] Add `stable: Option<String>`, `runtime: Option<RuntimeSnapshot>`, `workspace: Vec<WorkspaceMessage>` fields.
+  - [ ] Add `apply_to_transcript` that enforces the documented message order.
+  - [ ] Update callers to import from `prompt`; no duplicate type remains.
+- [ ] Add `prompt/mod.rs` with `PromptInputs`, `PromptBundle`, `PromptPreset`, and `build` signature returning `Result<_, PromptError>`.
+- [ ] Register `mod prompt;` in `lib.rs` and re-export only `pub(crate)` items.
+
+**Acceptance criteria:**
+
+- `cargo test --quiet -p ee-agent-orchestrator prompt::` passes.
+- Prompt rendering is unchanged in behavior; existing provider adapter tests pass.
+- Slot and registration inventories match the capture doc exactly.
+- `loop_engine.rs` has no new logic beyond the moved type and one delegation call.
+
+## Phase 1 — Stable prompt and runtime snapshot
+
+**Goal:** replace `workspace_system_context` and `mode_system_context` with the registry builder, and deliver runtime facts as a separate snapshot.
+
+**Overview:** this phase wires identity, persona prefix/suffix, `WORKING_DIRECTORY`, `SANDBOX_POLICY`, `APPROVAL_POLICY`, and `EE_TURN_GUIDANCE`. It deletes the old flattened strings and updates adapter tests.
+
+**Rules:**
+
+- The stable prompt must not contain cwd, workspace roots, sandbox text, approval text, or agent identity.
+- Runtime text is derived from typed policy inputs, never from a free-form permission string.
+- Approval prose never grants escalation when writes or execution are denied.
+- `EE_TURN_GUIDANCE` carries the existing `capability_aware_guidance` text; strategy decisions do not change.
+- No prompt section embeds tool output, repository text, or model output.
+
+**Work items:**
+
+- [ ] Add `prompt/runtime_context.rs`.
+  - [ ] Render `WORKING_DIRECTORY` with cwd, sorted deduplicated roots, absolute-path rule, and workspace-scope rule.
+  - [ ] Render `SANDBOX_POLICY` from `ToolPolicy::{allow_write, allow_execute}` and `WorkspaceScope`.
+  - [ ] Render `APPROVAL_POLICY` from typed `ApprovalMode` resolved by the adapter (`agents.approval`, `agents.read_only_modes`, `allow_host_approved_side_effects`).
+  - [ ] Render `SUBAGENT_DELEGATION` only when depth > 0 or delegation is allowed.
+  - [ ] Prepend the exact supersession header once.
+  - [ ] Add exact-render tests for read-only, workspace-write, approval ask, approval denied, and subagent identity.
+- [ ] Add `prompt/sections.rs` standard builder.
+  - [ ] Emit `HARNESS_IDENTITY`, `DEPLOYMENT_PERSONA_PREFIX`, `DEPLOYMENT_PERSONA_SUFFIX`.
+  - [ ] Emit `PLAN_POLICY` only for plan mode (text supplied in Phase 4; Phase 1 may keep the existing plan text inside the section).
+  - [ ] Emit `FILE_REFERENCE` when the session accepts resource links.
+  - [ ] Apply the `minimal` preset through `complete: true`.
+- [ ] Rewire `provider_adapter`.
+  - [ ] Delete `workspace_system_context` and `mode_system_context`.
+  - [ ] Build `PromptBundle` in `new_session`, `load_session`, `resume_session`, and `prompt`.
+  - [ ] Store the stable string and runtime snapshot on the session state.
+  - [ ] Pass both through `runtime/turn.rs` into `TurnSystemContext`.
+- [ ] Apply the bundle in `prompt/context.rs`.
+  - [ ] One system message for the stable prompt.
+  - [ ] Memory facts remain a separate system message.
+  - [ ] Runtime snapshot is a user-role message with `TrustLevel::SystemPolicy` and `metadata["ee_prompt"] = "runtime_context"`.
+  - [ ] Current prompt is last.
+- [ ] Update or delete tests that asserted the old flat strings.
+- [ ] Add snapshot tests for `standard`, `plan`, `minimal`, and read-only prompts.
+- [ ] Add cache-stability test: two turns with different cwd produce identical stable strings and different runtime strings.
+
+**Acceptance criteria:**
+
+- No `Session context:`, `Tool path rules:`, or `Agent mode:` flat string remains in production code.
+- Standard prompt snapshot is stable and contains no cwd path.
+- `read_file`, `write_file`, `create_terminal`, and `delegate_task` are absent from plan/ask prompt text.
+- Runtime snapshot metadata and trust level are asserted exactly.
+- `cargo test --quiet -p ee-agent-orchestrator` passes.
+
+## Phase 2 — Tool guidance and consistency gate
+
+**Goal:** every advertised tool has owned guidance, and prompt prose can never name a tool the turn does not advertise.
+
+**Overview:** this phase adds `prompt/tool_guidance.rs` with one entry per `ee` capability and the bidirectional consistency test. It does not add tools.
+
+**Rules:**
+
+- Guidance is keyed by advertised tool name, not by DSH tool name.
+- A section emits only when every required tool is advertised.
+- No placeholder text for tools that do not exist.
+- Advertised tools without guidance must be explicitly exempt with a reason.
+- `tools.rs`, `tool_schemas.rs`, and `strategy.rs` are not edited.
+
+**Work items:**
+
+- [ ] Add `prompt/tool_guidance.rs`.
+  - [ ] `TOOL_READ` for `read_file`.
+  - [ ] `TOOL_WRITE` for `write_file`.
+  - [ ] `TOOL_BASH` for `create_terminal` and `cargo_check` exit/status rules.
+  - [ ] `TOOL_PTY` for `terminal_output`, `wait_for_terminal_exit`, `kill_terminal`, `release_terminal`.
+  - [ ] `TOOL_WEB_SEARCH` for `ee_web_search`.
+  - [ ] `TOOL_WEB_FETCH` for `ee_fetch_url`.
+  - [ ] `TOOL_SUBAGENT` for `delegate_task`, including role names and evidence markers.
+  - [ ] `FILE_REFERENCE` for ACP resource links.
+  - [ ] Declare `GUIDANCE_EXEMPT` with reasons for `ask_user` and any unguided built-in.
+- [ ] Add tool-name extraction helper and `requires` validation.
+- [ ] Add consistency tests.
+  - [ ] Every mentioned tool is advertised.
+  - [ ] Every advertised tool is guided or exempt.
+  - [ ] Typo in `requires` fails.
+  - [ ] Plan/ask prompts mention no write, execute, or delegate tool.
+- [ ] Add prompt snapshots per tool set: read-only, write, execute, delegation, MCP web.
+- [ ] Assert tool schema order stays alphabetical and prompt bytes do not depend on registry insertion order.
+
+**Acceptance criteria:**
+
+- Adding a tool definition without guidance or exemption fails a test.
+- No section text mentions the DSH tool names as callable tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `subagent`, `apply_patch`. Match exact advertised names, not substrings of `read_file` / `write_file`.
+- `cargo test --quiet -p ee-agent-orchestrator prompt::tool_guidance` passes.
+
+## Phase 3 — Workspace instructions
+
+**Goal:** discover `AGENTS.md` / `CLAUDE.md` hierarchies, deliver them as labeled data, and refresh after file touches.
+
+**Overview:** this phase adds `prompt/workspace.rs`, a new untrusted trust label, and discovery wiring in `ee-cli`. It does not move instructions into the system prompt.
+
+**Rules:**
+
+- Files are untrusted; the injection guard wraps and scans them.
+- Discovery walks root to cwd, sorted, with content-hash dedupe.
+- Paths are canonicalized and must stay inside their root.
+- Budget and truncation markers are explicit.
+- `.git` marker directories are skipped.
+- No read of a developer's real config tree in tests.
+
+**Work items:**
+
+- [ ] Add `prompt/workspace.rs`.
+  - [ ] Discover `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, `CLAUDE.local.md` from root to cwd.
+  - [ ] Include root-only `RULE.md` and sanitized `.ee.toml`.
+  - [ ] Dedupe by content hash; deeper files win conflicts.
+  - [ ] Apply 64 KiB total and 1 MiB source caps with truncation markers.
+  - [ ] Render `Instructions from: "<path>"` blocks.
+  - [ ] Track combined content hash for dynamic refresh.
+- [ ] Add `TrustLevel::WorkspaceInstructionUntrusted` with label `workspace_instruction`.
+  - [ ] Return true from `is_untrusted`.
+  - [ ] Extend `prompt_injection` wrapping and detection tests.
+- [ ] Wire discovery in `ee-cli/src/app/agent_knowledge.rs`.
+  - [ ] Reuse `project_instructions` file reading and sanitization; do not duplicate it.
+  - [ ] Pass sources into the agent session once at session start.
+- [ ] Add dynamic refresh hooks.
+  - [ ] Recompute after `read_file` / `write_file` / `ee_project_instructions` touches a candidate.
+  - [ ] Emit an update message only when the hash changes; remove when files disappear.
+- [ ] Add tests for precedence, dedupe, caps, injection detection, refresh, removal, and path escape rejection.
+
+**Acceptance criteria:**
+
+- Workspace text never appears in the stable system prompt.
+- Workspace messages carry the `workspace_instruction` label and are scanned by the injection guard.
+- Discovery order and dedupe match the plan exactly.
+- Tests use only `tempfile` roots and never the real home config.
+
+## Phase 4 — Mode policy sections
+
+**Goal:** express ask, plan, and write policy as ordered sections without losing the plan payload.
+
+**Overview:** this phase rewrites `PLAN_POLICY` prose for `ee`, adds mode gating for tool guidance, and removes the old mode concatenation. It keeps `parse_plan_items` and the payload contract unchanged.
+
+**Rules:**
+
+- `PLAN_POLICY` orders before tool guidance and after persona.
+- Plan payload marker and JSON shape stay byte-identical.
+- Ask mode is read-only and advertises no mutation guidance.
+- Write mode retains host approval and trusted-write semantics.
+- Mode sets come from `mode_policy`; prose never grants a capability the policy denies.
+
+**Work items:**
+
+- [ ] Rewrite plan text in `prompt/sections.rs`.
+  - [ ] Investigation rules, deliverable sections, `## Open questions` then payload.
+  - [ ] Explicit prohibition on writes, execution, and delegation.
+  - [ ] Keep the payload shape and hidden-Markdown note.
+- [ ] Add ask-mode text: answer directly, read-only tools only, no mutation or delegation.
+- [ ] Add write-mode text: implement with advertised tools; host approval remains required.
+- [ ] Gate tool guidance by mode-advertised tool set.
+- [ ] Remove `mode_system_context` and its call site.
+- [ ] Extend plan-mode tests.
+  - [ ] Payload still parses through `parse_plan_items`.
+  - [ ] Snapshot contains `## Plan`, `## Validation`, `## Open questions`.
+  - [ ] Snapshot contains no write/execute/delegate tool names.
+- [ ] Add ask-mode and write-mode snapshots.
+
+**Acceptance criteria:**
+
+- Plan responses from the model still compile to the existing ACP task plan.
+- Mode prompts differ only by documented sections.
+- `cargo test --quiet -p ee-agent-orchestrator provider_adapter` passes.
+
+## Phase 5 — Delegation, MCP, and compaction
+
+**Goal:** add delegation identity/depth contexts, MCP server facts and labeled server instructions, and a DSH-shaped compaction checkpoint prompt.
+
+**Overview:** this phase adds `prompt/mcp.rs` and `prompt/compaction.rs`. MCP server-supplied text is delivered as untrusted runtime messages, never as system policy.
+
+**Rules:**
+
+- MCP display naming stays `mcp_<server>_<tool>`; `ee` proxy tools keep their unprefixed names.
+- `MCP_SERVERS` stable section contains host facts only.
+- Server instruction text carries label `mcp_server` and is untrusted.
+- `SUBAGENT_DELEGATION` renders identity, depth, and remaining budget from policy.
+- Compaction keeps `ee` evidence fields; only the section ordering follows DSH.
+- `mcp/manager.rs` (over 1,000 LOC) receives no logic; add a thin summary accessor or a new module that reads existing public accessors.
+
+**Work items:**
+
+- [ ] Add `prompt/mcp.rs`.
+  - [ ] Render configured server names and display-name rule into `MCP_SERVERS`.
+  - [ ] Render per-server instruction messages for runtime delivery.
+  - [ ] Add tests for naming, ordering, and trust label.
+- [ ] Add `prompt/runtime_context.rs` subagent support.
+  - [ ] Root agent identity line.
+  - [ ] Child identity with role and depth.
+  - [ ] Remaining delegation budget from `max_delegate_depth` / `max_parallel_delegates`.
+- [ ] Rewrite `compaction.rs::build_compaction_prompt`.
+  - [ ] Adopt DSH section order: primary request, concepts, files, errors, pending jobs, current work, next step, critical context.
+  - [ ] Keep `ee` task graph, memory facts, validation facts, and budget sections.
+  - [ ] Add `Pending Jobs` only when job tools exist.
+  - [ ] Add tests for section order and retained evidence.
+- [ ] Add subagent and MCP prompt snapshots.
+
+**Acceptance criteria:**
+
+- MCP instruction text cannot appear in the stable prompt.
+- Subagent context appears only when delegation is possible or depth > 0.
+- Compaction summary still satisfies existing continuation tests.
+- `cargo test --quiet -p ee-agent-orchestrator compaction` passes.
+
+## Phase 5b — Loop limits, repetition, and budget parity
+
+**Goal:** match DSH/Codex behavior: no default turn or tool-call cap, read-only parallelism 10, advisory repeat reminder at 3, subagent depth line only at the cap, pressure notice only for opt-in caps, and tool-result middle prune.
+
+**Overview:** DSH caps concurrency, repeats, time, depth, and active subagents, but not turns or total tool calls (capture §13). `ee` currently defaults to 16 iterations, 16 model calls, and 180 tool calls per turn; that stops tasks that would finish if allowed to continue. Make those limits `Option<usize>` with default `None`, keep `stuck.rs` and timeouts as the real safety net, and add the missing advisory/pruning behavior.
+
+**Rules:**
+
+- `max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` default to `None` (unlimited). `Some(n)` is user/deployment opt-in; `Some(0)` is rejected.
+- Delete `DEFAULT_MAX_LOOP_ITERATIONS`, `DEFAULT_MAX_MODEL_CALLS`, and `DEFAULT_MAX_TOOL_CALLS_PER_TURN`; do not replace them with sentinel values.
+- `stuck.rs`, host cancellation, `max_output_bytes`, `max_subagents`, `tool_timeout`, and `turn_timeout` remain.
+- `DEFAULT_MAX_PARALLEL_TOOLS` becomes `10`; write/execute waves stay serial.
+- Repeat reminder thresholds are `[3, 5, 8]`; `ee` stops at `stuck.max_repeated_tool_calls = 4`, so only 3 fires by default.
+- Pressure notice appears only when a finite `Some(max)` is configured; `None` emits nothing.
+- Bump `CHECKPOINT_SCHEMA_VERSION`; old numeric-cap checkpoints fail closed, no migration shim.
+- Reminder and pressure notice are orchestrator-authored, user-role, `TrustLevel::SystemPolicy`, metadata `ee_prompt=repeat_reminder` / `ee_prompt=runtime_context`.
+- No standing budget table and no new DSH slot; reuse `EE_TURN_GUIDANCE`.
+- `loop_engine.rs`, `stuck.rs`, and `model.rs` receive call sites or small helpers only; detector logic lives in `prompt/repeat_guard.rs`.
+
+**Work items:**
+
+- [ ] Make the three count caps optional.
+  - [ ] In `src/config.rs`, change `max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` to `Option<usize>` and default each to `None`.
+  - [ ] Delete the three `DEFAULT_MAX_*` constants and every import of them.
+  - [ ] Add configuration validation that rejects `Some(0)` with a clear error.
+  - [ ] In `src/budget.rs`, make `BudgetConfig` fields `Option<usize>`; `from_config` copies them.
+  - [ ] Change every `try_reserve_*` and `try_reserve_subagent_and_model_calls` check to deny only on `Some(max)`; `None` never denies on count.
+  - [ ] Make `BudgetSnapshot` count caps `Option<usize>`; render `unbounded` in `Display`.
+  - [ ] Update `restore_used` to compare `Option` caps and skip the usage-above-cap check when the cap is `None`.
+  - [ ] In `src/checkpoint.rs`, update `validate` for `Option` caps and bump `CHECKPOINT_SCHEMA_VERSION`.
+  - [ ] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants finite.
+  - [ ] Update every `BudgetSnapshot` literal in tests/fixtures to `Some(...)` or `None`; no `usize` literals remain.
+- [ ] Make provider limits optional.
+  - [ ] `ee-opencode-agent`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
+  - [ ] `ee-openrouter-agent`: same change, including the manifest input description and default.
+  - [ ] Map directly into `OrchestratorConfig` without `unwrap_or(0)`; omitted means `None`.
+  - [ ] Update provider tests: default is `None`; explicit `7` is `Some(7)`; `0` is rejected.
+- [ ] Add unlimited-default regression tests.
+  - [ ] Fake adapter drives more than 16 iterations and model calls in one turn; task completes.
+  - [ ] Fake tools drive more than 180 tool calls in one turn; task completes.
+  - [ ] `Some(1)` still stops after the first call; `Some(0)` fails at config load.
+  - [ ] `BudgetSnapshot` round-trips `None` as `null`; checkpoint restore accepts matching `None` and rejects a mismatch.
+  - [ ] Old numeric-cap checkpoint fails with the schema-version error.
+- [ ] Match read-only parallelism.
+  - [ ] Change `DEFAULT_MAX_PARALLEL_TOOLS` to `10` in `src/config.rs`.
+  - [ ] Update the default-value assertions in `src/config.rs` tests.
+  - [ ] Add a test proving write/execute intents still serialize above the limit.
+- [ ] Add `src/prompt/repeat_guard.rs`.
+  - [ ] Canonicalize arguments with deep key sorting; key on `(tool name, canonical JSON)`.
+  - [ ] Track consecutive counts with thresholds `[3, 5, 8]`, `argumentsPreviewChars = 500`.
+  - [ ] Implement `*` wildcard `include` / `exclude`; excluded calls neither count nor reset.
+  - [ ] Reset the chain on a user message; keep per-runtime state only.
+  - [ ] Emit the exact gentle/detailed reminder texts from the plan, with `ee` tool names.
+  - [ ] Add unit tests for threshold, canonical ordering, preview truncation, filters, reset, and argument change.
+- [ ] Wire the reminder into the loop at one call site.
+  - [ ] Observe each executed tool call after its result; append the returned notice to the transcript.
+  - [ ] Skip observation when the tool-call budget denied the call.
+  - [ ] Assert the existing hard stop still fires at 4 (`src/stuck.rs`).
+- [ ] Add the budget pressure notice.
+  - [ ] Compute remaining iterations/model calls/tool calls from `BudgetSnapshot` for finite caps only.
+  - [ ] Emit one line into `EE_TURN_GUIDANCE` only at `iterations_remaining <= 2` or `tool_calls_used >= 90%`.
+  - [ ] Emit nothing when the corresponding cap is `None`.
+  - [ ] Never print all caps; no new section name.
+- [ ] Add the subagent depth line at the cap.
+  - [ ] Render `Delegation depth for \`delegate_task\`: current <n>, maximum <m>, remaining levels 0.` only when `depth == max_depth`.
+  - [ ] Extend the `SUBAGENT_DELEGATION` snapshot test for below-cap silence.
+- [ ] Add tool-result middle pruning.
+  - [ ] Prune only tool-result text longer than 8192 chars: keep 4096 head + 1024 tail.
+  - [ ] Insert the exact marker `[... tool result middle pruned ...]`.
+  - [ ] Apply before the transcript byte budget; never prune assistant text or tool arguments.
+  - [ ] Add tests for boundary sizes, exact output, determinism, and post-prune budget enforcement.
+- [ ] Audit per-tool timeouts.
+  - [ ] Record `ee`'s 120 s global tool timeout vs DSH's 30-300 s per-tool defaults in the plan.
+  - [ ] Do not change timeout defaults in this phase.
+- [ ] Document the remaining wall-clock knob.
+  - [ ] State that `turn_timeout = 300 s` is unchanged and is not a step cap.
+  - [ ] Leave an explicit follow-up decision for unlimited wall-clock turns; do not change it silently.
+- [ ] Run validation for touched modules.
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator prompt::`
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator config`
+  - [ ] `cargo test --quiet -p ee-agent-orchestrator stuck`
+  - [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`
+
+**Acceptance criteria:**
+
+- Default config has `None` for iterations, model calls, and tool calls; no sentinel `usize::MAX` or `0`.
+- More than 16 iterations/model calls and more than 180 tool calls complete in one turn under defaults.
+- Explicit `Some(n)` still stops at `n`; `Some(0)` fails validation; checkpoints compare `Option` caps.
+- Provider manifests default to unlimited and reject explicit `0`.
+- `DEFAULT_MAX_PARALLEL_TOOLS == 10`; write/execute stays serial.
+- Third identical call emits one advisory notice; fourth stops the loop.
+- Reminder does not fire on changed arguments, a reset user message, or an excluded tool.
+- Pressure notice appears only for finite caps and only under the documented conditions.
+- Depth line appears only at the cap.
+- Oversized tool result is pruned to head + marker + tail; small results are byte-identical.
+- No new slot name and no budget table in the prompt.
+
+## Phase 6 — Deferred slots and final gates
+
+**Goal:** document inert capabilities, freeze snapshots, and prove no drift remains.
+
+**Overview:** this phase adds no new product behavior. It audits every registered slot, pins the deferred list, and runs the full validation set.
+
+**Rules:**
+
+- Inert slots emit nothing and are listed with the condition that would activate them.
+- No placeholder prose for missing tools.
+- No DSH repository `AGENTS.md` content in any snapshot.
+- Snapshots are deterministic and checked in.
+- Full validation runs with the memory guard.
+
+**Work items:**
+
+- [ ] Audit every slot against the registry table.
+  - [ ] Include the phase 5b additions: repeat reminder metadata, pressure notice, depth line, middle-prune marker.
+  - [ ] Add a test that iterates all slots and asserts an explicit status: `emitted`, `conditional`, `deferred`, or `omit`.
+  - [ ] Assert deferred slots have an activation note in the plan.
+- [ ] Add guards against blind porting.
+  - [ ] No `DeepSeek Harness`, `dsh`, `@path`, `apply_patch`, `run_code`, or `job_output` in `ee` prompt snapshots.
+  - [ ] No `harness-example/` path referenced by runtime code or tests.
+- [ ] Freeze snapshots for standard, plan, ask, write, minimal, read-only, delegation, and MCP.
+- [ ] Run final validation.
+  - [ ] `cargo fmt --all --check`.
+  - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+  - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
+  - [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`.
+  - [ ] `cargo test --quiet -p ee-cli --features agents` for the touched modules.
+
+**Acceptance criteria:**
+
+- All slot and registration names match DSH exactly.
+- No prompt text names an unadvertised tool.
+- Stable prompts contain no runtime facts.
+- Snapshots contain no DSH product or repository content.
+- Full validation passes under the memory guard.
