@@ -46,7 +46,7 @@ impl OrchestratorRuntime {
                 sink,
                 client,
                 cancel,
-                recovery.system_context,
+                recovery.prompt,
                 &recovery.provider,
                 metadata,
             )
@@ -83,7 +83,7 @@ impl OrchestratorRuntime {
                 sink,
                 client,
                 cancel,
-                recovery.system_context,
+                recovery.prompt,
                 &recovery.provider,
                 metadata,
             )
@@ -227,7 +227,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
         session_id: &str,
         provider: &str,
     ) -> Result<(), OrchestratorError> {
@@ -288,7 +288,7 @@ impl OrchestratorRuntime {
                     sink.clone(),
                     client.clone(),
                     cancel.clone(),
-                    system_context.clone(),
+                    prompt.clone(),
                     repair_context,
                     plan,
                     execution_log.clone(),
@@ -445,7 +445,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
         repair_context: String,
         context_plan: ContextPlan,
         execution_log: Arc<Mutex<Vec<ToolExecutionLogEntry>>>,
@@ -480,11 +480,12 @@ impl OrchestratorRuntime {
             },
         );
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
-        let mut session = system_context.unwrap_or_default();
-        if !session.is_empty() {
-            session.push_str("\n\n");
-        }
-        session.push_str(&repair_context);
+        let mut prompt = prompt.unwrap_or_default();
+        prompt
+            .runtime
+            .get_or_insert_with(crate::prompt::context::RuntimeSnapshot::default)
+            .push_block(&repair_context);
+        let stable = (!prompt.stable.trim().is_empty()).then_some(prompt.stable);
         engine
             .run_with_system_context(
                 ctx,
@@ -493,10 +494,12 @@ impl OrchestratorRuntime {
                 cancel,
                 task,
                 TurnSystemContext {
+                    history: Vec::new(),
                     memory,
-                    session: Some(session),
+                    stable,
+                    runtime: prompt.runtime,
+                    workspace: prompt.workspace,
                     task_context: Some(context_plan),
-                    ..TurnSystemContext::default()
                 },
             )
             .await

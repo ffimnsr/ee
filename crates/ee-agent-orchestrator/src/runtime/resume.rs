@@ -13,7 +13,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: String,
+        prompt: PromptBundle,
         provider: &str,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.resume_turn_with_metadata(
@@ -21,7 +21,7 @@ impl OrchestratorRuntime {
             sink,
             client,
             cancel,
-            system_context,
+            prompt,
             provider,
             RecoveryTurnMetadata::default(),
         )
@@ -34,7 +34,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: String,
+        prompt: PromptBundle,
         provider: &str,
         metadata: RecoveryTurnMetadata,
     ) -> Result<TurnOutcome, OrchestratorError> {
@@ -90,19 +90,22 @@ impl OrchestratorRuntime {
             resumed_count: resumed.resumed_count,
         });
         let mut transcript = Transcript::new();
-        transcript.messages = resume.transcript;
+        let mut prompt_messages = Vec::new();
         // Durable checkpoints omit transcript content. A non-empty prompt is
         // therefore required after crash recovery; `/resume` alone fails above.
         if !ctx.prompt.is_empty() {
-            transcript.messages.extend(Transcript::from_prompt(&ctx).messages);
+            prompt_messages.extend(Transcript::from_prompt(&ctx).messages);
         }
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
-        if let Some(facts) = memory {
-            transcript.prepend_system(format!("Memory facts:\n{facts}"));
+        TurnSystemContext {
+            history: resume.transcript,
+            memory,
+            stable: (!prompt.stable.trim().is_empty()).then_some(prompt.stable),
+            runtime: prompt.runtime,
+            workspace: prompt.workspace,
+            task_context: None,
         }
-        if !system_context.is_empty() {
-            transcript.prepend_system(&system_context);
-        }
+        .apply_to_transcript(&mut transcript, prompt_messages);
         let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
             .with_capture_metadata(metadata.checkpoint_context, metadata.evidence_refs);
         let model = self.models.default_adapter()?;
@@ -205,16 +208,16 @@ impl OrchestratorRuntime {
         cancel: watch::Receiver<bool>,
         events: EventRecorder,
     ) -> Result<PromptResult, OrchestratorError> {
-        self.run_turn_recording_with_system_context(ctx, sink, client, cancel, events, None).await
+        self.run_turn_recording_with_prompt(ctx, sink, client, cancel, events, None).await
     }
-    pub(super) async fn run_turn_recording_with_system_context(
+    pub(super) async fn run_turn_recording_with_prompt(
         &self,
         ctx: PromptContext,
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         events: EventRecorder,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
     ) -> Result<PromptResult, OrchestratorError> {
         // Agent-advertised slash commands arrive as ordinary prompt text;
         // `/compact` takes the compaction path before any task or tool work.
@@ -228,7 +231,7 @@ impl OrchestratorRuntime {
                     sink,
                     cancel,
                     command.instructions,
-                    system_context,
+                    prompt,
                     Vec::new(),
                     events,
                 )
@@ -251,7 +254,7 @@ impl OrchestratorRuntime {
             client,
             cancel,
             task,
-            system_context,
+            prompt,
             Vec::new(),
             None,
             events,
@@ -265,7 +268,7 @@ impl OrchestratorRuntime {
         .await
     }
     /// Shared turn runner: builds the engine from `options` and runs one
-    /// bounded turn over the prompt with the given system context.  The
+    /// bounded turn over the prompt with the given prompt planes.  The
     /// wall-clock deadline is re-anchored to this turn's slice (a runtime
     /// may idle between turns for longer than one timeout).
     #[allow(clippy::too_many_arguments)]
@@ -276,7 +279,7 @@ impl OrchestratorRuntime {
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         task: TaskNode,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
         history: Vec<ModelMessage>,
         task_context: Option<ContextPlan>,
         events: EventRecorder,
@@ -298,21 +301,13 @@ impl OrchestratorRuntime {
             events,
             options,
         );
-        engine
-            .run_with_system_context(
-                ctx,
-                sink,
-                client,
-                cancel,
-                task,
-                TurnSystemContext {
-                    history,
-                    memory,
-                    session: system_context,
-                    task_context,
-                    ..TurnSystemContext::default()
-                },
-            )
-            .await
+        let mut context =
+            TurnSystemContext { history, memory, task_context, ..TurnSystemContext::default() };
+        if let Some(prompt) = prompt {
+            context.stable = (!prompt.stable.trim().is_empty()).then_some(prompt.stable);
+            context.runtime = prompt.runtime;
+            context.workspace = prompt.workspace;
+        }
+        engine.run_with_system_context(ctx, sink, client, cancel, task, context).await
     }
 }

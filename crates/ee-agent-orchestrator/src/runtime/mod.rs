@@ -51,6 +51,7 @@ pub(crate) use crate::model_router::ModelRouter;
 pub(crate) use crate::plan_compiler::{PlanCompiler, PlanInput};
 pub(crate) use crate::policy::PolicyEngine;
 pub(crate) use crate::progress::ProgressTracker;
+pub(crate) use crate::prompt::PromptBundle;
 pub(crate) use crate::prompt::context::TurnSystemContext;
 pub(crate) use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 pub(crate) use crate::repair::{
@@ -141,22 +142,25 @@ pub enum AutomaticRubberDuckTurn {
 
 /// Inputs shared by a fresh strategic recovery turn and a resumed one.
 /// Grouping this metadata keeps the production API narrow while retaining the
-/// exact provider identity and system context used by checkpoint recovery.
+/// exact provider identity and prompt planes used by checkpoint recovery.
 #[derive(Debug, Clone)]
 pub struct StrategicRecoveryContext {
+    /// Strategic planning input for the turn.
     pub input: StrategicInput,
-    pub system_context: String,
+    /// Stable and runtime prompt planes resolved for this turn.
+    pub(crate) prompt: PromptBundle,
+    /// Provider identity stamped into checkpoints.
     pub provider: String,
 }
 
 impl StrategicRecoveryContext {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         input: StrategicInput,
-        system_context: impl Into<String>,
+        prompt: PromptBundle,
         provider: impl Into<String>,
     ) -> Self {
-        Self { input, system_context: system_context.into(), provider: provider.into() }
+        Self { input, prompt, provider: provider.into() }
     }
 }
 

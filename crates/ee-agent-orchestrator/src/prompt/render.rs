@@ -36,6 +36,12 @@ impl Section {
         if registration.trim().is_empty() {
             return Err(PromptError::EmptyRegistration);
         }
+        debug_assert!(
+            crate::prompt::sections::stable_slot(slot.name).is_some()
+                || crate::prompt::sections::runtime_slot(slot.name).is_some(),
+            "prompt slot {} is not registered in either plane",
+            slot.name
+        );
         Ok(Self {
             slot: slot.name,
             order: slot.order,
@@ -55,6 +61,7 @@ impl Section {
     }
 
     /// Marks this section as a complete prompt.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_complete(mut self, complete: bool) -> Self {
         self.complete = complete;
@@ -62,6 +69,7 @@ impl Section {
     }
 
     /// Enables or disables `{{variable}}` interpolation.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_interpolation(mut self, interpolate: bool) -> Self {
         self.interpolate = interpolate;

@@ -119,13 +119,20 @@ async fn default_strategic_recovery_path_injects_bounded_capability_guidance_and
             sink,
             client,
             cancel_rx,
-            StrategicRecoveryContext::new(input, "session facts", "provider"),
+            StrategicRecoveryContext::new(
+                input,
+                PromptBundle { stable: "session facts".into(), ..PromptBundle::default() },
+                "provider",
+            ),
         )
         .await
         .expect("turn succeeds");
     assert!(matches!(outcome, StrategicTurnOutcome::Completed(_)));
     let request = &model.requests()[0];
-    assert!(request.transcript[0].text_content().contains("Turn guidance:"));
+    assert_eq!(request.transcript[0].text_content(), "session facts");
+    assert!(
+        request.transcript.iter().any(|message| message.text_content().contains("Turn guidance:"))
+    );
     assert!(request.transcript.iter().any(|message| {
         message.metadata.get("context_source").map(String::as_str) == Some("diagnostics")
     }));

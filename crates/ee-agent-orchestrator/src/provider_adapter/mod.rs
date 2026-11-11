@@ -59,6 +59,9 @@ use crate::observability::{
     WaterfallOutcome, WaterfallStage,
 };
 use crate::policy::{PolicyEngine, ToolPolicy};
+use crate::prompt::{
+    AgentIdentity, ApprovalMode, PromptBundle, PromptInputs, PromptPreset, SandboxMode,
+};
 use crate::runtime::{
     OrchestratorRuntime, StrategicRecoveryContext, StrategicRecoveryTurn, StrategicTurnOutcome,
 };
@@ -124,9 +127,14 @@ impl Default for OrchestratorProviderConfig {
 /// One live session's orchestrator runtime and immutable session facts.
 struct SessionRuntime {
     runtime: Arc<OrchestratorRuntime>,
-    system_context: String,
     /// Workspace used to scope durable state and avoid cross-workspace loads.
     workspace: std::path::PathBuf,
+    /// Sorted, deduplicated workspace roots reported in the runtime context.
+    workspace_roots: Vec<std::path::PathBuf>,
+    /// Provider label used by the deployment persona prefix.
+    provider_label: String,
+    /// Model label used by the deployment persona prefix.
+    model_label: String,
     /// Current ACP mode, kept in provider state so its policy and prompt
     /// instructions remain aligned with framework session state.
     mode: SessionModeId,
@@ -415,48 +423,6 @@ fn mode_policy(base: &PolicyEngine, mode: &SessionModeId) -> Result<PolicyEngine
         }
     }
     Ok(PolicyEngine::new(policy))
-}
-
-fn mode_system_context(system_context: String, mode: &SessionModeId) -> String {
-    let instruction = match mode.to_string().as_str() {
-        ASK_MODE_ID => {
-            "Agent mode: ask. Answer directly; use read-only tools when needed. Do not modify files, run commands, or delegate."
-        }
-        PLAN_MODE_ID => {
-            r#"Agent mode: plan. Investigate with read-only tools when needed, then return a concrete implementation plan, not a general explanation or a promise to investigate later.
-
-Format final response exactly with these sections:
-## Plan
-1. `<file or symbol>` — exact change, reason, dependency/order, and observable success criterion.
-2. Continue one numbered item per independently actionable step.
-## Validation
-- Name exact tests, checks, or manual verification for the completed implementation; say why validation cannot run when none applies.
-## Open questions
-- List only blockers that require a user decision; otherwise write `None`.
-
-Every plan step must name affected files or symbols when known, describe an executable change, and state how completion is verified. Do not claim implementation is complete. Do not modify files, run commands, or delegate.
-
-After `## Open questions`, include exactly one machine-readable payload. Keep it synchronized with `## Plan` and use this exact shape:
-<!-- ee-plan
-[
-  {
-    "title": "short task title",
-    "action": "exact implementation action",
-    "scope": "affected file or symbol",
-    "expected_result": "observable completed state",
-    "verification": "specific test, check, or manual verification",
-    "depends_on": ["prior task title or #index"]
-  }
-]
--->
-The payload must contain at least one task. It is hidden from rendered Markdown and becomes the ACP task plan."#
-        }
-        WRITE_MODE_ID => {
-            "Agent mode: write. Implement task with allowed tools. Existing host approval gates remain required for writes and execution."
-        }
-        _ => "Agent mode: unknown. Do not invoke tools or make changes.",
-    };
-    format!("{system_context}\n\n{instruction}")
 }
 
 fn parse_plan_items(response: &str) -> Result<Vec<crate::plan_compiler::PlanInput>, ProviderError> {

@@ -284,25 +284,60 @@ pub(super) fn persist_session_snapshot(
         .map_err(ProviderError::from)
 }
 
-pub(super) fn workspace_system_context(
+/// Normalizes the reported workspace roots: canonicalized where possible,
+/// deduplicated, and sorted so the runtime snapshot is deterministic.
+pub(super) fn normalize_workspace_roots(
     cwd: &std::path::Path,
     additional_directories: &[std::path::PathBuf],
-) -> String {
-    let mut roots = vec![cwd.to_path_buf()];
-    for directory in additional_directories {
-        if !roots.iter().any(|root| root == directory) {
-            roots.push(directory.clone());
+) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for directory in std::iter::once(cwd).chain(additional_directories.iter().map(|p| p.as_path()))
+    {
+        let root = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+        if !roots.iter().any(|existing| existing == &root) {
+            roots.push(root);
         }
     }
-    let mut text = format!(
-        "Session context:\n- current_working_directory: {}\n- workspace_roots:",
-        cwd.display()
-    );
-    for root in roots {
-        text.push_str(&format!("\n  - {}", root.display()));
-    }
-    text.push_str(
-        "\nTool path rules:\n- Built-in file and terminal tools require absolute paths.\n- Resolve relative paths against current_working_directory before calling tools.",
-    );
-    text
+    roots.sort();
+    roots
+}
+
+/// Provider and model labels for the deployment persona prefix.
+pub(super) fn default_model_labels(
+    models: &crate::model_registry::ModelRegistry,
+) -> (String, String) {
+    models
+        .advertised()
+        .into_iter()
+        .find(|info| info.id == crate::model_registry::DEFAULT_MODEL_ID)
+        .map_or_else(
+            || ("ee".to_string(), crate::model_registry::DEFAULT_MODEL_ID.to_string()),
+            |info| (info.identity.provider_id, info.identity.model_id),
+        )
+}
+
+/// Builds the stable prompt and runtime snapshot for one session mode.
+pub(super) fn prompt_bundle(
+    cwd: &std::path::Path,
+    workspace_roots: &[std::path::PathBuf],
+    provider: &str,
+    model: &str,
+    mode: &SessionModeId,
+    policy: &ToolPolicy,
+) -> Result<PromptBundle, ProviderError> {
+    crate::prompt::build(&PromptInputs {
+        mode,
+        provider,
+        model,
+        cwd,
+        workspace_roots,
+        sandbox: SandboxMode::from_policy(policy),
+        allow_execute: policy.allow_execute,
+        approval: ApprovalMode::from_policy(policy),
+        allow_delegate: policy.allow_delegate,
+        agent: AgentIdentity { name: "root", depth: 0, max_depth: None },
+        turn_guidance: None,
+        preset: PromptPreset::Standard,
+    })
+    .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))
 }

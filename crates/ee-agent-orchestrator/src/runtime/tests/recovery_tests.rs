@@ -137,7 +137,7 @@ async fn deadline_stop_becomes_interrupted_outcome_with_durable_checkpoint() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -193,7 +193,7 @@ async fn resumed_turn_completes_without_new_root_and_retains_counters() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -220,7 +220,7 @@ async fn resumed_turn_completes_without_new_root_and_retains_counters() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -283,7 +283,7 @@ async fn manual_resume_preserves_ambiguous_write_and_never_replays_it() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -318,7 +318,14 @@ async fn manual_resume_preserves_ambiguous_write_and_never_replays_it() {
     let (sink, client, _rx) = plumbing();
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let error = runtime
-        .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "test-provider")
+        .resume_turn(
+            prompt("hello"),
+            sink,
+            client,
+            cancel_rx,
+            PromptBundle::default(),
+            "test-provider",
+        )
         .await
         .expect_err("ambiguous write blocks manual resume");
     assert!(
@@ -350,7 +357,7 @@ async fn cancellation_clears_pending_checkpoints() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -379,7 +386,7 @@ async fn completed_turn_clears_pending_checkpoints() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         )
         .await
@@ -407,7 +414,7 @@ async fn deadline_is_reanchored_per_turn_not_per_session() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         )
         .await
@@ -434,7 +441,7 @@ async fn resume_rejects_provider_mismatch_and_expired_sessions() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -449,7 +456,14 @@ async fn resume_rejects_provider_mismatch_and_expired_sessions() {
     let (sink, client, _rx) = plumbing();
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let error = runtime
-        .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "other-provider")
+        .resume_turn(
+            prompt("hello"),
+            sink,
+            client,
+            cancel_rx,
+            PromptBundle::default(),
+            "other-provider",
+        )
         .await
         .expect_err("provider mismatch rejects restore");
     assert!(
@@ -482,7 +496,7 @@ async fn resume_rejects_provider_mismatch_and_expired_sessions() {
             sink,
             client,
             cancel_rx,
-            String::new(),
+            PromptBundle::default(),
             "test-provider",
         ),
         async {
@@ -506,7 +520,14 @@ async fn resume_rejects_provider_mismatch_and_expired_sessions() {
     let (sink, client, _rx) = plumbing();
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let error = runtime
-        .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "test-provider")
+        .resume_turn(
+            prompt("hello"),
+            sink,
+            client,
+            cancel_rx,
+            PromptBundle::default(),
+            "test-provider",
+        )
         .await
         .expect_err("session cap rejects resume");
     assert!(error.to_string().contains("cumulative timeout"), "{error}");

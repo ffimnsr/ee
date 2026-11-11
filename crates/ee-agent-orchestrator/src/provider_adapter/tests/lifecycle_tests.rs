@@ -140,7 +140,10 @@ async fn provider_adapter_mode_switch_preserves_model_conversation() {
     let conversation = requests[1]
         .transcript
         .iter()
-        .filter(|message| matches!(message.role, ModelRole::User | ModelRole::Assistant))
+        .filter(|message| {
+            matches!(message.role, ModelRole::User | ModelRole::Assistant)
+                && !message.metadata.contains_key("ee_prompt")
+        })
         .map(|message| (message.role, message.text_content()))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -246,7 +249,7 @@ async fn provider_telemetry_is_opt_in_local_and_records_terminal_state() {
 }
 
 #[tokio::test]
-async fn provider_adapter_prompt_includes_workspace_system_context() {
+async fn provider_adapter_prompt_includes_runtime_context() {
     let model =
         Arc::new(FakeModel::new(vec![ModelResponse::new().text(plan_response("ok")).completed()]));
     let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
@@ -284,12 +287,17 @@ async fn provider_adapter_prompt_includes_workspace_system_context() {
     assert_eq!(request_result(frames[4].clone())["stopReason"], "end_turn");
 
     let requests = model.requests();
-    let context = requests[0].transcript[0].text_content();
-    assert!(context.contains("current_working_directory: /work/project"), "{context}");
-    assert!(context.contains("- /shared/lib"), "{context}");
+    let context = requests[0]
+        .transcript
+        .iter()
+        .map(crate::model::ModelMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(context.contains("Current working directory: \"/work/project\"."), "{context}");
+    assert!(context.contains("- \"/shared/lib\""), "{context}");
     assert!(context.contains("require absolute paths"), "{context}");
     assert!(context.contains("Resolve relative paths"), "{context}");
-    assert!(context.contains("Agent mode: plan"), "{context}");
+    assert!(context.contains("You are in plan mode."), "{context}");
     assert!(context.contains("concrete implementation plan"), "{context}");
     assert!(context.contains("## Plan"), "{context}");
     assert!(context.contains("## Validation"), "{context}");

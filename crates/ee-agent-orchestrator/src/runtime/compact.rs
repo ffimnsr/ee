@@ -144,17 +144,10 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         cancel: watch::Receiver<bool>,
         instructions: Option<String>,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
     ) -> Result<PromptResult, OrchestratorError> {
-        self.run_compact_turn_with_history(
-            ctx,
-            sink,
-            cancel,
-            instructions,
-            system_context,
-            Vec::new(),
-        )
-        .await
+        self.run_compact_turn_with_history(ctx, sink, cancel, instructions, prompt, Vec::new())
+            .await
     }
     /// Runs one `/compact` turn with bounded provider-owned conversation
     /// history included in compaction context. Memory changes commit only
@@ -166,7 +159,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         cancel: watch::Receiver<bool>,
         instructions: Option<String>,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
         recent_messages: Vec<ModelMessage>,
     ) -> Result<PromptResult, OrchestratorError> {
         self.run_compact_turn_recording(
@@ -174,7 +167,7 @@ impl OrchestratorRuntime {
             sink,
             cancel,
             instructions,
-            system_context,
+            prompt,
             recent_messages,
             self.events.clone(),
         )
@@ -187,7 +180,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         cancel: watch::Receiver<bool>,
         instructions: Option<String>,
-        system_context: Option<String>,
+        prompt: Option<PromptBundle>,
         recent_messages: Vec<ModelMessage>,
         events: EventRecorder,
     ) -> Result<PromptResult, OrchestratorError> {
@@ -217,9 +210,17 @@ impl OrchestratorRuntime {
             system.push_str("\n\nSession context:\n");
             system.push_str(&context);
         }
-        if let Some(session) = system_context {
-            system.push_str("\n\n");
-            system.push_str(&session);
+        if let Some(prompt) = prompt {
+            if !prompt.stable.trim().is_empty() {
+                system.push_str("\n\n");
+                system.push_str(&prompt.stable);
+            }
+            if let Some(runtime) =
+                prompt.runtime.filter(|snapshot| !snapshot.text.trim().is_empty())
+            {
+                system.push_str("\n\n");
+                system.push_str(&runtime.text);
+            }
         }
         let user_prompt =
             instructions.as_deref().filter(|text| !text.trim().is_empty()).map_or_else(

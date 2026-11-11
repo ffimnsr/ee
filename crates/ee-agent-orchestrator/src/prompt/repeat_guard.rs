@@ -58,12 +58,6 @@ impl RepeatGuard {
         Self { config: RepeatGuardConfig { thresholds, ..config }, last_key: None, count: 0 }
     }
 
-    /// Resets the chain, as a real user message does.
-    pub(crate) fn reset(&mut self) {
-        self.last_key = None;
-        self.count = 0;
-    }
-
     /// Observes one executed call and returns a reminder when a threshold hits.
     pub(crate) fn observe(&mut self, tool_name: &str, arguments: &Value) -> Option<ModelMessage> {
         if !self.tracked(tool_name) {
@@ -228,17 +222,6 @@ mod tests {
             assert!(guard.observe("x", &json!({ "a": 1, "b": 2 })).is_none());
         }
         assert!(guard.observe("x", &json!({ "b": 2, "a": 1 })).is_some());
-    }
-
-    #[test]
-    fn user_reset_clears_the_chain() {
-        let mut guard = RepeatGuard::new(RepeatGuardConfig::default());
-        let args = json!({ "path": "a" });
-        for _ in 0..2 {
-            assert!(guard.observe("read_file", &args).is_none());
-        }
-        guard.reset();
-        assert!(guard.observe("read_file", &args).is_none());
     }
 
     #[test]

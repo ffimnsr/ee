@@ -17,26 +17,6 @@ impl OrchestratorRuntime {
     ) -> Result<PromptResult, OrchestratorError> {
         self.run_turn_recording(ctx, sink, client, cancel, EventRecorder::new()).await
     }
-    /// Runs one turn with immutable session context prepended to the model
-    /// transcript as system facts.
-    pub async fn run_turn_with_system_context(
-        &self,
-        ctx: PromptContext,
-        sink: UpdateSink,
-        client: ClientBridge,
-        cancel: watch::Receiver<bool>,
-        system_context: String,
-    ) -> Result<PromptResult, OrchestratorError> {
-        self.run_turn_recording_with_system_context(
-            ctx,
-            sink,
-            client,
-            cancel,
-            EventRecorder::new(),
-            Some(system_context),
-        )
-        .await
-    }
     /// Runs one turn with recovery enabled: milestone checkpoints are
     /// persisted and deadline/timeout stops become
     /// [`TurnOutcome::Interrupted`] carrying a durable checkpoint instead of
@@ -49,7 +29,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: String,
+        prompt: PromptBundle,
         provider: &str,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.run_turn_recoverable_with_metadata(
@@ -57,7 +37,7 @@ impl OrchestratorRuntime {
             sink,
             client,
             cancel,
-            system_context,
+            prompt,
             provider,
             RecoveryTurnMetadata::default(),
         )
@@ -70,7 +50,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: String,
+        prompt: PromptBundle,
         provider: &str,
         metadata: RecoveryTurnMetadata,
     ) -> Result<TurnOutcome, OrchestratorError> {
@@ -81,14 +61,7 @@ impl OrchestratorRuntime {
         *self.last_repair_stop.lock().expect("last repair stop poisoned") = None;
         if !self.config.recovery.enabled {
             let result = self
-                .run_turn_guided_without_recovery(
-                    ctx,
-                    sink,
-                    client,
-                    cancel,
-                    system_context,
-                    metadata,
-                )
+                .run_turn_guided_without_recovery(ctx, sink, client, cancel, prompt, metadata)
                 .await?;
             return Ok(TurnOutcome::Completed(result));
         }
@@ -104,7 +77,7 @@ impl OrchestratorRuntime {
                     sink,
                     cancel,
                     command.instructions,
-                    Some(system_context),
+                    Some(prompt),
                     metadata.history,
                     self.events.clone(),
                 )
@@ -138,11 +111,9 @@ impl OrchestratorRuntime {
             strategy: guidance.decision.strategy,
             reason: guidance.decision.reason,
         });
-        let mut system_context = system_context;
-        if !system_context.is_empty() {
-            system_context.push_str("\n\n");
-        }
-        system_context.push_str(&guidance.text);
+        let mut prompt = prompt;
+        let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
+        append_turn_guidance(&mut prompt, &guidance.text, Some(&budget));
         let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
             .with_capture_metadata(
                 metadata.checkpoint_context.clone(),
@@ -160,7 +131,7 @@ impl OrchestratorRuntime {
                 client,
                 cancel,
                 task,
-                Some(system_context.clone()),
+                Some(prompt.clone()),
                 metadata.history.clone(),
                 metadata.context_plan.clone(),
                 self.events.clone(),
@@ -198,7 +169,7 @@ impl OrchestratorRuntime {
                     validation_sink,
                     validation_client,
                     validation_cancel,
-                    Some(system_context),
+                    Some(prompt),
                     &session_id,
                     provider,
                 )
@@ -230,7 +201,7 @@ impl OrchestratorRuntime {
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        system_context: String,
+        prompt: PromptBundle,
         metadata: RecoveryTurnMetadata,
     ) -> Result<PromptResult, OrchestratorError> {
         let prompt_text = prompt_text(&ctx);
@@ -243,7 +214,7 @@ impl OrchestratorRuntime {
                     sink,
                     cancel,
                     command.instructions,
-                    Some(system_context),
+                    Some(prompt),
                     metadata.history,
                     self.events.clone(),
                 )
@@ -275,18 +246,16 @@ impl OrchestratorRuntime {
             strategy: guidance.decision.strategy,
             reason: guidance.decision.reason,
         });
-        let mut system_context = system_context;
-        if !system_context.is_empty() {
-            system_context.push_str("\n\n");
-        }
-        system_context.push_str(&guidance.text);
+        let mut prompt = prompt;
+        let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
+        append_turn_guidance(&mut prompt, &guidance.text, Some(&budget));
         self.run_loop_with_options(
             ctx,
             sink,
             client,
             cancel,
             task,
-            Some(system_context),
+            Some(prompt),
             metadata.history,
             metadata.context_plan,
             self.events.clone(),
@@ -300,5 +269,22 @@ impl OrchestratorRuntime {
             },
         )
         .await
+    }
+}
+
+/// Appends strategy guidance and finite-budget pressure to the runtime plane.
+fn append_turn_guidance(
+    prompt: &mut PromptBundle,
+    guidance: &str,
+    budget: Option<&crate::budget::BudgetSnapshot>,
+) {
+    if let Some(runtime) = prompt.runtime.as_mut() {
+        crate::prompt::runtime_context::append_turn_guidance(runtime, Some(guidance), budget);
+        return;
+    }
+    let mut runtime = crate::prompt::context::RuntimeSnapshot::default();
+    crate::prompt::runtime_context::append_turn_guidance(&mut runtime, Some(guidance), budget);
+    if !runtime.text.trim().is_empty() {
+        prompt.runtime = Some(runtime);
     }
 }

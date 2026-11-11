@@ -1,8 +1,8 @@
 //! Transcript assembly order for one turn.
 //!
 //! `TurnSystemContext` owns every message that precedes the current prompt:
-//! the stable system prefix, legacy session text, memory facts, retained
-//! history, workspace instructions, and the runtime snapshot.
+//! the stable system prefix, memory facts, retained history, workspace
+//! instructions, and the runtime snapshot.
 
 use crate::context_planner::ContextPlan;
 use crate::model::{ModelMessage, ModelRole, Transcript};
@@ -14,14 +14,28 @@ pub(crate) const RUNTIME_CONTEXT_HEADER: &str =
 
 /// Host-authored runtime facts delivered as one user-role snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeSnapshot {
+pub struct RuntimeSnapshot {
     /// Rendered context sections, already joined with blank lines.
     pub text: String,
 }
 
+impl RuntimeSnapshot {
+    /// Appends one rendered block, preserving the plane's blank-line join.
+    pub(crate) fn push_block(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if !self.text.trim().is_empty() {
+            self.text.push_str("\n\n");
+        }
+        self.text.push_str(text);
+    }
+}
+
 /// One workspace instruction message with its source path.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WorkspaceMessage {
+pub struct WorkspaceMessage {
     /// Source path used for precedence and dedupe diagnostics.
     pub path: String,
     /// Pre-labeled message. Phase 3 supplies the workspace trust label.
@@ -35,10 +49,6 @@ pub(crate) struct TurnSystemContext {
     pub history: Vec<ModelMessage>,
     /// Compact memory facts from the runtime store.
     pub memory: Option<String>,
-    /// Legacy immutable session facts such as cwd and path rules.
-    ///
-    /// Phase 1 replaces this with `stable` plus the runtime snapshot.
-    pub session: Option<String>,
     /// Fresh task context. Repository and tool content retain their untrusted
     /// transcript role; this must never be flattened into system context.
     pub task_context: Option<ContextPlan>,
@@ -64,9 +74,6 @@ impl TurnSystemContext {
         let mut messages = Vec::new();
         if let Some(stable) = self.stable.filter(|text| !text.trim().is_empty()) {
             messages.push(ModelMessage::text(ModelRole::System, stable));
-        }
-        if let Some(session) = self.session.filter(|text| !text.trim().is_empty()) {
-            messages.push(ModelMessage::text(ModelRole::System, session));
         }
         if let Some(facts) = self.memory.filter(|text| !text.trim().is_empty()) {
             messages.push(ModelMessage::text(ModelRole::System, format!("Memory facts:\n{facts}")));
@@ -189,5 +196,14 @@ mod tests {
 
         assert_eq!(transcript.messages.len(), 1);
         assert_eq!(text(&transcript.messages[0]), "current");
+    }
+
+    #[test]
+    fn push_block_preserves_blank_line_join() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.push_block("first");
+        snapshot.push_block("  ");
+        snapshot.push_block("second");
+        assert_eq!(snapshot.text, "first\n\nsecond");
     }
 }

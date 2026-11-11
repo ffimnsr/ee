@@ -1,6 +1,6 @@
 # ee Agent Prompt Sections — Design + Plan
 
-Status: **Phase 0 and Phase 5b core implemented; Phases 1–4, 5, and 6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
+Status: **Phases 0, 1, and 5b core implemented; Phases 2–4, 5, and 6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
 
 Reference capture: [deepseek-harness-agent-mode-prompt-capture.md](deepseek-harness-agent-mode-prompt-capture.md) (vendored DSH `0.2.2-rc.1`, commit `fcc0ad4`).
 
@@ -608,10 +608,10 @@ Security tests:
 | Phase | Can start after | Write scope | Outcome |
 |---|---|---|---|
 | 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | Registry, renderer, errors, moved `TurnSystemContext`; no behavior change |
-| 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/turn.rs` | Old flat strings deleted; stable prompt + runtime snapshot wired |
+| 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/{turn,resume,compact,strategic}.rs` | **Done:** stable prompt + user-role runtime snapshot wired; flat `Session context`/`Tool path rules`/`Agent mode` strings deleted; `PLAN_POLICY` pulled forward so plan output stays valid |
 | 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs` + tests | Guidance for all advertised `ee` tools; consistency gate |
 | 3 Workspace | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | Root-to-cwd discovery, trust label, dynamic updates |
-| 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | `PLAN_POLICY` + ask/write sections; plan payload preserved |
+| 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | `PLAN_POLICY` landed in Phase 1; remaining work is ask/write wording and any mode-specific tool-set checks. Plan payload contract already preserved |
 | 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | `TOOL_SUBAGENT`, `MCP_SERVERS`, `SUBAGENT_DELEGATION`, checkpoint prompt |
 | 5b Limits + repetition | 2 | `src/{config,budget,checkpoint,model}.rs`, `src/checkpoint_budget.rs`, `src/stuck.rs` call site, `src/prompt/{repeat_guard,budget_notice,delegation}.rs`, `src/subagents/manager.rs`, `crates/ee-{opencode,openrouter}-agent` | **Core done:** unlimited default, opt-in caps, parallelism 10, repeat reminder, tool-result prune, notice/depth helpers. Wiring notice/depth into runtime contexts follows Phase 1/5 |
 | 6 Deferred slots + gates | 2, 3, 4, 5, 5b | tests, `src/prompt/sections.rs` | Inert slots documented; full validation; snapshots committed |

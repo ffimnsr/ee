@@ -1,10 +1,13 @@
 //! `impl AgentProvider for OrchestratorProvider`: ACP session surface.
 use super::conversation::McpTurnCleanup;
+use super::conversation::default_model_labels;
 use super::conversation::emit_mcp_diagnostics;
 use super::conversation::initial_commands;
 use super::conversation::model_history;
 use super::conversation::next_session_number;
+use super::conversation::normalize_workspace_roots;
 use super::conversation::persist_session_snapshot;
+use super::conversation::prompt_bundle;
 use super::conversation::record_agent_message;
 use super::conversation::record_final_response;
 use super::conversation::record_user_message;
@@ -12,7 +15,6 @@ use super::conversation::replay_conversation;
 use super::conversation::restore_runtime_from_checkpoint;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
-use super::conversation::workspace_system_context;
 use super::*;
 
 impl AgentProvider for OrchestratorProvider {
@@ -63,7 +65,8 @@ impl AgentProvider for OrchestratorProvider {
                 .map_err(ProviderError::from)?;
             let number = next_session_number(&next_session, &config.recovery, durable_session_ids);
             let session_id = SessionId::new(format!("{SESSION_ID_PREFIX}-{number}"));
-            let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
+            let workspace_roots = normalize_workspace_roots(&ctx.cwd, &ctx.additional_directories);
+            let (provider_label, model_label) = default_model_labels(&models);
             let mode = default_session_mode();
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
             let runtime = Arc::new(
@@ -80,8 +83,10 @@ impl AgentProvider for OrchestratorProvider {
             plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
             let entry = SessionRuntime {
                 runtime,
-                system_context,
                 workspace: ctx.cwd.clone(),
+                workspace_roots,
+                provider_label,
+                model_label,
                 mode: mode.clone(),
                 mcp_servers,
                 conversation: Arc::new(Mutex::new(Vec::new())),
@@ -119,7 +124,8 @@ impl AgentProvider for OrchestratorProvider {
         let recovery_enabled = config.recovery.enabled;
         let plugins = self.plugins.clone();
         Box::pin(async move {
-            let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
+            let workspace_roots = normalize_workspace_roots(&ctx.cwd, &ctx.additional_directories);
+            let (provider_label, model_label) = default_model_labels(&models);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
             // A live session (same process, e.g. reconnect) is reused
             // as-is, including its recorded conversation.
@@ -203,15 +209,18 @@ impl AgentProvider for OrchestratorProvider {
             })?;
             replay_conversation(ctx.replay_sink.as_ref(), &conversation)?;
             plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
+            // The checkpoint stays pending: the next prompt resumes it.
             sessions.lock().expect("adapter sessions poisoned").insert(
                 session_id.to_string(),
                 SessionRuntime {
                     runtime,
-                    system_context,
                     workspace: ctx.cwd.clone(),
+                    workspace_roots,
+                    provider_label,
+                    model_label,
                     mode: mode.clone(),
                     mcp_servers,
-                    conversation: Arc::new(Mutex::new(conversation)),
+                    conversation: Arc::new(Mutex::new(Vec::new())),
                 },
             );
             Ok(SessionInit::new(session_id)
@@ -244,6 +253,8 @@ impl AgentProvider for OrchestratorProvider {
             // interrupted turn is continued by the next `session/prompt` via
             // the pending-checkpoint detection.  A live session (same
             // process) is reused as-is.
+            let workspace_roots = normalize_workspace_roots(&ctx.cwd, &ctx.additional_directories);
+            let (provider_label, model_label) = default_model_labels(&models);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
             let live_mode = {
                 let mut sessions = sessions.lock().expect("adapter sessions poisoned");
@@ -282,16 +293,16 @@ impl AgentProvider for OrchestratorProvider {
                         "failed to register built-in tools: {error}"
                     ))
                 })?;
-                let system_context =
-                    workspace_system_context(&ctx.cwd, &ctx.additional_directories);
                 plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
                 // The checkpoint stays pending: the next prompt resumes it.
                 sessions.lock().expect("adapter sessions poisoned").insert(
                     session_id.to_string(),
                     SessionRuntime {
                         runtime,
-                        system_context,
                         workspace: ctx.cwd.clone(),
+                        workspace_roots,
+                        provider_label,
+                        model_label,
                         mode: mode.clone(),
                         mcp_servers,
                         conversation: Arc::new(Mutex::new(Vec::new())),
@@ -329,14 +340,27 @@ impl AgentProvider for OrchestratorProvider {
                 sessions.get(&session_id.to_string()).map(|session| {
                     (
                         session.runtime.clone(),
-                        session.system_context.clone(),
+                        session.workspace.clone(),
+                        session.workspace_roots.clone(),
+                        session.provider_label.clone(),
+                        session.model_label.clone(),
                         session.mode.clone(),
                         session.mcp_servers.clone(),
                         session.conversation.clone(),
                     )
                 })
             };
-            let Some((runtime, system_context, mode, mcp_servers, conversation)) = session else {
+            let Some((
+                runtime,
+                workspace,
+                workspace_roots,
+                provider_label,
+                model_label,
+                mode,
+                mcp_servers,
+                conversation,
+            )) = session
+            else {
                 return Err(ProviderError::BackendFailure(format!(
                     "no orchestrator state for session {session_id}"
                 )));
@@ -349,7 +373,15 @@ impl AgentProvider for OrchestratorProvider {
                 .lock()
                 .expect("telemetry recorder poisoned")
                 .start_turn(&telemetry_turn, telemetry_attribution);
-            let system_context = mode_system_context(system_context, &mode);
+            let policy = runtime.policy();
+            let bundle = prompt_bundle(
+                &workspace,
+                &workspace_roots,
+                &provider_label,
+                &model_label,
+                &mode,
+                policy.policy(),
+            )?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
             // expose tools; the runtime still routes the turn to its
@@ -373,7 +405,7 @@ impl AgentProvider for OrchestratorProvider {
                         sink,
                         cancel,
                         command.instructions,
-                        Some(system_context),
+                        Some(bundle.clone()),
                         history,
                     )
                     .await
@@ -575,7 +607,6 @@ impl AgentProvider for OrchestratorProvider {
             let resume_sink = sink.clone();
             let resume_client = client.clone();
             let resume_cancel = cancel.clone();
-            let resume_system = system_context.clone();
             // Host evidence is unavailable on current `PromptContext` / `ClientBridge`.
             // Required host seam: bounded, redacted completion evidence IDs plus
             // revisions supplied with this prompt and mapped into `StrategicInput`.
@@ -584,11 +615,11 @@ impl AgentProvider for OrchestratorProvider {
                 StrategicInput { validation_workspace, ..StrategicInput::default() };
             let recovery_context = StrategicRecoveryContext::new(
                 strategic_input.clone(),
-                system_context,
+                bundle.clone(),
                 provider_name.clone(),
             );
             let resume_recovery_context =
-                StrategicRecoveryContext::new(strategic_input, resume_system, provider_name);
+                StrategicRecoveryContext::new(strategic_input, bundle, provider_name);
             let result = if has_pending {
                 // A paused turn awaits: the same prompt resumes it from its
                 // checkpoint (manual resume). `/resume` carries no new prompt

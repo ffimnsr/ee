@@ -650,7 +650,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 | Phase | Can start after | Write scope | Blocks |
 |---|---|---|---|
 | 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | 1 |
-| 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/turn.rs` | 2, 3, 4 |
+| 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/{turn,resume,compact,strategic}.rs` | 2, 3, 4 |
 | 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs` + tests | 5, 6 |
 | 3 Workspace instructions | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | 6 |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | 6 |
@@ -693,7 +693,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] Update callers to import from `prompt`; no duplicate type remains.
 - [x] Add `prompt/mod.rs` with `PromptInputs`, `PromptBundle`, `PromptPreset`, and `build` signature returning `Result<_, PromptError>`.
 - [x] Register `mod prompt;` in `lib.rs` and use `pub(crate)` visibility.
-- [x] Add a temporary `#![allow(dead_code)]` in `prompt/mod.rs` for contracts consumed in Phase 1; remove after wiring.
+- [x] Add a temporary `#![allow(dead_code)]` in `prompt/mod.rs` for contracts consumed in Phase 1; removed after wiring (`cargo clippy -D warnings` clean).
 
 **Acceptance criteria:**
 
@@ -718,39 +718,39 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Add `prompt/runtime_context.rs`.
-  - [ ] Render `WORKING_DIRECTORY` with cwd, sorted deduplicated roots, absolute-path rule, and workspace-scope rule.
-  - [ ] Render `SANDBOX_POLICY` from `ToolPolicy::{allow_write, allow_execute}` and `WorkspaceScope`.
-  - [ ] Render `APPROVAL_POLICY` from typed `ApprovalMode` resolved by the adapter (`agents.approval`, `agents.read_only_modes`, `allow_host_approved_side_effects`).
-  - [ ] Render `SUBAGENT_DELEGATION` only when depth > 0 or delegation is allowed.
-  - [ ] Prepend the exact supersession header once.
-  - [ ] Add exact-render tests for read-only, workspace-write, approval ask, approval denied, and subagent identity.
-- [ ] Add `prompt/sections.rs` standard builder.
-  - [ ] Emit `HARNESS_IDENTITY`, `DEPLOYMENT_PERSONA_PREFIX`, `DEPLOYMENT_PERSONA_SUFFIX`.
-  - [ ] Emit `PLAN_POLICY` only for plan mode (text supplied in Phase 4; Phase 1 may keep the existing plan text inside the section).
-  - [ ] Emit `FILE_REFERENCE` when the session accepts resource links.
-  - [ ] Apply the `minimal` preset through `complete: true`.
-- [ ] Rewire `provider_adapter`.
-  - [ ] Delete `workspace_system_context` and `mode_system_context`.
-  - [ ] Build `PromptBundle` in `new_session`, `load_session`, `resume_session`, and `prompt`.
-  - [ ] Store the stable string and runtime snapshot on the session state.
-  - [ ] Pass both through `runtime/turn.rs` into `TurnSystemContext`.
-- [ ] Apply the bundle in `prompt/context.rs`.
-  - [ ] One system message for the stable prompt.
-  - [ ] Memory facts remain a separate system message.
-  - [ ] Runtime snapshot is a user-role message with `TrustLevel::SystemPolicy` and `metadata["ee_prompt"] = "runtime_context"`.
-  - [ ] Current prompt is last.
-- [ ] Update or delete tests that asserted the old flat strings.
-- [ ] Add snapshot tests for `standard`, `plan`, `minimal`, and read-only prompts.
-- [ ] Add cache-stability test: two turns with different cwd produce identical stable strings and different runtime strings.
+- [x] Add `prompt/runtime_context.rs`.
+  - [x] Render `WORKING_DIRECTORY` with cwd, sorted deduplicated roots, absolute-path rule, and workspace-scope rule.
+  - [x] Render `SANDBOX_POLICY` from `ToolPolicy::{allow_write, allow_execute}` and `WorkspaceScope`.
+  - [x] Render `APPROVAL_POLICY` from typed `ApprovalMode` resolved by the adapter from effective `ToolPolicy` (mode policy already encodes `agents.read_only_modes` and `allow_host_approved_side_effects`).
+  - [x] Render `SUBAGENT_DELEGATION` when depth > 0 or delegation is denied; full delegation-budget text lands in Phase 5.
+  - [x] Prepend the exact supersession header once (in `prompt/context.rs`).
+  - [x] Add exact-render tests for read-only, workspace-write (scoped and unscoped), approval ask, approval denied, path quoting, and subagent identity.
+- [x] Add `prompt/sections.rs` standard builder.
+  - [x] Emit `HARNESS_IDENTITY`, `DEPLOYMENT_PERSONA_PREFIX`, `DEPLOYMENT_PERSONA_SUFFIX`.
+  - [x] Emit `PLAN_POLICY` only for plan mode (existing plan contract moved into the section).
+  - [ ] Emit `FILE_REFERENCE` when the session accepts resource links (needs an explicit client-link signal; deferred to Phase 6).
+  - [x] Apply the `minimal` preset through `complete: true` (test-only preset).
+- [x] Rewire `provider_adapter`.
+  - [x] Delete `workspace_system_context` and `mode_system_context`.
+  - [x] Resolve `PromptBundle` per prompt from stored session facts (`cwd`, sorted roots, provider/model labels, current mode, effective policy).
+  - [x] Store the session facts needed to rebuild the bundle; the runtime snapshot is rebuilt per turn so cwd/policy drift cannot go stale.
+  - [x] Pass both planes through `runtime/{turn,resume,compact,strategic}.rs` into `TurnSystemContext`.
+- [x] Apply the bundle in `prompt/context.rs`.
+  - [x] One system message for the stable prompt.
+  - [x] Memory facts remain a separate system message.
+  - [x] Runtime snapshot is a user-role message with `TrustLevel::SystemPolicy` and `metadata["ee_prompt"] = "runtime_context"`.
+  - [x] Current prompt is last.
+- [x] Update or delete tests that asserted the old flat strings.
+- [x] Add builder tests for `standard`, `plan`, `minimal`, read-only, scoped/unscoped write, and approval variants; byte-level snapshot freezing remains Phase 6.
+- [x] Add cache-stability test: two turns with different cwd produce identical stable strings and different runtime strings.
 
 **Acceptance criteria:**
 
-- No `Session context:`, `Tool path rules:`, or `Agent mode:` flat string remains in production code.
-- Standard prompt snapshot is stable and contains no cwd path.
-- `read_file`, `write_file`, `create_terminal`, and `delegate_task` are absent from plan/ask prompt text.
-- Runtime snapshot metadata and trust level are asserted exactly.
-- `cargo test --quiet -p ee-agent-orchestrator` passes.
+- [x] No `Session context:`, `Tool path rules:`, or `Agent mode:` flat string remains in production code.
+- [x] Standard prompt snapshot is stable and contains no cwd path.
+- [x] `read_file`, `write_file`, `create_terminal`, and `delegate_task` are absent from plan/ask prompt text.
+- [x] Runtime snapshot metadata and trust level are asserted exactly.
+- [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
 
 ## Phase 2 — Tool guidance and consistency gate
 
@@ -974,11 +974,11 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] Emit one line only at `iterations_remaining <= 2` or `tool_calls_used >= 90%`.
   - [x] Emit nothing when the corresponding cap is `None`.
   - [x] Never print all caps; no new section name.
-  - [ ] Wire `pressure_notice` into `EE_TURN_GUIDANCE` when Phase 1 builds the runtime snapshot.
+  - [x] Wire `pressure_notice` into `EE_TURN_GUIDANCE` when Phase 1 builds the runtime snapshot.
 - [x] Add the subagent depth line helper (`prompt/delegation.rs`).
   - [x] Render `Delegation depth for \`delegate_task\`: current <n>, maximum <m>, remaining levels 0.` only when `depth >= max_depth`.
   - [x] Unit tests cover below-cap silence and at/over-cap text.
-  - [ ] Wire it into `SUBAGENT_DELEGATION` when Phase 5 renders that context.
+  - [x] Wire it into `SUBAGENT_DELEGATION` for depth > 0 (root delegation budget text still lands in Phase 5).
 - [x] Add tool-result middle pruning.
   - [x] Prune only tool-result text longer than 8192 chars: keep 4096 head + 1024 tail.
   - [x] Insert the exact marker `[... tool result middle pruned ...]`.
@@ -1006,7 +1006,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - `DEFAULT_MAX_PARALLEL_TOOLS == 10`; write/execute stays serial.
 - Third identical call emits one advisory notice; fourth stops the loop.
 - Reminder does not fire on changed arguments, a reset user message, or an excluded tool.
-- Pressure-notice helper returns text only for finite caps under the documented conditions; wiring into `EE_TURN_GUIDANCE` is pending Phase 1.
+- Pressure-notice helper returns text only for finite caps under the documented conditions and is wired into `EE_TURN_GUIDANCE` by the runtime.
 - Depth-line helper returns text only at the cap; wiring into `SUBAGENT_DELEGATION` is pending Phase 5.
 - Oversized tool result is pruned to head + marker + tail; small results are byte-identical.
 - No new slot name and no budget table in the prompt.
