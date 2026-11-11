@@ -1344,8 +1344,8 @@ Verified in `crates/ee-agent-orchestrator`:
 | Tool timeout | per tool, 30-300 s | 120 s global | keep; document difference |
 | Subagent depth | 1 | 2 | document; decide separately |
 | Active subagents | 8 | 8 spawns / 4 concurrent | document; decide separately |
-| Output bytes | no per-turn cap | 1 MiB | `ee` stricter; keep |
-| Turn wall clock | no core deadline | 300 s | `ee` stricter; keep |
+| Output bytes | no per-turn cap | 1 MiB | change `ee` default to unbounded |
+| Turn wall clock | no core deadline | 300 s | change `ee` default to unbounded |
 | Tool result pruning | 8192/4096/1024 | whole-message transcript drop | adopt middle prune |
 | Auto compaction | 0.8 / 0.16 / 65536 | memory compaction only | defer |
 
@@ -1361,7 +1361,7 @@ Verified in `crates/ee-agent-orchestrator`:
 6. **Render the subagent depth line only at the cap**, exactly like DSH's `tool:<name>:depth` contract.
 7. **Adopt middle-pruning for tool results** (8192 threshold, 4096 head, 1024 tail) before adopting any compaction ratio. `ee` currently drops whole oldest messages, which can throw away both the command and its output.
 8. **Defer compaction ratios.** `ee` has memory compaction, not context-window compaction. Adopting 0.8/0.16/65536 without an automatic trigger would be dead config.
-9. **Do not make the wall-clock turn timeout unlimited in the same change.** `turn_timeout = 300 s` is a separate knob; decide it explicitly rather than hiding it inside step-limit parity.
+9. **Make output bytes and wall-clock turn time optional too.** `max_output_bytes` and `turn_timeout` are the same kind of ceiling. They become `None` defaults with opt-in `Some(...)`; per-tool `tool_timeout` stays finite because it bounds one call, not the task.
 
 Source files for this pass:
 

@@ -305,7 +305,13 @@ impl OrchestratorRuntime {
                 client,
                 cancel,
                 task,
-                TurnSystemContext { history, memory, session: system_context, task_context },
+                TurnSystemContext {
+                    history,
+                    memory,
+                    session: system_context,
+                    task_context,
+                    ..TurnSystemContext::default()
+                },
             )
             .await
     }

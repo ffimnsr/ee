@@ -199,6 +199,7 @@ pub mod plugin_runtime;
 pub mod policy;
 pub mod progress;
 pub mod progress_scoring;
+mod prompt;
 pub mod prompt_injection;
 pub mod provider_adapter;
 pub mod rate_limit;

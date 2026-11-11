@@ -1,6 +1,6 @@
 # ee Agent Prompt Sections — Design + Plan
 
-Status: **design, pending implementation** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
+Status: **Phase 0 implemented; Phases 1–6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
 
 Reference capture: [deepseek-harness-agent-mode-prompt-capture.md](deepseek-harness-agent-mode-prompt-capture.md) (vendored DSH `0.2.2-rc.1`, commit `fcc0ad4`).
 
@@ -457,17 +457,18 @@ DSH caps concurrency, repeats, time, and delegation, but **not turns or total to
 **D11 — Read-only parallelism matches DSH at 10.**
 `DEFAULT_MAX_PARALLEL_TOOLS` becomes `10` (was `4`). Writes and execution stay serial; only the existing read-only parallel wave widens. Config remains authoritative.
 
-**D12 — No default turn or tool-call cap.**
-`max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` become `Option<usize>` with default `None` (unlimited). `Some(n)` is the explicit user/deployment cap; `Some(0)` is rejected at configuration load. Defaults are deleted, not raised:
+**D12 — No default turn, tool-call, output, or wall-clock cap.**
+`max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, and `max_output_bytes` become `Option<usize>`; `turn_timeout` becomes `Option<Duration>`. All default to `None` (unlimited). `Some(n)` is the explicit user/deployment cap; zero or zero duration is rejected at configuration load. Defaults are deleted, not raised:
 
-- Delete `DEFAULT_MAX_LOOP_ITERATIONS`, `DEFAULT_MAX_MODEL_CALLS`, `DEFAULT_MAX_TOOL_CALLS_PER_TURN`.
-- `BudgetTracker` checks `if let Some(max)` before denying; `None` never denies on count.
+- Delete `DEFAULT_MAX_LOOP_ITERATIONS`, `DEFAULT_MAX_MODEL_CALLS`, `DEFAULT_MAX_TOOL_CALLS_PER_TURN`, `DEFAULT_MAX_OUTPUT_BYTES`, and `DEFAULT_TURN_TIMEOUT`.
+- `BudgetTracker` checks `if let Some(max)` before denying; `None` never denies on count, output bytes, or deadline.
+- `BudgetConfig::from_config` sets `deadline: config.turn_timeout.map(|limit| Instant::now() + limit)`; `reset_deadline` takes `Option<Duration>` and sets or clears the deadline.
 - `BudgetSnapshot` carries `Option<usize>` caps; `Display` renders `unbounded`.
 - `restore_used` compares `Option` caps and only rejects a usage above a configured `Some(max)`.
 - Bump `CHECKPOINT_SCHEMA_VERSION` because the serialized cap shape changes; old checkpoints fail closed instead of being migrated.
 - `ee-opencode-agent` and `ee-openrouter-agent` expose `max_iterations` as optional; omit means unlimited, explicit `0` fails validation.
-- Subagent roles and rubber-duck recursion keep finite local caps (`Some(role.max_iterations)`); they are child safety budgets, not the root default.
-- `stuck.rs`, host cancellation, tool timeouts, `max_output_bytes`, and `turn_timeout` remain.
+- Subagent roles and rubber-duck recursion keep finite local caps (`Some(role.max_iterations)`); they are child safety budgets, not the root default. A child timeout remains finite.
+- `stuck.rs`, host cancellation, and per-tool `tool_timeout` remain. Those are behavioral/execution guards, not step counters.
 - No prompt text advertises a cap. A pressure notice exists only for a finite opt-in cap.
 
 **D13 — Repetition is advisory before it is terminal.**
@@ -493,8 +494,8 @@ Parity table:
 | Tool timeout | per tool 30-300 s | 120 s global | keep, document |
 | Subagent depth | 1 | 2 | keep, open question |
 | Active subagents | 8 | 8 spawns, 4 concurrent | keep, open question |
-| Output bytes | no cap | 1 MiB | keep |
-| Turn wall clock | none | 300 s | keep |
+| Output bytes | no cap | `None` default, `Some(n)` opt-in | change |
+| Turn wall clock | none | `None` default, `Some(d)` opt-in | change |
 | Tool result prune | 8192/4096/1024 | same | add |
 | Auto compaction | 0.8 / 0.16 / 65536 | memory-only | defer |
 
@@ -520,7 +521,7 @@ Turn budget: <n> model call(s) and <m> tool call(s) remain. Prefer finishing the
 
 Do not emit it while the budget is healthy or when the cap is `None`; a notice on every turn trains the model to ignore it.
 
-Open questions, not part of this phase: `turn_timeout = 300 s` and `max_output_bytes = 1 MiB` are separate ceilings. If fully unlimited turns are wanted, change them to `Option<Duration>` / `Option<usize>` deliberately; do not smuggle that into step-limit parity.
+`turn_timeout` and `max_output_bytes` are part of the same default-unlimited contract. They remain opt-in `Some(...)` caps, so a deployment can still enforce a wall-clock or output ceiling. Per-tool `tool_timeout` stays finite by default; it bounds one tool call, not the task.
 
 ## 14. Auxiliary prompts
 
@@ -578,9 +579,10 @@ Workspace instruction tests:
 
 Limit tests (phase 5b):
 
-- Default `OrchestratorConfig` has `max_loop_iterations == None`, `max_model_calls == None`, `max_tool_calls_per_turn == None`.
+- Default `OrchestratorConfig` has `None` for iterations, model calls, tool calls, output bytes, and turn timeout.
 - `None` allows more than 16 iterations/model calls and more than 180 tool calls in one turn (drive a fake adapter for N+1 calls, assert completion).
-- `Some(1)` still stops after the first call; `Some(0)` fails configuration validation, not runtime reservation.
+- `Some(1)` still stops after the first call; `Some(Duration::ZERO)` and `Some(0)` fail configuration validation, not runtime reservation.
+- `None` turn timeout leaves `deadline_remaining() == None`; `Some(d)` still expires; `reset_deadline(None)` clears an existing deadline.
 - `BudgetSnapshot` serializes `None` as `null` and round-trips; `Display` renders `unbounded`; checkpoint restore rejects a cap mismatch and accepts equal `None`.
 - Checkpoint schema version is bumped; an old numeric-cap checkpoint fails closed.
 - Provider manifests: omitted `max_iterations` means `None`; explicit `0` is rejected; explicit `7` means `Some(7)`.
@@ -620,7 +622,7 @@ Security tests:
 - **Model adherence to user-role runtime facts.** DSH relies on it. If `ee` models treat the snapshot as user instruction, the fix is a system reminder line, not a return to flat system context.
 - **Tool-parity pressure.** Users may expect `edit`, `grep`, `glob`, and `apply_patch` because the section names exist. Keep the "registered but inert" rule visible in docs and do not emit placeholders.
 - **Workspace instruction prompt-injection surface.** Discovery increases the text an attacker can place in the prompt. The trust label and injection scan are mandatory, not optional.
-- **Unbounded default can burn tokens or run for hours.** This is the requested behavior, matching DSH/Codex. Mitigations are behavioral, not numeric: stuck detection, tool timeouts, output-byte cap, wall-clock turn timeout, and user cancellation. Surface the running totals in events/UI so the user can stop it.
+- **Unbounded default can burn tokens or run for hours.** This is the requested behavior, matching DSH/Codex. Mitigations are behavioral, not numeric: stuck detection, per-tool timeouts, and user cancellation. `max_output_bytes` / `turn_timeout` remain opt-in. Surface running totals in events/UI so the user can stop it.
 - **Opt-in cap wiring is easy to get wrong.** `None` must mean unlimited in every reservation path, snapshot restore, checkpoint validation, and provider manifest. A single `unwrap_or(0)` turns `None` into an immediate stop. Test each path explicitly.
 - **Checkpoint schema change.** Old checkpoints carry numeric caps. Bump the schema version and fail closed; do not write a migration shim.
 - **Parallelism 10 increases peak memory.** Ten concurrent read-only tools can each hold a file buffer. Keep the `scripts/run-tests-memguard.sh` gate and benchmark a large-repo read wave before shipping the default change.
@@ -683,4 +685,4 @@ Checked directly against `packages/core/agent-loop`, `packages/core/tools`, `pac
 - Jobs: 10 concurrent per owner, 256 KiB retained, 16 KiB settled.
 - PTC: 1024 subcalls/minute, 10 parallel subcalls.
 
-`ee` verified in `crates/ee-agent-orchestrator/src/{config,budget,stuck,model,checkpoint}.rs` and both provider crates. Conclusion: default `max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` to `None`; keep stuck detection, timeouts, output bytes, and opt-in `Some(n)` caps; adopt DSH's advisory/pruning mechanisms.
+`ee` verified in `crates/ee-agent-orchestrator/src/{config,budget,stuck,model,checkpoint}.rs` and both provider crates. Conclusion: default `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, `max_output_bytes`, and `turn_timeout` to `None`; keep stuck detection, per-tool timeouts, and opt-in `Some(...)` caps; adopt DSH's advisory/pruning mechanisms.

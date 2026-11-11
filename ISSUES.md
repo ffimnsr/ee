@@ -674,25 +674,26 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Add `prompt/sections.rs`.
-  - [ ] Define all stable slot constants and orders from DSH `SECTION_ORDERS`.
-  - [ ] Define all runtime slot constants and orders from DSH `CONTEXT_ORDERS`.
-  - [ ] Define registration-name constants (`harness:identity`, `deployment:persona-prefix`, `tool:read`, `mcp:<server>` template, ...).
-  - [ ] Add the `EE_TURN_GUIDANCE` extension constant at order 130.
-  - [ ] Add a test asserting every name/order pair against a hardcoded expected table.
-- [ ] Add `prompt/render.rs`.
-  - [ ] Implement `Section`, sort by `(order, registration)`, drop empty, join with `\n\n`.
-  - [ ] Implement strict `{{variable}}` interpolation with unknown, undefined, and malformed errors.
-  - [ ] Implement `interpolate: false`, `complete`, duplicate-registration, and byte-budget errors.
-  - [ ] Add tests for ordering ties, empty sections, braces, complete collision, and unknown variables.
-- [ ] Add `prompt/error.rs` with `PromptError` variants and `Display`.
-- [ ] Add `prompt/context.rs`.
-  - [ ] Move `TurnSystemContext` from `loop_engine.rs`.
-  - [ ] Add `stable: Option<String>`, `runtime: Option<RuntimeSnapshot>`, `workspace: Vec<WorkspaceMessage>` fields.
-  - [ ] Add `apply_to_transcript` that enforces the documented message order.
-  - [ ] Update callers to import from `prompt`; no duplicate type remains.
-- [ ] Add `prompt/mod.rs` with `PromptInputs`, `PromptBundle`, `PromptPreset`, and `build` signature returning `Result<_, PromptError>`.
-- [ ] Register `mod prompt;` in `lib.rs` and re-export only `pub(crate)` items.
+- [x] Add `prompt/sections.rs`.
+  - [x] Define all stable slot constants and orders from DSH `SECTION_ORDERS`.
+  - [x] Define all runtime slot constants and orders from DSH `CONTEXT_ORDERS`.
+  - [x] Define registration names on each `Slot` (`harness:identity`, `deployment:persona-prefix`, `tool:read`, `mcp:<server>` template, ...).
+  - [x] Add the `EE_TURN_GUIDANCE` extension constant at order 130 and `MCP_SERVER_INSTRUCTIONS` at 140.
+  - [x] Add a test asserting every name/order pair against a hardcoded expected table.
+- [x] Add `prompt/render.rs`.
+  - [x] Implement `Section`, sort by `(order, registration)`, drop empty, join with `\n\n`.
+  - [x] Implement strict `{{variable}}` interpolation with unknown, undefined, and malformed errors.
+  - [x] Implement `interpolate: false`, `complete`, duplicate-registration, and byte-budget errors.
+  - [x] Add tests for ordering ties, empty sections, braces, complete collision, and unknown variables.
+- [x] Add `prompt/error.rs` with `PromptError` variants and `Display`.
+- [x] Add `prompt/context.rs`.
+  - [x] Move `TurnSystemContext` from `loop_engine.rs`.
+  - [x] Add `stable: Option<String>`, `runtime: Option<RuntimeSnapshot>`, `workspace: Vec<WorkspaceMessage>` fields.
+  - [x] Add `apply_to_transcript` that enforces the documented message order.
+  - [x] Update callers to import from `prompt`; no duplicate type remains.
+- [x] Add `prompt/mod.rs` with `PromptInputs`, `PromptBundle`, `PromptPreset`, and `build` signature returning `Result<_, PromptError>`.
+- [x] Register `mod prompt;` in `lib.rs` and use `pub(crate)` visibility.
+- [x] Add a temporary `#![allow(dead_code)]` in `prompt/mod.rs` for contracts consumed in Phase 1; remove after wiring.
 
 **Acceptance criteria:**
 
@@ -917,9 +918,9 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Rules:**
 
-- `max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` default to `None` (unlimited). `Some(n)` is user/deployment opt-in; `Some(0)` is rejected.
-- Delete `DEFAULT_MAX_LOOP_ITERATIONS`, `DEFAULT_MAX_MODEL_CALLS`, and `DEFAULT_MAX_TOOL_CALLS_PER_TURN`; do not replace them with sentinel values.
-- `stuck.rs`, host cancellation, `max_output_bytes`, `max_subagents`, `tool_timeout`, and `turn_timeout` remain.
+- `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, and `max_output_bytes` default to `None` (unlimited); `turn_timeout` defaults to `None` too. `Some(...)` is user/deployment opt-in; zero values are rejected.
+- Delete `DEFAULT_MAX_LOOP_ITERATIONS`, `DEFAULT_MAX_MODEL_CALLS`, `DEFAULT_MAX_TOOL_CALLS_PER_TURN`, `DEFAULT_MAX_OUTPUT_BYTES`, and `DEFAULT_TURN_TIMEOUT`; do not replace them with sentinel values.
+- `stuck.rs`, host cancellation, `max_subagents`, and per-tool `tool_timeout` remain.
 - `DEFAULT_MAX_PARALLEL_TOOLS` becomes `10`; write/execute waves stay serial.
 - Repeat reminder thresholds are `[3, 5, 8]`; `ee` stops at `stuck.max_repeated_tool_calls = 4`, so only 3 fires by default.
 - Pressure notice appears only when a finite `Some(max)` is configured; `None` emits nothing.
@@ -930,17 +931,18 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Make the three count caps optional.
-  - [ ] In `src/config.rs`, change `max_loop_iterations`, `max_model_calls`, and `max_tool_calls_per_turn` to `Option<usize>` and default each to `None`.
-  - [ ] Delete the three `DEFAULT_MAX_*` constants and every import of them.
-  - [ ] Add configuration validation that rejects `Some(0)` with a clear error.
-  - [ ] In `src/budget.rs`, make `BudgetConfig` fields `Option<usize>`; `from_config` copies them.
-  - [ ] Change every `try_reserve_*` and `try_reserve_subagent_and_model_calls` check to deny only on `Some(max)`; `None` never denies on count.
-  - [ ] Make `BudgetSnapshot` count caps `Option<usize>`; render `unbounded` in `Display`.
-  - [ ] Update `restore_used` to compare `Option` caps and skip the usage-above-cap check when the cap is `None`.
+- [ ] Make the count, output, and time caps optional.
+  - [ ] In `src/config.rs`, change `max_loop_iterations`, `max_model_calls`, `max_tool_calls_per_turn`, and `max_output_bytes` to `Option<usize>`; change `turn_timeout` to `Option<Duration>`; default all to `None`.
+  - [ ] Delete the five `DEFAULT_MAX_*` / `DEFAULT_TURN_TIMEOUT` constants and every import of them.
+  - [ ] Add configuration validation that rejects `Some(0)` and `Some(Duration::ZERO)` with a clear error.
+  - [ ] In `src/budget.rs`, make `BudgetConfig` count caps `Option<usize>` and its deadline derive from `turn_timeout.map(...)`.
+  - [ ] Change every `try_reserve_*`, `check_output_allowance`, `record_model_usage`, and `try_reserve_subagent_and_model_calls` check to deny only on `Some(max)`; `None` never denies.
+  - [ ] Make `reset_deadline` take `Option<Duration>`; `None` clears the deadline. Update `runtime/{compact,resume,strategic}.rs` and subagent call sites.
+  - [ ] Make `BudgetSnapshot` count/output caps `Option<usize>`; render `unbounded` in `Display`.
+  - [ ] Update `restore_used` to compare `Option` caps and skip usage-above-cap checks when `None`.
   - [ ] In `src/checkpoint.rs`, update `validate` for `Option` caps and bump `CHECKPOINT_SCHEMA_VERSION`.
-  - [ ] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants finite.
-  - [ ] Update every `BudgetSnapshot` literal in tests/fixtures to `Some(...)` or `None`; no `usize` literals remain.
+  - [ ] In `src/subagents/manager.rs`, map role caps with `Some(role.max_iterations)`; keep rubber-duck constants and child timeout finite.
+  - [ ] Update every `BudgetSnapshot` / config literal in tests/fixtures to `Some(...)` or `None`; no bare numeric caps remain.
 - [ ] Make provider limits optional.
   - [ ] `ee-opencode-agent`: `Config.max_iterations` and CLI/env parsing become `Option<usize>`; default `None`; explicit `0` fails validation.
   - [ ] `ee-openrouter-agent`: same change, including the manifest input description and default.
@@ -983,9 +985,10 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 - [ ] Audit per-tool timeouts.
   - [ ] Record `ee`'s 120 s global tool timeout vs DSH's 30-300 s per-tool defaults in the plan.
   - [ ] Do not change timeout defaults in this phase.
-- [ ] Document the remaining wall-clock knob.
-  - [ ] State that `turn_timeout = 300 s` is unchanged and is not a step cap.
-  - [ ] Leave an explicit follow-up decision for unlimited wall-clock turns; do not change it silently.
+- [ ] Cover output and wall-clock caps.
+  - [ ] `None` output bytes never deny; `Some(1)` denies after the first recorded byte.
+  - [ ] `None` turn timeout leaves no deadline; `Some(d)` expires; `reset_deadline(None)` clears an existing deadline.
+  - [ ] Per-tool `tool_timeout` stays finite and independent.
 - [ ] Run validation for touched modules.
   - [ ] `cargo test --quiet -p ee-agent-orchestrator prompt::`
   - [ ] `cargo test --quiet -p ee-agent-orchestrator config`
@@ -994,9 +997,9 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Acceptance criteria:**
 
-- Default config has `None` for iterations, model calls, and tool calls; no sentinel `usize::MAX` or `0`.
+- Default config has `None` for iterations, model calls, tool calls, output bytes, and turn timeout; no sentinel `usize::MAX`, `Duration::MAX`, or `0`.
 - More than 16 iterations/model calls and more than 180 tool calls complete in one turn under defaults.
-- Explicit `Some(n)` still stops at `n`; `Some(0)` fails validation; checkpoints compare `Option` caps.
+- Explicit `Some(n)` still stops at `n`; zero values fail validation; checkpoints compare `Option` caps.
 - Provider manifests default to unlimited and reject explicit `0`.
 - `DEFAULT_MAX_PARALLEL_TOOLS == 10`; write/execute stays serial.
 - Third identical call emits one advisory notice; fourth stops the loop.

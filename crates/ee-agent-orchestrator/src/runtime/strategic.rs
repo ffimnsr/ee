@@ -498,10 +498,10 @@ impl OrchestratorRuntime {
                 cancel,
                 task,
                 TurnSystemContext {
-                    history: Vec::new(),
                     memory,
                     session: Some(session),
                     task_context: Some(context_plan),
+                    ..TurnSystemContext::default()
                 },
             )
             .await

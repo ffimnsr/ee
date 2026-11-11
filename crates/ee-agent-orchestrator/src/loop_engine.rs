@@ -32,11 +32,10 @@ use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
-use crate::model::{
-    ModelAdapter, ModelMessage, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage,
-};
+use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
 use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
+use crate::prompt::context::TurnSystemContext;
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
@@ -85,20 +84,6 @@ pub(crate) struct LoopOptions {
     /// Incoming resume state when this run continues an interrupted turn;
     /// completed tool results are reused instead of replayed.
     pub resume_state: Option<ResumeState>,
-}
-
-/// System messages prepended before one model/tool loop.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TurnSystemContext {
-    /// Prior normalized user and assistant messages from this live session.
-    pub history: Vec<ModelMessage>,
-    /// Compact memory facts from the runtime store.
-    pub memory: Option<String>,
-    /// Immutable session facts such as cwd and path rules.
-    pub session: Option<String>,
-    /// Fresh task context. Repository and tool content retain their untrusted
-    /// transcript role; this must never be flattened into system context.
-    pub task_context: Option<crate::context_planner::ContextPlan>,
 }
 
 impl Default for LoopOptions {
@@ -195,7 +180,7 @@ impl LoopEngine {
             client,
             cancel,
             task,
-            TurnSystemContext { history: Vec::new(), memory, session: None, task_context: None },
+            TurnSystemContext { memory, ..TurnSystemContext::default() },
         )
         .await
     }
@@ -213,17 +198,7 @@ impl LoopEngine {
         context: TurnSystemContext,
     ) -> Result<PromptResult, OrchestratorError> {
         let mut transcript = Transcript::new();
-        transcript.messages = context.history;
-        transcript.messages.extend(Transcript::from_prompt(&ctx).messages);
-        if let Some(facts) = &context.memory {
-            transcript.prepend_system(format!("Memory facts:\n{facts}"));
-        }
-        if let Some(session) = context.session.as_deref().filter(|text| !text.is_empty()) {
-            transcript.prepend_system(session);
-        }
-        if let Some(task_context) = context.task_context {
-            task_context.apply_to_transcript(&mut transcript);
-        }
+        context.apply_to_transcript(&mut transcript, Transcript::from_prompt(&ctx).messages);
         self.run_transcript(&mut transcript, ctx.session_id.to_string(), sink, client, cancel, task)
             .await
     }

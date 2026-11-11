@@ -39,7 +39,7 @@ pub(crate) use crate::final_response::{
     FinalResponse, FinalResponseBuilder, ValidationOutcome, ValidationRecorder,
     changed_files_from_log,
 };
-pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
+pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions};
 pub(crate) use crate::memory::{MemoryItem, MemoryStore};
 pub(crate) use crate::memory_compaction::compact_memory;
 pub(crate) use crate::metrics::OrchestratorMetrics;
@@ -51,6 +51,7 @@ pub(crate) use crate::model_router::ModelRouter;
 pub(crate) use crate::plan_compiler::{PlanCompiler, PlanInput};
 pub(crate) use crate::policy::PolicyEngine;
 pub(crate) use crate::progress::ProgressTracker;
+pub(crate) use crate::prompt::context::TurnSystemContext;
 pub(crate) use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 pub(crate) use crate::repair::{
     RepairController, RepairDecision, RepairFailureSummary, RepairProgress, RepairReason,
