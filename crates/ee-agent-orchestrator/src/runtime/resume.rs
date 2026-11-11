@@ -101,8 +101,26 @@ impl OrchestratorRuntime {
         }
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
         let full_runtime = prompt.runtime.clone();
+        // Prefer the durable append-only log over the checkpoint's in-memory
+        // tail: it is the complete model-visible history, bounded only at
+        // projection time.
+        let (history, history_ids) = match self.session_logs.as_ref() {
+            Some(store) => {
+                let replayed = store
+                    .log_for(&session_id)
+                    .replay_messages_bounded(self.config.memory_limit_bytes)?;
+                if replayed.is_empty() {
+                    (resume.transcript.clone(), Vec::new())
+                } else {
+                    let ids = replayed.iter().map(|(id, _)| Some(id.clone())).collect();
+                    (replayed.into_iter().map(|(_, message)| message).collect(), ids)
+                }
+            }
+            None => (resume.transcript.clone(), Vec::new()),
+        };
         TurnSystemContext {
-            history: resume.transcript,
+            history,
+            history_ids,
             memory,
             stable: (!prompt.stable.trim().is_empty()).then_some(prompt.stable),
             global: prompt.global,
@@ -133,6 +151,8 @@ impl OrchestratorRuntime {
                 checkpoint: Some(handle),
                 resume_state: Some(resumed),
                 truncation_flag: Some(truncation_flag.clone()),
+                session_log: self.session_logs.as_ref().map(|store| store.log_for(&session_id)),
+                stop_gate: self.config.stop_gate.enabled.then(|| self.config.stop_gate.bounded()),
                 ..LoopOptions::default()
             },
         );
@@ -310,6 +330,13 @@ impl OrchestratorRuntime {
         let mut options = options;
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         options.truncation_flag = Some(truncation_flag.clone());
+        let session_id = ctx.session_id.to_string();
+        if let Some(store) = &self.session_logs {
+            options.session_log = Some(store.log_for(&session_id));
+        }
+        if options.depth == 0 && self.config.stop_gate.enabled {
+            options.stop_gate = Some(self.config.stop_gate.bounded());
+        }
         let engine = LoopEngine::new(
             self.config.clone(),
             model,
@@ -321,7 +348,6 @@ impl OrchestratorRuntime {
         );
         let mut context =
             TurnSystemContext { history, memory, task_context, ..TurnSystemContext::default() };
-        let session_id = ctx.session_id.to_string();
         let mut full_runtime = None;
         if let Some(prompt) = prompt {
             context.stable = (!prompt.stable.trim().is_empty()).then_some(prompt.stable);

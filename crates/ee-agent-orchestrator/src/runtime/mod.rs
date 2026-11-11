@@ -70,6 +70,7 @@ pub(crate) use crate::rubber_duck_trigger::{
     RubberDuckTriggerPolicy, RubberDuckTriggerReason, RubberDuckTriggerSkipReason,
 };
 pub(crate) use crate::sensitive_data::SensitiveDataGuard;
+pub(crate) use crate::session_log::SessionLogStore;
 pub(crate) use crate::strategy::{
     StrategicInput, StrategyContext, StrategyExecutor, StrategyRun, StrategySelector, TurnResult,
     capability_aware_guidance,
@@ -208,8 +209,11 @@ pub struct OrchestratorRuntime {
     last_repair_stop: Mutex<Option<RepairStopReason>>,
     /// Retained full runtime snapshot per session, used to project deltas.
     runtime_snapshots: Mutex<HashMap<String, RuntimeSnapshotState>>,
+    /// Append-only model-visible session log; `None` when disabled.
+    session_logs: Option<Arc<SessionLogStore>>,
 }
 
+mod branch;
 mod compact;
 mod lifecycle;
 mod prompt_views;

@@ -37,11 +37,14 @@ use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
 use crate::prompt::context::TurnSystemContext;
 use crate::prompt::repeat_guard::{RepeatGuard, RepeatGuardConfig};
+use crate::session_log::SessionLog;
+use crate::stop_gate::{StopGate, StopGateConfig, StopGateOutcome, StopVeto};
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
 use crate::tools::{
-    SideEffectClass, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry, ToolResult,
+    SideEffectClass, ToolDefinition, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry,
+    ToolResult,
 };
 
 /// How the loop engine executes one turn.
@@ -87,6 +90,12 @@ pub(crate) struct LoopOptions {
     pub resume_state: Option<ResumeState>,
     /// Set when transcript truncation removed the retained runtime base.
     pub truncation_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Append-only model-visible session log; `None` disables recording.
+    pub session_log: Option<Arc<SessionLog>>,
+    /// Evidence gate applied before a changed turn may stop.
+    pub stop_gate: Option<StopGateConfig>,
+    /// Optional plugin/host stop veto; can only deny an allowed stop.
+    pub stop_veto: Option<StopVeto>,
 }
 
 impl Default for LoopOptions {
@@ -104,6 +113,9 @@ impl Default for LoopOptions {
             checkpoint: None,
             resume_state: None,
             truncation_flag: None,
+            session_log: None,
+            stop_gate: None,
+            stop_veto: None,
         }
     }
 }
@@ -242,6 +254,11 @@ impl LoopEngine {
                 .as_ref()
                 .map_or_else(current_unix_millis, |resume| resume.first_started_at_millis),
         }));
+        // Attach the durable log before any message is appended so the
+        // bounded request view and the append-only log stay in lockstep.
+        if let Some(log) = &self.options.session_log {
+            transcript.attach_session_log(log.clone());
+        }
         let turn = self.run_loop(
             transcript,
             track.clone(),
@@ -305,10 +322,16 @@ impl LoopEngine {
         task: TaskNode,
     ) -> Result<PromptResult, OrchestratorError> {
         self.events.record(OrchestratorEvent::TurnStarted {
-            session_id,
+            session_id: session_id.clone(),
             task_id: task.id.as_str().to_string(),
         });
-        let outcome = self.run_loop_inner(transcript, &track, &sink, &client, cancel, &task).await;
+        if let Some(log) = transcript.session_log() {
+            log.begin_turn();
+            let _ = log.record_turn_started(task.id.as_str());
+        }
+        let outcome = self
+            .run_loop_inner(transcript, &track, &sink, &client, cancel, &task, &session_id)
+            .await;
         let stop_reason = match &outcome {
             Ok(_) => "end_turn",
             Err(OrchestratorError::Cancellation) => "cancelled",
@@ -321,10 +344,14 @@ impl LoopEngine {
                 "error"
             }
         };
+        if let Some(log) = transcript.session_log() {
+            let _ = log.record_turn_stopped(stop_reason);
+        }
         self.events.record(OrchestratorEvent::TurnStopped { stop_reason: stop_reason.into() });
         outcome
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_loop_inner(
         &self,
         transcript: &mut Transcript,
@@ -333,9 +360,11 @@ impl LoopEngine {
         client: &ClientBridge,
         cancel: watch::Receiver<bool>,
         task: &TaskNode,
+        session_id: &str,
     ) -> Result<PromptResult, OrchestratorError> {
         let mut empty_responses = 0usize;
         let mut message_seq = 0usize;
+        let mut repairs_used = 0usize;
         let mut detector = StuckDetector::new(self.config.stuck);
         let mut repeat_guard = RepeatGuard::new(RepeatGuardConfig::default());
         let graph_handle = self.graph.clone();
@@ -357,7 +386,7 @@ impl LoopEngine {
                 budget.emit(&self.events);
                 snapshot
             };
-            let tools = self
+            let tools: Vec<ToolDefinition> = self
                 .tools
                 .lock()
                 .expect("tool registry poisoned")
@@ -370,6 +399,16 @@ impl LoopEngine {
                         .is_none_or(|allowed| allowed.contains(&tool.name))
                 })
                 .collect();
+
+            self.events.record(OrchestratorEvent::StepStarted {
+                session_id: session_id.to_string(),
+                task_id: task.id.as_str().to_string(),
+                iteration: budget_snapshot.iterations_used,
+                advertised_tool_count: tools.len(),
+            });
+            if let Some(log) = transcript.session_log() {
+                log.set_iteration(budget_snapshot.iterations_used);
+            }
 
             // Keep the transcript inside the memory budget; oldest messages
             // are dropped first, the newest context always survives.
@@ -390,6 +429,12 @@ impl LoopEngine {
                 ModelRequest::new(prepared.messages, tools, budget_snapshot, task.clone())
                     .with_available_models(self.options.available_models.clone())
                     .with_model_id(self.options.model_id.clone());
+            // Fail closed before the model call: every model-visible message
+            // and the effective request must be durable first.
+            if let Err(error) = transcript.record_model_request(&request) {
+                self.events.record(OrchestratorEvent::Error { error: error.to_string() });
+                return Err(error);
+            }
             self.events.record(OrchestratorEvent::ModelRequested {
                 iteration: budget_snapshot.iterations_used,
             });
@@ -461,6 +506,44 @@ impl LoopEngine {
                 ));
             }
             if response.completed {
+                if let Some(config) = self.options.stop_gate.map(StopGateConfig::bounded) {
+                    let logged = self
+                        .options
+                        .execution_log
+                        .as_ref()
+                        .map(|log| log.lock().expect("execution log poisoned").clone())
+                        .unwrap_or_default();
+                    let decision = StopGate.evaluate(
+                        config,
+                        &task.id,
+                        &logged,
+                        repairs_used,
+                        self.options.stop_veto.as_ref(),
+                    );
+                    self.events.record(OrchestratorEvent::StopGateEvaluated {
+                        session_id: session_id.to_string(),
+                        task_id: task.id.as_str().to_string(),
+                        completion_state: decision.report.state.as_str().to_string(),
+                        changed_file_count: decision.changed_file_count,
+                        evidence_ids: decision.report.evidence_ids.clone(),
+                    });
+                    match decision.outcome {
+                        StopGateOutcome::Allow => {
+                            return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
+                        }
+                        StopGateOutcome::Repair => {
+                            repairs_used += 1;
+                            if let Some(instruction) = decision.repair_instruction {
+                                transcript.push_system_notice(instruction);
+                            }
+                            self.capture_checkpoint(transcript, track, task, false).await;
+                            continue;
+                        }
+                        StopGateOutcome::Blocked => {
+                            return Ok(prompt_result_with_usage(StopReason::Refusal, turn_usage));
+                        }
+                    }
+                }
                 return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
             }
             if self.options.mode == LoopMode::SimpleAnswer {
@@ -773,6 +856,14 @@ impl LoopEngine {
         };
         match saved {
             Ok(Some(checkpoint_id)) => {
+                if let Some(log) = transcript.session_log() {
+                    let seq = checkpoint_id
+                        .rsplit('-')
+                        .next()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_default();
+                    let _ = log.record_checkpoint(&checkpoint_id, seq);
+                }
                 self.events.record(OrchestratorEvent::CheckpointSaved {
                     session_id: handle.session_id().to_string(),
                     checkpoint_id,
@@ -996,6 +1087,12 @@ mod tests {
                     tool_calls_used: 0,
                     subagents_used: 0,
                     output_bytes_used: 0,
+                },
+                OrchestratorEvent::StepStarted {
+                    session_id: "s-1".into(),
+                    task_id: "task-1".into(),
+                    iteration: 1,
+                    advertised_tool_count: 1,
                 },
                 OrchestratorEvent::ModelRequested { iteration: 1 },
                 OrchestratorEvent::ModelResponded { iteration: 1 },

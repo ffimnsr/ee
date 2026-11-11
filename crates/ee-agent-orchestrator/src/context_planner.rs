@@ -424,9 +424,11 @@ impl ContextPlan {
         let system_count =
             messages.iter().take_while(|message| message.trust == TrustLevel::SystemPolicy).count();
         for message in messages[..system_count].iter().rev() {
-            transcript.messages.insert(0, message.clone());
+            transcript.insert_unlogged(0, message.clone());
         }
-        transcript.messages.extend(messages.into_iter().skip(system_count));
+        for message in messages.into_iter().skip(system_count) {
+            transcript.push_unlogged(message);
+        }
     }
 }
 

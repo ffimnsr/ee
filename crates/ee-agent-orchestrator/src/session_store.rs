@@ -6,7 +6,6 @@
 //! workspace path, and session id; files use hashed names to avoid exposing
 //! workspace paths in directory entries.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -14,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::OrchestratorError;
+use crate::private_fs::{create_private_dir, hex, sync_directory, write_private_file};
 
 /// Current on-disk session-state format.
 const SESSION_STATE_SCHEMA_VERSION: u32 = 2;
@@ -290,92 +290,10 @@ fn state_file_name(provider: &str, workspace: &str, session_id: &str) -> String 
     format!("{}.json", hex(&Sha256::digest(identity)))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn nonce() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())
-}
-
-fn create_private_dir(path: &Path) -> Result<(), OrchestratorError> {
-    std::fs::create_dir_all(path).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to create session state directory {}: {error}",
-            path.display()
-        ))
-    })?;
-    set_private_directory_permissions(path)
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), OrchestratorError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to create session state {}: {error}",
-            path.display()
-        ))
-    })?;
-    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to durably write session state {}: {error}",
-            path.display()
-        ))
-    })?;
-    set_private_file_permissions(path)
-}
-
-fn sync_directory(path: &Path) -> Result<(), OrchestratorError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path).and_then(|directory| directory.sync_all()).map_err(|error| {
-            OrchestratorError::Serialization(format!(
-                "failed to sync session state directory {}: {error}",
-                path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<(), OrchestratorError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to restrict session state directory {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_directory_permissions(_path: &Path) -> Result<(), OrchestratorError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), OrchestratorError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to restrict session state {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), OrchestratorError> {
-    Ok(())
 }
 
 #[cfg(test)]

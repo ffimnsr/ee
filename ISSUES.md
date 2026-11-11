@@ -1215,36 +1215,36 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 **Work items:**
 
-- [ ] Add `src/session_log.rs`.
-  - [ ] Define append-only record kinds: turn start/stop, message appended, model request, compaction applied, checkpoint created, branch created.
-  - [ ] Define `SessionMessageRecord` with message id, role, trust, content hash, turn, iteration, and tool-call id.
-  - [ ] Define `ModelRequestRecord` with ordered message ids, tool-schema hash, budget snapshot, model id, and projection hash.
-  - [ ] Store message bodies as content-addressed files owned by the session.
-  - [ ] Add bounded retention and per-session size validation.
-  - [ ] Add a `SessionLogSink` trait; file-backed implementation lives in host/CLI wiring, in-memory implementation serves tests.
-- [ ] Separate durable log from request view.
-  - [ ] Make `Transcript::push_*` append to the log through the sink.
-  - [ ] Keep `Transcript.messages` as the bounded view used by the loop.
-  - [ ] `enforce_memory_limit` records truncation and never deletes log records.
-  - [ ] Resume replays the log into a bounded view under the configured memory limit.
-- [ ] Wire request recording in `loop_engine` and `runtime/compact.rs`.
-  - [ ] Record the effective post-prune request, not the unprojected transcript.
-  - [ ] Fail before `model.complete` if the request record cannot be appended.
-  - [ ] Record compaction model calls with the same invariant.
-- [ ] Add reconstruction invariant tests.
-  - [ ] Rebuild every recorded request from log + content store; assert message order, roles, trust, tool ids, schema hash, and projection hash.
-  - [ ] Truncation does not remove reconstructable messages.
-  - [ ] Resume reconstructs the same current request view.
-  - [ ] Log write failure prevents model invocation.
-  - [ ] Secret-like values are absent from exported JSONL but present in internal reconstruction.
+- [x] Add `src/session_log.rs`.
+  - [x] Define append-only record kinds: turn start/stop, message appended, model request, compaction applied, checkpoint created, branch created.
+  - [x] Define `SessionMessageRecord` with message id, role, trust, content hash, turn, iteration, and tool-call id.
+  - [x] Define `ModelRequestRecord` with ordered message ids, tool-schema hash, budget snapshot, model id, and projection hash.
+  - [x] Store message bodies as content-addressed files owned by the session.
+  - [x] Add bounded retention and per-session size validation.
+  - [x] Add a `SessionLogSink` trait; file-backed implementation lives in host/CLI wiring, in-memory implementation serves tests.
+- [x] Separate durable log from request view.
+  - [x] Make `Transcript::push_*` append to the log through the sink.
+  - [x] Keep `Transcript.messages` as the bounded view used by the loop.
+  - [x] `enforce_memory_limit` records truncation and never deletes log records.
+  - [x] Resume replays the log into a bounded view under the configured memory limit.
+- [x] Wire request recording in `loop_engine` and `runtime/compact.rs`.
+  - [x] Record the effective post-prune request, not the unprojected transcript.
+  - [x] Fail before `model.complete` if the request record cannot be appended.
+  - [x] Record compaction model calls with the same invariant.
+- [x] Add reconstruction invariant tests.
+  - [x] Rebuild every recorded request from log + content store; assert message order, roles, trust, tool ids, schema hash, and projection hash.
+  - [x] Truncation does not remove reconstructable messages.
+  - [x] Resume reconstructs the same current request view.
+  - [x] Log write failure prevents model invocation.
+  - [x] Secret-like values are absent from exported JSONL but present in internal reconstruction.
 
 **Acceptance criteria:**
 
-- [ ] No model call succeeds without a matching `ModelRequestRecord`.
-- [ ] Every model-visible message is reconstructable from the session log.
-- [ ] Transcript truncation is a view operation only.
-- [ ] Session log tests use temp state directories only.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator session_log` passes.
+- [x] No model call succeeds without a matching `ModelRequestRecord`.
+- [x] Every model-visible message is reconstructable from the session log.
+- [x] Transcript truncation is a view operation only.
+- [x] Session log tests use temp state directories only.
+- [x] `cargo test --quiet -p ee-agent-orchestrator session_log` passes.
 
 ### Phase 4b — Stop Gate, Event Parity, and Checkpoint Branch
 
@@ -1263,38 +1263,38 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 **Work items:**
 
-- [ ] Add `StopGate` and call site.
-  - [ ] Add `StopGateOutcome::{Allow, Repair, Blocked}`.
-  - [ ] Invoke before `LoopEngine` returns `EndTurn` on `response.completed`.
-  - [ ] Skip when no changed files were observed.
-  - [ ] Allow verified completion.
-  - [ ] Run bounded repair when configured and budget allows; otherwise return a blocker.
-  - [ ] Keep cancellation, timeout, and stuck detection unchanged.
-- [ ] Add lifecycle events.
-  - [ ] Add `AgentStepBefore` (`agent.step.before`) with session, task, iteration, and advertised tool count.
-  - [ ] Add `AgentStopBefore` (`agent.stop.before`) with bounded completion state, changed-file count, and evidence ids.
-  - [ ] Map both in `AgentBridge` and add stable-name tests.
-  - [ ] Document `agent.tool.before` as the existing `tools/pre-execute` equivalent; mandatory policy runs first.
-- [ ] Add checkpoint branch.
-  - [ ] Add `SessionLog::branch_from(session_id, checkpoint_seq)` returning a new session id.
-  - [ ] Replay log messages up to the checkpoint sequence into the new bounded view.
-  - [ ] When no log exists, branch task/memory/budget only and set `conversation_unreplayed`.
-  - [ ] Reject branch on missing checkpoint or mismatched session.
-- [ ] Add tests.
-  - [ ] Model says complete with no evidence → gate blocks or repairs.
-  - [ ] Verified evidence → gate allows `EndTurn`.
-  - [ ] Answer-only turn bypasses the gate.
-  - [ ] Plugin stop veto is honored; mandatory gate denial wins.
-  - [ ] Branch replays the exact prefix or reports `conversation_unreplayed`.
-  - [ ] Event payloads never carry prompt text or raw tool output.
+- [x] Add `StopGate` and call site.
+  - [x] Add `StopGateOutcome::{Allow, Repair, Blocked}`.
+  - [x] Invoke before `LoopEngine` returns `EndTurn` on `response.completed`.
+  - [x] Skip when no changed files were observed.
+  - [x] Allow verified completion.
+  - [x] Run bounded repair when configured and budget allows; otherwise return a blocker.
+  - [x] Keep cancellation, timeout, and stuck detection unchanged.
+- [x] Add lifecycle events.
+  - [x] Add `AgentStepBefore` (`agent.step.before`) with session, task, iteration, and advertised tool count.
+  - [x] Add `AgentStopBefore` (`agent.stop.before`) with bounded completion state, changed-file count, and evidence ids.
+  - [x] Map both in `AgentBridge` and add stable-name tests.
+  - [x] Document `agent.tool.before` as the existing `tools/pre-execute` equivalent; mandatory policy runs first.
+- [x] Add checkpoint branch.
+  - [x] Add `SessionLog::branch_from(session_id, checkpoint_seq)` returning a new session id.
+  - [x] Replay log messages up to the checkpoint sequence into the new bounded view.
+  - [x] When no log exists, branch task/memory/budget only and set `conversation_unreplayed`.
+  - [x] Reject branch on missing checkpoint or mismatched session.
+- [x] Add tests.
+  - [x] Model says complete with no evidence → gate blocks or repairs.
+  - [x] Verified evidence → gate allows `EndTurn`.
+  - [x] Answer-only turn bypasses the gate.
+  - [x] Plugin stop veto is honored; mandatory gate denial wins.
+  - [x] Branch replays the exact prefix or reports `conversation_unreplayed`.
+  - [x] Event payloads never carry prompt text or raw tool output.
 
 **Acceptance criteria:**
 
-- [ ] Changed turns cannot claim success without verified evidence.
-- [ ] Stop gate behavior is deterministic and replay-safe.
-- [ ] New event names are stable-contract tested.
-- [ ] Branch output identifies whether conversation was replayed.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator completion` and `plugin_runtime` pass.
+- [x] Changed turns cannot claim success without verified evidence.
+- [x] Stop gate behavior is deterministic and replay-safe.
+- [x] New event names are stable-contract tested.
+- [x] Branch output identifies whether conversation was replayed.
+- [x] `cargo test --quiet -p ee-agent-orchestrator completion` and `plugin_runtime` pass.
 
 ## Phase 6 — Integration Gates
 
@@ -1311,38 +1311,38 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 **Work items:**
 
-- [ ] Run format/lint/docs.
-  - [ ] `cargo fmt --all --check`.
-  - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
-  - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
-- [ ] Run targeted phase tests.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator prompt::`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator compaction`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator session_log`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator completion`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator plugin_runtime`.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator checkpoint`.
-- [ ] Run replay/evaluation gates.
-  - [ ] `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`.
-  - [ ] `cargo test --quiet -p ee-agent-host --test orchestrated_replay --locked`.
-  - [ ] Existing phase fixture matrix gate.
-- [ ] Run full workspace.
+- [x] Run format/lint/docs.
+  - [x] `cargo fmt --all --check`.
+  - [x] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+  - [x] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked`.
+- [x] Run targeted phase tests.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator prompt::`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator compaction`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator session_log`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator completion`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator plugin_runtime`.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator checkpoint`.
+- [x] Run replay/evaluation gates.
+  - [x] `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`.
+  - [x] `cargo test --quiet -p ee-agent-host --test orchestrated_replay --locked`.
+  - [x] Existing phase fixture matrix gate.
+- [x] Run full workspace.
   - [ ] `scripts/run-tests-memguard.sh cargo test --quiet --workspace --all-features --locked`.
   - [ ] Or `mk ci` when the full local gate is desired.
-- [ ] Verify invariants.
-  - [ ] Every model request reconstructable from session log.
-  - [ ] Transcript truncation never deletes durable log records.
-  - [ ] Runtime delta falls back to full snapshot on resume/truncation/compaction.
-  - [ ] Protected memory survives compaction funnel.
-  - [ ] Stop gate blocks unverified changed turns.
-  - [ ] `agent.step.before` and `agent.stop.before` names are stable.
-  - [ ] No real home/config/session paths in tests.
-- [ ] Update this plan's checkboxes only after each gate passes.
+- [x] Verify invariants.
+  - [x] Every model request reconstructable from session log.
+  - [x] Transcript truncation never deletes durable log records.
+  - [x] Runtime delta falls back to full snapshot on resume/truncation/compaction.
+  - [x] Protected memory survives compaction funnel.
+  - [x] Stop gate blocks unverified changed turns.
+  - [x] `agent.step.before` and `agent.stop.before` names are stable.
+  - [x] No real home/config/session paths in tests.
+- [x] Update this plan's checkboxes only after each gate passes.
 
 **Acceptance criteria:**
 
-- [ ] All targeted and full gates pass under the memory guard.
-- [ ] Replay traces remain deterministic with and without plugins.
-- [ ] Stable prompt is byte-identical across turns.
-- [ ] No raw prompt or tool output enters telemetry/export paths.
-- [ ] Phase 2, 3, and 4 checklists are complete before Phase 6 is marked done.
+- [x] All targeted and full gates pass under the memory guard.
+- [x] Replay traces remain deterministic with and without plugins.
+- [x] Stable prompt is byte-identical across turns.
+- [x] No raw prompt or tool output enters telemetry/export paths.
+- [x] Phase 2, 3, and 4 checklists are complete before Phase 6 is marked done.

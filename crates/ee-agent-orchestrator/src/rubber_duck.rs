@@ -461,7 +461,7 @@ impl RubberDuckRunner {
                 &request.revision,
                 &cached.report,
             );
-            root_transcript.messages.push(cached.transcript_evidence.clone());
+            root_transcript.push_unlogged(cached.transcript_evidence.clone());
             return RubberDuckOutcome::Completed(Box::new(RubberDuckCompleted {
                 active_model: cached.active_model,
                 critic_model: cached.critic_model,
@@ -674,7 +674,7 @@ impl RubberDuckRunner {
             },
             policy_version: RUBBER_DUCK_POLICY_VERSION,
         });
-        root_transcript.messages.push(transcript_evidence.clone());
+        root_transcript.push_unlogged(transcript_evidence.clone());
         self.cache.lock().expect("rubber-duck cache poisoned").insert(
             cache_key,
             CachedCritique {

@@ -167,6 +167,7 @@ impl OrchestratorRuntime {
                 "orchestrator rubber-duck config must be validated before runtime construction",
             ),
         );
+        let session_logs = SessionLogStore::from_config(&config.session_log);
         Self {
             config,
             models,
@@ -190,6 +191,7 @@ impl OrchestratorRuntime {
             rubber_duck_triggers: Mutex::new(RubberDuckTriggerController::default()),
             last_repair_stop: Mutex::new(None),
             runtime_snapshots: Mutex::new(HashMap::new()),
+            session_logs,
         }
     }
     /// Installs an observe-only observer on the runtime event recorder.

@@ -15,6 +15,8 @@ use crate::reflection::ReflectionConfig;
 use crate::repair::RepairConfig;
 use crate::rubber_duck_config::RubberDuckConfig;
 use crate::rubber_duck_trigger::RubberDuckTriggerConfig;
+use crate::session_log::SessionLogConfig;
+use crate::stop_gate::StopGateConfig;
 use crate::stuck::StuckConfig;
 
 /// Default maximum subagent nesting depth.
@@ -174,6 +176,13 @@ pub struct OrchestratorConfig {
     /// Deterministic automatic trigger policy; manual-only until replay enables it.
     #[serde(default)]
     pub rubber_duck_triggers: RubberDuckTriggerConfig,
+    /// Append-only session log: content-addressed message bodies and ordered
+    /// model-request records. Memory-only when `dir` is unset.
+    #[serde(default)]
+    pub session_log: SessionLogConfig,
+    /// Evidence gate applied before a changed turn may claim completion.
+    #[serde(default)]
+    pub stop_gate: StopGateConfig,
 }
 
 impl OrchestratorConfig {
@@ -199,6 +208,7 @@ impl OrchestratorConfig {
             ));
         }
         self.compaction.validate()?;
+        self.session_log.validate()?;
         Ok(())
     }
 }
@@ -229,6 +239,8 @@ impl Default for OrchestratorConfig {
             recovery: RecoveryConfig::default(),
             rubber_duck: RubberDuckConfig::default(),
             rubber_duck_triggers: RubberDuckTriggerConfig::default(),
+            session_log: SessionLogConfig::default(),
+            stop_gate: StopGateConfig::default(),
         }
     }
 }
@@ -275,6 +287,8 @@ mod tests {
         assert!(!config.recovery.enabled);
         assert_eq!(config.rubber_duck, RubberDuckConfig::default());
         assert_eq!(config.rubber_duck_triggers, RubberDuckTriggerConfig::default());
+        assert_eq!(config.session_log, SessionLogConfig::default());
+        assert_eq!(config.stop_gate, StopGateConfig::default());
     }
 
     #[test]
@@ -328,6 +342,8 @@ mod tests {
             rubber_duck_triggers: RubberDuckTriggerConfig {
                 mode: crate::rubber_duck_trigger::RubberDuckTriggerMode::Automatic,
             },
+            session_log: SessionLogConfig::default(),
+            stop_gate: StopGateConfig::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");

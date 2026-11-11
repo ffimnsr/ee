@@ -75,6 +75,34 @@ fn budget_event(
     }
 }
 
+fn step_event(iteration: usize, advertised_tool_count: usize) -> OrchestratorEvent {
+    OrchestratorEvent::StepStarted {
+        session_id: "s-1".into(),
+        task_id: "task-1".into(),
+        iteration,
+        advertised_tool_count,
+    }
+}
+
+fn subagent_step_event(iteration: usize, advertised_tool_count: usize) -> OrchestratorEvent {
+    OrchestratorEvent::StepStarted {
+        session_id: "subagent".into(),
+        task_id: "task-2".into(),
+        iteration,
+        advertised_tool_count,
+    }
+}
+
+fn stop_gate_event() -> OrchestratorEvent {
+    OrchestratorEvent::StopGateEvaluated {
+        session_id: "s-1".into(),
+        task_id: "task-1".into(),
+        completion_state: "unverified".into(),
+        changed_file_count: 0,
+        evidence_ids: Vec::new(),
+    }
+}
+
 fn read_file_tool() -> Arc<FakeTool> {
     Arc::new(FakeTool::new(
         ToolDefinition::new("read_file", "reads a file").side_effect_class(SideEffectClass::Read),
@@ -152,6 +180,7 @@ fn recovery_config(turn_timeout: Duration) -> OrchestratorConfig {
     }
 }
 
+mod branch_tests;
 mod compact_tests;
 mod core_tests;
 mod fixture_tests;

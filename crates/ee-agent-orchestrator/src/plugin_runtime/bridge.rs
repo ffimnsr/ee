@@ -22,8 +22,9 @@ use crate::events::OrchestratorEvent;
 use crate::plugin_runtime::effects::{AgentEffect, AgentEffectQueue};
 use crate::plugin_runtime::events::{
     self, AgentApprovalBefore, AgentContextCollect, AgentModelAfter, AgentModelBefore,
-    AgentStrategySelect, AgentSubagentFinished, AgentSubagentStarted, AgentToolAfter,
-    AgentToolBefore, AgentTurnAfter, AgentTurnBefore, AgentValidationCompleted,
+    AgentStepBefore, AgentStopBefore, AgentStrategySelect, AgentSubagentFinished,
+    AgentSubagentStarted, AgentToolAfter, AgentToolBefore, AgentTurnAfter, AgentTurnBefore,
+    AgentValidationCompleted,
 };
 use crate::plugin_runtime::services::context::ContextCollectRequest;
 use crate::plugin_runtime::services::policy::ApprovalRequest;
@@ -44,6 +45,13 @@ pub struct StrategyProposal {
     pub strategy: TurnStrategy,
     #[serde(default)]
     pub reason: Option<StrategyReason>,
+}
+
+/// One stop-veto proposal from a bail listener.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StopVetoProposal {
+    /// `true` denies a stop the evidence gate would otherwise allow.
+    pub veto: bool,
 }
 
 /// Accumulator for `agent.context.collect` serial listeners.
@@ -250,6 +258,27 @@ impl AgentBridge {
         Ok(self.events.on_bail::<AgentStrategySelect, StrategyProposal>(listener)?)
     }
 
+    /// Registers an `agent.stop.before` bail listener.
+    ///
+    /// A veto can only deny a stop the mandatory evidence gate allows; it never
+    /// upgrades a blocked stop or bypasses required evidence.
+    pub fn on_stop_before(
+        &self,
+        listener: impl Fn(&AgentStopBefore) -> Option<StopVetoProposal> + Send + Sync + 'static,
+    ) -> Result<Disposer, ee_plugin_api::error::PluginError> {
+        Ok(self.events.on_bail::<AgentStopBefore, StopVetoProposal>(listener)?)
+    }
+
+    /// Whether a plugin vetoed the stop described by `event`.
+    #[must_use]
+    pub fn stop_vetoed(&self, event: &AgentStopBefore) -> bool {
+        self.events
+            .bail::<AgentStopBefore, StopVetoProposal>(event)
+            .ok()
+            .flatten()
+            .is_some_and(|proposal| proposal.veto)
+    }
+
     /// Queues a structured plugin effect.
     pub fn submit(&self, owner: Option<PluginId>, effect: AgentEffect) {
         self.effects.push(owner, effect);
@@ -288,6 +317,34 @@ impl AgentBridge {
                     task_kind: None,
                     role: None,
                     iteration: *iteration,
+                });
+            }
+            OrchestratorEvent::StepStarted {
+                session_id,
+                task_id,
+                iteration,
+                advertised_tool_count,
+            } => {
+                self.emit(&AgentStepBefore {
+                    session_id: session_id.clone(),
+                    task_id: task_id.clone(),
+                    iteration: *iteration,
+                    advertised_tool_count: *advertised_tool_count,
+                });
+            }
+            OrchestratorEvent::StopGateEvaluated {
+                session_id,
+                task_id,
+                completion_state,
+                changed_file_count,
+                evidence_ids,
+            } => {
+                self.emit(&AgentStopBefore {
+                    session_id: session_id.clone(),
+                    task_id: task_id.clone(),
+                    completion_state: completion_state.clone(),
+                    changed_file_count: *changed_file_count,
+                    evidence_ids: evidence_ids.clone(),
                 });
             }
             OrchestratorEvent::ModelResponded { iteration } => {
@@ -459,6 +516,66 @@ mod tests {
             },
         );
         assert_eq!(*seen.lock().expect("capture lock"), vec!["task-1".to_owned()]);
+    }
+
+    #[test]
+    fn observer_maps_step_and_stop_events() {
+        let bridge = bridge();
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        bridge
+            .events()
+            .on::<AgentStepBefore>({
+                let captured = Arc::clone(&steps);
+                move |event| {
+                    captured.lock().expect("capture lock").push(event.advertised_tool_count)
+                }
+            })
+            .expect("listener");
+        bridge
+            .events()
+            .on::<AgentStopBefore>({
+                let captured = Arc::clone(&stops);
+                move |event| captured.lock().expect("capture lock").push(event.changed_file_count)
+            })
+            .expect("listener");
+        bridge.observe_orchestrator_event(
+            "session-1",
+            &OrchestratorEvent::StepStarted {
+                session_id: "session-1".into(),
+                task_id: "task-1".into(),
+                iteration: 1,
+                advertised_tool_count: 2,
+            },
+        );
+        bridge.observe_orchestrator_event(
+            "session-1",
+            &OrchestratorEvent::StopGateEvaluated {
+                session_id: "session-1".into(),
+                task_id: "task-1".into(),
+                completion_state: "verified".into(),
+                changed_file_count: 1,
+                evidence_ids: vec!["inventory-log".into()],
+            },
+        );
+        assert_eq!(*steps.lock().expect("capture lock"), vec![2]);
+        assert_eq!(*stops.lock().expect("capture lock"), vec![1]);
+    }
+
+    #[test]
+    fn stop_veto_listener_denies_an_allowed_stop() {
+        let bridge = bridge();
+        let _listener = bridge
+            .on_stop_before(|_event| Some(StopVetoProposal { veto: true }))
+            .expect("listener");
+        let event = AgentStopBefore {
+            session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            completion_state: "verified".into(),
+            changed_file_count: 1,
+            evidence_ids: vec!["inventory-log".into()],
+        };
+        assert!(bridge.stop_vetoed(&event));
     }
 
     #[test]

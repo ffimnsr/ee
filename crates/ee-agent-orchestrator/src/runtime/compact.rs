@@ -239,6 +239,21 @@ impl OrchestratorRuntime {
             ModelMessage::text(ModelRole::System, system),
             ModelMessage::text(ModelRole::User, user_prompt),
         ];
+        // Fail closed before the compaction model call: the durable log must
+        // hold the effective request.
+        let session_id = ctx.session_id.to_string();
+        if let Some(store) = &self.session_logs {
+            let log = store.log_for(&session_id);
+            log.begin_turn();
+            log.set_iteration(1);
+            log.record_request(
+                &transcript,
+                &[],
+                crate::session_log::projection_hash(&transcript),
+                &budget_snapshot,
+                Some(DEFAULT_MODEL_ID),
+            )?;
+        }
         let task = TaskNode::new(
             TaskId::new("compact-session"),
             "compact session",
@@ -320,6 +335,13 @@ impl OrchestratorRuntime {
             *memory = staged_memory;
         }
         let retained_context_bytes = context.len();
+        if let Some(store) = &self.session_logs {
+            let _ = store.log_for(&session_id).record_compaction(
+                counts.pruned_tool_results,
+                counts.deduped_messages,
+                counts.dropped_messages,
+            );
+        }
         let report = CompactTurnReport {
             merged_duplicates: deterministic.merged_duplicates,
             decayed_observations: deterministic.decayed_observations,

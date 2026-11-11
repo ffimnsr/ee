@@ -432,10 +432,11 @@ impl SubagentManager {
         if !is_rubber_duck {
             transcript.prepend_system(GENERIC_HANDOFF_INSTRUCTIONS);
         }
-        transcript.messages.extend(request.context_snapshot.clone());
+        for message in request.context_snapshot.clone() {
+            transcript.push_unlogged(message);
+        }
         transcript
-            .messages
-            .push(ModelMessage::text(ModelRole::User, request.scoped_prompt.clone()));
+            .push_unlogged(ModelMessage::text(ModelRole::User, request.scoped_prompt.clone()));
 
         // Subagents stream no updates to the client; their output is the
         // bounded summary carried back in the delegate tool result.

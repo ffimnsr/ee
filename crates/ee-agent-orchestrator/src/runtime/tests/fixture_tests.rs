@@ -19,9 +19,11 @@ async fn fixture_simple_answer_produces_stable_event_sequence() {
         vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 1),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 11), // "hello world"
+            stop_gate_event(),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ]
     );
@@ -46,6 +48,7 @@ async fn fixture_tool_then_answer_produces_stable_event_sequence() {
         vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 2),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 0), // tool intent only
@@ -60,9 +63,11 @@ async fn fixture_tool_then_answer_produces_stable_event_sequence() {
                 success: true,
             },
             budget_event(2, 2, 1, 0, 0),
+            step_event(2, 2),
             OrchestratorEvent::ModelRequested { iteration: 2 },
             OrchestratorEvent::ModelResponded { iteration: 2 },
             budget_event(2, 2, 1, 0, 7), // "read it"
+            stop_gate_event(),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ]
     );
@@ -92,6 +97,7 @@ async fn fixture_delegate_then_answer_produces_stable_event_sequence() {
         vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 1),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 0),
@@ -112,6 +118,7 @@ async fn fixture_delegate_then_answer_produces_stable_event_sequence() {
                 task_id: "task-2".into(),
             },
             budget_event(1, 1, 0, 0, 0),
+            subagent_step_event(1, 1),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, DELEGATED_HANDOFF_OUTPUT.len()),
@@ -123,9 +130,11 @@ async fn fixture_delegate_then_answer_produces_stable_event_sequence() {
                 success: true,
             },
             budget_event(2, 2, 1, 1, 0),
+            step_event(2, 1),
             OrchestratorEvent::ModelRequested { iteration: 2 },
             OrchestratorEvent::ModelResponded { iteration: 2 },
             budget_event(2, 2, 1, 1, 13), // "parent answer"
+            stop_gate_event(),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ]
     );

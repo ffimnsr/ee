@@ -99,7 +99,7 @@ impl RepeatGuard {
         arguments: &Value,
     ) {
         if let Some(notice) = self.observe(tool_name, arguments) {
-            transcript.messages.push(notice);
+            transcript.push_unlogged(notice);
         }
     }
 

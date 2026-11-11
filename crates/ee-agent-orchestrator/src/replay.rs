@@ -253,6 +253,25 @@ fn budget_event(
     }
 }
 
+fn step_event(iteration: usize, advertised_tool_count: usize) -> OrchestratorEvent {
+    OrchestratorEvent::StepStarted {
+        session_id: "s-1".into(),
+        task_id: "task-1".into(),
+        iteration,
+        advertised_tool_count,
+    }
+}
+
+fn stop_gate_event(changed_file_count: usize) -> OrchestratorEvent {
+    OrchestratorEvent::StopGateEvaluated {
+        session_id: "s-1".into(),
+        task_id: "task-1".into(),
+        completion_state: "unverified".into(),
+        changed_file_count,
+        evidence_ids: Vec::new(),
+    }
+}
+
 fn running_root(title: &str) -> TaskNode {
     TaskNode {
         id: TaskId::new("task-1"),
@@ -289,9 +308,11 @@ pub fn simple_answer_replay() -> ReplayScript {
         .with_expected_events(vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 1),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 11), // "hello world"
+            stop_gate_event(0),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ])
         .with_expected_tasks(vec![running_root("hello world")])
@@ -306,6 +327,7 @@ pub fn tool_then_answer_replay() -> ReplayScript {
         .with_expected_events(vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 2),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 0), // tool intent only
@@ -320,9 +342,11 @@ pub fn tool_then_answer_replay() -> ReplayScript {
                 success: true,
             },
             budget_event(2, 2, 1, 0, 0),
+            step_event(2, 2),
             OrchestratorEvent::ModelRequested { iteration: 2 },
             OrchestratorEvent::ModelResponded { iteration: 2 },
             budget_event(2, 2, 1, 0, 7), // "read it"
+            stop_gate_event(0),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ])
         .with_expected_tasks(vec![running_root("read a file")])
@@ -357,6 +381,7 @@ pub fn delegate_then_answer_replay() -> ReplayScript {
         .with_expected_events(vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             budget_event(1, 1, 0, 0, 0),
+            step_event(1, 1),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, 0),
@@ -376,6 +401,12 @@ pub fn delegate_then_answer_replay() -> ReplayScript {
                 task_id: "task-2".into(),
             },
             budget_event(1, 1, 0, 0, 0),
+            OrchestratorEvent::StepStarted {
+                session_id: "subagent".into(),
+                task_id: "task-2".into(),
+                iteration: 1,
+                advertised_tool_count: 1,
+            },
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
             budget_event(1, 1, 0, 0, DELEGATED_HANDOFF_OUTPUT.len()),
@@ -387,9 +418,11 @@ pub fn delegate_then_answer_replay() -> ReplayScript {
                 success: true,
             },
             budget_event(2, 2, 1, 1, 0),
+            step_event(2, 1),
             OrchestratorEvent::ModelRequested { iteration: 2 },
             OrchestratorEvent::ModelResponded { iteration: 2 },
             budget_event(2, 2, 1, 1, 13), // "parent answer"
+            stop_gate_event(0),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
         ])
         .with_expected_tasks(vec![running_root("delegate work"), completed_child()])
@@ -405,6 +438,7 @@ pub fn endless_loop_replay(calls: usize) -> ReplayScript {
         vec![OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() }];
     for iteration in 1..=3usize {
         events.push(budget_event(iteration, iteration, iteration - 1, 0, 0));
+        events.push(step_event(iteration, 2));
         events.push(OrchestratorEvent::ModelRequested { iteration });
         events.push(OrchestratorEvent::ModelResponded { iteration });
         events.push(budget_event(iteration, iteration, iteration - 1, 0, 0));

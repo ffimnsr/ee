@@ -41,6 +41,41 @@ impl Event for AgentTurnAfter {
     const NAME: &'static str = "agent.turn.after";
 }
 
+/// One loop iteration is about to call the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStepBefore {
+    pub session_id: String,
+    pub task_id: String,
+    /// 1-based loop iteration.
+    pub iteration: usize,
+    /// Tool schemas advertised to the model this iteration.
+    pub advertised_tool_count: usize,
+}
+
+impl Event for AgentStepBefore {
+    const NAME: &'static str = "agent.step.before";
+}
+
+/// The evidence gate evaluated a completion signal before the stop.
+///
+/// Payloads carry the derived state, counts, and evidence ids only; prompts and
+/// tool output never travel through this event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStopBefore {
+    pub session_id: String,
+    pub task_id: String,
+    /// Derived completion state label (`verified`, `unverified`, ...).
+    pub completion_state: String,
+    /// Successful write-class executions observed this turn.
+    pub changed_file_count: usize,
+    /// Evidence ids backing the completion state.
+    pub evidence_ids: Vec<String>,
+}
+
+impl Event for AgentStopBefore {
+    const NAME: &'static str = "agent.stop.before";
+}
+
 /// A model call is about to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentModelBefore {
@@ -70,8 +105,10 @@ impl Event for AgentModelAfter {
 
 /// A tool is about to run.
 ///
-/// Mandatory policy (workspace trust, destructive safeguards, budget, write
-/// transactions) is evaluated before plugin bail listeners see this event.
+/// This is the `tools/pre-execute` equivalent: mandatory policy (workspace
+/// trust, destructive safeguards, budget, write transactions) is evaluated
+/// before plugin bail listeners see this event, so a listener can deny but
+/// never bypass a mandatory denial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolBefore {
     pub session_id: String,
@@ -232,6 +269,8 @@ mod tests {
     fn event_names_are_stable() {
         assert_eq!(AgentTurnBefore::NAME, "agent.turn.before");
         assert_eq!(AgentTurnAfter::NAME, "agent.turn.after");
+        assert_eq!(AgentStepBefore::NAME, "agent.step.before");
+        assert_eq!(AgentStopBefore::NAME, "agent.stop.before");
         assert_eq!(AgentModelBefore::NAME, "agent.model.before");
         assert_eq!(AgentModelAfter::NAME, "agent.model.after");
         assert_eq!(AgentToolBefore::NAME, "agent.tool.before");
@@ -244,6 +283,35 @@ mod tests {
         assert_eq!(AgentValidationCompleted::NAME, "agent.validation.completed");
         assert_eq!(AgentSessionCreated::NAME, "agent.session.created");
         assert_eq!(AgentSessionClosed::NAME, "agent.session.closed");
+    }
+
+    #[test]
+    fn step_and_stop_payloads_carry_no_content() {
+        let step = AgentStepBefore {
+            session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            iteration: 2,
+            advertised_tool_count: 3,
+        };
+        let stop = AgentStopBefore {
+            session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            completion_state: "verified".into(),
+            changed_file_count: 1,
+            evidence_ids: vec!["inventory-log".into()],
+        };
+        for json in [
+            serde_json::to_value(&step).expect("serializes"),
+            serde_json::to_value(&stop).expect("serializes"),
+        ] {
+            let object = json.as_object().expect("object payload");
+            for forbidden in ["prompt", "transcript", "tool_output", "arguments"] {
+                assert!(!object.contains_key(forbidden), "payload leaked {forbidden}");
+            }
+            assert!(!object.values().any(|value| value
+                .as_str()
+                .is_some_and(|text| text.contains("ignore previous instructions"))));
+        }
     }
 
     #[test]

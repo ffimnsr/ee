@@ -9,13 +9,14 @@
 //! same-process recovery metadata still works, but crash restore is not available.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::private_fs::{create_private_dir, hex, sync_directory, write_private_file};
 
 use crate::checkpoint::{
     CheckpointCaptureMetadata, CheckpointContextProvenance, OrchestratorCheckpoint,
@@ -393,90 +394,10 @@ impl CheckpointStore {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// Creates a durable-store directory with owner-only permissions where the
 /// platform exposes POSIX modes. Existing directories are tightened too.
-fn create_private_dir(path: &Path) -> Result<(), OrchestratorError> {
-    std::fs::create_dir_all(path).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to create checkpoint directory {}: {error}",
-            path.display()
-        ))
-    })?;
-    set_private_directory_permissions(path)
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), OrchestratorError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to create checkpoint {}: {error}",
-            path.display()
-        ))
-    })?;
-    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to durably write checkpoint {}: {error}",
-            path.display()
-        ))
-    })?;
-    set_private_file_permissions(path)
-}
-
-fn sync_directory(path: &Path) -> Result<(), OrchestratorError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path).and_then(|directory| directory.sync_all()).map_err(|error| {
-            OrchestratorError::Serialization(format!(
-                "failed to sync checkpoint directory {}: {error}",
-                path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<(), OrchestratorError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to restrict checkpoint directory {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_directory_permissions(_path: &Path) -> Result<(), OrchestratorError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), OrchestratorError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-        OrchestratorError::Serialization(format!(
-            "failed to restrict checkpoint {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), OrchestratorError> {
-    Ok(())
-}
-
+/// (Shared implementation lives in the crate-private `private_fs` module.)
+///
 /// Per-turn checkpoint writer wired into the loop engine by the runtime.
 ///
 /// Milestone captures are debounced (at most one per [`CHECKPOINT_MILESTONE_DEBOUNCE`])

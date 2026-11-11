@@ -24,6 +24,30 @@ pub enum OrchestratorEvent {
         /// 1-based loop iteration.
         iteration: usize,
     },
+    /// One loop iteration is about to call the model.
+    StepStarted {
+        /// ACP session id.
+        session_id: String,
+        /// Root task id.
+        task_id: String,
+        /// 1-based loop iteration.
+        iteration: usize,
+        /// Tool schemas advertised to the model.
+        advertised_tool_count: usize,
+    },
+    /// The evidence gate evaluated a completion signal.
+    StopGateEvaluated {
+        /// ACP session id.
+        session_id: String,
+        /// Root task id.
+        task_id: String,
+        /// Derived completion state label.
+        completion_state: String,
+        /// Successful write-class executions observed this turn.
+        changed_file_count: usize,
+        /// Evidence ids backing the completion state.
+        evidence_ids: Vec<String>,
+    },
     /// The model adapter returned a response.
     ModelResponded {
         /// 1-based loop iteration.
@@ -312,6 +336,19 @@ mod tests {
         let events = vec![
             OrchestratorEvent::TurnStarted { session_id: "s-1".into(), task_id: "task-1".into() },
             OrchestratorEvent::ModelRequested { iteration: 2 },
+            OrchestratorEvent::StepStarted {
+                session_id: "s-1".into(),
+                task_id: "task-1".into(),
+                iteration: 2,
+                advertised_tool_count: 3,
+            },
+            OrchestratorEvent::StopGateEvaluated {
+                session_id: "s-1".into(),
+                task_id: "task-1".into(),
+                completion_state: "verified".into(),
+                changed_file_count: 1,
+                evidence_ids: vec!["inventory-log".into()],
+            },
             OrchestratorEvent::ModelResponded { iteration: 2 },
             OrchestratorEvent::ToolStarted {
                 tool_call_id: "tc-1".into(),

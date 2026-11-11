@@ -503,6 +503,7 @@ impl OrchestratorRuntime {
                     workspace: prompt.workspace,
                     mcp: prompt.mcp,
                     task_context: Some(context_plan),
+                    ..TurnSystemContext::default()
                 },
             )
             .await

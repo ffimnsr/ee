@@ -93,6 +93,11 @@ pub struct OrchestratorProviderConfig {
     /// Optional root for durable normal-session snapshots. This is separate
     /// from recovery checkpoints, which represent interrupted turns only.
     pub session_state_dir: Option<std::path::PathBuf>,
+    /// Optional durable root for the append-only session log. When set, model
+    /// request records and content-addressed message bodies are written under
+    /// `<dir>/session-log`; `None` keeps the log in memory for this process.
+    /// This is opt-in because message bodies contain full local content.
+    pub session_log_dir: Option<std::path::PathBuf>,
     /// Maximum serialized bytes retained for one normal-session snapshot.
     pub max_session_state_bytes: usize,
     /// Trusted validation declarations supplied by server configuration. Repository
@@ -116,6 +121,7 @@ impl Default for OrchestratorProviderConfig {
             .title(DEFAULT_IMPLEMENTATION_TITLE),
             mcp: McpToolPolicy::default(),
             session_state_dir: None,
+            session_log_dir: None,
             max_session_state_bytes: crate::config::DEFAULT_MAX_CHECKPOINT_BYTES,
             validation_workspace: WorkspaceValidationConfig::default(),
             telemetry: TelemetryConfig::default(),

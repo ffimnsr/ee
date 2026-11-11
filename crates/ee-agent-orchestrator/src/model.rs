@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use ee_acp_agent_server::PromptContext;
 use ee_agent_protocol::ContentBlock;
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::budget::BudgetSnapshot;
+use crate::session_log::SessionLog;
 use crate::subagents::SubagentIntent;
 use crate::tasks::TaskNode;
 use crate::tools::{ToolDefinition, ToolIntent, ToolResult};
@@ -437,7 +439,11 @@ pub struct TranscriptTruncation {
 /// assistant responses (reasoning kept separate), tool observations with
 /// stable tool-call ids, and subagent summaries, and enforces the memory
 /// byte limit by dropping the oldest messages first.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// When a [`SessionLog`] is attached, every pushed message is appended to the
+/// durable log and its stable message id is retained alongside the bounded
+/// request view. Truncation is therefore a view operation only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Transcript {
     /// Normalized messages in chronological order.
@@ -445,13 +451,25 @@ pub struct Transcript {
     /// What the last [`Transcript::enforce_memory_limit`] call removed,
     /// when it removed anything.
     pub truncation: Option<TranscriptTruncation>,
+    /// Durable log the transcript appends to, when one is wired.
+    #[serde(skip)]
+    pub(crate) log: Option<Arc<SessionLog>>,
+    /// Parallel to `messages`; `None` when a message is not (yet) logged.
+    #[serde(skip)]
+    pub(crate) log_ids: Vec<Option<String>>,
+}
+
+impl PartialEq for Transcript {
+    fn eq(&self, other: &Self) -> bool {
+        self.messages == other.messages && self.truncation == other.truncation
+    }
 }
 
 impl Transcript {
     /// Creates an empty transcript.
     #[must_use]
     pub fn new() -> Self {
-        Self { messages: Vec::new(), truncation: None }
+        Self { messages: Vec::new(), truncation: None, log: None, log_ids: Vec::new() }
     }
 
     /// Converts ACP prompt content into one normalized user message.
@@ -482,13 +500,17 @@ impl Transcript {
         if !unsupported.is_empty() {
             message = message.with_metadata([("unsupported_blocks".into(), unsupported.join(","))]);
         }
-        Self { messages: vec![message], truncation: None }
+        let mut transcript = Self::new();
+        transcript.messages = vec![message];
+        transcript
     }
 
     /// Prepends a system message ahead of the prompt's user message, used to
     /// seed bounded memory facts before any model call.
     pub fn prepend_system(&mut self, text: impl Into<String>) {
         self.messages.insert(0, ModelMessage::text(ModelRole::System, text));
+        let id = self.record_message_at(0, None);
+        self.log_ids.insert(0, id);
     }
 
     /// Appends the assistant message for a model response: text stays in
@@ -508,11 +530,16 @@ impl Transcript {
             message = message.with_reasoning_summary(reasoning);
         }
         self.messages.push(message);
+        let id = self.record_message_at(self.messages.len() - 1, None);
+        self.log_ids.push(id);
     }
 
     /// Appends a tool observation carrying the stable tool-call id.
     pub fn push_tool_result(&mut self, tool_call_id: impl Into<String>, result: ToolResult) {
-        self.messages.push(ModelMessage::tool_result(tool_call_id, result));
+        let tool_call_id = tool_call_id.into();
+        self.messages.push(ModelMessage::tool_result(tool_call_id.clone(), result));
+        let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
+        self.log_ids.push(id);
     }
 
     /// Appends a tool observation with classification metadata.
@@ -535,12 +562,18 @@ impl Transcript {
         if let Some(path) = path {
             entries.push((TOOL_PATH_METADATA_KEY.to_string(), path.to_string()));
         }
-        self.messages.push(ModelMessage::tool_result(tool_call_id, result).with_metadata(entries));
+        let tool_call_id = tool_call_id.into();
+        self.messages
+            .push(ModelMessage::tool_result(tool_call_id.clone(), result).with_metadata(entries));
+        let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
+        self.log_ids.push(id);
     }
 
     /// Appends a subagent summary message (subagent phase).
     pub fn push_subagent_summary(&mut self, summary: impl Into<String>) {
         self.messages.push(ModelMessage::text(ModelRole::Subagent, summary));
+        let id = self.record_message_at(self.messages.len() - 1, None);
+        self.log_ids.push(id);
     }
 
     /// Request projection: tool-result middles pruned without mutating the
@@ -580,6 +613,9 @@ impl Transcript {
             total -= dropped;
             removed_bytes += dropped;
             self.messages.remove(0);
+            if !self.log_ids.is_empty() {
+                self.log_ids.remove(0);
+            }
             removed += 1;
         }
         self.truncation = (removed > 0).then_some(TranscriptTruncation {
@@ -588,6 +624,9 @@ impl Transcript {
             retained_bytes: total,
             limit_bytes,
         });
+        if let (Some(log), Some(truncation)) = (&self.log, &self.truncation) {
+            log.record_truncation(truncation);
+        }
     }
 
     /// All normalized messages in chronological order.

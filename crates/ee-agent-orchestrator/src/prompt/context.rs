@@ -175,6 +175,8 @@ pub struct WorkspaceMessage {
 pub(crate) struct TurnSystemContext {
     /// Prior normalized user, assistant, and tool messages from this session.
     pub history: Vec<ModelMessage>,
+    /// Durable log ids aligned with `history`; empty when unknown.
+    pub history_ids: Vec<Option<String>>,
     /// Compact memory facts from the runtime store.
     pub memory: Option<String>,
     /// Fresh task context. Repository and tool content retain their untrusted
@@ -201,29 +203,57 @@ impl TurnSystemContext {
     /// [`TurnSystemContext::history`], so callers cannot interleave runtime
     /// facts after the current user prompt.
     pub(crate) fn apply_to_transcript(
-        self,
+        mut self,
         transcript: &mut Transcript,
         prompt_messages: Vec<ModelMessage>,
     ) {
         let mut messages = Vec::new();
+        let mut ids: Vec<Option<String>> = Vec::new();
         if let Some(stable) = self.stable.filter(|text| !text.trim().is_empty()) {
             messages.push(ModelMessage::text(ModelRole::System, stable));
+            ids.push(None);
         }
-        messages.extend(self.global.into_iter().map(|instruction| instruction.message));
+        for instruction in self.global {
+            messages.push(instruction.message);
+            ids.push(None);
+        }
         if let Some(facts) = self.memory.filter(|text| !text.trim().is_empty()) {
             messages.push(ModelMessage::text(ModelRole::System, format!("Memory facts:\n{facts}")));
+            ids.push(None);
         }
-        messages.extend(self.history.into_iter().filter(|message| !is_refreshable_prompt(message)));
+        // History ids stay aligned with retained history; refreshable prompt
+        // planes drop their ids with the message because they are rebuilt.
+        let history_ids = std::mem::take(&mut self.history_ids);
+        let mut history_ids = history_ids.into_iter().chain(std::iter::repeat(None));
+        for message in self.history {
+            let id = history_ids.next().flatten();
+            if is_refreshable_prompt(&message) {
+                continue;
+            }
+            messages.push(message);
+            ids.push(id);
+        }
         if let Some(retained) = self.retained_runtime.filter(|text| !text.trim().is_empty()) {
             messages.push(retained_runtime_message(&retained));
+            ids.push(None);
         }
-        messages.extend(self.workspace.into_iter().map(|workspace| workspace.message));
+        for workspace in self.workspace {
+            messages.push(workspace.message);
+            ids.push(None);
+        }
         if let Some(runtime) = self.runtime.filter(|snapshot| !snapshot.text.trim().is_empty()) {
             messages.push(runtime_message(&runtime));
+            ids.push(None);
         }
-        messages.extend(self.mcp.into_iter().map(|instruction| instruction.message));
-        messages.extend(prompt_messages);
-        transcript.messages = messages;
+        for instruction in self.mcp {
+            messages.push(instruction.message);
+            ids.push(None);
+        }
+        for message in prompt_messages {
+            messages.push(message);
+            ids.push(None);
+        }
+        transcript.replace_messages_with_ids(messages, ids);
         if let Some(task_context) = self.task_context {
             task_context.apply_to_transcript(transcript);
         }
@@ -283,6 +313,28 @@ mod tests {
 
     fn section(name: &str, order: i32, text: &str) -> RuntimeSection {
         RuntimeSection::new(name, order, text)
+    }
+
+    #[test]
+    fn history_ids_stay_aligned_for_log_replay() {
+        let mut transcript = Transcript::new();
+        let context = TurnSystemContext {
+            history: vec![
+                ModelMessage::text(ModelRole::User, "old"),
+                ModelMessage::text(ModelRole::Assistant, "answer"),
+            ],
+            history_ids: vec![Some("msg-1".into()), Some("msg-2".into())],
+            memory: Some("facts".into()),
+            ..TurnSystemContext::default()
+        };
+        context.apply_to_transcript(
+            &mut transcript,
+            vec![ModelMessage::text(ModelRole::User, "current")],
+        );
+        assert_eq!(
+            transcript.log_ids,
+            vec![None, Some("msg-1".into()), Some("msg-2".into()), None]
+        );
     }
 
     #[test]

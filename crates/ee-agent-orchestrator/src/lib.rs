@@ -67,6 +67,10 @@
 //!   ACP [`AgentProvider`](ee_acp_agent_server::AgentProvider).
 //! - [`checkpoint`] — serializable session snapshots with fail-closed restore
 //!   validation, provenance reports, and deterministic id generator state.
+//! - [`session_log`] — append-only per-session log: content-addressed message
+//!   bodies, ordered model-request records, bounded retention, redacted export,
+//!   and checkpoint branching.
+//! - [`stop_gate`] — evidence gate applied before a changed turn may stop.
 //! - [`completion`] — evidence-gated terminal state (`verified`,
 //!   `partially_verified`, `blocked`, or `unverified`) derived only from tool
 //!   observations and selected validation records.
@@ -198,6 +202,7 @@ pub mod parallel_tools;
 pub mod plan_compiler;
 pub mod plugin_runtime;
 pub mod policy;
+pub mod private_fs;
 pub mod progress;
 pub mod progress_scoring;
 mod prompt;
@@ -221,7 +226,14 @@ pub mod rubber_duck_trigger;
 pub mod runtime;
 pub mod semantic_memory;
 pub mod sensitive_data;
+pub mod session_log;
+mod session_log_sink;
+#[cfg(test)]
+mod session_log_tests;
 pub mod session_store;
+pub mod stop_gate;
+#[cfg(test)]
+mod stop_gate_loop_tests;
 pub mod strategy;
 pub mod streaming;
 pub mod stuck;
@@ -237,6 +249,7 @@ pub mod tool_dependencies;
 pub mod tool_schemas;
 pub mod tools;
 pub mod trace;
+mod transcript_log;
 pub mod trust;
 pub mod validation;
 pub mod workspace_scope;
@@ -468,6 +481,16 @@ pub use semantic_memory::{
     SemanticMemoryAdapter, SemanticMemoryConfig, SemanticMemoryHit,
 };
 pub use sensitive_data::{SensitiveDataGuard, is_secret_like, redact_values};
+pub use session_log::{
+    BranchOutcome, DEFAULT_MAX_SESSION_LOG_BYTES, DEFAULT_MAX_SESSION_LOG_RECORDS,
+    FileSessionLogSink, InMemorySessionLogSink, ModelRequestRecord, SESSION_LOG_RECORD_FILE,
+    SESSION_LOG_SCHEMA_VERSION, SessionLog, SessionLogConfig, SessionLogRecord, SessionLogSink,
+    SessionLogStore, SessionMessageRecord, TruncationRecord, projection_hash, tool_schema_hash,
+};
+pub use stop_gate::{
+    DEFAULT_MAX_STOP_GATE_REPAIRS, LOOP_EVIDENCE_REVISION, MAX_STOP_GATE_REPAIRS, StopGate,
+    StopGateConfig, StopGateDecision, StopGateOutcome, StopVeto,
+};
 pub use strategy::{
     CapabilityAwareGuidance, StrategicInput, StrategyContext, StrategyDecision, StrategyReason,
     StrategySelector, TurnResult, TurnStrategy, capability_aware_guidance,

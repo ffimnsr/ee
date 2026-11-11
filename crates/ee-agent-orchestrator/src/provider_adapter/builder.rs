@@ -44,11 +44,12 @@ impl OrchestratorProvider {
     /// this constructor; the host mirrors the registry for plugin metadata and
     /// deterministic routing hints.
     pub fn with_model_registry_and_host(
-        config: OrchestratorProviderConfig,
+        mut config: OrchestratorProviderConfig,
         models: crate::model_registry::ModelRegistry,
         policy: PolicyEngine,
         plugins: std::sync::Arc<crate::plugin_runtime::AgentPluginHost>,
     ) -> Result<Self, ProviderError> {
+        apply_session_log_dir(&mut config);
         models.default_adapter().map_err(ProviderError::from)?;
         plugins.models().adopt_registry(&models).map_err(|error| {
             ProviderError::BackendFailure(format!("failed to mirror model registry: {error}"))
@@ -150,5 +151,37 @@ impl OrchestratorProvider {
             ProviderError::InvalidRequest(format!("unknown orchestrator session: {session_id}"))
         })?;
         session.runtime.register_tool(tool).map_err(ProviderError::from)
+    }
+}
+
+/// Applies the opt-in durable session-log root derived from provider config.
+///
+/// Nothing is written unless the host explicitly sets the directory: session
+/// log bodies contain full local content, so this never turns on implicitly.
+fn apply_session_log_dir(config: &mut OrchestratorProviderConfig) {
+    if let Some(dir) = config.session_log_dir.clone() {
+        config.orchestrator.session_log.dir = Some(dir.join("session-log"));
+        config.orchestrator.session_log.enabled = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_session_log_is_opt_in() {
+        let mut config = OrchestratorProviderConfig::default();
+        apply_session_log_dir(&mut config);
+        assert!(config.orchestrator.session_log.dir.is_none());
+
+        let dir = std::path::PathBuf::from("/tmp/ee-session-log");
+        config.session_log_dir = Some(dir.clone());
+        apply_session_log_dir(&mut config);
+        assert_eq!(
+            config.orchestrator.session_log.dir.as_deref(),
+            Some(dir.join("session-log").as_path())
+        );
+        assert!(config.orchestrator.session_log.enabled);
     }
 }
