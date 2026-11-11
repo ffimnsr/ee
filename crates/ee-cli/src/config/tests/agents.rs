@@ -11,6 +11,11 @@ fn agents_settings_disabled_by_default() {
     assert!(!settings.agents.enabled);
     assert!(settings.agents.default_agent.is_none());
     assert_eq!(settings.agents.max_concurrent_prompts, 4);
+    assert_eq!(
+        settings.agents.read_only_modes,
+        BTreeSet::from([String::from("ask"), String::from("plan")]),
+        "ask and plan never receive trusted-write auto-approval"
+    );
     assert!(settings.agents.servers.is_empty());
     assert!(settings.mcp.servers.is_empty());
 }
@@ -48,6 +53,27 @@ command = "other-agent"
     assert_eq!(helper.env.get("EE_AGENT_MODE").map(|v| v.raw.as_str()), Some("1"));
     assert_eq!(helper.cwd.as_deref(), Some(Path::new("/tmp/agent")));
     assert_eq!(settings.agents.servers.len(), 2);
+}
+#[test]
+fn agents_read_only_modes_parse_and_repository_layers_cannot_remove_them() {
+    let raw: EeToml =
+        toml::from_str("[agents]\nread_only_modes = [\"ask\", \"review\"]\n").unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(
+        settings.agents.read_only_modes,
+        BTreeSet::from([String::from("ask"), String::from("review")]),
+        "host-global config owns the full read-only set"
+    );
+
+    // Repository config may add read-only modes but must never remove one.
+    let raw: EeToml = toml::from_str("[agents]\nread_only_modes = [\"plan\"]\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::Ancestor);
+    assert_eq!(
+        settings.agents.read_only_modes,
+        BTreeSet::from([String::from("ask"), String::from("plan"), String::from("review")]),
+        "repository layers only add read-only modes"
+    );
 }
 #[test]
 fn agents_approval_alignment_parses_and_fails_closed_on_unknown_values() {

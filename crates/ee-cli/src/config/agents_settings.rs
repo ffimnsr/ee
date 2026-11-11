@@ -23,7 +23,7 @@ use super::value::{ensure_named_table, mutate_config_at_scope};
 #[cfg(any(feature = "agents", test))]
 use super::web_context::agent_web_context_settings_to_toml;
 use super::workspace_memory::WorkspaceMemorySettings;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "agents")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +33,12 @@ use ee_agent_host::AgentWebContextConfig;
 
 const DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS: usize = 4;
 pub(super) const MAX_AGENT_MAX_CONCURRENT_PROMPTS: usize = 32;
+
+/// Agent modes that never receive trusted-workspace write auto-approval.
+/// Read-only modes still get the read-only command allowlist; they only lose
+/// the implicit write consent. Repository config layers may add modes but
+/// never remove them.
+pub(super) const DEFAULT_READ_ONLY_MODES: [&str; 2] = ["ask", "plan"];
 
 /// Bridge-approval alignment with the agent's own permission prompt.
 ///
@@ -112,6 +118,8 @@ pub(crate) struct AgentsSettings {
     pub default_agent: Option<String>,
     /// Maximum provider prompts in flight on each configured agent connection.
     pub max_concurrent_prompts: usize,
+    /// Agent modes that never receive trusted-workspace write auto-approval.
+    pub read_only_modes: BTreeSet<String>,
     pub servers: BTreeMap<String, AgentServerSettings>,
     /// Bridge-approval alignment with the agent's own permission prompt.
     pub approval: AgentApprovalSettings,
@@ -132,6 +140,10 @@ impl Default for AgentsSettings {
             enabled: false,
             default_agent: None,
             max_concurrent_prompts: DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS,
+            read_only_modes: DEFAULT_READ_ONLY_MODES
+                .iter()
+                .map(|mode| (*mode).to_string())
+                .collect(),
             servers: BTreeMap::new(),
             approval: AgentApprovalSettings::default(),
             rubber_duck: RubberDuckSettings::default(),
@@ -230,6 +242,7 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
         enabled: Some(agents.enabled),
         default_agent: agents.default_agent.clone(),
         max_concurrent_prompts: Some(agents.max_concurrent_prompts),
+        read_only_modes: Some(agents.read_only_modes.iter().cloned().collect()),
         approval: Some(AgentApprovalToml {
             alignment: Some(agents.approval.alignment.label().to_string()),
         }),

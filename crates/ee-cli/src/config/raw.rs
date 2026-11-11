@@ -155,6 +155,9 @@ pub(crate) struct AgentsToml {
     pub default_agent: Option<String>,
     /// Per-connection prompt concurrency. Valid range: 1 through 32.
     pub max_concurrent_prompts: Option<usize>,
+    /// Agent modes that never receive trusted-workspace write auto-approval.
+    /// Defaults to `["ask", "plan"]`; repository layers may only add modes.
+    pub read_only_modes: Option<Vec<String>>,
     /// Bridge-approval alignment policy (`[agents.approval]` table).
     pub approval: Option<AgentApprovalToml>,
     #[serde(default)]

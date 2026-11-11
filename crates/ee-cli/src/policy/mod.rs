@@ -23,13 +23,14 @@
 //!   budget, and apply only while the host-local workspace trust decision
 //!   remains `trusted`.
 //! - Trusted-write built-in allow: while the host-local workspace decision is
-//!   `trusted`, a native write whose every target canonicalizes inside the
-//!   primary workspace root and is neither a protected path nor the secret
-//!   store dispatches without a prompt, provided the request stays within the
-//!   write safety maxima (files, per-file bytes, total bytes). Denials,
-//!   safeguards, and mandatory-confirm rules still win, MCP proxy writes never
-//!   qualify, and additional workspace roots are out of scope because the
-//!   trust decision is keyed by the primary root.
+//!   `trusted` and the issuing agent mode is not in `agents.read_only_modes`
+//!   (default `ask`, `plan`), a native write whose every target canonicalizes
+//!   inside the primary workspace root and is neither a protected path nor the
+//!   secret store dispatches without a prompt, provided the request stays
+//!   within the write safety maxima (files, per-file bytes, total bytes).
+//!   Denials, safeguards, and mandatory-confirm rules still win, MCP proxy
+//!   writes never qualify, and additional workspace roots are out of scope
+//!   because the trust decision is keyed by the primary root.
 //! - `evaluate`: the pure shared evaluator.  It performs no filesystem,
 //!   process, transport, UI, clock, or counter mutation; time and usage are
 //!   injected.

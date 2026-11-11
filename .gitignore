@@ -37,3 +37,4 @@ build
 
 *.log
 /profile.json.gz
+harness-example/

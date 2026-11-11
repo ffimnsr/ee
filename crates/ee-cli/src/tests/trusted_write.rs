@@ -4,8 +4,9 @@
 //! primary workspace root, and nothing else.
 //!
 //! Outside targets, symlink escapes, protected paths, the secret store,
-//! additional workspace roots, requests beyond the write safety maxima, and
-//! MCP proxy writes always stay on the explicit approval path.
+//! additional workspace roots, requests beyond the write safety maxima, agent
+//! modes configured read-only (`agents.read_only_modes`, default `ask`/`plan`),
+//! and MCP proxy writes always stay on the explicit approval path.
 
 use std::fs;
 use std::path::Path;
@@ -20,6 +21,31 @@ use crate::tests::agent_mcp::{
 };
 use crate::tests::helpers::CurrentDirGuard;
 use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
+use ee_agent_host::fake::FakeAgentScript;
+
+/// Fake agent that advertises ask/plan/write modes and starts in `write`, so
+/// trusted-write auto-approval is enabled; the default fixture starts in
+/// `ask`, which is intentionally read-only.
+pub(crate) fn write_mode_agent_script() -> FakeAgentScript {
+    FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "modes": {
+                "currentModeId": "write",
+                "availableModes": [
+                    { "id": "ask", "name": "Ask" },
+                    { "id": "plan", "name": "Plan" },
+                    { "id": "write", "name": "Write" },
+                ],
+            },
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .delay(25)
+}
 
 fn write_frame(path: &Path, content: &str) -> Value {
     json!({
@@ -34,7 +60,7 @@ fn write_frame(path: &Path, content: &str) -> Value {
 /// duration of the test, because trust resolution reads the workspace root
 /// from the current working directory.
 fn trusted_app() -> (App, TempDir, ScriptedFake) {
-    let (mut app, temp, fake) = mcp_app(base_agent_script(), false, true);
+    let (mut app, temp, fake) = mcp_app(write_mode_agent_script(), false, true);
     open_pane_and_wait_ready(&mut app);
     let state_dir = temp.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();
@@ -48,7 +74,7 @@ fn trusted_app() -> (App, TempDir, ScriptedFake) {
 
 /// App with the agents pane open and no workspace trust decision.
 fn undecided_app() -> (App, TempDir, ScriptedFake) {
-    let (mut app, temp, fake) = mcp_app(base_agent_script(), false, true);
+    let (mut app, temp, fake) = mcp_app(write_mode_agent_script(), false, true);
     open_pane_and_wait_ready(&mut app);
     let state_dir = temp.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();
@@ -95,6 +121,58 @@ fn trusted_workspace_auto_applies_in_workspace_modify() {
     let reply = proxy_recv(&mut stream);
     assert_eq!(reply["result"]["value"].as_str(), Some("ok"), "auto-allowed: {reply}");
     assert_eq!(fs::read_to_string(&target).unwrap().trim_end(), "fn new() {}");
+}
+
+#[test]
+fn read_only_mode_stays_explicit_even_when_workspace_trusted() {
+    let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+    let state_dir = temp.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    app.agents.test_trust_store_base = Some(state_dir.clone());
+    WorkspaceTrustStore::at(&state_dir, temp.path())
+        .unwrap()
+        .set_decision(WorkspaceTrustDecision::Trusted)
+        .unwrap();
+
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    let target = temp.path().join("ask-mode.rs");
+    let mut stream = connect_proxy(&app);
+    proxy_send(&mut stream, 1, write_frame(&target, "fn ask() {}"));
+
+    wait_until(&mut app, "read-only mode write queued", |app| !app.agents.approvals.is_empty());
+    assert!(!target.exists(), "ask/plan modes never auto-apply trusted writes");
+}
+
+#[test]
+fn empty_read_only_mode_set_restores_trusted_write_auto_apply() {
+    let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+    app.config.agents.read_only_modes.clear();
+    let state_dir = temp.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    app.agents.test_trust_store_base = Some(state_dir.clone());
+    WorkspaceTrustStore::at(&state_dir, temp.path())
+        .unwrap()
+        .set_decision(WorkspaceTrustDecision::Trusted)
+        .unwrap();
+
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    let target = temp.path().join("ask-mode.rs");
+    let mut stream = connect_proxy(&app);
+    proxy_send(&mut stream, 1, write_frame(&target, "fn ask() {}"));
+
+    wait_until(&mut app, "configured write dispatched", |app| {
+        app.agents.approvals.is_empty() && target.exists()
+    });
+    let reply = proxy_recv(&mut stream);
+    assert_eq!(reply["result"]["value"].as_str(), Some("ok"), "auto-allowed: {reply}");
 }
 
 #[test]

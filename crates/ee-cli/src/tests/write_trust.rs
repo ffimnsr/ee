@@ -623,7 +623,8 @@ mod e2e {
     /// safety maxima and protected paths still require an explicit decision.
     #[test]
     fn trusted_workspace_prompts_only_for_ineligible_writes() {
-        let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+        let (mut app, temp, _fake) =
+            mcp_app(crate::tests::trusted_write::write_mode_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();

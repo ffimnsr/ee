@@ -476,6 +476,22 @@ impl EditorSettings {
                 );
             }
         }
+        if let Some(modes) = &patch.read_only_modes {
+            let requested = modes
+                .iter()
+                .map(|mode| mode.trim())
+                .filter(|mode| !mode.is_empty())
+                .map(str::to_owned);
+            if kind.is_host_global() {
+                // Host-global config owns the whole read-only set.
+                self.agents.read_only_modes.clear();
+                self.agents.read_only_modes.extend(requested);
+            } else {
+                // Repository layers may only add read-only modes; removing one
+                // would silently widen trusted-write auto-approval.
+                self.agents.read_only_modes.extend(requested);
+            }
+        }
         if let Some(rubber_duck) = &patch.rubber_duck {
             match merge_rubber_duck(&self.agents.rubber_duck, rubber_duck) {
                 Ok(resolved) => self.agents.rubber_duck = resolved,

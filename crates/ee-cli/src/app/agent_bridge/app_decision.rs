@@ -470,8 +470,13 @@ impl App {
     /// always stay on the explicit approval path.  Requests beyond the write
     /// safety maxima (files, per-file bytes, total bytes) also stay explicit:
     /// trust is implicit consent for routine writes, not for unbounded ones.
+    /// Read-only agent modes (`agents.read_only_modes`, default `ask`/`plan`)
+    /// also stay explicit.
     pub(super) fn trusted_write_eligible(&self, prompt: &ApprovalPrompt) -> bool {
-        if prompt.mcp.is_some() || !self.workspace_trusted() {
+        if prompt.mcp.is_some()
+            || !self.workspace_trusted()
+            || !self.trusted_write_mode_allows(&prompt.session_id)
+        {
             return false;
         }
         match &prompt.kind {
@@ -491,6 +496,35 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Whether the prompting session's active agent mode permits implicit
+    /// write consent.  Modes are agent-advertised ids with no capability flags,
+    /// so only the configured read-only set is trusted to mean "no writes".
+    /// Prompts that map to no live thread (proxy-originated app tools) fall
+    /// back to the active thread's mode; with no mode information at all the
+    /// agent backend still decides, so the trusted-write path stays enabled.
+    fn trusted_write_mode_allows(&self, session_id: &str) -> bool {
+        if self.config.agents.read_only_modes.is_empty() {
+            return true;
+        }
+        let Some(mode) = self.prompt_mode_id(session_id) else {
+            return true;
+        };
+        !self.config.agents.read_only_modes.contains(&mode)
+    }
+
+    /// Advertised agent mode for the prompting session, falling back to the
+    /// active thread when the prompt carries no session id of its own.
+    fn prompt_mode_id(&self, session_id: &str) -> Option<String> {
+        let thread = self
+            .agents
+            .thread_index(session_id)
+            .and_then(|index| self.agents.threads.get(index))
+            .or_else(|| {
+                self.agents.active_thread_index().and_then(|index| self.agents.threads.get(index))
+            })?;
+        thread.host.snapshot().current_mode.map(|mode| mode.0.to_string())
     }
 
     /// Normalized native write operation: canonical in-workspace target,
