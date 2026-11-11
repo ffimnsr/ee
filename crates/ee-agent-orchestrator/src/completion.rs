@@ -71,6 +71,33 @@ impl EvidenceStatus {
     }
 }
 
+/// Evidence classes a turn is actually able to observe.
+///
+/// Inventory and one selected validation result are always required for a
+/// verified changed turn. Diagnostics and diff review are required only when
+/// the host advertises a tool that can produce them; otherwise a standalone
+/// orchestrator with no editor proxy could never satisfy the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CompletionRequirements {
+    /// Require a successful post-write diagnostics observation.
+    #[serde(default = "default_true")]
+    pub post_write_diagnostics: bool,
+    /// Require a successful final diff review observation.
+    #[serde(default = "default_true")]
+    pub final_diff_review: bool,
+}
+
+impl Default for CompletionRequirements {
+    fn default() -> Self {
+        Self { post_write_diagnostics: true, final_diff_review: true }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 /// One tool-observed completion item with a stable identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -116,6 +143,9 @@ pub struct CompletionEvidence {
     pub post_write_diagnostics: Option<CompletionEvidenceItem>,
     /// Final diff review result.
     pub final_diff_review: Option<CompletionEvidenceItem>,
+    /// Evidence classes this turn is able to observe.
+    #[serde(default)]
+    pub requirements: CompletionRequirements,
 }
 
 impl CompletionEvidence {
@@ -219,12 +249,23 @@ pub fn derive_completion(
         );
     }
 
-    for (label, item) in [
-        ("post-write diagnostics", evidence.post_write_diagnostics.as_ref()),
-        ("final diff review", evidence.final_diff_review.as_ref()),
+    for (label, item, required) in [
+        (
+            "post-write diagnostics",
+            evidence.post_write_diagnostics.as_ref(),
+            evidence.requirements.post_write_diagnostics,
+        ),
+        (
+            "final diff review",
+            evidence.final_diff_review.as_ref(),
+            evidence.requirements.final_diff_review,
+        ),
     ] {
         let Some(item) = item else {
-            return unverified(format!("record {label} before completion"), evidence_ids);
+            if required {
+                return unverified(format!("record {label} before completion"), evidence_ids);
+            }
+            continue;
         };
         if !matches!(item.status, EvidenceStatus::Passed) {
             return unverified(

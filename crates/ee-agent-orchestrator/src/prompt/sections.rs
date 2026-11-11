@@ -41,7 +41,7 @@ pub(crate) const PTC_ONLY: Slot =
 pub(crate) const FILE_REFERENCE: Slot =
     Slot { name: "FILE_REFERENCE", order: 900, registrations: &["context:file-reference"] };
 pub(crate) const TOOL_BASH: Slot =
-    Slot { name: "TOOL_BASH", order: 1000, registrations: &["tool:bash"] };
+    Slot { name: "TOOL_BASH", order: 1000, registrations: &["tool:bash", "tool:git"] };
 pub(crate) const TOOL_PWSH: Slot =
     Slot { name: "TOOL_PWSH", order: 1010, registrations: &["tool:pwsh"] };
 pub(crate) const TOOL_READ: Slot =
@@ -225,19 +225,19 @@ mod tests {
             SlotStatus::Omit,
             "no @file-reference expansion; read_file owns file access",
         ),
-        ("TOOL_BASH", SlotStatus::Conditional, "terminal tools advertised"),
+        ("TOOL_BASH", SlotStatus::Conditional, "terminal or git tools advertised"),
         ("TOOL_PWSH", SlotStatus::Omit, "no pwsh tool"),
         ("TOOL_READ", SlotStatus::Conditional, "read_file advertised"),
         ("TOOL_WRITE", SlotStatus::Conditional, "write_file advertised"),
-        ("TOOL_EDIT", SlotStatus::Omit, "no edit tool; write_file replaces files"),
-        ("TOOL_APPLY_PATCH", SlotStatus::Omit, "no patch tool"),
-        ("TOOL_GLOB", SlotStatus::Omit, "no glob tool"),
-        ("TOOL_GREP", SlotStatus::Omit, "no grep tool"),
+        ("TOOL_EDIT", SlotStatus::Conditional, "ee_replace_text advertised"),
+        ("TOOL_APPLY_PATCH", SlotStatus::Conditional, "ee_apply_patch advertised"),
+        ("TOOL_GLOB", SlotStatus::Conditional, "ee_search_files advertised"),
+        ("TOOL_GREP", SlotStatus::Conditional, "ee_search_text_regex advertised"),
         ("TOOL_JOBS", SlotStatus::Omit, "no job tools"),
         ("TOOL_PTY", SlotStatus::Conditional, "terminal session tools advertised"),
         ("TOOL_WEB_SEARCH", SlotStatus::Conditional, "ee_web_search advertised"),
         ("TOOL_WEB_FETCH", SlotStatus::Conditional, "ee_fetch_url advertised"),
-        ("TOOL_LSP", SlotStatus::Omit, "no LSP tool"),
+        ("TOOL_LSP", SlotStatus::Conditional, "diagnostics and symbol tools advertised"),
         ("TOOL_SESSION_QUERY", SlotStatus::Omit, "no session-query tool"),
         ("TOOL_GOAL", SlotStatus::Omit, "no goal tools"),
         ("TOOL_SCHEDULE", SlotStatus::Omit, "no schedule tools"),

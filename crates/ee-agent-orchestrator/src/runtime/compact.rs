@@ -111,12 +111,30 @@ impl OrchestratorRuntime {
             (reflection.review_calls > 0).then_some(reflection.findings.len()),
         )
         .score(&self.tasks.lock().expect("task graph poisoned").clone());
+        let capabilities = {
+            let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+            crate::stop_gate::evidence_capabilities_for(&definitions)
+        };
+        let derived_evidence = input.completion_evidence.is_none().then(|| {
+            crate::stop_gate::completion_evidence_from_log_with_requirements(
+                &log,
+                &changed_files,
+                capabilities.requirements(),
+            )
+        });
+        let completion_evidence = input.completion_evidence.as_ref().or(derived_evidence.as_ref());
+        let mut effective_validation = validation.clone();
+        if effective_validation.records().is_empty() {
+            for record in crate::stop_gate::validation_records_from_log(&log) {
+                effective_validation.record_evidence(record);
+            }
+        }
         let mut final_response = FinalResponseBuilder {
             changed_files,
-            validation: &validation,
-            // Host-provided evidence is optional; absence deliberately keeps
-            // the final response unverified rather than fabricating facts.
-            completion_evidence: input.completion_evidence.as_ref(),
+            validation: &effective_validation,
+            // Host evidence wins; loop evidence is the fallback when the ACP
+            // host did not supply current-turn completion facts.
+            completion_evidence,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &self.tasks.lock().expect("task graph poisoned").clone(),

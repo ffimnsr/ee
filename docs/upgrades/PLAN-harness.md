@@ -94,19 +94,19 @@ Orders are copied from DSH. "Emitter" is the `ee` module that supplies text. "St
 | 600 | `TEAM_POLICY` | `team:policy` | — | omit (no shared task board) |
 | 800 | `PTC_ONLY` | `tools:ptc-only` | — | omit (no `run_code`) |
 | 900 | `FILE_REFERENCE` | `context:file-reference` | `prompt/sections.rs` | conditional (client sends resource links) |
-| 1000 | `TOOL_BASH` | `tool:bash` | `prompt/tool_guidance.rs` | conditional (`create_terminal`) |
+| 1000 | `TOOL_BASH` | `tool:bash`, `tool:git` | `prompt/tool_guidance.rs` | conditional (`create_terminal` or `ee_git_diff`) |
 | 1010 | `TOOL_PWSH` | `tool:pwsh` | — | omit (no PowerShell tool) |
 | 1100 | `TOOL_READ` | `tool:read` | `prompt/tool_guidance.rs` | conditional (`read_file`) |
 | 1200 | `TOOL_WRITE` | `tool:write` | `prompt/tool_guidance.rs` | conditional (`write_file`) |
-| 1300 | `TOOL_EDIT` | `tool:edit` | — | deferred (no `edit` tool) |
-| 1350 | `TOOL_APPLY_PATCH` | `tool:apply_patch` | — | deferred (no `apply_patch` tool) |
-| 1400 | `TOOL_GLOB` | `tool:glob` | — | deferred (no `glob` tool) |
-| 1500 | `TOOL_GREP` | `tool:grep` | — | deferred (no `grep` tool) |
+| 1300 | `TOOL_EDIT` | `tool:edit` | `prompt/tool_guidance.rs` | conditional (`ee_replace_text`) |
+| 1350 | `TOOL_APPLY_PATCH` | `tool:apply_patch` | `prompt/tool_guidance.rs` | conditional (`ee_apply_patch`) |
+| 1400 | `TOOL_GLOB` | `tool:glob` | `prompt/tool_guidance.rs` | conditional (`ee_search_files`) |
+| 1500 | `TOOL_GREP` | `tool:grep` | `prompt/tool_guidance.rs` | conditional (`ee_search_text_regex`) |
 | 1600 | `TOOL_JOBS` | `tool:jobs` | — | deferred (terminals are not jobs) |
 | 1700 | `TOOL_PTY` | `tool:pty` | `prompt/tool_guidance.rs` | conditional (terminal session tools) |
 | 2000 | `TOOL_WEB_SEARCH` | `tool:web_search` | `prompt/tool_guidance.rs` | conditional (`ee_web_search`) |
 | 2100 | `TOOL_WEB_FETCH` | `tool:web_fetch` | `prompt/tool_guidance.rs` | conditional (`ee_fetch_url`) |
-| 2200 | `TOOL_LSP` | `tool:lsp` | — | deferred (no agent LSP tool) |
+| 2200 | `TOOL_LSP` | `tool:lsp` | `prompt/tool_guidance.rs` | conditional (diagnostics and symbol tools) |
 | 2300 | `TOOL_SESSION_QUERY` | `tool:session-query` | — | deferred |
 | 2400 | `TOOL_GOAL` | `tool:goal` | — | omit (no goal tools) |
 | 2500 | `TOOL_SCHEDULE` | `tool:schedule` | — | omit (no scheduler) |
@@ -566,7 +566,7 @@ Snapshot tests (exact strings, fixed inputs):
 4. Read-only preset: `SANDBOX_POLICY` denies writes and execution; no escalation text.
 5. MCP fixture: server facts in the stable section; server instructions in runtime messages.
 6. Slot audit: every registered stable and runtime slot has exactly one status (`emitted`, `conditional`, `omit`) with a reason; no slot stays deferred.
-7. Anti-blind-port guard: standard and plan prompts contain no `DeepSeek`, `dsh`, `apply_patch`, `run_code`, `job_output`, `harness-example/`, or `@path` token.
+7. Anti-blind-port guard: standard and plan prompts contain no `DeepSeek`, `dsh`, bare `apply_patch`, `run_code`, `job_output`, `harness-example/`, or `@path` token. Namespaced `ee_apply_patch` is an `ee` tool, not a DSH port.
 8. Byte snapshots: exact standard stable text, exact runtime snapshot text, exact MCP host-facts section, and exact plan contract.
 
 Invariant tests:
@@ -634,7 +634,7 @@ Security tests:
 |---|---|---|---|
 | 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | Registry, renderer, errors, moved `TurnSystemContext`; no behavior change |
 | 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/{turn,resume,compact,strategic}.rs` | **Done:** stable prompt + user-role runtime snapshot wired; flat `Session context`/`Tool path rules`/`Agent mode` strings deleted; `PLAN_POLICY` pulled forward so plan output stays valid |
-| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs`, `src/runtime/prompt_views.rs`, `provider_adapter/{conversation,agent_impl}.rs` | **Done:** eight conditional `TOOL_*` rows for advertised `ee` tools, policy-derived gate, prompt rebuild after MCP registration, bidirectional consistency tests |
+| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs`, `src/runtime/prompt_views.rs`, `provider_adapter/{conversation,agent_impl}.rs` | **Done:** conditional `TOOL_*` rows for advertised `ee` tools, including proxy edit/search/diagnostics/git guidance; policy-derived gate, prompt rebuild after MCP registration, bidirectional consistency tests |
 | 3 Workspace | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | **Done:** root-to-cwd (and per-root) discovery, content dedupe, 64 KiB budget, untrusted `workspace_instruction` snapshot, prompt-plane replacement on resume, host tool aligned |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `src/prompt/runtime_context.rs`, `provider_adapter/mod.rs` | **Done:** `PLAN_POLICY` in plan mode; ask/write/unknown text in `EE_MODE_POLICY`; guidance stays policy-gated; plan payload contract preserved; ask/write lifecycle tests |
 | 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | **Done:** `MCP_SERVERS` host facts, untrusted per-server `MCP_SERVER_INSTRUCTIONS` messages, instruction capture from the MCP initialize handshake, DSH-shaped compaction checkpoint, delegation identity/depth/denial |

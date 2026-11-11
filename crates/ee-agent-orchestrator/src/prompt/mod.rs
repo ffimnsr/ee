@@ -502,6 +502,14 @@ mod tests {
             "release_terminal",
             "ee_web_search",
             "ee_fetch_url",
+            "ee_replace_text",
+            "ee_apply_patch",
+            "ee_search_files",
+            "ee_search_text_regex",
+            "ee_get_diagnostics",
+            "ee_document_symbols",
+            "ee_references",
+            "ee_git_diff",
             "delegate_task",
         ]);
         let servers = vec!["docs".to_string()];
@@ -516,13 +524,13 @@ mod tests {
             "deepseek",
             "Harness",
             "dsh",
-            "apply_patch",
+            "`apply_patch`",
             "run_code",
             "job_output",
             "harness-example/",
             "@path",
-            "edit_file",
-            "grep_search",
+            "`edit_file`",
+            "`grep_search`",
         ] {
             assert!(!text.contains(forbidden), "prompt leaks {forbidden:?}: {text}");
         }
@@ -530,7 +538,7 @@ mod tests {
         let plan_mode: &'static SessionModeId = Box::leak(Box::new(SessionModeId::new("plan")));
         inputs.mode = plan_mode;
         let plan = build(&inputs).expect("builds").stable;
-        for forbidden in ["DeepSeek", "apply_patch", "run_code", "@path"] {
+        for forbidden in ["DeepSeek", "`apply_patch`", "run_code", "@path"] {
             assert!(!plan.contains(forbidden), "plan prompt leaks {forbidden:?}: {plan}");
         }
     }

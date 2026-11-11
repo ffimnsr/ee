@@ -192,6 +192,9 @@ pub struct OrchestratorRuntime {
     /// are server-observed tool records only; host evidence remains separate.
     last_turn_changed_files: Mutex<Vec<crate::final_response::ChangedFile>>,
     last_turn_validation: Mutex<ValidationRecorder>,
+    /// Latest recovery turn's tool execution log. Used to derive loop evidence
+    /// when the host did not supply completion evidence.
+    last_turn_execution_log: Mutex<Vec<ToolExecutionLogEntry>>,
     /// Trusted planning inputs set by strategic recovery before its loop starts.
     /// They select registered validation tools only; never completion evidence.
     validation_workspace: Mutex<WorkspaceValidationConfig>,

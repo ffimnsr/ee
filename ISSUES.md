@@ -792,7 +792,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 **Acceptance criteria:**
 
 - [x] Adding a tool definition without guidance or exemption fails a test.
-- [x] No section text mentions the DSH tool names as callable tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `subagent`, `apply_patch`. Match exact advertised names, not substrings of `read_file` / `write_file`.
+- [x] No section text mentions the DSH tool names as callable tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `subagent`, `apply_patch`. Match exact advertised names, not substrings of `read_file` / `write_file`. Namespaced `ee_apply_patch` and `ee_replace_text` are `ee` proxy tools and remain allowed.
 - [x] `cargo test --quiet -p ee-agent-orchestrator prompt::tool_guidance` passes.
 - [x] Full `cargo test --quiet -p ee-agent-orchestrator`, clippy, and `cargo fmt --all --check` pass.
 
@@ -1038,7 +1038,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
   - [x] Add a test that iterates all slots and asserts an explicit status: `emitted`, `conditional`, or `omit`.
   - [x] Assert no slot is left `deferred`; every inert slot has a reason.
 - [x] Add guards against blind porting.
-  - [x] No `DeepSeek`, `dsh`, `@path`, `apply_patch`, `run_code`, or `job_output` in `ee` prompt output.
+  - [x] No `DeepSeek`, `dsh`, `@path`, bare `apply_patch`, `run_code`, or `job_output` in `ee` prompt output. Namespaced `ee_apply_patch` is an `ee` proxy tool.
   - [x] No `harness-example/` path referenced by runtime code or tests.
 - [x] Freeze snapshots: exact standard stable text, exact runtime snapshot text, exact MCP host-facts section, and exact plan contract; ask, write, minimal, read-only, delegation, and MCP behavior use exact assertions.
 - [x] Run final validation.

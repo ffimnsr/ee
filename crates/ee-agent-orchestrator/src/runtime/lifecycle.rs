@@ -184,6 +184,7 @@ impl OrchestratorRuntime {
             children,
             last_turn_changed_files: Mutex::new(Vec::new()),
             last_turn_validation: Mutex::new(ValidationRecorder::new()),
+            last_turn_execution_log: Mutex::new(Vec::new()),
             validation_workspace: Mutex::new(WorkspaceValidationConfig::default()),
             validation_changed_symbols: Mutex::new(Vec::new()),
             context_cache: Mutex::new(ContextPlanCache::new()),

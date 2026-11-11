@@ -429,8 +429,7 @@ pub fn has_independent_children(tasks: &TaskGraph) -> bool {
 /// `test`, or `check` in the name).
 #[must_use]
 pub fn is_validation_tool_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("valid") || lower.contains("test") || lower.contains("check")
+    crate::evidence_classification::is_validation_tool_name(name)
 }
 
 /// Everything a strategy run needs; all handles are clonable so the

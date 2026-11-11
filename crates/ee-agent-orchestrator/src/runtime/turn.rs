@@ -58,6 +58,8 @@ impl OrchestratorRuntime {
             Vec::new();
         *self.last_turn_validation.lock().expect("last turn validation poisoned") =
             ValidationRecorder::new();
+        *self.last_turn_execution_log.lock().expect("last turn execution log poisoned") =
+            Vec::new();
         *self.last_repair_stop.lock().expect("last repair stop poisoned") = None;
         if !self.config.recovery.enabled {
             let result = self

@@ -23,6 +23,44 @@ use crate::tools::{
     SideEffectClass, ToolDefinition, ToolExecutor, ToolIntent, ToolRegistry, ToolResult,
 };
 
+/// Whether every intent in the batch is read-class and safe to run as one
+/// concurrent wave.
+#[must_use]
+pub(crate) fn all_read_only(intents: &[ToolIntent], tools: &Arc<Mutex<ToolRegistry>>) -> bool {
+    !intents.is_empty()
+        && intents.iter().all(|intent| {
+            tools
+                .lock()
+                .expect("tool registry poisoned")
+                .get(&intent.name)
+                .is_some_and(|tool| tool.definition().side_effect_class == SideEffectClass::Read)
+        })
+}
+
+/// Stable partition that moves read-class intents before the rest.
+#[must_use]
+pub(crate) fn read_first_order(
+    intents: Vec<ToolIntent>,
+    tools: &Arc<Mutex<ToolRegistry>>,
+) -> Vec<ToolIntent> {
+    let mut reads = Vec::new();
+    let mut rest = Vec::new();
+    for intent in intents {
+        let is_read = tools
+            .lock()
+            .expect("tool registry poisoned")
+            .get(&intent.name)
+            .is_some_and(|tool| tool.definition().side_effect_class == SideEffectClass::Read);
+        if is_read {
+            reads.push(intent);
+        } else {
+            rest.push(intent);
+        }
+    }
+    reads.extend(rest);
+    reads
+}
+
 /// Runs tool batches with deterministic parallel read-only execution.
 #[derive(Clone)]
 pub struct ParallelToolRunner {

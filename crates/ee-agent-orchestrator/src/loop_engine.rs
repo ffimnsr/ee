@@ -399,6 +399,7 @@ impl LoopEngine {
                         .is_none_or(|allowed| allowed.contains(&tool.name))
                 })
                 .collect();
+            let evidence_capabilities = crate::stop_gate::evidence_capabilities_for(&tools);
 
             self.events.record(OrchestratorEvent::StepStarted {
                 session_id: session_id.to_string(),
@@ -513,12 +514,13 @@ impl LoopEngine {
                         .as_ref()
                         .map(|log| log.lock().expect("execution log poisoned").clone())
                         .unwrap_or_default();
-                    let decision = StopGate.evaluate(
+                    let decision = StopGate.evaluate_with_capabilities(
                         config,
                         &task.id,
                         &logged,
                         repairs_used,
                         self.options.stop_veto.as_ref(),
+                        evidence_capabilities,
                     );
                     self.events.record(OrchestratorEvent::StopGateEvaluated {
                         session_id: session_id.to_string(),
@@ -567,21 +569,15 @@ impl LoopEngine {
             // ResearchThenEdit runs read-class intents before the rest; the
             // ordering is a stable partition, never a semantic reorder.
             let intents = if self.options.read_first {
-                read_first_order(response.tool_intents, &self.tools)
+                crate::parallel_tools::read_first_order(response.tool_intents, &self.tools)
             } else {
                 response.tool_intents
             };
-            let parallel_read_wave = self.options.read_first
-                && intents.len() > 1
-                && intents.iter().all(|intent| {
-                    self.tools
-                        .lock()
-                        .expect("tool registry poisoned")
-                        .get(&intent.name)
-                        .is_some_and(|tool| {
-                            tool.definition().side_effect_class == SideEffectClass::Read
-                        })
-                });
+            // Read-only batches are independent regardless of which strategy
+            // selected the turn; write/execute waves still serialize inside the
+            // runner. `read_first` now only controls ordering.
+            let parallel_read_wave =
+                intents.len() > 1 && crate::parallel_tools::all_read_only(&intents, &self.tools);
             if parallel_read_wave {
                 // The runner retains model order in its output while scheduling only
                 // independent read waves concurrently. Host web-service limits remain
@@ -877,28 +873,6 @@ impl LoopEngine {
             }
         }
     }
-}
-
-/// Stable partition of tool intents: read-class intents first, then the
-/// rest, preserving order within each group.  Unknown tools stay in the
-/// second group and fail in the executor.
-fn read_first_order(intents: Vec<ToolIntent>, tools: &Arc<Mutex<ToolRegistry>>) -> Vec<ToolIntent> {
-    let mut reads = Vec::new();
-    let mut rest = Vec::new();
-    for intent in intents {
-        let is_read = tools
-            .lock()
-            .expect("tool registry poisoned")
-            .get(&intent.name)
-            .is_some_and(|tool| tool.definition().side_effect_class == SideEffectClass::Read);
-        if is_read {
-            reads.push(intent);
-        } else {
-            rest.push(intent);
-        }
-    }
-    reads.extend(rest);
-    reads
 }
 
 /// Replaces a repeated successful web fetch with compact source metadata. The

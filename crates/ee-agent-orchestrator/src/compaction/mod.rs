@@ -52,13 +52,33 @@ pub struct CompactionConfig {
     /// Host-approved compaction strategy name. Only built-in strategies load.
     #[serde(default = "default_compaction_strategy")]
     pub strategy: String,
+    /// Estimated context-window use at which a turn compacts before it starts.
+    /// `0` disables automatic compaction; values above 100 fail validation.
+    #[serde(default = "default_auto_compact_threshold_percent")]
+    pub auto_threshold_percent: u8,
+    /// Conversation messages kept verbatim after automatic compaction. The
+    /// summary retains older context in the session memory store.
+    #[serde(default = "default_auto_compact_retained_messages")]
+    pub auto_retained_messages: usize,
 }
 
 /// Default strategy name for configuration and serde defaults.
 pub const DEFAULT_COMPACTION_STRATEGY: &str = "default";
+/// Default estimated context-window use that triggers automatic compaction.
+pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 80;
+/// Default conversation tail retained after automatic compaction.
+pub const DEFAULT_AUTO_COMPACT_RETAINED_MESSAGES: usize = 8;
 
 fn default_compaction_strategy() -> String {
     DEFAULT_COMPACTION_STRATEGY.to_string()
+}
+
+fn default_auto_compact_threshold_percent() -> u8 {
+    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
+}
+
+fn default_auto_compact_retained_messages() -> usize {
+    DEFAULT_AUTO_COMPACT_RETAINED_MESSAGES
 }
 
 impl Default for CompactionConfig {
@@ -67,14 +87,28 @@ impl Default for CompactionConfig {
             memory: MemoryCompactionConfig::default(),
             max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
             strategy: default_compaction_strategy(),
+            auto_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+            auto_retained_messages: DEFAULT_AUTO_COMPACT_RETAINED_MESSAGES,
         }
     }
 }
 
 impl CompactionConfig {
-    /// Rejects unknown strategy names before a turn starts.
+    /// Rejects unknown strategy names and invalid automatic compaction knobs
+    /// before a turn starts.
     pub fn validate(&self) -> Result<(), OrchestratorError> {
-        self.select().map(|_| ())
+        self.select()?;
+        if self.auto_threshold_percent > 100 {
+            return Err(OrchestratorError::InvalidState(
+                "compaction.auto_threshold_percent must be between 0 and 100".into(),
+            ));
+        }
+        if self.auto_retained_messages == 0 {
+            return Err(OrchestratorError::InvalidState(
+                "compaction.auto_retained_messages must be positive".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Resolves the configured host-approved strategy.

@@ -185,6 +185,7 @@ pub mod error;
 #[cfg(feature = "test-utils")]
 pub mod evaluation;
 pub mod events;
+pub mod evidence_classification;
 pub mod fanout_fanin;
 pub mod final_response;
 pub mod issue_integration;

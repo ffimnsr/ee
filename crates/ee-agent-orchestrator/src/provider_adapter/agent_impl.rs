@@ -507,6 +507,38 @@ impl AgentProvider for OrchestratorProvider {
             // (client-crash continuation).  Without a pending checkpoint it
             // is an ordinary prompt whose text reaches the model.
             let resume_command = recovery.enabled && is_resume_command(&prompt_text);
+            // Automatic compaction runs before the new user message is
+            // recorded, so the prompt is never summarized away. The summary
+            // lives in orchestrator memory; the provider retains only a recent
+            // verbatim tail.
+            if !has_pending && !resume_command {
+                let history_for_compaction = model_history(&conversation);
+                let estimated = super::auto_compact::estimated_tokens(&history_for_compaction);
+                if super::auto_compact::should_compact(
+                    estimated,
+                    runtime.config().context_window_tokens,
+                    runtime.config().compaction.auto_threshold_percent,
+                ) {
+                    let compaction = runtime
+                        .run_compact_turn_with_history(
+                            ctx.clone(),
+                            sink.clone(),
+                            cancel.clone(),
+                            None,
+                            Some(bundle.clone()),
+                            history_for_compaction,
+                        )
+                        .await;
+                    if let Err(error) = compaction {
+                        tracing::warn!(%error, "automatic context compaction failed; continuing with full history");
+                    } else {
+                        super::auto_compact::trim_conversation(
+                            &conversation,
+                            runtime.config().compaction.auto_retained_messages,
+                        );
+                    }
+                }
+            }
             let history = if has_pending { Vec::new() } else { model_history(&conversation) };
             if !has_pending {
                 record_user_message(&conversation, prompt_text);
@@ -627,10 +659,10 @@ impl AgentProvider for OrchestratorProvider {
             let resume_sink = sink.clone();
             let resume_client = client.clone();
             let resume_cancel = cancel.clone();
-            // Host evidence is unavailable on current `PromptContext` / `ClientBridge`.
-            // Required host seam: bounded, redacted completion evidence IDs plus
-            // revisions supplied with this prompt and mapped into `StrategicInput`.
-            // Until that existing-provider input is added, responses stay unverified.
+            // Host evidence is not carried by the current ACP prompt surface, so
+            // the runtime derives completion evidence from the tool execution
+            // log. A host that can supply typed evidence still wins here; this
+            // seam remains optional rather than forcing every turn unverified.
             let strategic_input =
                 StrategicInput { validation_workspace, ..StrategicInput::default() };
             let recovery_context = StrategicRecoveryContext::new(

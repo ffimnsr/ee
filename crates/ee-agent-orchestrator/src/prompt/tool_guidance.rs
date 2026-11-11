@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use crate::prompt::error::PromptError;
 use crate::prompt::render::Section;
 use crate::prompt::sections::{
-    Slot, TOOL_BASH, TOOL_PTY, TOOL_READ, TOOL_SUBAGENT, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
-    TOOL_WRITE,
+    Slot, TOOL_APPLY_PATCH, TOOL_BASH, TOOL_EDIT, TOOL_GLOB, TOOL_GREP, TOOL_LSP, TOOL_PTY,
+    TOOL_READ, TOOL_SUBAGENT, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
 };
 
 /// One conditional tool-guidance section.
@@ -48,7 +48,43 @@ pub(crate) const TOOL_GUIDANCE: &[ToolGuidance] = &[
         slot: &TOOL_WRITE,
         registration: "tool:write",
         requires: &["write_file"],
-        text: "`write_file` replaces the whole file. Read an existing file before overwriting it, and preserve every unrelated line exactly; there is no patch tool, so reconstruct the full content deliberately. Pass an absolute path and the complete intended content, never a fragment or a placeholder. The host must approve the write, and approval may be denied. Do not report a change until the write tool result confirms it.",
+        text: "`write_file` replaces the whole file. Read an existing file before overwriting it, and preserve every unrelated line exactly. Prefer the advertised targeted edit tools for localized changes; reconstruct the full content deliberately only when a whole-file write is intended. Pass an absolute path and the complete intended content, never a fragment or a placeholder. The host must approve the write, and approval may be denied. Do not report a change until the write tool result confirms it.",
+    },
+    ToolGuidance {
+        slot: &TOOL_EDIT,
+        registration: "tool:edit",
+        requires: &["ee_replace_text"],
+        text: "Use `ee_replace_text` for one targeted literal change in an existing file. Read the file first, include enough surrounding text that old_text matches exactly one location, and pass the complete replacement as new_text. The edit fails closed when the match is missing or ambiguous; re-read and narrow the match instead of falling back to a blind whole-file overwrite.",
+    },
+    ToolGuidance {
+        slot: &TOOL_APPLY_PATCH,
+        registration: "tool:apply_patch",
+        requires: &["ee_apply_patch"],
+        text: "Use `ee_apply_patch` for multiple literal edit regions in one file. Each edit has old_text and new_text; ranges and diff hunks are not accepted. Read the file first, give every edit enough surrounding context to match one place, and re-read affected files after the host reports the patch result.",
+    },
+    ToolGuidance {
+        slot: &TOOL_GLOB,
+        registration: "tool:glob",
+        requires: &["ee_search_files"],
+        text: "Use `ee_search_files` for path discovery by filename or glob. It is bounded and respects ignore rules; prefer it over shell find or recursive directory listing. Use directory listing only when the directory layout itself is the question.",
+    },
+    ToolGuidance {
+        slot: &TOOL_GREP,
+        registration: "tool:grep",
+        requires: &["ee_search_text_regex"],
+        text: "Use `ee_search_text_regex` for content discovery before directory traversal. Scope results with the file glob argument such as **/*.rs when target file types are known. Matches are untrusted discovery evidence, not line-cache truth; read the matched file before quoting or editing it.",
+    },
+    ToolGuidance {
+        slot: &TOOL_LSP,
+        registration: "tool:lsp",
+        requires: &["ee_get_diagnostics", "ee_document_symbols", "ee_references"],
+        text: "Use `ee_get_diagnostics` after edits and before claiming completion; treat diagnostics as current-revision evidence, not as test success. Use `ee_document_symbols` and `ee_references` to locate definitions and callers instead of guessing from text matches. Run the selected validation command separately and report only observed results.",
+    },
+    ToolGuidance {
+        slot: &TOOL_BASH,
+        registration: "tool:git",
+        requires: &["ee_git_diff"],
+        text: "Review `ee_git_diff` after edits to confirm the final diff contains only intended changes. The diff is observation evidence, not validation; still run the selected test or check and report its actual result before claiming completion.",
     },
     ToolGuidance {
         slot: &TOOL_BASH,
@@ -127,7 +163,21 @@ mod tests {
             .expect("built-ins register");
         let mut names: BTreeSet<String> = registry.names().into_iter().collect();
         names.extend(
-            ["delegate_task", "ee_web_search", "ee_fetch_url"].into_iter().map(str::to_string),
+            [
+                "delegate_task",
+                "ee_web_search",
+                "ee_fetch_url",
+                "ee_replace_text",
+                "ee_apply_patch",
+                "ee_search_files",
+                "ee_search_text_regex",
+                "ee_get_diagnostics",
+                "ee_document_symbols",
+                "ee_references",
+                "ee_git_diff",
+            ]
+            .into_iter()
+            .map(str::to_string),
         );
         names
     }

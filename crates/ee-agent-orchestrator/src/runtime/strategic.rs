@@ -100,20 +100,42 @@ impl OrchestratorRuntime {
             }
         }
     }
-    /// Builds completion from host-provided evidence only. The recovery loop
-    /// does not fabricate editor facts or copy model prose into evidence, so
-    /// missing host evidence remains explicitly unverified.
+    /// Builds completion from host evidence when supplied, otherwise from the
+    /// same tool-observed log the stop gate uses. The recovery loop never
+    /// fabricates editor facts or copies model prose into evidence.
     pub(super) fn build_recovery_final_response(&self, input: &StrategicInput) -> FinalResponse {
-        let validation =
+        let mut validation =
             self.last_turn_validation.lock().expect("last turn validation poisoned").clone();
         let changed_files =
             self.last_turn_changed_files.lock().expect("last turn changed files poisoned").clone();
+        let execution_log =
+            self.last_turn_execution_log.lock().expect("last turn execution log poisoned").clone();
+        // Host evidence is authoritative when supplied. Otherwise derive the
+        // same tool-observed evidence the stop gate uses, so a verified turn
+        // does not become `unverified` only because ACP carried no host facts.
+        let capabilities = {
+            let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+            crate::stop_gate::evidence_capabilities_for(&definitions)
+        };
+        let derived_evidence = input.completion_evidence.is_none().then(|| {
+            crate::stop_gate::completion_evidence_from_log_with_requirements(
+                &execution_log,
+                &changed_files,
+                capabilities.requirements(),
+            )
+        });
+        if validation.records().is_empty() {
+            for record in crate::stop_gate::validation_records_from_log(&execution_log) {
+                validation.record_evidence(record);
+            }
+        }
+        let completion_evidence = input.completion_evidence.as_ref().or(derived_evidence.as_ref());
         let tasks = self.tasks.lock().expect("task graph poisoned").clone();
         let memory = self.memory.lock().expect("memory store poisoned").clone();
         let mut final_response = FinalResponseBuilder {
             changed_files,
             validation: &validation,
-            completion_evidence: input.completion_evidence.as_ref(),
+            completion_evidence,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -211,6 +233,8 @@ impl OrchestratorRuntime {
         *self.last_turn_changed_files.lock().expect("last turn changed files poisoned") =
             changed_files;
         *self.last_turn_validation.lock().expect("last turn validation poisoned") = validation;
+        *self.last_turn_execution_log.lock().expect("last turn execution log poisoned") =
+            execution_log;
         Ok(PostWriteValidation { results })
     }
     /// Runs at most the configured number of repair loops after a current

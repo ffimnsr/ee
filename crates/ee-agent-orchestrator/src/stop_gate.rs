@@ -21,13 +21,16 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::completion::{
-    CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionState,
-    derive_completion,
+    CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionRequirements,
+    CompletionState, derive_completion,
+};
+use crate::evidence_classification::{
+    is_diagnostics_log_entry, is_diff_review_log_entry, is_validation_log_entry,
+    validation_command_for_entry,
 };
 use crate::final_response::{
     ChangedFile, ValidationOutcome, ValidationRecord, changed_files_from_log,
 };
-use crate::strategy::is_validation_tool_name;
 use crate::tasks::TaskId;
 use crate::tools::ToolExecutionLogEntry;
 
@@ -61,6 +64,48 @@ impl StopGateConfig {
     #[must_use]
     pub fn bounded(self) -> Self {
         Self { max_repairs: self.max_repairs.min(MAX_STOP_GATE_REPAIRS), ..self }
+    }
+}
+
+/// Evidence classes the current tool set can actually produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EvidenceCapabilities {
+    /// A dedicated diagnostics tool is advertised.
+    pub diagnostics: bool,
+    /// A dedicated diff-review tool is advertised.
+    pub diff_review: bool,
+}
+
+impl Default for EvidenceCapabilities {
+    fn default() -> Self {
+        Self { diagnostics: true, diff_review: true }
+    }
+}
+
+impl EvidenceCapabilities {
+    /// Requirements implied by the advertised tool set.
+    #[must_use]
+    pub const fn requirements(self) -> CompletionRequirements {
+        CompletionRequirements {
+            post_write_diagnostics: self.diagnostics,
+            final_diff_review: self.diff_review,
+        }
+    }
+}
+
+/// Builds evidence capabilities from advertised tool definitions.
+#[must_use]
+pub fn evidence_capabilities_for(
+    definitions: &[crate::tools::ToolDefinition],
+) -> EvidenceCapabilities {
+    EvidenceCapabilities {
+        diagnostics: definitions.iter().any(|definition| {
+            crate::evidence_classification::is_diagnostics_tool_name(&definition.name)
+        }),
+        diff_review: definitions.iter().any(|definition| {
+            crate::evidence_classification::is_diff_review_tool_name(&definition.name)
+        }),
     }
 }
 
@@ -147,6 +192,27 @@ impl StopGate {
         repairs_used: usize,
         veto: Option<&StopVeto>,
     ) -> StopGateDecision {
+        self.evaluate_with_capabilities(
+            config,
+            task_id,
+            log,
+            repairs_used,
+            veto,
+            EvidenceCapabilities::default(),
+        )
+    }
+
+    /// Evaluates completion with the evidence classes the turn can produce.
+    #[must_use]
+    pub fn evaluate_with_capabilities(
+        &self,
+        config: StopGateConfig,
+        task_id: &TaskId,
+        log: &[ToolExecutionLogEntry],
+        repairs_used: usize,
+        veto: Option<&StopVeto>,
+        capabilities: EvidenceCapabilities,
+    ) -> StopGateDecision {
         let changed_files = changed_files_from_log(log, task_id);
         if changed_files.is_empty() {
             return StopGateDecision {
@@ -157,7 +223,8 @@ impl StopGate {
                 veto_reason: None,
             };
         }
-        let evidence = completion_evidence_from_log(log, &changed_files);
+        let mut evidence = completion_evidence_from_log(log, &changed_files);
+        evidence.requirements = capabilities.requirements();
         let validation = validation_records_from_log(log);
         let report = derive_completion(&changed_files, &evidence, &validation);
         let changed_file_count = changed_files.len();
@@ -213,6 +280,27 @@ pub fn completion_evidence_from_log(
     changed_files: &[ChangedFile],
 ) -> CompletionEvidence {
     let mut evidence = CompletionEvidence::new(LOOP_EVIDENCE_REVISION);
+    completion_evidence_into(&mut evidence, log, changed_files);
+    evidence
+}
+
+/// Builds loop evidence with explicit completion requirements.
+#[must_use]
+pub fn completion_evidence_from_log_with_requirements(
+    log: &[ToolExecutionLogEntry],
+    changed_files: &[ChangedFile],
+    requirements: CompletionRequirements,
+) -> CompletionEvidence {
+    let mut evidence = completion_evidence_from_log(log, changed_files);
+    evidence.requirements = requirements;
+    evidence
+}
+
+fn completion_evidence_into(
+    evidence: &mut CompletionEvidence,
+    log: &[ToolExecutionLogEntry],
+    changed_files: &[ChangedFile],
+) {
     evidence.record_changed_file_inventory(
         CompletionEvidenceItem::passed(
             "inventory-log",
@@ -221,25 +309,20 @@ pub fn completion_evidence_from_log(
         ),
         changed_files.iter().map(|file| file.path.clone()),
     );
-    if let Some(entry) =
-        log.iter().find(|entry| entry.success && is_diagnostics_tool_name(&entry.tool_name))
-    {
+    if let Some(entry) = log.iter().find(|entry| entry.success && is_diagnostics_log_entry(entry)) {
         evidence.record_post_write_diagnostics(CompletionEvidenceItem::passed(
             "diagnostics-log",
             entry.tool_name.clone(),
             LOOP_EVIDENCE_REVISION,
         ));
     }
-    if let Some(entry) =
-        log.iter().find(|entry| entry.success && is_diff_review_tool_name(&entry.tool_name))
-    {
+    if let Some(entry) = log.iter().find(|entry| entry.success && is_diff_review_log_entry(entry)) {
         evidence.record_final_diff_review(CompletionEvidenceItem::passed(
             "diff-log",
             entry.tool_name.clone(),
             LOOP_EVIDENCE_REVISION,
         ));
     }
-    evidence
 }
 
 /// Builds selected validation records from loop-observed validation tools.
@@ -247,11 +330,11 @@ pub fn completion_evidence_from_log(
 pub fn validation_records_from_log(log: &[ToolExecutionLogEntry]) -> Vec<ValidationRecord> {
     log.iter()
         .enumerate()
-        .filter(|(_, entry)| is_validation_tool_name(&entry.tool_name))
+        .filter(|(_, entry)| is_validation_log_entry(entry))
         .map(|(index, entry)| {
             ValidationRecord::evidence(
                 format!("validation-log-{index}"),
-                entry.tool_name.clone(),
+                validation_command_for_entry(entry),
                 if entry.success { ValidationOutcome::Passed } else { ValidationOutcome::Failed },
                 Some(entry.tool_name.clone()),
                 None,
@@ -272,13 +355,13 @@ pub fn validation_records_from_log(log: &[ToolExecutionLogEntry]) -> Vec<Validat
 /// Whether the tool name identifies a diagnostics-producing tool.
 #[must_use]
 pub fn is_diagnostics_tool_name(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("diagnostic")
+    crate::evidence_classification::is_diagnostics_tool_name(name)
 }
 
 /// Whether the tool name identifies a diff-review tool.
 #[must_use]
 pub fn is_diff_review_tool_name(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("diff")
+    crate::evidence_classification::is_diff_review_tool_name(name)
 }
 
 fn bypassed_report() -> CompletionReport {
@@ -405,5 +488,57 @@ mod tests {
         let log = vec![entry("write_file", SideEffectClass::Write, false)];
         let decision = StopGate.evaluate(StopGateConfig::default(), &task(), &log, 0, None);
         assert_eq!(decision.outcome, StopGateOutcome::Allow);
+    }
+
+    #[test]
+    fn standalone_validation_without_editor_evidence_is_allowed() {
+        let log = vec![
+            entry("write_file", SideEffectClass::Write, true),
+            entry("cargo_check", SideEffectClass::Execute, true),
+        ];
+        let decision = StopGate.evaluate_with_capabilities(
+            StopGateConfig::default(),
+            &task(),
+            &log,
+            0,
+            None,
+            EvidenceCapabilities { diagnostics: false, diff_review: false },
+        );
+        assert_eq!(decision.outcome, StopGateOutcome::Allow);
+        assert!(decision.report.is_verified());
+    }
+
+    #[test]
+    fn terminal_validation_counts_when_editor_evidence_is_unavailable() {
+        let mut validation = entry("create_terminal", SideEffectClass::Execute, true);
+        validation.arguments = serde_json::json!({ "command": "cargo test --quiet" });
+        let log = vec![entry("write_file", SideEffectClass::Write, true), validation];
+        let decision = StopGate.evaluate_with_capabilities(
+            StopGateConfig::default(),
+            &task(),
+            &log,
+            0,
+            None,
+            EvidenceCapabilities { diagnostics: false, diff_review: false },
+        );
+        assert_eq!(decision.outcome, StopGateOutcome::Allow);
+        assert!(decision.report.is_verified());
+    }
+
+    #[test]
+    fn advertised_editor_evidence_is_still_required() {
+        let log = vec![
+            entry("write_file", SideEffectClass::Write, true),
+            entry("cargo_check", SideEffectClass::Execute, true),
+        ];
+        let decision = StopGate.evaluate_with_capabilities(
+            StopGateConfig::default(),
+            &task(),
+            &log,
+            0,
+            None,
+            EvidenceCapabilities { diagnostics: true, diff_review: true },
+        );
+        assert_eq!(decision.outcome, StopGateOutcome::Repair);
     }
 }
