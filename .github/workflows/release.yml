@@ -146,7 +146,7 @@ jobs:
       # linker-warning allowance is restored here for the same reason.
       RUSTFLAGS: >-
         --remap-path-prefix=${{ github.workspace }}=/workspace
-        ${{ runner.os == 'macOS' && '-A linker-messages' || '' }}
+        ${{ matrix.linker_warnings }}
 
     strategy:
       fail-fast: false
@@ -156,10 +156,12 @@ jobs:
             target: x86_64-unknown-linux-musl
             archive_ext: tar.gz
             binary_name: ee
+            linker_warnings: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_ext: tar.gz
             binary_name: ee
+            linker_warnings: -A linker-messages
 
     steps:
       - name: Checkout
