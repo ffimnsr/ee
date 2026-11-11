@@ -651,7 +651,7 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 |---|---|---|---|
 | 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | 1 |
 | 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/{turn,resume,compact,strategic}.rs` | 2, 3, 4 |
-| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs` + tests | 5, 6 |
+| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs`, `src/runtime/prompt_views.rs`, `provider_adapter/{conversation,agent_impl}.rs` | 5, 6 |
 | 3 Workspace instructions | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | 6 |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | 6 |
 | 5 Delegation, MCP, compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | 6 |
@@ -768,30 +768,33 @@ Reference: [PLAN-harness.md](docs/upgrades/PLAN-harness.md) · capture: [deepsee
 
 **Work items:**
 
-- [ ] Add `prompt/tool_guidance.rs`.
-  - [ ] `TOOL_READ` for `read_file`.
-  - [ ] `TOOL_WRITE` for `write_file`.
-  - [ ] `TOOL_BASH` for `create_terminal` and `cargo_check` exit/status rules.
-  - [ ] `TOOL_PTY` for `terminal_output`, `wait_for_terminal_exit`, `kill_terminal`, `release_terminal`.
-  - [ ] `TOOL_WEB_SEARCH` for `ee_web_search`.
-  - [ ] `TOOL_WEB_FETCH` for `ee_fetch_url`.
-  - [ ] `TOOL_SUBAGENT` for `delegate_task`, including role names and evidence markers.
-  - [ ] `FILE_REFERENCE` for ACP resource links.
-  - [ ] Declare `GUIDANCE_EXEMPT` with reasons for `ask_user` and any unguided built-in.
-- [ ] Add tool-name extraction helper and `requires` validation.
-- [ ] Add consistency tests.
-  - [ ] Every mentioned tool is advertised.
-  - [ ] Every advertised tool is guided or exempt.
-  - [ ] Typo in `requires` fails.
-  - [ ] Plan/ask prompts mention no write, execute, or delegate tool.
-- [ ] Add prompt snapshots per tool set: read-only, write, execute, delegation, MCP web.
-- [ ] Assert tool schema order stays alphabetical and prompt bytes do not depend on registry insertion order.
+- [x] Add `prompt/tool_guidance.rs`.
+  - [x] `TOOL_READ` for `read_file`.
+  - [x] `TOOL_WRITE` for `write_file`.
+  - [x] `TOOL_BASH` for `create_terminal`, `wait_for_terminal_exit`, and `cargo_check` exit/status rules.
+  - [x] `TOOL_PTY` for `terminal_output`, `kill_terminal`, `release_terminal`.
+  - [x] `TOOL_WEB_SEARCH` for `ee_web_search`.
+  - [x] `TOOL_WEB_FETCH` for `ee_fetch_url`.
+  - [x] `TOOL_SUBAGENT` for `delegate_task`, including role names and evidence markers. DSH registration name `tool:subagent`; the earlier `tool:<subagent-tool>` template was corrected.
+  - [ ] `FILE_REFERENCE` for ACP resource links (deferred to Phase 6 with the client-link signal; no tool name to gate on).
+  - [x] Declare `GUIDANCE_EXEMPT` with reasons for `ask_user` and any unguided built-in.
+  - [x] Gate is policy-derived: `OrchestratorRuntime::advertised_tool_names` filters registered tools through `PolicyEngine::check`.
+  - [x] Rebuild the stable prompt after prompt-scoped MCP registration so conditional web-tool guidance tracks the turn.
+- [x] Add tool-name extraction helper and `requires` validation.
+- [x] Add consistency tests.
+  - [x] Every mentioned tool is advertised.
+  - [x] Every advertised tool is guided or exempt (built-in universe read from `ToolRegistry::register_builtins`).
+  - [x] Typo in `requires` fails.
+  - [x] Plan/ask prompts mention no write, execute, or delegate tool.
+- [x] Add prompt coverage per tool set: read-only, write, execute, delegation, MCP web (presence assertions; byte snapshots stay Phase 6).
+- [x] Assert prompt bytes do not depend on advertised-tool order (registry definitions already sort alphabetically).
 
 **Acceptance criteria:**
 
-- Adding a tool definition without guidance or exemption fails a test.
-- No section text mentions the DSH tool names as callable tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `subagent`, `apply_patch`. Match exact advertised names, not substrings of `read_file` / `write_file`.
-- `cargo test --quiet -p ee-agent-orchestrator prompt::tool_guidance` passes.
+- [x] Adding a tool definition without guidance or exemption fails a test.
+- [x] No section text mentions the DSH tool names as callable tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`, `subagent`, `apply_patch`. Match exact advertised names, not substrings of `read_file` / `write_file`.
+- [x] `cargo test --quiet -p ee-agent-orchestrator prompt::tool_guidance` passes.
+- [x] Full `cargo test --quiet -p ee-agent-orchestrator`, clippy, and `cargo fmt --all --check` pass.
 
 ## Phase 3 — Workspace instructions
 

@@ -12,6 +12,7 @@ pub(crate) mod render;
 pub(crate) mod repeat_guard;
 pub(crate) mod runtime_context;
 pub(crate) mod sections;
+pub(crate) mod tool_guidance;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -91,6 +92,9 @@ pub(crate) struct PromptInputs<'a> {
     pub agent: AgentIdentity<'a>,
     /// Per-turn strategy text, when the runtime produced any.
     pub turn_guidance: Option<&'a str>,
+    /// Tool names advertised to the model for this turn, already filtered by
+    /// the effective policy.
+    pub advertised_tools: &'a [String],
     /// Section set to emit.
     pub preset: PromptPreset,
 }
@@ -125,6 +129,7 @@ pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptErr
             if inputs.mode.to_string() == PLAN_MODE_ID {
                 sections.push(Section::for_slot(&PLAN_POLICY, PLAN_POLICY_TEXT)?);
             }
+            sections.extend(tool_guidance::sections(inputs.advertised_tools)?);
             sections.push(Section::for_slot(
                 &DEPLOYMENT_PERSONA_SUFFIX,
                 "Host policy and host approval remain authoritative. Never claim a file, command, or test succeeded without a tool result that proves it.",
@@ -204,6 +209,7 @@ mod tests {
             allow_delegate: true,
             agent: AgentIdentity { name: "root", depth: 0, max_depth: None },
             turn_guidance: None,
+            advertised_tools: &[],
             preset: PromptPreset::Standard,
         }
     }
@@ -249,6 +255,105 @@ mod tests {
     fn write_mode_omits_plan_policy() {
         let bundle = build(&inputs("test", "test-model")).expect("builds");
         assert!(!bundle.stable.contains("You are in plan mode."));
+    }
+
+    fn names(tools: &[&str]) -> Vec<String> {
+        tools.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn advertised_tools_add_guidance_in_slot_order() {
+        let tools = names(&[
+            "read_file",
+            "write_file",
+            "create_terminal",
+            "wait_for_terminal_exit",
+            "cargo_check",
+        ]);
+        let mut inputs = inputs("test", "test-model");
+        inputs.advertised_tools = &tools;
+        let bundle = build(&inputs).expect("builds");
+        assert!(bundle.stable.contains("Use `read_file`"));
+        assert!(bundle.stable.contains("`write_file` replaces the whole file"));
+        assert!(bundle.stable.contains("`create_terminal`"));
+        assert!(!bundle.stable.contains("Track every terminal id"));
+        assert!(!bundle.stable.contains("`delegate_task`"));
+        assert!(!bundle.stable.contains("`ee_web_search`"));
+
+        let read = bundle.stable.find("Use `read_file`").expect("read guidance");
+        let write = bundle.stable.find("`write_file` replaces").expect("write guidance");
+        let bash = bundle.stable.find("`create_terminal`").expect("bash guidance");
+        assert!(bash < read && read < write, "guidance follows DSH slot order");
+    }
+
+    #[test]
+    fn guidance_emits_for_each_tool_set() {
+        let cases: &[(&[&str], &[&str], &[&str])] = &[
+            (&["read_file"], &["Use `read_file`"], &["`write_file`", "`create_terminal`"]),
+            (
+                &["read_file", "write_file"],
+                &["Use `read_file`", "`write_file` replaces"],
+                &["`create_terminal`"],
+            ),
+            (
+                &[
+                    "read_file",
+                    "create_terminal",
+                    "wait_for_terminal_exit",
+                    "cargo_check",
+                    "terminal_output",
+                    "kill_terminal",
+                    "release_terminal",
+                ],
+                &["`create_terminal`", "Track every terminal id"],
+                &["`write_file`", "`delegate_task`"],
+            ),
+            (
+                &["read_file", "delegate_task"],
+                &["Use `read_file`", "`delegate_task`"],
+                &["`create_terminal`", "`ee_web_search`"],
+            ),
+            (
+                &["ee_web_search", "ee_fetch_url"],
+                &["`ee_web_search`", "`ee_fetch_url`"],
+                &["Use `read_file`", "`delegate_task`"],
+            ),
+        ];
+        for (advertised, present, absent) in cases {
+            let tools = names(advertised);
+            let mut inputs = inputs("test", "test-model");
+            inputs.advertised_tools = &tools;
+            let stable = build(&inputs).expect("builds").stable;
+            for needle in *present {
+                assert!(stable.contains(needle), "{advertised:?} must emit {needle}");
+            }
+            for needle in *absent {
+                assert!(!stable.contains(needle), "{advertised:?} must omit {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn guidance_bytes_do_not_depend_on_advertised_tool_order() {
+        let forward = names(&["read_file", "write_file", "ee_web_search", "ee_fetch_url"]);
+        let mut reverse = forward.clone();
+        reverse.reverse();
+        let mut first = inputs("test", "test-model");
+        first.advertised_tools = &forward;
+        let mut second = inputs("test", "test-model");
+        second.advertised_tools = &reverse;
+        assert_eq!(build(&first).expect("builds").stable, build(&second).expect("builds").stable);
+    }
+
+    #[test]
+    fn guidance_never_names_a_tool_hidden_by_policy() {
+        let tools = names(&["read_file"]);
+        let mut inputs = inputs("test", "test-model");
+        inputs.advertised_tools = &tools;
+        let bundle = build(&inputs).expect("builds");
+        assert!(!bundle.stable.contains("write_file"));
+        assert!(!bundle.stable.contains("create_terminal"));
+        assert!(!bundle.stable.contains("delegate_task"));
     }
 
     #[test]

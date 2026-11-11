@@ -212,6 +212,7 @@ pub struct OrchestratorRuntime {
 
 mod compact;
 mod lifecycle;
+mod prompt_views;
 mod resume;
 mod rubber_duck;
 mod strategic;

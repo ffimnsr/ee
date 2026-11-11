@@ -305,6 +305,12 @@ async fn provider_adapter_prompt_includes_runtime_context() {
     assert!(context.contains("file or symbol"), "{context}");
     assert!(context.contains("observable success criterion"), "{context}");
     assert!(context.contains(PLAN_PAYLOAD_MARKER), "{context}");
+    assert!(!context.contains("`write_file` replaces"), "plan mode must not guide writes");
+    assert!(
+        !context.contains("Run shell commands through `create_terminal`"),
+        "plan mode must not guide execution"
+    );
+    assert!(!context.contains("Use `delegate_task`"), "plan mode must not guide delegation");
 
     let tasks = probe.session_state(&session_id).expect("session state").0.list();
     assert_eq!(tasks.len(), 2, "compiled plan replaces prompt-only root");

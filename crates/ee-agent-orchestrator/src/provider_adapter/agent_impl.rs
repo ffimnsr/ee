@@ -381,6 +381,7 @@ impl AgentProvider for OrchestratorProvider {
                 &model_label,
                 &mode,
                 policy.policy(),
+                &runtime.advertised_tool_names(),
             )?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
@@ -596,6 +597,17 @@ impl AgentProvider for OrchestratorProvider {
             }
             drop(host_turn);
             emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
+            // Rebuild the stable prompt now that prompt-scoped MCP tools are
+            // registered: guidance must name only tools the model can call.
+            let bundle = prompt_bundle(
+                &workspace,
+                &workspace_roots,
+                &provider_label,
+                &model_label,
+                &mode,
+                policy.policy(),
+                &runtime.advertised_tool_names(),
+            )?;
             let cleanup =
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
             // The framework's cancellation watch flips on `session/cancel`

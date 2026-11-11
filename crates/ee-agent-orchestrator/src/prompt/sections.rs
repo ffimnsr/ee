@@ -77,7 +77,7 @@ pub(crate) const TOOL_WORKFLOW: Slot =
 pub(crate) const TOOL_RALPH: Slot =
     Slot { name: "TOOL_RALPH", order: 2700, registrations: &["tool:ralph"] };
 pub(crate) const TOOL_SUBAGENT: Slot =
-    Slot { name: "TOOL_SUBAGENT", order: 2800, registrations: &["tool:<subagent-tool>"] };
+    Slot { name: "TOOL_SUBAGENT", order: 2800, registrations: &["tool:subagent"] };
 pub(crate) const TOOL_REPORT: Slot = Slot { name: "TOOL_REPORT", order: 2900, registrations: &[] };
 pub(crate) const TOOL_COMPUTER_USE: Slot = Slot {
     name: "TOOL_COMPUTER_USE",

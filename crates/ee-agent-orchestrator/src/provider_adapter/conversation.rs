@@ -324,6 +324,7 @@ pub(super) fn prompt_bundle(
     model: &str,
     mode: &SessionModeId,
     policy: &ToolPolicy,
+    advertised_tools: &[String],
 ) -> Result<PromptBundle, ProviderError> {
     crate::prompt::build(&PromptInputs {
         mode,
@@ -337,6 +338,7 @@ pub(super) fn prompt_bundle(
         allow_delegate: policy.allow_delegate,
         agent: AgentIdentity { name: "root", depth: 0, max_depth: None },
         turn_guidance: None,
+        advertised_tools,
         preset: PromptPreset::Standard,
     })
     .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))

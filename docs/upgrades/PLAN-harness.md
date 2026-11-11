@@ -1,6 +1,6 @@
 # ee Agent Prompt Sections — Design + Plan
 
-Status: **Phases 0, 1, and 5b core implemented; Phases 2–4, 5, and 6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
+Status: **Phases 0, 1, 2, and 5b core implemented; Phases 3–6 pending** · Scope: `crates/ee-agent-orchestrator` prompt assembly, `ee-cli` workspace-instruction loading, and the ACP/MCP host boundary.
 
 Reference capture: [deepseek-harness-agent-mode-prompt-capture.md](deepseek-harness-agent-mode-prompt-capture.md) (vendored DSH `0.2.2-rc.1`, commit `fcc0ad4`).
 
@@ -255,6 +255,10 @@ struct ToolGuidance {
 ```
 
 A section emits only when every `requires` name is in the advertised set. This makes conditional-section drift impossible by construction.
+
+The advertised set is policy-derived: `OrchestratorRuntime::advertised_tool_names` returns registered tools that `PolicyEngine::check` admits for a root turn, so guidance can never describe a tool that policy hides. The adapter rebuilds the stable prompt after prompt-scoped MCP tools are registered, which lets the pinned `ee_web_search` / `ee_fetch_url` rows track the actual turn. `TOOL_SUBAGENT` uses the DSH registration name `tool:subagent`; the earlier `tool:<subagent-tool>` template in `sections.rs` was a transcription error and is corrected here.
+
+`FILE_REFERENCE` stays registered but inert until a client resource-link signal exists; it is not a tool-guidance row because it has no advertised tool name to gate on.
 
 ### 6.6 `MCP_SERVERS`
 
@@ -609,7 +613,7 @@ Security tests:
 |---|---|---|---|
 | 0 Contracts | now | `src/prompt/{mod,sections,render,error,context}.rs`, `src/lib.rs` | Registry, renderer, errors, moved `TurnSystemContext`; no behavior change |
 | 1 Stable + runtime | 0 | `src/prompt/{runtime_context,sections}.rs`, `provider_adapter/{mod,conversation,agent_impl}.rs`, `runtime/{turn,resume,compact,strategic}.rs` | **Done:** stable prompt + user-role runtime snapshot wired; flat `Session context`/`Tool path rules`/`Agent mode` strings deleted; `PLAN_POLICY` pulled forward so plan output stays valid |
-| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs` + tests | Guidance for all advertised `ee` tools; consistency gate |
+| 2 Tool guidance | 1 | `src/prompt/tool_guidance.rs`, `src/runtime/prompt_views.rs`, `provider_adapter/{conversation,agent_impl}.rs` | **Done:** eight conditional `TOOL_*` rows for advertised `ee` tools, policy-derived gate, prompt rebuild after MCP registration, bidirectional consistency tests |
 | 3 Workspace | 1 | `src/prompt/workspace.rs`, `src/trust.rs`, `src/prompt_injection.rs`, `ee-cli/src/app/agent_knowledge.rs` | Root-to-cwd discovery, trust label, dynamic updates |
 | 4 Mode policy | 1 | `src/prompt/sections.rs`, `provider_adapter/mod.rs` | `PLAN_POLICY` landed in Phase 1; remaining work is ask/write wording and any mode-specific tool-set checks. Plan payload contract already preserved |
 | 5 Delegation/MCP/compaction | 2 | `src/prompt/{mcp,compaction}.rs`, `src/prompt/runtime_context.rs` | `TOOL_SUBAGENT`, `MCP_SERVERS`, `SUBAGENT_DELEGATION`, checkpoint prompt |
