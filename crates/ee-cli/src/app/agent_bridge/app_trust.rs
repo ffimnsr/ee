@@ -474,7 +474,7 @@ impl App {
         session_id: &str,
         fingerprint: &str,
     ) -> TrustDecision {
-        self.evaluate_operation_with_safeguard(operation, session_id, fingerprint, None)
+        self.evaluate_operation_with_safeguard(operation, session_id, fingerprint, None, false)
     }
 
     pub(super) fn evaluate_operation_with_safeguard(
@@ -483,6 +483,7 @@ impl App {
         session_id: &str,
         fingerprint: &str,
         built_in_deny: Option<SafeguardMatch>,
+        trusted_write_enabled: bool,
     ) -> TrustDecision {
         let now = self.trust_clock.now();
         let effective = self.effective_trust_document(operation.workspace);
@@ -508,6 +509,7 @@ impl App {
             usage: &usage,
             workspace_enabled: effective.workspace_enabled,
             safe_read_enabled: self.workspace_trusted(),
+            trusted_write_enabled,
             built_in_deny,
             tool_default,
             category_default,

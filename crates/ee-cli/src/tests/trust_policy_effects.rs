@@ -72,6 +72,7 @@ fn decide(
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
         safe_read_enabled: false,
+        trusted_write_enabled: false,
         built_in_deny: built_in_deny.then_some(SafeguardMatch {
             rule_id: "builtin.v1.test",
             category: SafeguardCategory::CatastrophicDeletion,

@@ -80,6 +80,7 @@ fn input<'a>(
         usage,
         workspace_enabled: true,
         safe_read_enabled: false,
+        trusted_write_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: Some(FallbackEffect::Confirm),

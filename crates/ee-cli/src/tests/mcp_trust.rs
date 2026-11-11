@@ -93,6 +93,7 @@ fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecis
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
         safe_read_enabled: false,
+        trusted_write_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -554,14 +555,17 @@ mod e2e {
         let mut stream = connect_proxy(&app);
         let target = temp.path().join("write.txt");
         fs::write(&target, "v0").unwrap();
-        // ee_write_text_file carries file contents: no exact always-allow rule.
+        // Content-bearing native writes offer no exact always-allow rule. The
+        // trusted workspace auto-applies routine writes, so use a request above
+        // the write safety maxima to keep the prompt path under test.
+        let huge = "x".repeat((crate::policy::MAX_WRITE_FILE_BYTES + 1) as usize);
         proxy_send(
             &mut stream,
             1,
             json!({
                 "method": "write_text_file",
                 "path": target.display().to_string(),
-                "content": "agent-v1",
+                "content": huge,
             }),
         );
         wait_until(&mut app, "write approval queued", |app| !app.agents.approvals.is_empty());

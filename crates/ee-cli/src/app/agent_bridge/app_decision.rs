@@ -446,6 +446,53 @@ impl App {
         Some(candidate)
     }
 
+    /// Canonical root that keys the host-local workspace trust decision.  The
+    /// decision is resolved from the active workspace, so the trusted-write
+    /// built-in allow must be scoped to that same root; extra workspace roots
+    /// stay out of scope.
+    fn primary_workspace_root(&self) -> Option<PathBuf> {
+        std::fs::canonicalize(self.current_workspace_root()).ok()
+    }
+
+    /// Canonical write target inside the primary workspace, outside protected
+    /// paths and the secret store: the only shape the trusted-write built-in
+    /// allow accepts.
+    pub(super) fn canonical_primary_write_target(&self, path: &Path) -> Option<PathBuf> {
+        let candidate = self.canonical_native_write_target(path)?;
+        let primary = self.primary_workspace_root()?;
+        candidate.starts_with(&primary).then_some(candidate)
+    }
+
+    /// Whether a pending approval may skip the prompt because the host-local
+    /// workspace decision is `trusted`.  Only native writes whose every target
+    /// canonicalizes inside the primary workspace qualify; MCP proxy writes,
+    /// external paths, symlink escapes, protected paths, and the secret store
+    /// always stay on the explicit approval path.  Requests beyond the write
+    /// safety maxima (files, per-file bytes, total bytes) also stay explicit:
+    /// trust is implicit consent for routine writes, not for unbounded ones.
+    pub(super) fn trusted_write_eligible(&self, prompt: &ApprovalPrompt) -> bool {
+        if prompt.mcp.is_some() || !self.workspace_trusted() {
+            return false;
+        }
+        match &prompt.kind {
+            ApprovalKind::Write { path, content, .. } => {
+                self.canonical_primary_write_target(path).is_some()
+                    && content.len() as u64 <= MAX_WRITE_FILE_BYTES
+            }
+            ApprovalKind::WriteBatch { writes, .. } => {
+                !writes.is_empty()
+                    && writes.len() as u64 <= MAX_WRITE_FILES
+                    && writes.iter().all(|write| {
+                        self.canonical_primary_write_target(&write.path).is_some()
+                            && write.content.len() as u64 <= MAX_WRITE_FILE_BYTES
+                    })
+                    && writes.iter().map(|write| write.content.len() as u64).sum::<u64>()
+                        <= MAX_WRITE_TOTAL_BYTES
+            }
+            _ => false,
+        }
+    }
+
     /// Normalized native write operation: canonical in-workspace target,
     /// create/modify category from the file-existence expectation, and the
     /// exact file count and byte deltas of this request.  Ineligible targets

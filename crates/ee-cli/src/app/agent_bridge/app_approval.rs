@@ -474,11 +474,13 @@ impl App {
         let safeguard = self.built_in_safeguard_for_prompt(&prompt);
         self.attach_always_allows(&mut prompt, &operation);
         self.attach_persistent_deny(&mut prompt, &operation);
+        let trusted_write = self.trusted_write_eligible(&prompt);
         let mut decision = self.evaluate_operation_with_safeguard(
             &operation,
             &session_id,
             &fingerprint,
             safeguard,
+            trusted_write,
         );
         // Phase 4 curated-profile fallback: a terminal request that matches
         // a fixed registry entry is evaluated as its profile when the exact
@@ -559,10 +561,17 @@ impl App {
             }
             TrustDecision { outcome: TrustOutcome::Allow, reason, .. } => {
                 if *reason == DecisionReason::BuiltInAllow {
-                    // Workspace-trusted read-only allowlist: dispatch silently,
-                    // never record a session decision, and keep the audit
-                    // trail entry for the automatic allow.
-                    let summary = String::from("trusted built-in read-only command");
+                    // Workspace-trusted allowlist: dispatch silently, never
+                    // record a session decision, and keep the audit trail
+                    // entry for the automatic allow.
+                    let summary = if matches!(
+                        audited_operation.category,
+                        TrustCategory::WriteCreate | TrustCategory::WriteModify
+                    ) {
+                        String::from("trusted workspace write")
+                    } else {
+                        String::from("trusted built-in read-only command")
+                    };
                     if let Some(thread_index) = thread_index
                         && let Some(thread) = self.agents.threads.get_mut(thread_index)
                     {

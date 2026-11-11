@@ -42,6 +42,12 @@ pub(crate) struct PolicyInput<'a> {
     /// the built-in read-only safe allowlist for `safe_read` profile
     /// operations. The evaluator never reads the decision itself.
     pub(crate) safe_read_enabled: bool,
+    /// Injected host-local workspace trust decision for native writes. The
+    /// caller sets this only for a prompt whose every target canonicalizes
+    /// under the primary workspace root, is not a protected path, and is not
+    /// the secret store, so a write outside the workspace directory can
+    /// never reach the built-in allow below.
+    pub(crate) trusted_write_enabled: bool,
     /// Application-owned, non-overridable safeguard match, if any.
     pub(crate) built_in_deny: Option<SafeguardMatch>,
     /// Effective exact-tool fallback, if configured.
@@ -175,6 +181,20 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
     if input.safe_read_enabled
         && let OperationIdentity::Profile { profile } = &input.operation.identity
         && is_safe_read_profile(profile)
+    {
+        finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
+    }
+    no_match!("built_in_allow");
+    // Built-in workspace-trusted native-write allow. Same precedence slot as
+    // the read-only allowlist: denials, safeguards, and mandatory-confirm
+    // rules above still win, and the caller only enables the flag for
+    // canonical in-primary-workspace, non-protected, non-secret targets.
+    if input.trusted_write_enabled
+        && matches!(
+            input.operation.category,
+            TrustCategory::WriteCreate | TrustCategory::WriteModify
+        )
+        && matches!(input.operation.identity, OperationIdentity::Write { .. })
     {
         finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
     }

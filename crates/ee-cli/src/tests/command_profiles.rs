@@ -76,6 +76,7 @@ fn decide(
         usage: &UsageSnapshot::default(),
         workspace_enabled,
         safe_read_enabled: false,
+        trusted_write_enabled: false,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
