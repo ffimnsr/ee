@@ -567,3 +567,52 @@ fn assistant_tool_call_replays_as_a_function_call_item() {
     assert_eq!(input[2]["type"], "function_call_output");
     assert_eq!(input[2]["call_id"], "call_1");
 }
+
+fn body_with(control: &ee_agent_orchestrator::ToolCallControl, cache: &CacheDirective) -> Value {
+    responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        system_prompt: "system",
+        transcript: &transcript(),
+        tools: &definitions(),
+        stream: false,
+        max_output_tokens: None,
+        extensions: None,
+        tool_control: control,
+        cache,
+    })
+}
+
+#[test]
+fn tool_choice_and_parallel_follow_the_request_control() {
+    let cache = CacheDirective::disabled();
+    let auto = body_with(&ee_agent_orchestrator::ToolCallControl::auto(), &cache);
+    assert_eq!(auto["tool_choice"], "auto");
+    assert!(auto.get("parallel_tool_calls").is_none(), "unset by default");
+
+    let named = body_with(&ee_agent_orchestrator::ToolCallControl::named("read_file"), &cache);
+    assert_eq!(named["tool_choice"]["name"], "read_file");
+
+    let parallel = body_with(
+        &ee_agent_orchestrator::ToolCallControl::required().with_parallel(Some(false)),
+        &cache,
+    );
+    assert_eq!(parallel["tool_choice"], "required");
+    assert_eq!(parallel["parallel_tool_calls"], false);
+}
+
+#[test]
+fn request_level_cache_ttl_uses_the_documented_field() {
+    let ttl = |value: &str| CacheDirective {
+        policy: ee_chat_completions::CachePolicy::Explicit(
+            ee_chat_completions::CachePolicyObject::auto().with_ttl(Some(value.to_string())),
+        ),
+        ..CacheDirective::implicit(ee_chat_completions::CachePolicy::Auto)
+    };
+
+    let body = body_with(&ee_agent_orchestrator::ToolCallControl::auto(), &ttl("24h"));
+    assert_eq!(body["prompt_cache_retention"], "24h");
+
+    let body = body_with(&ee_agent_orchestrator::ToolCallControl::auto(), &ttl("1h"));
+    assert_eq!(body["prompt_cache_options"]["ttl"], "1h");
+    assert!(body.get("prompt_cache_retention").is_none());
+}

@@ -18,8 +18,9 @@
 use std::sync::Arc;
 
 use ee_chat_completions::{
-    BearerToken, ChatCompletionsClient, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource,
-    TrustedEndpoint,
+    BearerToken, CacheDirective, CacheFormat, CachePolicy, CacheSupport, ChatCompletionsClient,
+    EndpointProfile, MaxTokensField, RetryPolicy, TokenSource, TrustedEndpoint, gateway_policy,
+    parse_policy, parse_ttl,
 };
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -43,6 +44,10 @@ pub(crate) const MAX_OPTION_JSON_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_FALLBACK_MODELS: usize = 16;
 /// Longest accepted `OPENROUTER_USER` value, in bytes.
 pub(crate) const MAX_USER_BYTES: usize = 256;
+/// Prompt-cache policy: `auto`, `none`, or a JSON object.
+pub(crate) const CACHE_POLICY_ENV: &str = "OPENROUTER_CACHE_POLICY";
+/// Prompt-cache lifetime, in the models.dev duration form.
+pub(crate) const CACHE_TTL_ENV: &str = "OPENROUTER_CACHE_TTL";
 /// Reasoning effort levels OpenRouter documents.
 pub(crate) const REASONING_EFFORTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -63,6 +68,8 @@ pub(crate) struct OpenRouterOptions {
     reasoning_field: Option<String>,
     max_output_tokens: Option<u64>,
     max_tokens_field: Option<MaxTokensField>,
+    cache_policy: Option<CachePolicy>,
+    cache_ttl: Option<String>,
 }
 
 impl OpenRouterOptions {
@@ -80,6 +87,8 @@ impl OpenRouterOptions {
                 reasoning_field: std::env::var("OPENROUTER_REASONING_FIELD").ok(),
                 max_output_tokens: std::env::var("OPENROUTER_MAX_OUTPUT_TOKENS").ok(),
                 max_tokens_field: std::env::var("OPENROUTER_MAX_TOKENS_FIELD").ok(),
+                cache_policy: std::env::var(CACHE_POLICY_ENV).ok(),
+                cache_ttl: std::env::var(CACHE_TTL_ENV).ok(),
             },
             reasoning_effort,
         )
@@ -101,6 +110,8 @@ impl OpenRouterOptions {
             reasoning_field,
             max_output_tokens,
             max_tokens_field,
+            cache_policy,
+            cache_ttl,
         } = sources;
         let provider = provider
             .as_deref()
@@ -149,6 +160,18 @@ impl OpenRouterOptions {
             .filter(|value| !value.is_empty())
             .map(parse_reasoning_field)
             .transpose()?;
+        let cache_policy = cache_policy
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                parse_policy(value).map_err(|detail| format!("{CACHE_POLICY_ENV}: {detail}"))
+            })
+            .transpose()?;
+        let cache_ttl = cache_ttl
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_ttl(value).map_err(|detail| format!("{CACHE_TTL_ENV}: {detail}")))
+            .transpose()?;
         Ok(Self {
             provider,
             plugins,
@@ -160,6 +183,8 @@ impl OpenRouterOptions {
             reasoning_field,
             max_output_tokens,
             max_tokens_field,
+            cache_policy,
+            cache_ttl,
         })
     }
 
@@ -235,6 +260,10 @@ pub(crate) struct OptionSources {
     pub max_output_tokens: Option<String>,
     /// `OPENROUTER_MAX_TOKENS_FIELD`.
     pub max_tokens_field: Option<String>,
+    /// `OPENROUTER_CACHE_POLICY`.
+    pub cache_policy: Option<String>,
+    /// `OPENROUTER_CACHE_TTL`.
+    pub cache_ttl: Option<String>,
 }
 
 fn parse_object(name: &str, raw: &str) -> Result<Value, String> {
@@ -401,7 +430,7 @@ pub(crate) fn openrouter_profile_with_options(
             config.retry_base_delay,
             config.retry_max_delay,
         ))
-        .with_prompt_cache(supports_anthropic_prompt_cache(model))
+        .with_cache(cache_directive(model, options))
         .with_headers(headers)
         .with_stream_usage(options.include_usage())
         .with_max_output_tokens(options.max_output_tokens())
@@ -465,12 +494,33 @@ pub(crate) fn detect_max_tokens_field(model: &str, endpoint: &str) -> MaxTokensF
     }
 }
 
-/// Whether an OpenRouter model id routes to an Anthropic-family model, whose
-/// API understands explicit `cache_control` breakpoints.
-#[must_use]
-pub(crate) fn supports_anthropic_prompt_cache(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model.starts_with("anthropic/") || model.contains("claude")
+/// Resolves the prompt-cache directive for one OpenRouter model.
+///
+/// OpenRouter forwards inline markers to upstreams that understand them, so the
+/// route advertises explicit caching and the *policy* decides whether anything
+/// is placed. The default policy is the reference gateway heuristic: Anthropic
+/// and Qwen families only.
+fn cache_directive(model: &str, options: &OpenRouterOptions) -> CacheDirective {
+    let format = if model.to_ascii_lowercase().contains("qwen") {
+        CacheFormat::Alibaba
+    } else {
+        CacheFormat::Anthropic
+    };
+    let policy = options.cache_policy.clone().unwrap_or_else(|| gateway_policy(model));
+    let (format, support) = if format == CacheFormat::Alibaba {
+        // Qwen ignores breakpoints on tool definitions and caches them with the
+        // system prompt, so the tool plane is excluded outright.
+        (
+            CacheFormat::Alibaba,
+            CacheSupport {
+                targets: ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES,
+                ..CacheSupport::ANTHROPIC
+            },
+        )
+    } else {
+        (CacheFormat::Anthropic, CacheSupport::ANTHROPIC)
+    };
+    CacheDirective { policy: policy.with_ttl(options.cache_ttl.clone()), support, format }
 }
 
 /// Resolves the OpenRouter bearer token for each round trip.
@@ -613,7 +663,10 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "system");
         assert_eq!(body["reasoning"]["effort"], "medium");
         assert_eq!(body["stream"], false);
-        assert_eq!(body["tool_choice"], "auto");
+        assert!(
+            body.get("tool_choice").is_none(),
+            "tool_choice is omitted when no tools are advertised"
+        );
 
         let mut without = test_config();
         without.reasoning_effort = Some(String::new());
@@ -737,11 +790,27 @@ mod tests {
         let mut config = test_config();
         config.model = String::from("anthropic/claude-sonnet-4");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
-        assert!(profile.prompt_cache);
+        assert_eq!(profile.cache.policy, CachePolicy::Auto);
+        assert!(profile.cache.places_markers());
 
         config.model = String::from("openai/gpt-5");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
-        assert!(!profile.prompt_cache);
+        assert_eq!(profile.cache.policy, CachePolicy::None);
+        assert!(!profile.cache.places_markers());
+    }
+
+    #[test]
+    fn qwen_routes_keep_system_and_tail_breakpoints_only() {
+        let mut config = test_config();
+        config.model = String::from("qwen/qwen3-coder");
+        let profile = openrouter_profile(&config, &config.model).expect("profile builds");
+
+        assert_eq!(profile.cache.format, CacheFormat::Alibaba);
+        assert_eq!(
+            profile.cache.support.targets,
+            ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES
+        );
+        assert!(profile.cache.places_markers());
     }
 
     #[test]
@@ -848,5 +917,44 @@ mod tests {
         )
         .expect_err("unknown field must fail");
         assert!(error.contains("OPENROUTER_REASONING_FIELD"), "{error}");
+    }
+
+    #[test]
+    fn cache_policy_and_ttl_are_parsed_at_startup() {
+        let options = OpenRouterOptions::parse(
+            OptionSources {
+                cache_policy: Some(String::from("auto")),
+                cache_ttl: Some(String::from("1h")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect("parses");
+        let profile =
+            openrouter_profile_with_options(&test_config(), "google/gemini-2.5-pro", &options)
+                .expect("profile builds");
+        assert_eq!(
+            profile.cache.policy,
+            CachePolicy::Explicit(
+                ee_chat_completions::CachePolicyObject::auto().with_ttl(Some(String::from("1h")))
+            )
+        );
+        assert!(profile.cache.places_markers());
+        assert_eq!(profile.cache.policy.ttl(), Some("1h"));
+    }
+    #[test]
+    fn invalid_cache_options_fail_before_any_request() {
+        let error = OpenRouterOptions::parse(
+            OptionSources { cache_policy: Some(String::from("{")), ..OptionSources::default() },
+            None,
+        )
+        .expect_err("bad policy");
+        assert!(error.contains("OPENROUTER_CACHE_POLICY"), "{error}");
+        let error = OpenRouterOptions::parse(
+            OptionSources { cache_ttl: Some(String::from("1w")), ..OptionSources::default() },
+            None,
+        )
+        .expect_err("bad ttl");
+        assert!(error.contains("OPENROUTER_CACHE_TTL"), "{error}");
     }
 }

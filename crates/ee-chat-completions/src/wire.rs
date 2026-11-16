@@ -1,9 +1,10 @@
-//! Chat Completions wire format: request bodies, response decoding, SSE.
+//! Chat Completions wire format: response decoding, SSE, normalization.
 //!
 //! Everything here is a property of the OpenAI-compatible Chat Completions
 //! dialect, not of a provider: buffered responses, Server-Sent Events framing,
 //! streamed delta accumulation, usage extraction, and the mapping between the
-//! wire shape and the normalized orchestrator transcript.
+//! wire shape and the normalized orchestrator transcript. Request assembly and
+//! transcript conversion live in [`crate::request`] and are re-exported here.
 //!
 //! [`AssistantTurn`] and the normalization helpers
 //! ([`response_from_turn`], [`content_text`], [`tool_call_id_of`]) are shared by
@@ -13,9 +14,7 @@
 use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{
-    ModelContent, ModelMessage, ModelResponse, ModelRole, ModelUsage, ToolDefinition, ToolIntent,
-};
+use ee_agent_orchestrator::{ModelContent, ModelResponse, ModelUsage, ToolIntent};
 use serde_json::{Value, json};
 
 pub use crate::error_classification::{
@@ -23,9 +22,11 @@ pub use crate::error_classification::{
     is_unreachable, parse_rate_limit, parse_retry_after, parse_should_retry, retry_after_of,
     retry_delay, unreachable_delay,
 };
-use crate::profile::MaxTokensField;
-use crate::reasoning_replay::{
-    append_reasoning_detail, native_reasoning_of, replay_reasoning, replay_tool_calls,
+use crate::reasoning_replay::{append_reasoning_detail, native_reasoning_of};
+pub use crate::request::{
+    ChatRequestParts, RequestBodyOptions, chat_request_parts, messages_from_transcript,
+    messages_from_transcript_replaying, messages_from_transcript_with_cache, request_body,
+    tool_choice_value, tools_from_definitions, tools_from_definitions_with,
 };
 use crate::transport::DeltaSink;
 
@@ -95,188 +96,6 @@ pub enum StreamDelta {
     Text(String),
     /// Partial model reasoning.
     Reasoning(String),
-}
-
-/// Optional fields for one Chat Completions request body.
-#[derive(Debug, Clone, Copy)]
-pub struct RequestBodyOptions<'a> {
-    /// Whether the response is streamed.
-    pub stream: bool,
-    /// Whether a streamed response requests `stream_options.include_usage`.
-    pub stream_usage: bool,
-    /// Output-token bound, written to [`Self::max_tokens_field`].
-    pub max_tokens: Option<u64>,
-    /// Body field carrying [`Self::max_tokens`].
-    pub max_tokens_field: MaxTokensField,
-    /// Provider body fields merged last, e.g. reasoning shaping.
-    pub extensions: Option<&'a Value>,
-}
-
-impl Default for RequestBodyOptions<'_> {
-    fn default() -> Self {
-        Self {
-            stream: false,
-            stream_usage: false,
-            max_tokens: None,
-            max_tokens_field: MaxTokensField::MaxTokens,
-            extensions: None,
-        }
-    }
-}
-
-impl<'a> RequestBodyOptions<'a> {
-    /// Options for a buffered request with no extra fields.
-    #[must_use]
-    pub fn buffered() -> Self {
-        Self::default()
-    }
-
-    /// Options for a streamed request with no extra fields.
-    #[must_use]
-    pub fn streaming() -> Self {
-        Self { stream: true, ..Self::default() }
-    }
-}
-
-/// Builds a Chat Completions request body.
-///
-/// `options` controls streaming, usage reporting, the output bound, and
-/// provider body fields. Extension fields are merged last so a provider can
-/// shape the request without editing shared code.
-#[must_use]
-pub fn request_body(
-    model: &str,
-    messages: &[Value],
-    tools: &[Value],
-    options: RequestBodyOptions<'_>,
-) -> Value {
-    let RequestBodyOptions { stream, stream_usage, max_tokens, max_tokens_field, extensions } =
-        options;
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "tool_choice": "auto",
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    if stream && stream_usage {
-        body["stream_options"] = json!({ "include_usage": true });
-    }
-    if let Some(max_tokens) = max_tokens {
-        body[max_tokens_field.as_str()] = Value::from(max_tokens);
-    }
-    if let Some(Value::Object(extra)) = extensions
-        && let Some(object) = body.as_object_mut()
-    {
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
-    }
-    body
-}
-
-/// Converts a normalized transcript into chat messages, prepending
-/// `system_prompt`.
-///
-/// Tool observations carry their stable tool-call id; subagent summaries map to
-/// user content.
-#[must_use]
-pub fn messages_from_transcript(system_prompt: &str, transcript: &[ModelMessage]) -> Vec<Value> {
-    messages_from_transcript_with_cache(system_prompt, transcript, false)
-}
-
-/// Converts a normalized transcript into chat messages, optionally emitting
-/// Anthropic/OpenRouter `cache_control` breakpoints on the stable prefix planes.
-///
-/// The text is never rewritten: a breakpoint turns the message content into a
-/// single text part carrying `cache_control`, which providers that do not
-/// support prompt caching ignore. Breakpoints are only placed on the system
-/// prompt and on messages explicitly marked with `ee_cache_breakpoint`.
-#[must_use]
-pub fn messages_from_transcript_with_cache(
-    system_prompt: &str,
-    transcript: &[ModelMessage],
-    cache_breakpoints: bool,
-) -> Vec<Value> {
-    messages_from_transcript_replaying(system_prompt, transcript, cache_breakpoints, "", None)
-}
-
-/// Converts a normalized transcript into chat messages, replaying provider
-/// reasoning state the current model produced.
-///
-/// `model` is the model the request targets; native reasoning sealed for another
-/// model is never replayed. `reasoning_field` names a scalar assistant field the
-/// route requires even when the provider only streamed structured details (for
-/// example Kimi's `reasoning_content`); it falls back to the message's reasoning
-/// summary.
-#[must_use]
-pub fn messages_from_transcript_replaying(
-    system_prompt: &str,
-    transcript: &[ModelMessage],
-    cache_breakpoints: bool,
-    model: &str,
-    reasoning_field: Option<&str>,
-) -> Vec<Value> {
-    let mut messages = Vec::new();
-    if cache_breakpoints && !system_prompt.is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": [{ "type": "text", "text": system_prompt, "cache_control": { "type": "ephemeral" } }],
-        }));
-    } else {
-        messages.push(json!({ "role": "system", "content": system_prompt }));
-    }
-    for message in transcript {
-        let role = match message.role {
-            ModelRole::System => "system",
-            ModelRole::User | ModelRole::Subagent => "user",
-            ModelRole::Assistant => "assistant",
-            ModelRole::Tool => "tool",
-        };
-        let content = content_text(&message.content);
-        let mut entry = if role == "tool" {
-            json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id_of(&message.content),
-                "content": content,
-            })
-        } else if content_has_media(&message.content) {
-            json!({ "role": role, "content": content_parts(&message.content) })
-        } else if cache_breakpoints && message.is_cache_breakpoint() && !content.is_empty() {
-            json!({
-                "role": role,
-                "content": [{ "type": "text", "text": content, "cache_control": { "type": "ephemeral" } }],
-            })
-        } else {
-            json!({ "role": role, "content": content })
-        };
-        if message.role == ModelRole::Assistant {
-            replay_tool_calls(&mut entry, message, content.is_empty());
-            replay_reasoning(&mut entry, message, model, reasoning_field);
-        }
-        messages.push(entry);
-    }
-    messages
-}
-
-/// Converts normalized tool definitions into a function tool schema.
-#[must_use]
-pub fn tools_from_definitions(definitions: &[ToolDefinition]) -> Vec<Value> {
-    definitions
-        .iter()
-        .map(|definition| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": definition.name,
-                    "description": definition.description,
-                    "parameters": definition.input_schema,
-                }
-            })
-        })
-        .collect()
 }
 
 /// Converts a decoded assistant turn into a normalized [`ModelResponse`]:

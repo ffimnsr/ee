@@ -204,7 +204,24 @@ impl OrchestratorRuntime {
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
             worktrees,
             transcripts,
+            until: Mutex::new(None),
         }
+    }
+
+    /// Installs a loop stop predicate, evaluated after each model step of every
+    /// subsequent root turn.
+    ///
+    /// Returning `true` ends the turn with the normal final response, so a
+    /// caller can end a multi-step loop deterministically instead of relying on
+    /// an iteration cap. Passing `None` clears it.
+    pub fn set_until_hook(&self, until: Option<UntilPredicate>) {
+        *self.until.lock().expect("until hook poisoned") = until;
+    }
+
+    /// Returns the installed loop stop predicate, when one is set.
+    #[must_use]
+    pub fn until_hook(&self) -> Option<UntilPredicate> {
+        self.until.lock().expect("until hook poisoned").clone()
     }
     /// Records the session working directory and workspace roots for mid-turn
     /// nested `AGENTS.md`/`CLAUDE.md` discovery. Called once per prompt by the

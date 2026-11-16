@@ -35,6 +35,8 @@ use crate::tasks::TaskNode;
 use crate::tools::{ToolDefinition, ToolIntent, ToolResult};
 use crate::trust::{TrustLevel, trust_for_role};
 
+pub use crate::model_options::{ResponseFormat, ToolCallControl, ToolChoice, validate_tool_names};
+
 /// Cap on diagnostic metadata entries; keeps provider metadata bounded.
 pub const MAX_METADATA_ENTRIES: usize = 16;
 
@@ -343,6 +345,17 @@ pub struct ModelRequest {
     /// [`estimate_prompt_tokens`].
     #[serde(default)]
     pub prompt_tokens: Option<u64>,
+    /// Tool-call control for this request; the default keeps provider behavior.
+    #[serde(default)]
+    pub tool_control: ToolCallControl,
+    /// Structured-output request; `None` sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+    /// Whether the routed provider accepts a tool list that changes between
+    /// steps. The default is `false`: a route that cannot honour the change
+    /// fails closed instead of silently sending it.
+    #[serde(default)]
+    pub allow_tool_list_updates: bool,
 }
 
 impl ModelRequest {
@@ -363,7 +376,31 @@ impl ModelRequest {
             available_models: Vec::new(),
             model_id: None,
             prompt_tokens: None,
+            tool_control: ToolCallControl::auto(),
+            response_format: None,
+            allow_tool_list_updates: false,
         }
+    }
+
+    /// Sets the tool-call control for this request.
+    #[must_use]
+    pub fn with_tool_control(mut self, tool_control: ToolCallControl) -> Self {
+        self.tool_control = tool_control;
+        self
+    }
+
+    /// Requests structured output.
+    #[must_use]
+    pub fn with_response_format(mut self, format: Option<ResponseFormat>) -> Self {
+        self.response_format = format;
+        self
+    }
+
+    /// Declares whether the route accepts a mid-conversation tool-list change.
+    #[must_use]
+    pub fn with_tool_list_updates(mut self, allowed: bool) -> Self {
+        self.allow_tool_list_updates = allowed;
+        self
     }
 
     /// Sets the prompt size measured by the provider on the previous call.
@@ -518,6 +555,9 @@ pub struct ModelResponse {
     /// Opaque provider reasoning state for the next turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<OpaqueProviderState>,
+    /// Decoded structured-output object, when the request asked for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<serde_json::Value>,
     /// Reported token usage; unknown fields stay `None`.
     pub usage: ModelUsage,
 }
@@ -533,6 +573,7 @@ impl ModelResponse {
             completed: false,
             finish_reason: None,
             native: None,
+            structured_output: None,
             usage: ModelUsage::new(),
         }
     }
@@ -1051,6 +1092,9 @@ mod tests {
             available_models: Vec::new(),
             model_id: None,
             prompt_tokens: None,
+            tool_control: ToolCallControl::auto(),
+            response_format: None,
+            allow_tool_list_updates: false,
         }
     }
 

@@ -146,6 +146,7 @@ impl OrchestratorRuntime {
                     memory: Some(self.memory.clone()),
                     checkpoint: Some(handle),
                     execution_log: Some(execution_log.clone()),
+                    until: self.until_hook(),
                     ..LoopOptions::default()
                 },
             )
@@ -267,6 +268,7 @@ impl OrchestratorRuntime {
                 graph: Some(self.tasks.clone()),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                until: self.until_hook(),
                 ..LoopOptions::default()
             },
         )

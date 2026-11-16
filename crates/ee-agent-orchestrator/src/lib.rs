@@ -198,12 +198,14 @@ pub mod fanout_fanin;
 pub mod final_response;
 pub mod issue_integration;
 pub mod loop_engine;
+pub mod loop_hooks;
 pub mod mcp;
 pub mod memory;
 pub mod memory_compaction;
 pub mod metrics;
 pub mod milestones;
 pub mod model;
+pub mod model_options;
 pub mod model_registry;
 pub mod model_router;
 pub mod observability;
@@ -246,6 +248,7 @@ pub mod stop_gate;
 mod stop_gate_loop_tests;
 pub mod strategy;
 pub mod streaming;
+pub mod structured_output;
 pub mod stuck;
 pub mod subagent_handoff;
 pub mod subagent_roles;
@@ -372,6 +375,7 @@ pub use issue_integration::{
     CRITERIA_KEY_MARKER, ChecklistEdit, ChecklistItem, IssueChecklist, IssueChecklistConfig,
     is_configured,
 };
+pub use loop_hooks::{UntilFn, UntilPredicate};
 pub use mcp::{McpToolClassSpec, McpToolPolicy};
 pub use memory::{MemoryItem, MemoryStore};
 pub use memory_compaction::{
@@ -387,9 +391,9 @@ pub use milestones::{
 pub use model::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage, ModelRequest,
     ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
-    OUTPUT_LIMIT_MIN, OpaqueProviderState, Transcript, TranscriptTruncation,
-    compaction_threshold_tokens, estimate_json_prompt_tokens, estimate_prompt_tokens,
-    fit_output_limit,
+    OUTPUT_LIMIT_MIN, OpaqueProviderState, ResponseFormat, ToolCallControl, ToolChoice, Transcript,
+    TranscriptTruncation, compaction_threshold_tokens, estimate_json_prompt_tokens,
+    estimate_prompt_tokens, fit_output_limit, validate_tool_names,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,
@@ -548,7 +552,8 @@ pub use tool_dependencies::{PlannedTool, ToolDataClass, ToolDependency, ToolDepe
 pub use tool_schemas::{compile_schemas, compile_tool_schema, validate_compiled_schema};
 pub use tools::{
     ServerTool, SideEffectClass, ToolCallContext, ToolDefinition, ToolErrorKind,
-    ToolExecutionLogEntry, ToolExecutor, ToolFuture, ToolIntent, ToolRegistry, ToolResult,
+    ToolExecutionLogEntry, ToolExecutor, ToolFormat, ToolFuture, ToolIntent, ToolRegistry,
+    ToolResult,
 };
 pub use trace::{TraceLine, export_jsonl, is_sensitive_key, redact_assignments, redact_json};
 pub use trust::{TrustLevel, trust_for_role};

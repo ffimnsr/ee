@@ -43,6 +43,12 @@ pub const RUBBER_DUCK_MODE_ENV: &str = "OPENCODE_RUBBER_DUCK_MODE";
 /// Optional reasoning-effort selector: `low`, `medium`, or `high`.
 pub const REASONING_EFFORT_ENV: &str = "OPENCODE_REASONING_EFFORT";
 
+/// Prompt-cache policy: `auto`, `none`, or a JSON object.
+pub const CACHE_POLICY_ENV: &str = "OPENCODE_CACHE_POLICY";
+
+/// Prompt-cache lifetime, in the models.dev duration form.
+pub const CACHE_TTL_ENV: &str = "OPENCODE_CACHE_TTL";
+
 /// Default system prompt sent with each session transcript.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are an agent running inside ee editor. Answer concisely and help with software engineering tasks. Use available tools for workspace file reads; never print tool-call syntax as prose.";
 /// API-key description shown during setup.
@@ -361,6 +367,10 @@ pub struct Config {
     pub context_window: u64,
     /// Explicit output-token bound; validated against the catalog ceiling.
     pub max_output_tokens: Option<u64>,
+    /// Prompt-cache policy override; `None` uses the route default.
+    pub cache_policy: Option<ee_chat_completions::CachePolicy>,
+    /// Prompt-cache lifetime override.
+    pub cache_ttl: Option<String>,
     /// Retry policy for rate-limited and transient failures.
     pub retry: RetryPolicy,
     /// Durable checkpoint directory, when configured.
@@ -384,6 +394,7 @@ impl std::fmt::Debug for Config {
             .field("max_iterations", &self.max_iterations)
             .field("context_window", &self.context_window)
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("cache_policy", &self.cache_policy)
             .field("retry", &self.retry)
             .field("checkpoint_dir", &self.checkpoint_dir)
             .finish_non_exhaustive()
@@ -468,6 +479,22 @@ impl Config {
             max_iterations: args.max_iterations,
             context_window,
             max_output_tokens: args.max_output_tokens,
+            cache_policy: env_or_dotenv(CACHE_POLICY_ENV, dotenv)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| {
+                    ee_chat_completions::parse_policy(&value).map_err(|detail| {
+                        ConfigError::InvalidCacheOption { variable: CACHE_POLICY_ENV, detail }
+                    })
+                })
+                .transpose()?,
+            cache_ttl: env_or_dotenv(CACHE_TTL_ENV, dotenv)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| {
+                    ee_chat_completions::parse_ttl(&value).map_err(|detail| {
+                        ConfigError::InvalidCacheOption { variable: CACHE_TTL_ENV, detail }
+                    })
+                })
+                .transpose()?,
             retry: RetryPolicy::new(
                 args.retry_max_attempts,
                 Duration::from_millis(args.retry_base_delay_ms),
@@ -535,6 +562,7 @@ impl Config {
             .and_then(|effort| reasoning::request_extensions(self.route.dialect, effort));
         profile =
             profile.with_limits(self.route.limits()).with_max_output_tokens(self.max_output_tokens);
+        profile = profile.with_cache(self.cache_directive());
         if let Some(field) = self.route.max_tokens_field() {
             let parsed = ee_chat_completions::MaxTokensField::parse(field).map_err(|_| {
                 ConfigError::InvalidCatalogMetadata {
@@ -546,6 +574,48 @@ impl Config {
             profile = profile.with_max_tokens_field(parsed);
         }
         Ok(profile)
+    }
+
+    /// Resolves the prompt-cache directive for the routed dialect.
+    ///
+    /// Anthropic Messages routes are Anthropic-compatible by construction, so
+    /// they default to automatic placement. Responses routes only support
+    /// provider-managed caching (a request-level lifetime, no markers). Chat
+    /// Completions routes go through an OpenAI-compatible gateway, so only the
+    /// Anthropic and Qwen families get breakpoints unless an operator overrides
+    /// the policy.
+    #[must_use]
+    pub fn cache_directive(&self) -> ee_chat_completions::CacheDirective {
+        use ee_chat_completions::{CacheDirective, CacheFormat, CachePolicy, CacheSupport};
+        let (support, format) = match self.route.dialect {
+            crate::routes::OpenCodeDialect::OpenAiResponses => {
+                (CacheSupport::IMPLICIT, CacheFormat::Anthropic)
+            }
+            crate::routes::OpenCodeDialect::AnthropicMessages => {
+                (CacheSupport::ANTHROPIC, CacheFormat::Anthropic)
+            }
+            crate::routes::OpenCodeDialect::OpenAiChatCompletions => {
+                if self.route.model_id.to_ascii_lowercase().contains("qwen") {
+                    (
+                        CacheSupport {
+                            targets: ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES,
+                            ..CacheSupport::ANTHROPIC
+                        },
+                        CacheFormat::Alibaba,
+                    )
+                } else {
+                    (CacheSupport::ANTHROPIC, CacheFormat::Anthropic)
+                }
+            }
+        };
+        let policy = self.cache_policy.clone().unwrap_or_else(|| match self.route.dialect {
+            crate::routes::OpenCodeDialect::OpenAiResponses => CachePolicy::None,
+            crate::routes::OpenCodeDialect::AnthropicMessages => CachePolicy::Auto,
+            crate::routes::OpenCodeDialect::OpenAiChatCompletions => {
+                ee_chat_completions::gateway_policy(self.route.model_id)
+            }
+        });
+        CacheDirective { policy: policy.with_ttl(self.cache_ttl.clone()), support, format }
     }
 
     /// Bounded operator note when a configured reasoning effort cannot reach the
@@ -599,6 +669,13 @@ pub fn route_profile(
 /// value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
+    /// `OPENCODE_CACHE_POLICY` / `OPENCODE_CACHE_TTL` is malformed.
+    InvalidCacheOption {
+        /// Environment variable that was rejected.
+        variable: &'static str,
+        /// Parser diagnostic.
+        detail: String,
+    },
     /// `OPENCODE_SURFACE` was unset or empty.
     MissingSurface,
     /// `OPENCODE_SURFACE` was neither `zen` nor `go`.
@@ -761,6 +838,9 @@ impl std::fmt::Display for ConfigError {
                 "catalog metadata {field}={value:?} for model {model_id:?} is not supported by this \
                  ee release: regenerate the catalog with scripts/gen_catalog.py"
             ),
+            Self::InvalidCacheOption { variable, detail } => {
+                write!(formatter, "invalid {variable}: {detail}")
+            }
         }
     }
 }

@@ -134,9 +134,49 @@ pub struct ToolDefinition {
     pub host_approval: bool,
     /// Capability flags the client must advertise for this tool.
     pub required_capabilities: Vec<String>,
+    /// Whether the argument schema is enforced strictly by the provider.
+    ///
+    /// Only emitted to routes whose catalog advertises `tools.strict`.
+    #[serde(default)]
+    pub strict: bool,
+    /// Free-form input format, when the tool takes raw text instead of JSON.
+    ///
+    /// Only emitted to routes whose catalog advertises the matching format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ToolFormat>,
     /// Dependency metadata for planned-batch ordering and cache invalidation.
     #[serde(default)]
     pub dependency: ToolDependency,
+}
+
+/// Free-form tool input format a provider advertises.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ToolFormat {
+    /// Unconstrained text.
+    Text,
+    /// A Lark grammar definition.
+    Lark {
+        /// Grammar source.
+        definition: String,
+    },
+    /// A regular-expression grammar.
+    Regex {
+        /// Pattern source.
+        definition: String,
+    },
+}
+
+impl ToolFormat {
+    /// Stable lowercase name used by catalog capability lists.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Lark { .. } => "lark",
+            Self::Regex { .. } => "regex",
+        }
+    }
 }
 
 impl ToolDefinition {
@@ -151,6 +191,8 @@ impl ToolDefinition {
             side_effect_subclass: None,
             host_approval: false,
             required_capabilities: Vec::new(),
+            strict: false,
+            format: None,
             dependency: ToolDependency::new(),
         }
     }
@@ -230,6 +272,20 @@ impl ToolDefinition {
     #[must_use]
     pub fn required_capabilities(mut self, capabilities: Vec<String>) -> Self {
         self.required_capabilities = capabilities;
+        self
+    }
+
+    /// Marks this tool's argument schema as strictly enforced.
+    #[must_use]
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+
+    /// Sets the free-form input format.
+    #[must_use]
+    pub fn format(mut self, format: ToolFormat) -> Self {
+        self.format = Some(format);
         self
     }
 
@@ -897,6 +953,8 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
                 side_effect_subclass: subclass,
                 host_approval: false,
                 required_capabilities: Vec::new(),
+                strict: false,
+                format: None,
                 dependency,
             },
         )) as Arc<dyn ServerTool>

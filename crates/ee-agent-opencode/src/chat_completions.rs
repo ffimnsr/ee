@@ -6,10 +6,10 @@
 //! dialect has no private duplicate codec.
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{ModelMessage, ModelResponse, ToolDefinition};
+use ee_agent_orchestrator::{ModelMessage, ModelResponse, ToolCallControl, ToolDefinition};
 use ee_chat_completions::{
-    ChatCompletionsClient, DeltaSink, EndpointProfile, EndpointTransport,
-    messages_from_transcript_replaying, response_from_turn, seal_response, tools_from_definitions,
+    ChatCompletionsClient, ChatRequest, ChatRequestParts, DeltaSink, EndpointProfile,
+    EndpointTransport, chat_request_parts, response_from_turn, seal_response,
 };
 
 /// Dialect every route served by this module speaks.
@@ -55,16 +55,39 @@ impl ChatCompletionsCodec {
         tools: &[ToolDefinition],
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_controlled(transcript, tools, &control, prompt_tokens).await
+    }
+
+    /// Performs one buffered round trip with tool-call control.
+    pub(crate) async fn complete_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
-        let messages = messages_from_transcript_replaying(
-            &profile.system_prompt,
+        let (messages, tools) = chat_request_parts(&ChatRequestParts {
+            system_prompt: &profile.system_prompt,
             transcript,
-            profile.prompt_cache,
-            &profile.model,
-            profile.reasoning_field.as_deref(),
-        );
-        let tools = tools_from_definitions(tools);
-        let turn = self.client.complete_with_prompt(&messages, &tools, prompt_tokens).await?;
+            definitions: tools,
+            cache: &profile.cache,
+            model: &profile.model,
+            reasoning_field: profile.reasoning_field.as_deref(),
+            tools_strict: profile.tools_strict,
+            freeform: &profile.freeform,
+            prompt_tokens,
+        });
+        let turn = self
+            .client
+            .complete_request(&ChatRequest {
+                messages,
+                tools,
+                tool_control: tool_control.clone(),
+                prompt_tokens,
+            })
+            .await?;
         Ok(seal_response(response_from_turn(turn), &profile.model))
     }
 
@@ -93,18 +116,37 @@ impl ChatCompletionsCodec {
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens).await
+    }
+
+    /// Performs one streaming round trip with tool-call control.
+    pub(crate) async fn complete_streaming_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
-        let messages = messages_from_transcript_replaying(
-            &profile.system_prompt,
+        let (messages, tools) = chat_request_parts(&ChatRequestParts {
+            system_prompt: &profile.system_prompt,
             transcript,
-            profile.prompt_cache,
-            &profile.model,
-            profile.reasoning_field.as_deref(),
-        );
-        let tools = tools_from_definitions(tools);
+            definitions: tools,
+            cache: &profile.cache,
+            model: &profile.model,
+            reasoning_field: profile.reasoning_field.as_deref(),
+            tools_strict: profile.tools_strict,
+            freeform: &profile.freeform,
+            prompt_tokens,
+        });
         let turn = self
             .client
-            .complete_streaming_with_prompt(&messages, &tools, sink, prompt_tokens)
+            .complete_streaming_request(
+                &ChatRequest { messages, tools, tool_control: tool_control.clone(), prompt_tokens },
+                sink,
+            )
             .await?;
         Ok(seal_response(response_from_turn(turn), &profile.model))
     }

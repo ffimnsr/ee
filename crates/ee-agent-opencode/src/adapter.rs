@@ -22,7 +22,7 @@ use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::ModelMessage;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, OrchestratorConfig,
-    OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolDefinition,
+    OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolCallControl, ToolDefinition,
 };
 use ee_agent_protocol::Implementation;
 use ee_chat_completions::{DeltaSink, EndpointTransport, StreamDelta, TokenSource, wait_cancelled};
@@ -69,8 +69,10 @@ pub trait DialectCodec: Send + Sync + 'static {
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         _prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
+        let _ = tool_control;
         self.complete(transcript, tools)
     }
 
@@ -79,9 +81,11 @@ pub trait DialectCodec: Send + Sync + 'static {
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         _prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
+        let _ = tool_control;
         self.complete_streaming(transcript, tools, sink)
     }
 }
@@ -112,22 +116,31 @@ impl DialectCodec for ResponsesCodec {
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(ResponsesCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+        Box::pin(ResponsesCodec::complete_controlled(
+            self,
+            transcript,
+            tools,
+            tool_control,
+            prompt_tokens,
+        ))
     }
 
     fn complete_streaming_with_prompt<'a>(
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(ResponsesCodec::complete_streaming_with_prompt(
+        Box::pin(ResponsesCodec::complete_streaming_controlled(
             self,
             transcript,
             tools,
+            tool_control,
             sink,
             prompt_tokens,
         ))
@@ -160,22 +173,31 @@ impl DialectCodec for MessagesCodec {
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(MessagesCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+        Box::pin(MessagesCodec::complete_controlled(
+            self,
+            transcript,
+            tools,
+            tool_control,
+            prompt_tokens,
+        ))
     }
 
     fn complete_streaming_with_prompt<'a>(
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(MessagesCodec::complete_streaming_with_prompt(
+        Box::pin(MessagesCodec::complete_streaming_controlled(
             self,
             transcript,
             tools,
+            tool_control,
             sink,
             prompt_tokens,
         ))
@@ -208,22 +230,31 @@ impl DialectCodec for ChatCompletionsCodec {
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(ChatCompletionsCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+        Box::pin(ChatCompletionsCodec::complete_controlled(
+            self,
+            transcript,
+            tools,
+            tool_control,
+            prompt_tokens,
+        ))
     }
 
     fn complete_streaming_with_prompt<'a>(
         &'a self,
         transcript: &'a [ModelMessage],
         tools: &'a [ToolDefinition],
+        tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
     ) -> CodecFuture<'a> {
-        Box::pin(ChatCompletionsCodec::complete_streaming_with_prompt(
+        Box::pin(ChatCompletionsCodec::complete_streaming_controlled(
             self,
             transcript,
             tools,
+            tool_control,
             sink,
             prompt_tokens,
         ))
@@ -310,9 +341,13 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 return Err(ModelError::Cancelled);
             }
             credential?;
+            ee_agent_orchestrator::validate_tool_names(&request.tools)
+                .map_err(ModelError::Adapter)?;
+            request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let completion = codec.complete_with_prompt(
                 &request.transcript,
                 &request.tools,
+                &request.tool_control,
                 request.prompt_tokens,
             );
             tokio::select! {
@@ -335,6 +370,9 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 return Err(ModelError::Cancelled);
             }
             credential?;
+            ee_agent_orchestrator::validate_tool_names(&request.tools)
+                .map_err(ModelError::Adapter)?;
+            request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(forward_error),
@@ -342,6 +380,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
             let completion = codec.complete_streaming_with_prompt(
                 &request.transcript,
                 &request.tools,
+                &request.tool_control,
                 &mut sink,
                 request.prompt_tokens,
             );

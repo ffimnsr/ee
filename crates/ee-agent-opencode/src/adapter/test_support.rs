@@ -61,6 +61,8 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
         max_output_tokens: None,
+        cache_policy: None,
+        cache_ttl: None,
         retry: RetryPolicy::new(
             DEFAULT_RETRY_MAX_ATTEMPTS,
             Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS),

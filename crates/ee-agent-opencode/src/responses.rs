@@ -21,12 +21,14 @@ use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
+    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl, ToolChoice,
+    ToolDefinition, estimate_prompt_tokens,
 };
 use ee_chat_completions::{
-    AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, ToolCall, Usage,
-    content_text, drive_sse, emit_finished_deltas, is_event_stream, response_from_turn,
-    tool_call_id_of, usage_from_tokens, with_buffered_retry, with_stream_retry,
+    AssistantTurn, CacheDirective, DeltaSink, EndpointRequest, EndpointTransport, SseControl,
+    ToolCall, Usage, content_text, drive_sse, emit_finished_deltas, is_event_stream,
+    openai_request_ttl, response_from_turn, tool_call_id_of, usage_from_tokens,
+    with_buffered_retry, with_stream_retry,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -35,6 +37,29 @@ use crate::dialect::{codec_error, parse_arguments};
 
 /// Dialect every route served by this module speaks.
 pub const DIALECT: crate::routes::OpenCodeDialect = crate::routes::OpenCodeDialect::OpenAiResponses;
+
+/// Inputs for one Responses request body.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponsesBody<'a> {
+    /// Wire model id.
+    pub model: &'a str,
+    /// Profile system prompt, sent as `instructions`.
+    pub system_prompt: &'a str,
+    /// Normalized conversation.
+    pub transcript: &'a [ModelMessage],
+    /// Advertised tools.
+    pub tools: &'a [ToolDefinition],
+    /// Whether the response is streamed.
+    pub stream: bool,
+    /// Output-token bound.
+    pub max_output_tokens: Option<u64>,
+    /// Provider body fields merged last.
+    pub extensions: Option<&'a Value>,
+    /// Tool-call control.
+    pub tool_control: &'a ToolCallControl,
+    /// Prompt-cache policy, for the request-level lifetime only.
+    pub cache: &'a CacheDirective,
+}
 
 /// Builds an OpenAI Responses request body.
 ///
@@ -51,45 +76,75 @@ pub fn request_body(
     max_output_tokens: Option<u64>,
     extensions: Option<&Value>,
 ) -> Value {
-    let mut input = Vec::new();
-    for message in transcript {
+    let auto = ToolCallControl::auto();
+    let cache = CacheDirective::disabled();
+    responses_body(&ResponsesBody {
+        model,
+        system_prompt,
+        transcript,
+        tools,
+        stream,
+        max_output_tokens,
+        extensions,
+        tool_control: &auto,
+        cache: &cache,
+    })
+}
+
+/// Builds a Responses body with tool-call control and the request-level cache
+/// lifetime.
+///
+/// Responses ignores inline cache markers, so a configured lifetime lands in
+/// `prompt_cache_retention` (24h) or `prompt_cache_options.ttl` instead.
+#[must_use]
+pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
+    let mut items = Vec::new();
+    for message in input.transcript {
         // Reasoning items precede the assistant item they belong to: the
         // protocol replays them as their own input items, in generation order.
         if message.role == ModelRole::Assistant {
-            input.extend(replay_reasoning_items(message, model));
+            items.extend(replay_reasoning_items(message, input.model));
             if let Some(item) = input_item(message) {
-                input.push(item);
+                items.push(item);
             }
-            input.extend(function_call_items(message));
+            items.extend(function_call_items(message));
         } else if let Some(item) = input_item(message) {
-            input.push(item);
+            items.push(item);
         }
     }
     let mut body = json!({
-        "model": model,
-        "input": input,
-        "stream": stream,
-        "tool_choice": "auto",
+        "model": input.model,
+        "input": items,
+        "stream": input.stream,
         // EE never asks the provider to keep the response for later retrieval.
         "store": false,
         // Encrypted reasoning travels back in the transcript, so a stateless
         // multi-step loop keeps its reasoning without server-side storage.
         "include": ["reasoning.encrypted_content"],
     });
-    if let Some(max_output_tokens) = max_output_tokens {
+    if let Some(max_output_tokens) = input.max_output_tokens {
         body["max_output_tokens"] = Value::from(max_output_tokens);
     }
-    if !system_prompt.is_empty() {
-        body["instructions"] = Value::String(system_prompt.to_string());
+    if !input.system_prompt.is_empty() {
+        body["instructions"] = Value::String(input.system_prompt.to_string());
         // Deterministic, session-config-scoped cache key: stable across every
         // turn of the session because it hashes only the model id and the
         // stable system prompt. Routes that do not support the field ignore
         // it; extensions may still override it last.
-        body["prompt_cache_key"] = Value::String(prompt_cache_key(model, system_prompt));
+        body["prompt_cache_key"] =
+            Value::String(prompt_cache_key(input.model, input.system_prompt));
     }
-    if !tools.is_empty() {
+    if let Some(Value::Object(ttl)) = openai_request_ttl(input.cache)
+        && let Some(object) = body.as_object_mut()
+    {
+        for (key, value) in ttl {
+            object.insert(key, value);
+        }
+    }
+    if !input.tools.is_empty() {
         body["tools"] = Value::Array(
-            tools
+            input
+                .tools
                 .iter()
                 .map(|definition| {
                     json!({
@@ -101,8 +156,12 @@ pub fn request_body(
                 })
                 .collect(),
         );
+        body["tool_choice"] = responses_tool_choice(&input.tool_control.choice);
+        if let Some(parallel) = input.tool_control.parallel {
+            body["parallel_tool_calls"] = Value::from(parallel);
+        }
     }
-    if let Some(Value::Object(extra)) = extensions
+    if let Some(Value::Object(extra)) = input.extensions
         && let Some(object) = body.as_object_mut()
     {
         for (key, value) in extra {
@@ -110,6 +169,16 @@ pub fn request_body(
         }
     }
     body
+}
+
+/// Lowers a tool choice into the Responses field value.
+fn responses_tool_choice(choice: &ToolChoice) -> Value {
+    match choice {
+        ToolChoice::Auto => json!("auto"),
+        ToolChoice::None => json!("none"),
+        ToolChoice::Required => json!("required"),
+        ToolChoice::Tool { name } => json!({ "type": "function", "name": name }),
+    }
 }
 
 /// Deterministic prompt-cache key for one route/session configuration.
@@ -655,19 +724,33 @@ impl ResponsesCodec {
         tools: &[ToolDefinition],
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_controlled(transcript, tools, &control, prompt_tokens).await
+    }
+
+    /// Performs one buffered round trip with tool-call control.
+    pub(crate) async fn complete_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let prompt = prompt_tokens
             .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
         let max_output_tokens = profile.fitted_output_limit(prompt);
-        let body = request_body(
-            &profile.model,
-            &profile.system_prompt,
+        let body = responses_body(&ResponsesBody {
+            model: &profile.model,
+            system_prompt: &profile.system_prompt,
             transcript,
             tools,
-            false,
+            stream: false,
             max_output_tokens,
-            profile.extensions.as_ref(),
-        );
+            extensions: profile.extensions.as_ref(),
+            tool_control,
+            cache: &profile.cache,
+        });
         let transport = &self.transport;
         let label = profile.label.as_str();
         with_buffered_retry(&profile.retry, || async {
@@ -706,19 +789,34 @@ impl ResponsesCodec {
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens).await
+    }
+
+    /// Performs one streaming round trip with tool-call control.
+    pub(crate) async fn complete_streaming_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let prompt = prompt_tokens
             .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
         let max_output_tokens = profile.fitted_output_limit(prompt);
-        let body = request_body(
-            &profile.model,
-            &profile.system_prompt,
+        let body = responses_body(&ResponsesBody {
+            model: &profile.model,
+            system_prompt: &profile.system_prompt,
             transcript,
             tools,
-            true,
+            stream: true,
             max_output_tokens,
-            profile.extensions.as_ref(),
-        );
+            extensions: profile.extensions.as_ref(),
+            tool_control,
+            cache: &profile.cache,
+        });
         let mut attempt = ResponsesStreamAttempt { transport: &self.transport, body: &body };
         with_stream_retry(&self.transport.profile().retry, sink, &mut attempt).await
     }

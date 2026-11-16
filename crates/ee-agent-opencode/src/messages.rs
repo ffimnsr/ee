@@ -24,12 +24,14 @@ use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
+    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl, ToolChoice,
+    ToolDefinition, estimate_prompt_tokens,
 };
 use ee_chat_completions::{
-    AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, StreamDelta,
-    ToolCall, Usage, content_text, drive_sse, emit_finished_deltas, is_event_stream,
-    response_from_turn, tool_call_id_of, usage_from_tokens, with_buffered_retry, with_stream_retry,
+    AssistantTurn, CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective, DeltaSink,
+    EndpointRequest, EndpointTransport, SseControl, StreamDelta, ToolCall, Usage, cache_control,
+    content_text, drive_sse, emit_finished_deltas, is_event_stream, plan, response_from_turn,
+    tool_call_id_of, usage_from_tokens, warn_dropped, with_buffered_retry, with_stream_retry,
 };
 use serde_json::{Value, json};
 
@@ -46,6 +48,31 @@ pub const DIALECT: crate::routes::OpenCodeDialect =
 /// explicit override replaces it.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = ee_agent_orchestrator::OUTPUT_LIMIT_FALLBACK;
 
+/// Inputs for one Anthropic Messages request body.
+#[derive(Debug, Clone, Copy)]
+pub struct MessagesBody<'a> {
+    /// Wire model id.
+    pub model: &'a str,
+    /// Profile system prompt, hoisted into `system`.
+    pub system_prompt: &'a str,
+    /// Normalized conversation.
+    pub transcript: &'a [ModelMessage],
+    /// Advertised tools.
+    pub tools: &'a [ToolDefinition],
+    /// Whether the response is streamed.
+    pub stream: bool,
+    /// Output-token bound.
+    pub max_output_tokens: u64,
+    /// Provider body fields merged last.
+    pub extensions: Option<&'a Value>,
+    /// Tool-call control.
+    pub tool_control: &'a ToolCallControl,
+    /// Prompt-cache policy and route capabilities.
+    pub cache: &'a CacheDirective,
+    /// Prompt size measured by the provider on the previous call, when known.
+    pub prompt_tokens: Option<u64>,
+}
+
 /// Builds an Anthropic Messages request body.
 ///
 /// The profile system prompt and every transcript system message are joined into
@@ -61,23 +88,49 @@ pub fn request_body(
     max_output_tokens: u64,
     extensions: Option<&Value>,
 ) -> Value {
+    let auto = ToolCallControl::auto();
+    let cache = CacheDirective::disabled();
+    messages_body(&MessagesBody {
+        model,
+        system_prompt,
+        transcript,
+        tools,
+        stream,
+        max_output_tokens,
+        extensions,
+        tool_control: &auto,
+        cache: &cache,
+        prompt_tokens: None,
+    })
+}
+
+/// Builds a Messages body with tool-call control and prompt-cache placement.
+///
+/// Breakpoints are planned across the system, tool, and message planes under the
+/// shared four-breakpoint budget, and Anthropic is the one dialect where a
+/// `tool_result` block may carry one.
+#[must_use]
+pub fn messages_body(input: &MessagesBody<'_>) -> Value {
+    let markers = input.cache.places_markers();
+    let marker = cache_control(input.cache);
     let mut system_parts = Vec::new();
-    if !system_prompt.is_empty() {
-        system_parts.push(system_prompt.to_string());
+    if !input.system_prompt.is_empty() {
+        system_parts.push(input.system_prompt.to_string());
     }
     let mut messages: Vec<Value> = Vec::new();
+    let mut candidates: Vec<CacheCandidate> = Vec::new();
+    let mut manual: Vec<usize> = Vec::new();
+    let mut manual_system: Vec<usize> = Vec::new();
     let mut open_tool_results = false;
-    // Anthropic accepts at most four `cache_control` breakpoints per request.
-    // System and the final tool schema consume two; the last pinned
-    // instruction message consumes the third. Message text is never rewritten.
-    let last_breakpoint = transcript.iter().rposition(ModelMessage::is_cache_breakpoint);
-    for (index, message) in transcript.iter().enumerate() {
-        let pinned = last_breakpoint == Some(index);
+    for message in input.transcript {
         match message.role {
             ModelRole::System => {
                 let text = content_text(&message.content);
                 if !text.is_empty() {
                     system_parts.push(text);
+                    if markers && message.is_cache_breakpoint() {
+                        manual_system.push(system_parts.len() - 1);
+                    }
                 }
             }
             ModelRole::Tool => {
@@ -94,6 +147,10 @@ pub fn request_body(
                 {
                     content.push(block);
                 } else {
+                    candidates.push(CacheCandidate {
+                        index: messages.len(),
+                        role: CacheCandidateRole::ToolResult,
+                    });
                     messages.push(json!({ "role": "user", "content": [block] }));
                     open_tool_results = true;
                 }
@@ -102,9 +159,16 @@ pub fn request_body(
             ModelRole::User | ModelRole::Subagent => {
                 let text = content_text(&message.content);
                 if !text.is_empty() {
+                    if markers && message.is_cache_breakpoint() {
+                        manual.push(messages.len());
+                    }
+                    candidates.push(CacheCandidate {
+                        index: messages.len(),
+                        role: CacheCandidateRole::User,
+                    });
                     messages.push(json!({
                         "role": "user",
-                        "content": [text_block(&text, pinned)],
+                        "content": [text_block(&text, false, &marker)],
                     }));
                 }
             }
@@ -118,9 +182,10 @@ pub fn request_body(
                     .iter()
                     .any(|block| matches!(block, ModelContent::ToolCall { .. }));
                 if !text.is_empty() || has_calls {
-                    let mut blocks = replay_thinking_blocks(message, model).unwrap_or_default();
+                    let mut blocks =
+                        replay_thinking_blocks(message, input.model).unwrap_or_default();
                     if !text.is_empty() {
-                        blocks.push(text_block(&text, pinned));
+                        blocks.push(text_block(&text, false, &marker));
                     }
                     for block in &message.content {
                         if let ModelContent::ToolCall { tool_call_id, name, arguments } = block {
@@ -132,32 +197,58 @@ pub fn request_body(
                             }));
                         }
                     }
+                    if markers && message.is_cache_breakpoint() {
+                        manual.push(messages.len());
+                    }
+                    candidates.push(CacheCandidate {
+                        index: messages.len(),
+                        role: CacheCandidateRole::Assistant,
+                    });
                     messages.push(json!({ "role": "assistant", "content": blocks }));
                 }
             }
         }
         open_tool_results = false;
     }
+
+    let inputs = CacheCandidates {
+        tools: input.tools.len(),
+        system_parts: system_parts.len(),
+        messages: &candidates,
+        manual: &manual,
+        manual_system: &manual_system,
+        tool_results: true,
+        prompt_tokens: input.prompt_tokens,
+    };
+    let cache_plan = plan(input.cache, &inputs);
+    warn_dropped(&cache_plan, "Anthropic Messages", input.cache.support.max_breakpoints);
+    // Message markers are applied before the body is built: `json!` copies the
+    // value it interpolates, so a later mutation of the Vec would be lost.
+    for &index in &cache_plan.messages {
+        if let Some(message) = messages.get_mut(index) {
+            mark_last_block(message, &marker);
+        }
+    }
+
     let mut body = json!({
-        "model": model,
-        "max_tokens": max_output_tokens,
+        "model": input.model,
+        "max_tokens": input.max_output_tokens,
         "messages": messages,
-        "stream": stream,
-        "tool_choice": { "type": "auto" },
+        "stream": input.stream,
     });
     if !system_parts.is_empty() {
-        // The final system block closes the first cacheable prefix plane.
-        let blocks = system_parts
-            .iter()
-            .enumerate()
-            .map(|(index, text)| text_block(text, index + 1 == system_parts.len()))
-            .collect::<Vec<_>>();
-        body["system"] = Value::Array(blocks);
+        body["system"] = Value::Array(
+            system_parts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| text_block(text, cache_plan.system.contains(&index), &marker))
+                .collect(),
+        );
     }
-    if !tools.is_empty() {
-        let last = tools.len() - 1;
+    if !input.tools.is_empty() {
         body["tools"] = Value::Array(
-            tools
+            input
+                .tools
                 .iter()
                 .enumerate()
                 .map(|(index, definition)| {
@@ -166,16 +257,17 @@ pub fn request_body(
                         "description": definition.description,
                         "input_schema": definition.input_schema,
                     });
-                    // Anthropic caches the tool block up to the final schema.
-                    if index == last {
-                        tool["cache_control"] = json!({ "type": "ephemeral" });
+                    // Anthropic caches the tool block up to the marked schema.
+                    if cache_plan.tools == Some(index) {
+                        tool["cache_control"] = marker.clone();
                     }
                     tool
                 })
                 .collect(),
         );
+        body["tool_choice"] = messages_tool_choice(input.tool_control);
     }
-    if let Some(Value::Object(extra)) = extensions
+    if let Some(Value::Object(extra)) = input.extensions
         && let Some(object) = body.as_object_mut()
     {
         for (key, value) in extra {
@@ -183,6 +275,37 @@ pub fn request_body(
         }
     }
     body
+}
+
+/// Lowered Anthropic tool choice, including the parallel-call switch.
+fn messages_tool_choice(control: &ToolCallControl) -> Value {
+    let mut choice = match &control.choice {
+        ToolChoice::Auto => json!({ "type": "auto" }),
+        ToolChoice::None => json!({ "type": "none" }),
+        ToolChoice::Required => json!({ "type": "any" }),
+        ToolChoice::Tool { name } => json!({ "type": "tool", "name": name }),
+    };
+    if let Some(parallel) = control.parallel
+        && control.choice != ToolChoice::None
+    {
+        choice["disable_parallel_tool_use"] = Value::from(!parallel);
+    }
+    choice
+}
+
+/// Adds the marker to the last block that can carry one.
+fn mark_last_block(message: &mut Value, marker: &Value) {
+    let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if let Some(block) = blocks.iter_mut().rev().find(|block| {
+        matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("text" | "tool_result" | "tool_use")
+        )
+    }) {
+        block["cache_control"] = marker.clone();
+    }
 }
 
 /// Decodes a buffered Messages payload into a normalized response.
@@ -287,10 +410,10 @@ fn replay_thinking_blocks(message: &ModelMessage, model: &str) -> Option<Vec<Val
 }
 
 /// Whether one message should carry an Anthropic cache breakpoint block.
-fn text_block(text: &str, cache: bool) -> Value {
+fn text_block(text: &str, cache: bool, marker: &Value) -> Value {
     let mut block = json!({ "type": "text", "text": text });
     if cache {
-        block["cache_control"] = json!({ "type": "ephemeral" });
+        block["cache_control"] = marker.clone();
     }
     block
 }
@@ -600,20 +723,35 @@ impl MessagesCodec {
         tools: &[ToolDefinition],
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_controlled(transcript, tools, &control, prompt_tokens).await
+    }
+
+    /// Performs one buffered round trip with tool-call control.
+    pub(crate) async fn complete_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let prompt = prompt_tokens
             .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
         let max_output_tokens =
             profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-        let body = request_body(
-            &profile.model,
-            &profile.system_prompt,
+        let body = messages_body(&MessagesBody {
+            model: &profile.model,
+            system_prompt: &profile.system_prompt,
             transcript,
             tools,
-            false,
+            stream: false,
             max_output_tokens,
-            profile.extensions.as_ref(),
-        );
+            extensions: profile.extensions.as_ref(),
+            tool_control,
+            cache: &profile.cache,
+            prompt_tokens,
+        });
         let transport = &self.transport;
         let label = profile.label.as_str();
         with_buffered_retry(&profile.retry, || async {
@@ -652,20 +790,36 @@ impl MessagesCodec {
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
+        let control = ToolCallControl::auto();
+        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens).await
+    }
+
+    /// Performs one streaming round trip with tool-call control.
+    pub(crate) async fn complete_streaming_controlled(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        tool_control: &ToolCallControl,
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let prompt = prompt_tokens
             .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
         let max_output_tokens =
             profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-        let body = request_body(
-            &profile.model,
-            &profile.system_prompt,
+        let body = messages_body(&MessagesBody {
+            model: &profile.model,
+            system_prompt: &profile.system_prompt,
             transcript,
             tools,
-            true,
+            stream: true,
             max_output_tokens,
-            profile.extensions.as_ref(),
-        );
+            extensions: profile.extensions.as_ref(),
+            tool_control,
+            cache: &profile.cache,
+            prompt_tokens,
+        });
         let mut attempt = MessagesStreamAttempt { transport: &self.transport, body: &body };
         with_stream_retry(&self.transport.profile().retry, sink, &mut attempt).await
     }

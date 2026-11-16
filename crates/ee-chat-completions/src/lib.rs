@@ -29,30 +29,39 @@
 //! [`ModelAdapter`]: ee_agent_orchestrator::ModelAdapter
 
 pub mod adapter;
+pub mod cache_policy;
 pub mod endpoint;
 mod error_classification;
 pub mod native;
 pub mod profile;
 mod reasoning_replay;
+mod request;
 pub mod transport;
 pub mod wire;
 
 pub use adapter::{
     ChatCompletionsAdapter, CompletionClient, CompletionFuture, StreamingClient, wait_cancelled,
 };
+pub use cache_policy::{
+    BREAKPOINT_CAP, CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective,
+    CacheFormat, CacheMessageStrategy, CachePlan, CachePolicy, CachePolicyObject, CacheSupport,
+    CacheTargets, cache_control, gateway_policy, openai_request_ttl, parse_policy, parse_ttl, plan,
+    warn_dropped,
+};
 pub use endpoint::{EndpointError, TrustedEndpoint};
 pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
 pub use profile::{BearerToken, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource};
 pub use transport::{
-    ChatCompletionsClient, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest, EndpointTransport,
-    MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse, is_event_stream,
-    with_buffered_retry, with_stream_retry,
+    ChatCompletionsClient, ChatRequest, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest,
+    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse,
+    is_event_stream, with_buffered_retry, with_stream_retry,
 };
 pub use wire::{
-    AssistantTurn, RequestBodyOptions, StreamDelta, ToolCall, Usage, classify_http_error,
-    classify_status_error, content_has_media, content_parts, content_text, decode_message,
-    emit_finished_deltas, http_error_message, is_retryable, messages_from_transcript,
-    messages_from_transcript_replaying, messages_from_transcript_with_cache, parse_retry_after,
-    request_body, response_from_turn, retry_after_of, retry_delay, tool_call_id_of,
-    tools_from_definitions, usage_from_tokens,
+    AssistantTurn, ChatRequestParts, RequestBodyOptions, StreamDelta, ToolCall, Usage,
+    chat_request_parts, classify_http_error, classify_status_error, content_has_media,
+    content_parts, content_text, decode_message, emit_finished_deltas, http_error_message,
+    is_retryable, messages_from_transcript, messages_from_transcript_replaying,
+    messages_from_transcript_with_cache, parse_retry_after, request_body, response_from_turn,
+    retry_after_of, retry_delay, tool_call_id_of, tool_choice_value, tools_from_definitions,
+    tools_from_definitions_with, usage_from_tokens,
 };

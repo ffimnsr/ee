@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use ee_agent_orchestrator::{ModelLimits, OUTPUT_LIMIT_MAX, fit_output_limit};
 
+use crate::cache_policy::{CacheDirective, CachePolicy};
 use crate::endpoint::TrustedEndpoint;
 
 /// Body field carrying the output-token bound.
@@ -156,10 +157,13 @@ pub struct EndpointProfile {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     /// Extension body fields merged into every request, e.g. reasoning shaping.
     pub extensions: Option<Value>,
-    /// Emit Anthropic-style `cache_control` breakpoints on stable prompt
-    /// planes. Opt-in because only Anthropic-compatible routes understand the
-    /// marker; text is never rewritten.
-    pub prompt_cache: bool,
+    /// Prompt-cache policy plus the route capabilities that gate it.
+    pub cache: CacheDirective,
+    /// Whether tool schemas accept the `strict` flag on this route.
+    pub tools_strict: bool,
+    /// Free-form tool input formats this route advertises (`text`, `lark`,
+    /// `regex`); empty when it advertises none.
+    pub freeform: Vec<String>,
     /// Catalog-declared context/output limits, when known.
     pub limits: Option<ModelLimits>,
     /// Explicit output-token override; still clamped to the catalog ceiling.
@@ -193,7 +197,9 @@ impl EndpointProfile {
             retry: RetryPolicy::none(),
             headers: Vec::new(),
             extensions: None,
-            prompt_cache: false,
+            cache: CacheDirective::disabled(),
+            tools_strict: false,
+            freeform: Vec::new(),
             limits: None,
             max_output_tokens: None,
             stream_usage: false,
@@ -237,10 +243,35 @@ impl EndpointProfile {
         self
     }
 
-    /// Enables Anthropic-style prompt-cache breakpoints for this route.
+    /// Sets the prompt-cache policy and route capabilities.
+    #[must_use]
+    pub fn with_cache(mut self, cache: CacheDirective) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Enables or disables the reference automatic cache policy.
+    ///
+    /// `enabled` keeps the route's declared capabilities and only switches the
+    /// placement policy, so a route without explicit caching still emits
+    /// nothing.
     #[must_use]
     pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
-        self.prompt_cache = enabled;
+        self.cache.policy = if enabled { CachePolicy::Auto } else { CachePolicy::None };
+        self
+    }
+
+    /// Sets whether tool schemas accept the `strict` flag.
+    #[must_use]
+    pub fn with_tools_strict(mut self, strict: bool) -> Self {
+        self.tools_strict = strict;
+        self
+    }
+
+    /// Sets the free-form tool input formats the route advertises.
+    #[must_use]
+    pub fn with_freeform(mut self, freeform: Vec<String>) -> Self {
+        self.freeform = freeform;
         self
     }
 

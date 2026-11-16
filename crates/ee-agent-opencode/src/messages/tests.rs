@@ -83,9 +83,9 @@ fn request_body_hoists_system_and_correlates_tool_results() {
     assert_eq!(body["model"], "kimi-k3");
     assert_eq!(body["system"][0]["text"], "system");
     assert_eq!(body["system"][1]["text"], "Memory facts:\ncwd: /work");
-    assert_eq!(
-        body["system"][1]["cache_control"]["type"], "ephemeral",
-        "the final system block closes the stable prefix"
+    assert!(
+        body["system"][1].get("cache_control").is_none(),
+        "the markerless builder places no breakpoints"
     );
     assert_eq!(body["max_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
     assert_eq!(body["stream"], false);
@@ -103,28 +103,100 @@ fn request_body_hoists_system_and_correlates_tool_results() {
     assert_eq!(body["tools"][0]["name"], "read_file");
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "path");
     assert_eq!(body["tools"][0]["description"], "reads a file");
+    assert!(
+        body["tools"][0].get("cache_control").is_none(),
+        "the markerless builder places no breakpoints"
+    );
+}
+
+/// Every `cache_control` marker in an assembled Messages body.
+fn cache_markers(body: &Value) -> Vec<Value> {
+    let mut markers = Vec::new();
+    for part in body["system"].as_array().into_iter().flatten() {
+        markers.extend(part.get("cache_control").cloned());
+    }
+    for tool in body["tools"].as_array().into_iter().flatten() {
+        markers.extend(tool.get("cache_control").cloned());
+    }
+    for message in body["messages"].as_array().into_iter().flatten() {
+        for block in message["content"].as_array().into_iter().flatten() {
+            markers.extend(block.get("cache_control").cloned());
+        }
+    }
+    markers
+}
+
+#[test]
+fn automatic_policy_places_the_four_reference_breakpoints() {
+    let tools: Vec<ToolDefinition> =
+        (0..10).map(|index| ToolDefinition::new(format!("tool_{index}"), "t")).collect();
+    let transcript = vec![
+        ModelMessage::text(ModelRole::System, "project rules"),
+        ModelMessage::text(ModelRole::User, "current request"),
+    ];
+    let cache = ee_chat_completions::CacheDirective::anthropic();
+    let body = messages_body(&MessagesBody {
+        model: "claude",
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &tools,
+        stream: false,
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        extensions: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        prompt_tokens: None,
+    });
+
+    assert_eq!(cache_markers(&body).len(), 4, "the API allows four breakpoints: {body}");
+    assert_eq!(body["tools"][9]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][1]["cache_control"]["type"], "ephemeral");
     assert_eq!(
-        body["tools"][0]["cache_control"]["type"], "ephemeral",
-        "the last tool schema is a cache boundary"
+        body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral",
+        "the conversation tail is the fourth breakpoint"
     );
 }
 
 #[test]
-fn cache_breakpoints_mark_only_the_last_pinned_instruction() {
-    let transcript = vec![
-        ModelMessage::text(ModelRole::User, "stable global").with_cache_breakpoint(),
-        ModelMessage::text(ModelRole::User, "workspace rules").with_cache_breakpoint(),
-        ModelMessage::text(ModelRole::User, "current request"),
-    ];
+fn manual_breakpoints_are_preserved_and_counted() {
+    let transcript: Vec<ModelMessage> = (0..5)
+        .map(|index| {
+            ModelMessage::text(ModelRole::User, format!("step {index}")).with_cache_breakpoint()
+        })
+        .collect();
+    let cache = ee_chat_completions::CacheDirective {
+        policy: ee_chat_completions::CachePolicy::Explicit(
+            ee_chat_completions::CachePolicyObject {
+                tools: false,
+                system: false,
+                messages: None,
+                ttl: None,
+            },
+        ),
+        ..ee_chat_completions::CacheDirective::anthropic()
+    };
+    let body = messages_body(&MessagesBody {
+        model: "claude",
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &[ToolDefinition::new("read_file", "reads a file")],
+        stream: false,
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        extensions: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        prompt_tokens: None,
+    });
 
-    let body =
-        request_body("claude", "system", &transcript, &[], false, DEFAULT_MAX_OUTPUT_TOKENS, None);
-
-    assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
-    let pinned = &body["messages"][1]["content"][0];
-    assert_eq!(pinned["text"], "workspace rules", "text is never rewritten");
-    assert_eq!(pinned["cache_control"]["type"], "ephemeral");
-    assert!(body["messages"][2]["content"][0].get("cache_control").is_none());
+    let markers = cache_markers(&body);
+    assert_eq!(markers.len(), 4, "manual markers are capped at four: {body}");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "step 1", "text is never rewritten");
+    assert_eq!(body["messages"][1]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert!(
+        body["messages"][4]["content"][0].get("cache_control").is_none(),
+        "the fifth manual marker is dropped instead of emitting an invalid request"
+    );
 }
 
 #[test]
@@ -551,4 +623,39 @@ fn assistant_tool_call_and_thinking_replay_before_its_result() {
     let observation = messages[1]["content"].as_array().expect("tool result blocks");
     assert_eq!(observation[0]["type"], "tool_result");
     assert_eq!(observation[0]["tool_use_id"], "tu-1", "the result must answer a replayed call");
+}
+
+#[test]
+fn tool_choice_lowers_to_the_anthropic_shape() {
+    let cache = ee_chat_completions::CacheDirective::disabled();
+    let build = |control: &ee_agent_orchestrator::ToolCallControl| {
+        messages_body(&MessagesBody {
+            model: "claude",
+            system_prompt: "system",
+            transcript: &transcript(),
+            tools: &definitions(),
+            stream: false,
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            extensions: None,
+            tool_control: control,
+            cache: &cache,
+            prompt_tokens: None,
+        })
+    };
+
+    assert_eq!(
+        build(&ee_agent_orchestrator::ToolCallControl::auto())["tool_choice"]["type"],
+        "auto"
+    );
+    assert_eq!(
+        build(&ee_agent_orchestrator::ToolCallControl::required())["tool_choice"]["type"],
+        "any"
+    );
+    let named = build(&ee_agent_orchestrator::ToolCallControl::named("read_file"));
+    assert_eq!(named["tool_choice"]["type"], "tool");
+    assert_eq!(named["tool_choice"]["name"], "read_file");
+
+    let parallel =
+        build(&ee_agent_orchestrator::ToolCallControl::auto().with_parallel(Some(false)));
+    assert_eq!(parallel["tool_choice"]["disable_parallel_tool_use"], true);
 }

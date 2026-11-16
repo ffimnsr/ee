@@ -287,6 +287,11 @@ pub struct OrchestratorConfig {
     /// turn. `0` disables continuation.
     #[serde(default = "default_output_continuations")]
     pub max_output_continuations: usize,
+    /// Whether the routed provider accepts a tool list that changes between
+    /// steps. Providers advertise this as `tools.updates`; the default `false`
+    /// fails closed instead of sending a change the route cannot honour.
+    #[serde(default)]
+    pub tool_list_updates: bool,
     /// Model context-window size in tokens; the ACP `usage_update.size`.
     pub context_window_tokens: u64,
     /// Stuck-detection thresholds for the loop engine.
@@ -392,6 +397,7 @@ impl Default for OrchestratorConfig {
             max_input_tokens: None,
             max_output_tokens: None,
             max_output_continuations: DEFAULT_MAX_OUTPUT_CONTINUATIONS,
+            tool_list_updates: false,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             stuck: StuckConfig::default(),
             reflection: ReflectionConfig::default(),
@@ -546,6 +552,7 @@ mod tests {
             max_input_tokens: Some(1000),
             max_output_tokens: Some(2000),
             max_output_continuations: 3,
+            tool_list_updates: true,
             context_window_tokens: 250_000,
             stuck: StuckConfig {
                 max_repeated_model_responses: 2,

@@ -372,7 +372,7 @@ pub mod test_support {
     use std::time::Duration;
 
     use ee_agent_acp_server::ProviderError;
-    use ee_chat_completions::{CompletionClient, decode_message};
+    use ee_chat_completions::{ChatRequest, CompletionClient, decode_message};
     use serde_json::{Value, json};
 
     use super::{Config, OpenRouterModelAdapter};
@@ -548,16 +548,13 @@ pub mod test_support {
 
         pub(crate) fn client(&self) -> Arc<CompletionClient> {
             let scripted = self.clone();
-            Arc::new(move |messages, tools| {
+            Arc::new(move |request: ChatRequest| {
                 let scripted = scripted.clone();
-                let messages = messages.to_vec();
-                let tools = tools.to_vec();
                 Box::pin(async move {
-                    scripted
-                        .bodies
-                        .lock()
-                        .expect("bodies poisoned")
-                        .push(json!({ "messages": messages, "tools": tools }));
+                    scripted.bodies.lock().expect("bodies poisoned").push(json!({
+                        "messages": request.messages,
+                        "tools": request.tools,
+                    }));
                     let response = scripted.next_response().await;
                     decode_message(&response).ok_or_else(|| {
                         ProviderError::BackendFailure(

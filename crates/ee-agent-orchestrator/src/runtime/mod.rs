@@ -39,7 +39,7 @@ pub(crate) use crate::final_response::{
     FinalResponse, FinalResponseBuilder, ValidationOutcome, ValidationRecorder,
     changed_files_from_log,
 };
-pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions};
+pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions, UntilPredicate};
 pub(crate) use crate::memory::{MemoryItem, MemoryStore};
 pub(crate) use crate::metrics::OrchestratorMetrics;
 pub(crate) use crate::model::{
@@ -232,6 +232,8 @@ pub struct OrchestratorRuntime {
     worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
     /// Bounded completed child transcripts for `resume_child_id`.
     transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
+    /// Optional loop stop predicate applied to every root turn.
+    until: Mutex<Option<UntilPredicate>>,
 }
 
 mod branch;

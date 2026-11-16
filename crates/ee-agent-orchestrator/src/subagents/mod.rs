@@ -681,6 +681,8 @@ impl ServerTool for DelegateTool {
             side_effect_subclass: None,
             host_approval: false,
             required_capabilities: Vec::new(),
+            strict: false,
+            format: None,
             dependency: ToolDependency::new().produces(vec![ToolDataClass::SubagentSummary]),
         }
     }

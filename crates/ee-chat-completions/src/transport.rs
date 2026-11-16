@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use ee_agent_acp_server::{Delivery, ProviderError};
+use ee_agent_orchestrator::ToolCallControl;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
@@ -315,6 +316,25 @@ impl<'a> EndpointRequest<'a> {
     }
 }
 
+/// One buffered round trip's wire inputs.
+///
+/// The adapter builds these from a normalized [`ModelRequest`] so tool-call
+/// control travels with the request instead of being fixed at profile build
+/// time.
+///
+/// [`ModelRequest`]: ee_agent_orchestrator::ModelRequest
+#[derive(Debug, Clone, Default)]
+pub struct ChatRequest {
+    /// Assembled chat messages.
+    pub messages: Vec<Value>,
+    /// Assembled tool schemas.
+    pub tools: Vec<Value>,
+    /// Tool-choice and parallel-call control.
+    pub tool_control: ToolCallControl,
+    /// Prompt size measured by the provider on the previous call, when known.
+    pub prompt_tokens: Option<u64>,
+}
+
 /// One Chat Completions endpoint: profile, bearer-token source, HTTP client.
 #[derive(Clone)]
 pub struct ChatCompletionsClient {
@@ -366,6 +386,41 @@ impl ChatCompletionsClient {
         self.transport.bearer_token()
     }
 
+    /// Builds the body for one wire request, including the request-level cache
+    /// lifetime on routes that place no inline markers.
+    fn body_for(&self, request: &ChatRequest, stream: bool) -> Value {
+        let profile = self.transport.profile();
+        let prompt = request.prompt_tokens.unwrap_or_else(|| {
+            ee_agent_orchestrator::estimate_json_prompt_tokens(
+                &Value::Array(request.messages.clone()),
+                &Value::Array(request.tools.clone()),
+            )
+        });
+        let mut body = request_body(
+            &profile.model,
+            &request.messages,
+            &request.tools,
+            crate::wire::RequestBodyOptions {
+                stream,
+                stream_usage: profile.stream_usage,
+                max_tokens: profile.fitted_output_limit(prompt),
+                max_tokens_field: profile.max_tokens_field,
+                tool_control: Some(&request.tool_control),
+                extensions: profile.extensions.as_ref(),
+            },
+        );
+        if let Some(Value::Object(ttl)) = crate::cache_policy::openai_request_ttl(&profile.cache)
+            && let Some(object) = body.as_object_mut()
+        {
+            // Provider extension fields win: only fill a lifetime the profile
+            // did not already set.
+            for (key, value) in ttl {
+                object.entry(key).or_insert(value);
+            }
+        }
+        body
+    }
+
     /// Performs one buffered round trip without retrying.
     ///
     /// # Errors
@@ -393,25 +448,26 @@ impl ChatCompletionsClient {
         tools: &[Value],
         prompt_tokens: Option<u64>,
     ) -> Result<AssistantTurn, ProviderError> {
-        let profile = self.transport.profile();
-        let prompt = prompt_tokens.unwrap_or_else(|| {
-            ee_agent_orchestrator::estimate_json_prompt_tokens(
-                &Value::Array(messages.to_vec()),
-                &Value::Array(tools.to_vec()),
-            )
-        });
-        let body = request_body(
-            &profile.model,
-            messages,
-            tools,
-            crate::wire::RequestBodyOptions {
-                stream: false,
-                stream_usage: profile.stream_usage,
-                max_tokens: profile.fitted_output_limit(prompt),
-                max_tokens_field: profile.max_tokens_field,
-                extensions: profile.extensions.as_ref(),
-            },
-        );
+        self.complete_request_once(&ChatRequest {
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            tool_control: ToolCallControl::auto(),
+            prompt_tokens,
+        })
+        .await
+    }
+
+    /// Performs one buffered round trip without retrying.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ProviderError`] for transport, status, or shape
+    /// failures.
+    pub async fn complete_request_once(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<AssistantTurn, ProviderError> {
+        let body = self.body_for(request, false);
         let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
         let value = self.transport.read_json(&mut response, "response").await?;
         decode_message(&value).ok_or_else(|| {
@@ -447,10 +503,26 @@ impl ChatCompletionsClient {
         tools: &[Value],
         prompt_tokens: Option<u64>,
     ) -> Result<AssistantTurn, ProviderError> {
-        with_buffered_retry(&self.transport.profile().retry, || {
-            self.complete_once_with_prompt(messages, tools, prompt_tokens)
+        self.complete_request(&ChatRequest {
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            tool_control: ToolCallControl::auto(),
+            prompt_tokens,
         })
         .await
+    }
+
+    /// Performs one buffered round trip under the profile's retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last typed failure once the retry budget is exhausted.
+    pub async fn complete_request(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<AssistantTurn, ProviderError> {
+        with_buffered_retry(&self.transport.profile().retry, || self.complete_request_once(request))
+            .await
     }
 
     /// Performs one streaming round trip without retrying.
@@ -482,7 +554,30 @@ impl ChatCompletionsClient {
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
     ) -> Result<AssistantTurn, ProviderError> {
-        let mut attempt = HttpStreamAttempt { client: self, messages, tools, prompt_tokens };
+        self.complete_streaming_request_once(
+            &ChatRequest {
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+                tool_control: ToolCallControl::auto(),
+                prompt_tokens,
+            },
+            sink,
+        )
+        .await
+    }
+
+    /// Performs one streaming round trip without retrying.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ProviderError`] for transport, status, or decode
+    /// failures.
+    pub async fn complete_streaming_request_once(
+        &self,
+        request: &ChatRequest,
+        sink: DeltaSink<'_>,
+    ) -> Result<AssistantTurn, ProviderError> {
+        let mut attempt = HttpStreamAttempt { client: self, request };
         attempt.run(sink).await
     }
 
@@ -517,38 +612,43 @@ impl ChatCompletionsClient {
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
     ) -> Result<AssistantTurn, ProviderError> {
-        let mut attempt = HttpStreamAttempt { client: self, messages, tools, prompt_tokens };
+        self.complete_streaming_request(
+            &ChatRequest {
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+                tool_control: ToolCallControl::auto(),
+                prompt_tokens,
+            },
+            sink,
+        )
+        .await
+    }
+
+    /// Performs one streaming round trip under the profile's retry policy.
+    ///
+    /// A retry happens only when no delta reached `sink` yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last typed failure once the retry budget is exhausted.
+    pub async fn complete_streaming_request(
+        &self,
+        request: &ChatRequest,
+        sink: DeltaSink<'_>,
+    ) -> Result<AssistantTurn, ProviderError> {
+        let mut attempt = HttpStreamAttempt { client: self, request };
         with_stream_retry(&self.transport.profile().retry, sink, &mut attempt).await
     }
 
     /// Streams one response, decoding SSE events as they arrive.
     async fn send_streaming(
         &self,
-        messages: &[Value],
-        tools: &[Value],
+        request: &ChatRequest,
         sink: DeltaSink<'_>,
-        prompt_tokens: Option<u64>,
     ) -> Result<AssistantTurn, ProviderError> {
         let profile = self.transport.profile();
         let label = profile.label.as_str();
-        let prompt = prompt_tokens.unwrap_or_else(|| {
-            ee_agent_orchestrator::estimate_json_prompt_tokens(
-                &Value::Array(messages.to_vec()),
-                &Value::Array(tools.to_vec()),
-            )
-        });
-        let body = request_body(
-            &profile.model,
-            messages,
-            tools,
-            crate::wire::RequestBodyOptions {
-                stream: true,
-                stream_usage: profile.stream_usage,
-                max_tokens: profile.fitted_output_limit(prompt),
-                max_tokens_field: profile.max_tokens_field,
-                extensions: profile.extensions.as_ref(),
-            },
-        );
+        let body = self.body_for(request, true);
         let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
         let headers = response.headers().clone();
         if !is_event_stream(&headers) {
@@ -581,14 +681,12 @@ impl ChatCompletionsClient {
 /// One real streaming attempt for [`ChatCompletionsClient`].
 struct HttpStreamAttempt<'a> {
     client: &'a ChatCompletionsClient,
-    messages: &'a [Value],
-    tools: &'a [Value],
-    prompt_tokens: Option<u64>,
+    request: &'a ChatRequest,
 }
 
 impl StreamAttempt<AssistantTurn> for HttpStreamAttempt<'_> {
     fn run<'a>(&'a mut self, sink: DeltaSink<'a>) -> StreamFuture<'a, AssistantTurn> {
-        Box::pin(self.client.send_streaming(self.messages, self.tools, sink, self.prompt_tokens))
+        Box::pin(self.client.send_streaming(self.request, sink))
     }
 }
 

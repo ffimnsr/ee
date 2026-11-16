@@ -292,6 +292,9 @@ mod tests {
             available_models: Vec::new(),
             model_id: None,
             prompt_tokens: None,
+            tool_control: crate::model_options::ToolCallControl::auto(),
+            response_format: None,
+            allow_tool_list_updates: false,
         }
     }
 

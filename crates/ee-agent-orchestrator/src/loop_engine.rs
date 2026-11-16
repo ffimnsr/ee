@@ -34,7 +34,7 @@ use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
 use crate::model::{
-    ModelAdapter, ModelMessage, ModelRequest, ModelRole, ModelUsage, Transcript,
+    ModelAdapter, ModelMessage, ModelRequest, ModelResponse, ModelRole, ModelUsage, Transcript,
     prompt_result_with_usage,
 };
 use crate::model_registry::ModelInfo;
@@ -126,7 +126,15 @@ pub(crate) struct LoopOptions {
     pub decisions: Option<Arc<Mutex<crate::decision_log::DecisionLog>>>,
     /// Opt-in approval risk classifier; `None` leaves host approval unchanged.
     pub approval_classifier: Option<Arc<crate::approval_classifier::ApprovalClassifier>>,
+    /// Optional loop stop predicate, evaluated after each step with the steps so
+    /// far. Returning `true` ends the turn with the normal final response
+    /// instead of relying on an iteration cap.
+    pub until: Option<UntilPredicate>,
+    /// Structured-output request; the hidden forced tool is added per step.
+    pub response_format: Option<crate::model_options::ResponseFormat>,
 }
+
+pub use crate::loop_hooks::{UntilFn, UntilPredicate};
 
 impl Default for LoopOptions {
     fn default() -> Self {
@@ -152,6 +160,8 @@ impl Default for LoopOptions {
             workspace_remap: None,
             decisions: None,
             approval_classifier: None,
+            until: None,
+            response_format: None,
         }
     }
 }
@@ -420,6 +430,11 @@ impl LoopEngine {
         // with unknown usage are skipped, never counted as zero.
         let mut turn_usage = ModelUsage::new();
         let mut observed_web_sources = HashSet::new();
+        // Steps completed this turn, for the optional stop predicate.
+        let mut step_responses: Vec<ModelResponse> = Vec::new();
+        // First step's tool list; a mid-turn change is refused on routes that do
+        // not advertise `tools.updates`.
+        let mut first_tool_names: Option<Vec<String>> = None;
 
         loop {
             if *cancel.borrow() {
@@ -457,6 +472,22 @@ impl LoopEngine {
                 })
                 .collect();
             let evidence_capabilities = crate::stop_gate::evidence_capabilities_for(&tools);
+            crate::model_options::validate_tool_names(&tools)
+                .map_err(OrchestratorError::ModelFailure)?;
+            let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+            if let Some(first) = &first_tool_names {
+                if let Some(changed) = crate::model_options::tool_list_change(first, &tool_names)
+                    && !self.config.tool_list_updates
+                {
+                    return Err(OrchestratorError::ModelFailure(format!(
+                        "the advertised tool list changed mid-conversation ({changed}); the routed \
+                         provider does not accept tool-list updates, so freeze the registry for the \
+                         turn or advertise `tools.updates`"
+                    )));
+                }
+            } else {
+                first_tool_names = Some(tool_names);
+            }
 
             self.events.record(OrchestratorEvent::StepStarted {
                 session_id: session_id.to_string(),
@@ -492,7 +523,12 @@ impl LoopEngine {
                 ModelRequest::new(prepared.messages, tools.clone(), budget_snapshot, task.clone())
                     .with_available_models(self.options.available_models.clone())
                     .with_model_id(self.options.model_id.clone())
-                    .with_prompt_tokens(measured_prompt_tokens);
+                    .with_prompt_tokens(measured_prompt_tokens)
+                    .with_response_format(self.options.response_format.clone());
+            // Structured output is protocol-independent: a hidden tool carries
+            // the schema and the forced choice makes the model call it.
+            crate::structured_output::prepare(&mut request)
+                .map_err(OrchestratorError::ModelFailure)?;
             // Fail closed before the model call: every model-visible message
             // and the effective request must be durable first.
             if let Err(error) = transcript.record_model_request(&request) {
@@ -544,7 +580,10 @@ impl LoopEngine {
                         )
                         .with_available_models(self.options.available_models.clone())
                         .with_model_id(self.options.model_id.clone())
-                        .with_prompt_tokens(None);
+                        .with_prompt_tokens(None)
+                        .with_response_format(self.options.response_format.clone());
+                        crate::structured_output::prepare(&mut request)
+                            .map_err(OrchestratorError::ModelFailure)?;
                     }
                     Err(error) => {
                         self.events.record(OrchestratorEvent::Error { error: error.to_string() });
@@ -555,6 +594,11 @@ impl LoopEngine {
             self.events.record(OrchestratorEvent::ModelResponded {
                 iteration: budget_snapshot.iterations_used,
             });
+            // A structured-output step decodes the hidden tool's arguments and
+            // removes the call so the loop never executes it.
+            let mut response = response;
+            crate::structured_output::take_object(&request, &mut response)
+                .map_err(OrchestratorError::ModelFailure)?;
             if let Some(reason) = detector.observe_model_response(&response) {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
             }
@@ -590,6 +634,13 @@ impl LoopEngine {
             // Model response before tools: persist the assistant turn so an
             // interruption after tools leaves a durable transcript tail.
             self.capture_checkpoint(transcript, track, task, false).await;
+
+            // A caller-supplied predicate can end the loop here, after the step
+            // is durable and before any tool runs.
+            step_responses.push(response.clone());
+            if self.options.until.as_ref().is_some_and(|until| until.is_met(&step_responses)) {
+                return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
+            }
 
             // Feed the measured prompt size into the next round so the adapter
             // can fit its output bound to the room left in the window.
@@ -1164,6 +1215,16 @@ mod tests {
         tool: Arc<dyn ServerTool>,
         events: EventRecorder,
     ) -> LoopEngine {
+        engine_with_options(config, model, tool, events, LoopOptions::default())
+    }
+
+    fn engine_with_options(
+        config: OrchestratorConfig,
+        model: Arc<dyn ModelAdapter>,
+        tool: Arc<dyn ServerTool>,
+        events: EventRecorder,
+        options: LoopOptions,
+    ) -> LoopEngine {
         let tools = Arc::new(Mutex::new(ToolRegistry::new()));
         tools.lock().expect("tool registry poisoned").register(tool).expect("registers tool");
         let budget = Arc::new(Mutex::new(BudgetTracker::new(&config)));
@@ -1174,8 +1235,83 @@ mod tests {
             budget,
             crate::policy::PolicyEngine::default(),
             events,
-            LoopOptions::default(),
+            options,
         )
+    }
+
+    #[tokio::test]
+    async fn until_hook_ends_the_loop_after_the_named_step() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))]),
+            ModelResponse::new().text("second step").completed(),
+        ]);
+        let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let options = LoopOptions {
+            until: Some(UntilPredicate::new(|steps| steps.len() == 1)),
+            ..LoopOptions::default()
+        };
+        let engine = engine_with_options(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events,
+            options,
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn completes");
+
+        assert_eq!(model.call_count(), 1, "the predicate stopped the loop after one step");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn structured_output_uses_the_hidden_forced_tool() {
+        let model = FakeModel::new(vec![ModelResponse::new().tool_intents(vec![ToolIntent::new(
+            "tc-1",
+            crate::structured_output::OBJECT_TOOL,
+            json!({ "risk": "low" }),
+        )])]);
+        let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let options = LoopOptions {
+            response_format: Some(crate::model_options::ResponseFormat::JsonSchema {
+                name: String::from("verdict"),
+                schema: json!({ "type": "object", "required": ["risk"] }),
+                strict: true,
+            }),
+            ..LoopOptions::default()
+        };
+        let engine = engine_with_options(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events,
+            options,
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn completes");
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(model.call_count(), 1, "the hidden call is decoded, never executed");
+        let request = &model.requests()[0];
+        assert_eq!(
+            request.tools.last().expect("hidden tool").name,
+            crate::structured_output::OBJECT_TOOL
+        );
+        assert_eq!(
+            request.tool_control.choice,
+            crate::model_options::ToolChoice::Required,
+            "other tools are advertised, so the model must call a tool"
+        );
     }
 
     #[tokio::test]

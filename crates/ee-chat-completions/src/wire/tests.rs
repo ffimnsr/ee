@@ -1,10 +1,17 @@
 use std::time::Duration;
 
-use ee_agent_orchestrator::{ModelMessage, ModelRole, SideEffectClass, ToolResult};
+use ee_agent_orchestrator::{
+    ModelMessage, ModelRole, SideEffectClass, ToolCallControl, ToolDefinition, ToolFormat,
+    ToolResult,
+};
 use reqwest::header::HeaderMap;
 use serde_json::json;
 
 use super::*;
+use crate::cache_policy::{
+    CacheDirective, CacheFormat, CacheMessageStrategy, CachePolicy, CachePolicyObject,
+    CacheSupport, CacheTargets,
+};
 use crate::profile::RetryPolicy;
 
 #[test]
@@ -179,6 +186,7 @@ fn request_body_requests_stream_usage_and_output_bound() {
             stream_usage: true,
             max_tokens: Some(1_234),
             max_tokens_field: crate::profile::MaxTokensField::MaxCompletionTokens,
+            tool_control: None,
             extensions: None,
         },
     );
@@ -834,4 +842,160 @@ fn assistant_tool_calls_replay_before_their_observations() {
     assert_eq!(assistant["reasoning_details"][0]["index"], 0);
     assert_eq!(messages[3]["role"], "tool");
     assert_eq!(messages[3]["tool_call_id"], "call_1");
+}
+
+// ── Cache policy ─────────────────────────────────────────────────────
+
+fn system(text: &str) -> ModelMessage {
+    ModelMessage::text(ModelRole::System, text)
+}
+
+fn user(text: &str) -> ModelMessage {
+    ModelMessage::text(ModelRole::User, text)
+}
+
+fn definitions(count: usize) -> Vec<ToolDefinition> {
+    (0..count).map(|index| ToolDefinition::new(format!("tool_{index}"), "t")).collect()
+}
+
+fn chat_parts(
+    transcript: &[ModelMessage],
+    tools: &[ToolDefinition],
+    cache: &CacheDirective,
+) -> (Vec<Value>, Vec<Value>) {
+    chat_request_parts(&ChatRequestParts {
+        system_prompt: "system",
+        transcript,
+        definitions: tools,
+        cache,
+        model: "model-a",
+        reasoning_field: None,
+        tools_strict: false,
+        freeform: &[],
+        prompt_tokens: None,
+    })
+}
+
+fn markers(messages: &[Value], tools: &[Value]) -> usize {
+    let mut count = 0;
+    for message in messages {
+        if let Some(parts) = message["content"].as_array() {
+            count += parts.iter().filter(|part| part.get("cache_control").is_some()).count();
+        }
+    }
+    count + tools.iter().filter(|tool| tool.get("cache_control").is_some()).count()
+}
+
+#[test]
+fn automatic_policy_places_exactly_four_breakpoints() {
+    let transcript = vec![system("project rules"), user("current request")];
+    let tools = definitions(10);
+    let (messages, tools) = chat_parts(&transcript, &tools, &CacheDirective::anthropic());
+
+    assert_eq!(markers(&messages, &tools), 4);
+    assert_eq!(tools[9]["cache_control"]["type"], "ephemeral");
+    assert!(tools[8].get("cache_control").is_none());
+    assert_eq!(messages[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(messages[1]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(messages[2]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(messages[2]["content"][0]["text"], "current request");
+}
+
+#[test]
+fn alibaba_routes_skip_tool_breakpoints() {
+    let transcript = vec![user("current request")];
+    let tools = definitions(3);
+    let cache = CacheDirective {
+        policy: CachePolicy::Explicit(CachePolicyObject {
+            tools: true,
+            system: true,
+            messages: Some(CacheMessageStrategy::Tail(1)),
+            ttl: None,
+        }),
+        support: CacheSupport {
+            targets: CacheTargets::SYSTEM_AND_MESSAGES,
+            ..CacheSupport::ANTHROPIC
+        },
+        format: CacheFormat::Alibaba,
+    };
+    let (messages, tools) = chat_parts(&transcript, &tools, &cache);
+
+    assert!(tools.iter().all(|tool| tool.get("cache_control").is_none()));
+    assert_eq!(messages[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(messages[1]["content"][0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn a_policy_without_breakpoints_places_none() {
+    let transcript = vec![user("current request")];
+    let (messages, tools) = chat_parts(&transcript, &definitions(2), &CacheDirective::disabled());
+    assert_eq!(markers(&messages, &tools), 0);
+}
+
+#[test]
+fn configured_ttl_lands_on_every_marker() {
+    let cache = CacheDirective {
+        policy: CachePolicy::Explicit(CachePolicyObject::auto().with_ttl(Some(String::from("1h")))),
+        ..CacheDirective::anthropic()
+    };
+    let (messages, tools) = chat_parts(&[user("hi")], &definitions(1), &cache);
+
+    assert_eq!(tools[0]["cache_control"]["ttl"], "1h");
+    assert_eq!(messages[1]["content"][0]["cache_control"]["ttl"], "1h");
+    assert_eq!(messages[0]["content"][0]["cache_control"]["ttl"], "1h");
+}
+
+// ── Tool-call control and structured tools ───────────────────────────
+
+fn body_with(control: &ToolCallControl, tools: &[Value]) -> Value {
+    request_body(
+        "m",
+        &[],
+        tools,
+        RequestBodyOptions {
+            stream: false,
+            stream_usage: false,
+            max_tokens: None,
+            max_tokens_field: crate::profile::MaxTokensField::MaxTokens,
+            tool_control: Some(control),
+            extensions: None,
+        },
+    )
+}
+
+#[test]
+fn tool_choice_and_parallel_are_only_sent_with_tools() {
+    let tools = tools_from_definitions(&definitions(1));
+    let body = body_with(&ToolCallControl::auto(), &tools);
+    assert_eq!(body["tool_choice"], "auto");
+    assert!(body.get("parallel_tool_calls").is_none(), "unset by default");
+
+    let body = body_with(&ToolCallControl::auto().with_parallel(Some(false)), &tools);
+    assert_eq!(body["parallel_tool_calls"], false);
+
+    let body = body_with(&ToolCallControl::required(), &tools);
+    assert_eq!(body["tool_choice"], "required");
+
+    let body = body_with(&ToolCallControl::named("read_file"), &tools);
+    assert_eq!(body["tool_choice"]["function"]["name"], "read_file");
+
+    let empty = body_with(&ToolCallControl::named("read_file"), &[]);
+    assert!(empty.get("tool_choice").is_none(), "never without tools");
+    assert!(empty.get("parallel_tool_calls").is_none());
+}
+
+#[test]
+fn strict_and_freeform_tools_follow_route_capabilities() {
+    let strict = ToolDefinition::new("a", "a").strict();
+    let grammar = ToolDefinition::new("b", "b")
+        .format(ToolFormat::Lark { definition: String::from("start: /x/") });
+
+    let unsupported = tools_from_definitions_with(&[strict.clone(), grammar.clone()], false, &[]);
+    assert!(unsupported[0]["function"].get("strict").is_none());
+    assert_eq!(unsupported[1]["type"], "function", "a grammar tool degrades to a function");
+
+    let supported = tools_from_definitions_with(&[strict, grammar], true, &[String::from("lark")]);
+    assert_eq!(supported[0]["function"]["strict"], true);
+    assert_eq!(supported[1]["type"], "custom");
+    assert_eq!(supported[1]["custom"]["format"]["grammar"]["syntax"], "lark");
 }

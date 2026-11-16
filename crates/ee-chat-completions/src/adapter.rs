@@ -13,15 +13,13 @@ use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, StreamSink,
 };
-use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::native::seal_response;
 use crate::profile::{EndpointProfile, TokenSource};
-use crate::transport::ChatCompletionsClient;
+use crate::transport::{ChatCompletionsClient, ChatRequest};
 use crate::wire::{
-    AssistantTurn, StreamDelta, messages_from_transcript_replaying, response_from_turn,
-    tools_from_definitions,
+    AssistantTurn, ChatRequestParts, StreamDelta, chat_request_parts, response_from_turn,
 };
 
 /// Boxed future returned by an injected completion client.
@@ -30,12 +28,12 @@ pub type CompletionFuture =
 
 /// One buffered round trip, injectable so tests never need a network.
 ///
-/// Arguments are `(messages, tools)`; the transport that serves them is bound
-/// when the adapter is built.
-pub type CompletionClient = dyn Fn(&[Value], &[Value]) -> CompletionFuture + Send + Sync;
+/// The request carries the assembled messages and tools plus the tool-call
+/// control, so a caller can force a tool without rebuilding the profile.
+pub type CompletionClient = dyn Fn(ChatRequest) -> CompletionFuture + Send + Sync;
 
 /// One streaming round trip, injectable so tests never need a network.
-pub type StreamingClient = dyn Fn(&[Value], &[Value], StreamSink) -> CompletionFuture + Send + Sync;
+pub type StreamingClient = dyn Fn(ChatRequest, StreamSink) -> CompletionFuture + Send + Sync;
 
 /// Chat Completions as a normalized [`ModelAdapter`].
 pub struct ChatCompletionsAdapter {
@@ -89,17 +87,13 @@ impl ChatCompletionsAdapter {
     ) -> Self {
         let label = profile.label.clone();
         let buffered = client.clone();
-        let completion: Arc<CompletionClient> = Arc::new(move |messages, tools| {
+        let completion: Arc<CompletionClient> = Arc::new(move |request| {
             let client = buffered.clone();
-            let messages = messages.to_vec();
-            let tools = tools.to_vec();
-            Box::pin(async move { client.complete(&messages, &tools).await })
+            Box::pin(async move { client.complete_request(&request).await })
         });
         let forwarding = client;
-        let streaming: Arc<StreamingClient> = Arc::new(move |messages, tools, events| {
+        let streaming: Arc<StreamingClient> = Arc::new(move |request, events| {
             let client = forwarding.clone();
-            let messages = messages.to_vec();
-            let tools = tools.to_vec();
             let label = label.clone();
             Box::pin(async move {
                 let mut sink = |delta: StreamDelta| match delta {
@@ -114,7 +108,7 @@ impl ChatCompletionsAdapter {
                         ))
                     }),
                 };
-                client.complete_streaming(&messages, &tools, &mut sink).await
+                client.complete_streaming_request(&request, &mut sink).await
             })
         });
         Self { profile, token, completion, streaming: Some(streaming) }
@@ -137,16 +131,9 @@ impl ModelAdapter for ChatCompletionsAdapter {
             // The credential is checked before any request body exists, and the
             // message names the provider's own environment variable.
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript_replaying(
-                &profile.system_prompt,
-                &request.transcript,
-                profile.prompt_cache,
-                &profile.model,
-                profile.reasoning_field.as_deref(),
-            );
-            let tools = tools_from_definitions(&request.tools);
+            let request = wire_request(&profile, &request)?;
             let answer = tokio::select! {
-                answer = completion(&messages, &tools) => {
+                answer = completion(request) => {
                     answer.map_err(ModelError::Provider)?
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
@@ -183,16 +170,9 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 return Err(ModelError::Cancelled);
             }
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript_replaying(
-                &profile.system_prompt,
-                &request.transcript,
-                profile.prompt_cache,
-                &profile.model,
-                profile.reasoning_field.as_deref(),
-            );
-            let tools = tools_from_definitions(&request.tools);
+            let wire = wire_request(&profile, &request)?;
             let answer = tokio::select! {
-                answer = streaming(&messages, &tools, events) => {
+                answer = streaming(wire, events) => {
                     answer.map_err(ModelError::Provider)?
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
@@ -200,6 +180,36 @@ impl ModelAdapter for ChatCompletionsAdapter {
             Ok(seal_response(response_from_turn(answer), &profile.model))
         })
     }
+}
+
+/// Builds the wire request for one normalized request.
+///
+/// Tool definitions and tool-call control are validated before any body
+/// exists, so a duplicate name or an unknown forced tool is a local
+/// configuration error rather than a billable provider failure.
+fn wire_request(
+    profile: &EndpointProfile,
+    request: &ModelRequest,
+) -> Result<ChatRequest, ModelError> {
+    ee_agent_orchestrator::validate_tool_names(&request.tools).map_err(ModelError::Adapter)?;
+    request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+    let (messages, tools) = chat_request_parts(&ChatRequestParts {
+        system_prompt: &profile.system_prompt,
+        transcript: &request.transcript,
+        definitions: &request.tools,
+        cache: &profile.cache,
+        model: &profile.model,
+        reasoning_field: profile.reasoning_field.as_deref(),
+        tools_strict: profile.tools_strict,
+        freeform: &profile.freeform,
+        prompt_tokens: request.prompt_tokens,
+    });
+    Ok(ChatRequest {
+        messages,
+        tools,
+        tool_control: request.tool_control.clone(),
+        prompt_tokens: request.prompt_tokens,
+    })
 }
 
 /// Resolves when the cancellation signal flips, so every model call stays
@@ -225,7 +235,7 @@ mod tests {
     use ee_agent_orchestrator::{
         BudgetTracker, OrchestratorConfig, SideEffectClass, TaskId, TaskNode, ToolDefinition,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::endpoint::TrustedEndpoint;
@@ -270,15 +280,13 @@ mod tests {
     async fn injected_completion_receives_normalized_messages_and_tools() {
         let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = seen.clone();
-        let completion: Arc<CompletionClient> = Arc::new(move |messages, tools| {
+        let completion: Arc<CompletionClient> = Arc::new(move |request: ChatRequest| {
             let recorder = recorder.clone();
-            let messages = messages.to_vec();
-            let tools = tools.to_vec();
             Box::pin(async move {
-                recorder
-                    .lock()
-                    .expect("seen")
-                    .push(json!({ "messages": messages, "tools": tools }));
+                recorder.lock().expect("seen").push(json!({
+                    "messages": request.messages,
+                    "tools": request.tools,
+                }));
                 Ok(AssistantTurn {
                     content: String::from("answer"),
                     reasoning: String::from("thinking"),
@@ -318,7 +326,7 @@ mod tests {
     async fn missing_credential_fails_before_the_client_runs() {
         let calls = Arc::new(Mutex::new(0usize));
         let counter = calls.clone();
-        let completion: Arc<CompletionClient> = Arc::new(move |_messages, _tools| {
+        let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
             let counter = counter.clone();
             Box::pin(async move {
                 *counter.lock().expect("calls") += 1;
@@ -348,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_is_observed_before_the_request() {
         let completion: Arc<CompletionClient> =
-            Arc::new(|_messages, _tools| Box::pin(async { panic!("must not be called") }));
+            Arc::new(|_request: ChatRequest| Box::pin(async { panic!("must not be called") }));
         let adapter = ChatCompletionsAdapter::with_completion(profile(), token(), completion);
         let (_cancel_tx, cancel) = watch::channel(true);
 
@@ -359,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_without_a_streaming_client_emits_the_finished_answer_once() {
-        let completion: Arc<CompletionClient> = Arc::new(|_messages, _tools| {
+        let completion: Arc<CompletionClient> = Arc::new(|_request: ChatRequest| {
             Box::pin(async {
                 Ok(AssistantTurn {
                     content: String::from("answer"),

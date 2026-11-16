@@ -1756,13 +1756,14 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 6 — Prompt Cache Policy Parity
 
-- [ ] Apply an automatic, per-provider cache policy with bounded breakpoints instead of name-sniffed Anthropic enablement.
-  - [ ] **Problem:**
+- [x] Apply an automatic, per-provider cache policy with bounded breakpoints instead of name-sniffed Anthropic enablement.
+- [x] **Landed (Gap 6):** `ee-chat-completions::cache_policy` owns the plan: `CachePolicy`/`CachePolicyObject`/`CacheDirective`, `plan()` with a four-breakpoint cap, `CacheFormat::{Anthropic,Alibaba}`, `cache_control`, `openai_request_ttl`, `warn_dropped`, `gateway_policy`, `parse_policy`/`parse_ttl`. Chat assembly moved to `ee-chat-completions/src/request.rs` (`chat_request_parts`) so tool/system/message planes share one budget; the Messages codec plans the same way. OpenCode uses `OPENCODE_CACHE_POLICY`/`OPENCODE_CACHE_TTL`, OpenRouter `OPENROUTER_CACHE_POLICY`/`OPENROUTER_CACHE_TTL`; Responses routes advertise implicit caching only. Divergence: TTL values are validated by duration format rather than a per-provider allowlist, because the catalog carries no TTL inventory.
+  - [x] **Problem:**
     - `crates/ee-agent-openrouter/src/openrouter.rs::supports_anthropic_prompt_cache` enables breakpoints when the model id starts with `anthropic/` or contains `claude`; every other OpenRouter route gets none, including routes that cache well (Qwen) and routes served through Anthropic-compatible upstreams under other aliases (`~anthropic/...`).
     - `ee-chat-completions::messages_from_transcript_with_cache` places a breakpoint on the system prompt and on messages explicitly marked `ee_cache_breakpoint`. There is no tool breakpoint, no first/last system-part split, no conversation-tail breakpoint, and no 4-breakpoint budget accounting.
     - The Messages codec places breakpoints on the last system block and last tool only; there is no tail breakpoint, so long tool loops rewrite the whole conversation prefix each step.
     - TTL and cache format (`anthropic` vs `alibaba`) are not expressible, and cache hits therefore cannot be tuned per provider.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Port the reference policy model: a `CachePolicyObject { tools, system, messages }` with `auto` defaults (last tool, first and last system part, conversation tail), a 4-breakpoint cap that counts existing manual hints, and `none` to disable.
     - Add a per-provider policy table: Anthropic-family routes get auto; Qwen-family routes get system + tail only; other OpenRouter routes get none; allow catalog/provider overrides.
     - Support `ttl` on emitted `cache_control` and a per-provider cache format so `alibaba` routes skip tool-definition breakpoints.
@@ -1771,7 +1772,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
     - Gate cache markers on `capabilities.cache` (`implicit`/`explicit`, allowed `ttl` values, `minTokens`, `maxBreakpoints`, `targets`) and skip the policy pass entirely for protocols that ignore inline markers, matching `packages/ai/src/cache-policy.ts:59-70,230-245`.
     - Lower TTL in the field the protocol documents: OpenAI Responses/Chat uses `prompt_cache_retention: "24h"` for a 24-hour lifetime and `prompt_cache_options.ttl` otherwise (`packages/ai/src/protocols/utils/cache.ts:34-42`); Messages and OpenRouter carry `cache_control.ttl`.
     - Emit one bounded warning when breakpoints exceed the cap, including the dropped count (`packages/ai/src/protocols/utils/cache.ts::warnDropped`).
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - An Anthropic-route request with 10 tools and a long transcript carries exactly 4 breakpoints: last tool, first system part, last system part, and the tail message.
     - A non-Anthropic, non-Qwen OpenRouter route carries none.
     - A Qwen route carries system + tail only and no tool breakpoint.
@@ -1783,12 +1784,13 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 7 — Tool-Call Control and Structured Output
 
-- [ ] Give the request builder the tool controls and structured-output fields the reference agent supports.
-  - [ ] **Problem:**
+- [x] Give the request builder the tool controls and structured-output fields the reference agent supports.
+- [x] **Landed (Gap 7):** `ModelRequest` gained `tool_control` (`ToolChoice::{Auto,None,Required,Tool}` + `parallel`), `response_format`, and `allow_tool_list_updates`; `ToolDefinition` gained `strict` and `format` (`ToolFormat::{Text,Lark,Regex}`). Chat Completions, OpenAI Responses, and Anthropic Messages lower the control to their own field; `tools_from_definitions_with` emits `strict`/freeform only when the profile's route advertises them. Structured output uses the portable hidden `generate_object` tool (`ee-agent-orchestrator::structured_output`) with the approval classifier as the first consumer. Duplicate names fail before send; a mid-conversation tool-list change is rejected unless `OrchestratorConfig::tool_list_updates` is set; `UntilPredicate` (`OrchestratorRuntime::set_until_hook`) ends a loop deterministically. Divergences: Responses `allowed_tools` and native `response_format`/`text.format` are not emitted (the catalog advertises no per-model native-formatting flag, and the hidden-tool path is what the reference relies on), so a request never fails for lacking native structured output.
+  - [x] **Problem:**
     - `request_body` hardcodes `tool_choice: "auto"`. There is no way to require a tool, forbid tools, or name a specific tool, and no `parallel_tool_calls` flag even though the orchestrator runs up to `DEFAULT_MAX_PARALLEL_TOOLS = 10` independent read-only tools (`crates/ee-agent-orchestrator/src/config.rs:51`).
     - `ToolDefinition` (`crates/ee-agent-orchestrator/src/tools.rs:117`) carries only `name`, `description`, `input_schema`, and policy metadata; there is no `strict` flag and no freeform/grammar tool form, so schema-strict models cannot be satisfied and grammar tools (`lark`/`regex`) cannot be advertised.
     - No structured-output field is emitted anywhere (`response_format` / `text.format`), so a caller that needs a JSON object must prompt for it.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a `ToolCallControl` to `ModelRequest`: `choice` (`auto`, `none`, `required`, `tool { name }`), `parallel: Option<bool>`, and adapters emit the dialect-native field (`tool_choice`, `parallel_tool_calls`, Responses `allowed_tools` where supported).
     - Add `strict: bool` and an optional `format` (`text`, `lark`, `regex`) to `ToolDefinition`, with adapters emitting them only when the catalog advertises support (`tools.strict`, `tools.freeform`).
     - Default `parallel` to unset (do not send the field) so strict providers do not reject unknown fields, matching the reference default-off behavior.
@@ -1797,7 +1799,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
     - Reject duplicate tool names before sending, as the reference does (`packages/ai/src/llm.ts:264-271`); a duplicate is a configuration error, not a provider error.
     - Support mid-conversation tool-list changes only when the catalog advertises `tools.updates`; otherwise freeze the tool list for the session and document it.
     - Model the reference's loop stop predicate (`until`) as an optional orchestrator hook so callers can end a multi-step loop deterministically instead of relying on iteration caps alone.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - `tool_choice` is omitted when no tools are present and equals the configured control otherwise.
     - `parallel_tool_calls` is absent unless explicitly configured, and never emitted without tools.
     - A model whose catalog lacks `structured_output` fails the request before sending, with actionable guidance.
