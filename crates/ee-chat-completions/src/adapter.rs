@@ -17,7 +17,8 @@ use tokio::sync::watch;
 
 use crate::native::seal_response;
 use crate::profile::{EndpointProfile, TokenSource};
-use crate::transport::{ChatCompletionsClient, ChatRequest};
+use crate::responses::ResponsesCodec;
+use crate::transport::{ChatCompletionsClient, ChatRequest, EndpointTransport};
 use crate::wire::{
     AssistantTurn, ChatRequestParts, StreamDelta, chat_request_parts, response_from_turn,
 };
@@ -138,7 +139,9 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
             };
-            Ok(seal_response(response_from_turn(answer), &profile.model))
+            let mut response = response_from_turn(answer);
+            ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
+            Ok(seal_response(response, &profile.model))
         })
     }
 
@@ -177,8 +180,125 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
             };
-            Ok(seal_response(response_from_turn(answer), &profile.model))
+            let mut response = response_from_turn(answer);
+            ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
+            Ok(seal_response(response, &profile.model))
         })
+    }
+}
+
+/// OpenAI Responses as a normalized [`ModelAdapter`].
+///
+/// The Responses codec owns the request body, the SSE decoding, and the retry
+/// boundary; this adapter owns the orchestrator contract (credential check,
+/// cancellation, streamed-update forwarding) exactly like
+/// [`ChatCompletionsAdapter`].
+pub struct ResponsesAdapter {
+    profile: EndpointProfile,
+    token: TokenSource,
+    codec: Arc<ResponsesCodec>,
+}
+
+impl ResponsesAdapter {
+    /// Builds an adapter with a real HTTP client honoring the profile timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the HTTP client construction failure as a diagnostic string.
+    pub fn new(profile: EndpointProfile, token: TokenSource) -> Result<Self, String> {
+        let transport = EndpointTransport::new(profile.clone(), token.clone())?;
+        Ok(Self { profile, token, codec: Arc::new(ResponsesCodec::new(transport)) })
+    }
+
+    /// Builds an adapter over an existing HTTP client (shared pools, tests).
+    #[must_use]
+    pub fn with_http(profile: EndpointProfile, token: TokenSource, http: reqwest::Client) -> Self {
+        let transport = EndpointTransport::with_http(profile.clone(), token.clone(), http);
+        Self { profile, token, codec: Arc::new(ResponsesCodec::new(transport)) }
+    }
+
+    /// Returns the provider profile this adapter was built for.
+    #[must_use]
+    pub fn profile(&self) -> &EndpointProfile {
+        &self.profile
+    }
+}
+
+impl ModelAdapter for ResponsesAdapter {
+    fn complete(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let token = self.token.clone();
+        let codec = Arc::clone(&self.codec);
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(ModelError::Cancelled);
+            }
+            token().map_err(ModelError::Adapter)?;
+            ee_agent_orchestrator::validate_tool_names(&request.tools)
+                .map_err(ModelError::Adapter)?;
+            request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            let completion = codec.complete_controlled(
+                &request.transcript,
+                &request.tools,
+                &request.tool_control,
+                request.prompt_tokens,
+            );
+            tokio::select! {
+                response = completion => response.map_err(response_error),
+                () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
+            }
+        })
+    }
+
+    fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+        events: StreamSink,
+    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let token = self.token.clone();
+        let codec = Arc::clone(&self.codec);
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(ModelError::Cancelled);
+            }
+            token().map_err(ModelError::Adapter)?;
+            ee_agent_orchestrator::validate_tool_names(&request.tools)
+                .map_err(ModelError::Adapter)?;
+            request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            let mut sink = |delta: StreamDelta| match delta {
+                StreamDelta::Text(text) => events.text(text).map_err(sink_error),
+                StreamDelta::Reasoning(text) => events.reasoning(text).map_err(sink_error),
+            };
+            let completion = codec.complete_streaming_controlled(
+                &request.transcript,
+                &request.tools,
+                &request.tool_control,
+                &mut sink,
+                request.prompt_tokens,
+            );
+            tokio::select! {
+                response = completion => response.map_err(response_error),
+                () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
+            }
+        })
+    }
+}
+
+/// Keeps a closed stream distinguishable from a transport failure without
+/// leaking the dropped channel's contents.
+fn sink_error(error: ModelError) -> ProviderError {
+    ProviderError::BackendFailure(format!("streamed update was rejected: {error}"))
+}
+
+/// Maps a Responses codec failure onto the orchestrator's error type.
+fn response_error(error: ProviderError) -> ModelError {
+    match error {
+        ProviderError::Cancellation => ModelError::Cancelled,
+        other => ModelError::Provider(other),
     }
 }
 
@@ -193,9 +313,16 @@ fn wire_request(
 ) -> Result<ChatRequest, ModelError> {
     ee_agent_orchestrator::validate_tool_names(&request.tools).map_err(ModelError::Adapter)?;
     request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+    let guarded = ee_agent_orchestrator::guard_transcript(
+        profile.modalities,
+        &profile.model,
+        &request.transcript,
+    )
+    .map_err(ModelError::Adapter)?;
+    let transcript = guarded.as_deref().unwrap_or(&request.transcript);
     let (messages, tools) = chat_request_parts(&ChatRequestParts {
         system_prompt: &profile.system_prompt,
-        transcript: &request.transcript,
+        transcript,
         definitions: &request.tools,
         cache: &profile.cache,
         model: &profile.model,
@@ -274,6 +401,48 @@ mod tests {
             BudgetTracker::new(&OrchestratorConfig::default()).snapshot(),
             TaskNode::new(TaskId::new("task-1"), "hello", "hello"),
         )
+    }
+
+    #[tokio::test]
+    async fn undeclared_media_fails_before_the_client_runs() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let counter = calls.clone();
+        let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                *counter.lock().expect("calls") += 1;
+                Ok(AssistantTurn {
+                    content: String::new(),
+                    reasoning: String::new(),
+                    raw: Value::Null,
+                    native_reasoning: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some(String::from("stop")),
+                    usage: None,
+                })
+            })
+        });
+        let mut profile = profile();
+        profile.modalities =
+            ee_agent_orchestrator::Modalities { input: &["text", "image/png"], output: &["text"] };
+        let adapter = ChatCompletionsAdapter::with_completion(profile, token(), completion);
+        let mut request = request();
+        request.transcript = vec![
+            ee_agent_orchestrator::ModelMessage::new(ee_agent_orchestrator::ModelRole::User)
+                .with_content(vec![ee_agent_orchestrator::ModelContent::Image {
+                    data: String::from("AAAA"),
+                    mime_type: String::from("image/webp"),
+                    uri: None,
+                }]),
+        ];
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        let error = adapter.complete(request, cancel).await.expect_err("media gate fails closed");
+
+        let message = error.to_string();
+        assert!(message.contains("image/webp"), "{message}");
+        assert!(message.contains("image/png"), "{message}");
+        assert_eq!(*calls.lock().expect("calls"), 0, "no billable request was sent");
     }
 
     #[tokio::test]

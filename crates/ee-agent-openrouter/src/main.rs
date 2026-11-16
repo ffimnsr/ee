@@ -23,6 +23,13 @@ async fn main() {
         }
         return;
     }
+    if args.list_models {
+        if let Err(error) = print_models(args.json) {
+            eprintln!("ee-agent-openrouter: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let dotenv = match load_dotenv(Path::new(".env")) {
         Ok(values) => values,
@@ -47,6 +54,119 @@ async fn main() {
 enum ProviderMode {
     Simple,
     Orchestrated,
+}
+
+/// Prints the generated OpenRouter catalog as JSON or a stable table.
+///
+/// Listing is strictly local and display-only: it reads the committed table,
+/// never the process environment, a credential, or the network, and its output
+/// can never select an endpoint or a route.
+fn print_models(json: bool) -> Result<(), String> {
+    let mut models: Vec<&'static ee_agent_openrouter::catalog::CatalogModel> =
+        ee_agent_openrouter::catalog::models().collect();
+    models.sort_by_key(|entry| entry.id);
+    if json {
+        let rows: Vec<serde_json::Value> = models.iter().map(|entry| model_json(entry)).collect();
+        let rendered = serde_json::to_string_pretty(&serde_json::Value::Array(rows))
+            .map_err(|error| format!("failed to serialize output: {error}"))?;
+        println!("{rendered}");
+        return Ok(());
+    }
+    for entry in &models {
+        println!("{}", model_line(entry));
+    }
+    Ok(())
+}
+
+/// One listing row for the machine-readable form.
+fn model_json(entry: &ee_agent_openrouter::catalog::CatalogModel) -> serde_json::Value {
+    use ee_agent_orchestrator::ReasoningProtocol;
+    let variants =
+        |protocol| entry.variants(protocol).iter().map(|variant| variant.id).collect::<Vec<_>>();
+    serde_json::json!({
+        "id": entry.id,
+        "kind": entry.kind.as_str(),
+        "status": if entry.status.is_empty() { "active" } else { entry.status },
+        "family": entry.family,
+        "base_url": entry.base_url,
+        "routes": {
+            "chat": entry.routes.chat,
+            "responses": entry.routes.responses,
+            "messages": entry.routes.messages,
+            "images": entry.routes.images,
+            "systemone": entry.routes.systemone,
+        },
+        "limits": entry.limits.map(|limits| serde_json::json!({
+            "context": limits.context,
+            "output": limits.output,
+        })),
+        "modalities": {
+            "input": entry.modalities.input,
+            "output": entry.modalities.output,
+        },
+        "reasoning": {
+            "supported": entry.reasoning.supported,
+            "toggle": entry.reasoning.toggle,
+            "efforts": entry.reasoning.efforts,
+            "variants": {
+                "chat": variants(ReasoningProtocol::OpenAiChat),
+                "responses": variants(ReasoningProtocol::OpenAiResponses),
+            },
+        },
+        "cost_micros": entry.cost.map(|cost| serde_json::json!({
+            "input": cost.input_micros,
+            "output": cost.output_micros,
+            "cache_read": cost.cache_read_micros,
+            "cache_write": cost.cache_write_micros,
+            "tiers": cost.tiers.len(),
+        })),
+        "tools": {
+            "supported": entry.tools_supported,
+            "strict": entry.tools_strict,
+            "freeform": entry.freeform,
+        },
+        "structured_output": entry.structured_output,
+    })
+}
+
+/// One tab-separated listing line.
+fn model_line(entry: &ee_agent_openrouter::catalog::CatalogModel) -> String {
+    use ee_agent_orchestrator::{ReasoningProtocol, format_price_micros};
+    let limits = entry
+        .limits
+        .map(|limits| format!("ctx={} out={}", limits.context, limits.output))
+        .unwrap_or_else(|| String::from("ctx=? out=?"));
+    let variants = entry
+        .variants(ReasoningProtocol::OpenAiChat)
+        .iter()
+        .map(|variant| variant.id)
+        .collect::<Vec<_>>()
+        .join(",");
+    let reasoning = if variants.is_empty() {
+        String::from("reasoning=none")
+    } else {
+        format!("reasoning={variants}")
+    };
+    let cost = entry.cost.map_or_else(
+        || String::from("cost=unknown"),
+        |cost| {
+            format!(
+                "in={} out={}",
+                format_price_micros(cost.input_micros),
+                format_price_micros(cost.output_micros)
+            )
+        },
+    );
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        entry.id,
+        entry.kind.as_str(),
+        limits,
+        reasoning,
+        cost,
+        if entry.status.is_empty() { "status=active" } else { entry.status },
+        if entry.routes.responses { "routes=chat,responses" } else { "routes=chat" }
+    )
 }
 
 fn provider_mode(config: &Config) -> ProviderMode {
@@ -93,8 +213,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use ee_agent_openrouter::config::DEFAULT_API_URL;
     use ee_agent_openrouter::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
+    use ee_agent_openrouter::config::{DEFAULT_API_URL, DEFAULT_RESPONSES_URL, OpenRouterApiKind};
     use ee_agent_openrouter::orchestrated::openrouter_orchestrator_config;
 
     fn config(orchestrated: bool) -> Config {
@@ -105,6 +225,8 @@ mod tests {
             rubber_duck_model_family: None,
             rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
             api_url: String::from(DEFAULT_API_URL),
+            api_kind: OpenRouterApiKind::Chat,
+            responses_url: String::from(DEFAULT_RESPONSES_URL),
             api_key: Some(String::from("sk-test")),
             site_url: None,
             app_title: String::from("ee-test"),
@@ -125,6 +247,31 @@ mod tests {
             session_log_dir: None,
             session_log_durable: false,
         }
+    }
+
+    #[test]
+    fn list_models_reports_catalog_rows_with_limits_cost_and_variants() {
+        print_models(false).expect("text listing prints");
+
+        let entry =
+            ee_agent_openrouter::catalog::find("deepseek/deepseek-v4-flash").expect("catalog row");
+        let row = model_json(entry);
+        assert_eq!(row["kind"], "chat");
+        assert!(row["limits"]["context"].as_u64().is_some_and(|value| value > 0));
+        assert!(row["cost_micros"]["input"].as_u64().is_some());
+        assert!(row["reasoning"]["variants"]["chat"].is_array());
+        assert_eq!(row["routes"]["chat"], true);
+
+        let line = model_line(entry);
+        assert!(line.contains("deepseek/deepseek-v4-flash"), "{line}");
+        assert!(line.contains("ctx="), "{line}");
+    }
+
+    #[test]
+    fn list_models_needs_no_credential_or_network() {
+        // No OPENROUTER_API_KEY is set in the test process; listing must still
+        // succeed because it reads only the committed catalog.
+        print_models(true).expect("json listing prints");
     }
 
     #[test]

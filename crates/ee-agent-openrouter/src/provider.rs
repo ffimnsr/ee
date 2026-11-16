@@ -75,7 +75,7 @@ pub struct OpenRouterProvider {
 impl OpenRouterProvider {
     /// Builds a provider whose Chat Completions client honors `config.timeout`.
     pub fn new(config: Config) -> Result<Self, String> {
-        let client = openrouter_client(&config, &config.model)?;
+        let client = openrouter_client(&config, config.base_model())?;
         Ok(Self {
             config,
             client,
@@ -513,6 +513,8 @@ mod tests {
             rubber_duck_model_family: None,
             rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
             api_url: String::from("http://localhost:1/v1/chat/completions"),
+            api_kind: crate::config::OpenRouterApiKind::Chat,
+            responses_url: String::from(crate::config::DEFAULT_RESPONSES_URL),
             api_key: Some(String::from("sk-test")),
             site_url: None,
             app_title: String::from("ee-test"),

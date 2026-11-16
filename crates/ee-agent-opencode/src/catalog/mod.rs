@@ -33,64 +33,15 @@ use std::fmt;
 
 use crate::routes::{OpenCodeDialect, OpenCodeSurface, UnsupportedDialect};
 
-/// What a catalog entry produces. Only chat models are selectable by a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelKind {
-    /// Text chat model routable through one of the three implemented dialects.
-    Chat,
-    /// Typed decision model (System One).
-    Decision,
-    /// Image generation model.
-    Image,
-}
-
-/// Reasoning controls a model documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReasoningSupport {
-    /// Whether the model accepts any reasoning control.
-    pub supported: bool,
-    /// Whether a plain on/off toggle exists.
-    pub toggle: bool,
-    /// Effort values the model accepts, in catalog order.
-    pub efforts: &'static [&'static str],
-    /// Minimum thinking budget in tokens, when budgets are supported.
-    pub budget_min: Option<u64>,
-    /// Maximum thinking budget in tokens, when budgets are supported.
-    pub budget_max: Option<u64>,
-}
-
-impl ReasoningSupport {
-    /// No reasoning control is available or known.
-    pub const UNSUPPORTED: Self =
-        Self { supported: false, toggle: false, efforts: &[], budget_min: None, budget_max: None };
-}
-
-/// Monetary cost per million tokens, in integer micro-dollars.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelCost {
-    /// Input price per million tokens.
-    pub input_micros: u64,
-    /// Output price per million tokens.
-    pub output_micros: u64,
-    /// Cached-input read price per million tokens, when priced separately.
-    pub cache_read_micros: Option<u64>,
-    /// Cache-write price per million tokens, when priced separately.
-    pub cache_write_micros: Option<u64>,
-}
-
-/// Input/output modalities a model documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Modalities {
-    /// Accepted input MIME types (for example `text`, `image/png`, `application/pdf`).
-    pub input: &'static [&'static str],
-    /// Produced output MIME types.
-    pub output: &'static [&'static str],
-}
-
-impl Modalities {
-    /// No modality metadata (legacy rows).
-    pub const UNKNOWN: Self = Self { input: &[], output: &[] };
-}
+/// Shared metadata shapes re-exported for catalog consumers.
+///
+/// The catalog's public surface stays stable while the derivation, cost
+/// computation, and modality gates live in
+/// [`ee_agent_orchestrator::model_metadata`].
+pub use ee_agent_orchestrator::{
+    Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningProtocol, ReasoningSupport,
+    ReasoningVariant, find_variant, reasoning_variants, variant_ids,
+};
 
 /// One routable `(surface, model)` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +54,10 @@ pub struct CatalogModel {
     pub api_id: &'static str,
     /// What the entry produces.
     pub kind: ModelKind,
+    /// Protocol routes the entry advertises upstream.
+    pub routes: ModelRoutes,
+    /// Upstream catalog status (`""` when active, `"deprecated"`, ...).
+    pub status: &'static str,
     /// Protocol dialect the model speaks on this surface.
     pub dialect: OpenCodeDialect,
     /// Upstream-declared model family slug; empty for legacy rows.
@@ -141,6 +96,26 @@ impl CatalogModel {
     #[must_use]
     pub fn endpoint(&self) -> &'static str {
         crate::routes::endpoint_for(self.surface, self.dialect)
+    }
+
+    /// Protocol family used to derive reasoning variants.
+    #[must_use]
+    pub const fn reasoning_protocol(&self) -> ReasoningProtocol {
+        match self.dialect {
+            OpenCodeDialect::OpenAiResponses => ReasoningProtocol::OpenAiResponses,
+            OpenCodeDialect::AnthropicMessages => ReasoningProtocol::AnthropicMessages,
+            OpenCodeDialect::OpenAiChatCompletions => ReasoningProtocol::OpenAiChat,
+        }
+    }
+
+    /// Selectable reasoning variants for this entry's protocol and limits.
+    #[must_use]
+    pub fn variants(&self) -> Vec<ReasoningVariant> {
+        reasoning_variants(
+            self.reasoning,
+            self.reasoning_protocol(),
+            self.limits.map(|limits| limits.output),
+        )
     }
 }
 

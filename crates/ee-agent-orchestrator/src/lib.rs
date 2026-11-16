@@ -205,6 +205,7 @@ pub mod memory_compaction;
 pub mod metrics;
 pub mod milestones;
 pub mod model;
+pub mod model_metadata;
 pub mod model_options;
 pub mod model_registry;
 pub mod model_router;
@@ -394,6 +395,12 @@ pub use model::{
     OUTPUT_LIMIT_MIN, OpaqueProviderState, ResponseFormat, ToolCallControl, ToolChoice, Transcript,
     TranscriptTruncation, compaction_threshold_tokens, estimate_json_prompt_tokens,
     estimate_prompt_tokens, fit_output_limit, validate_tool_names,
+};
+pub use model_metadata::{
+    CostTier, MEDIA_TARGET_BYTES, MEDIA_TRIGGER_BYTES, Modalities, ModelCost, ModelKind,
+    ModelRoutes, ReasoningProtocol, ReasoningSupport, ReasoningVariant, TokenCounts,
+    apply_catalog_cost, bounded_media, find_variant, format_price_micros, guard_transcript,
+    media_bytes, modality_violation, reasoning_variants, usage_with_cost, variant_ids,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,

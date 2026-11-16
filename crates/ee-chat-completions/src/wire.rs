@@ -87,6 +87,8 @@ pub struct Usage {
     pub cached_input_tokens: Option<u64>,
     /// Prompt tokens written to the provider cache.
     pub cache_creation_input_tokens: Option<u64>,
+    /// Provider-reported cost in integer micro-dollars, when reported.
+    pub cost_micros: Option<u64>,
 }
 
 /// One displayable streaming delta.
@@ -96,6 +98,33 @@ pub enum StreamDelta {
     Text(String),
     /// Partial model reasoning.
     Reasoning(String),
+}
+
+/// Builds a codec failure whose text names the routed endpoint, never a
+/// credential.
+///
+/// Shared by every dialect codec so a provider's error wording stays identical
+/// across Chat Completions, Responses, and Messages.
+#[must_use]
+pub fn codec_error(label: &str, detail: impl std::fmt::Display) -> ProviderError {
+    ProviderError::BackendFailure(format!("{label}: {detail}"))
+}
+
+/// Parses tool arguments from their wire form.
+///
+/// An empty value means "no arguments"; malformed JSON or a non-object keeps the
+/// call identity with `Null` arguments, so the orchestrator rejects the call
+/// before any tool side effect.
+#[must_use]
+pub fn parse_arguments(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) if value.is_object() => value,
+        _ => Value::Null,
+    }
 }
 
 /// Converts a decoded assistant turn into a normalized [`ModelResponse`]:
@@ -118,6 +147,7 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
         reported.cached_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     usage.cache_creation_input_tokens =
         reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cost_micros = reported.cost_micros;
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
     response = response.with_finish_reason(answer.finish_reason);
@@ -184,7 +214,21 @@ pub fn usage_from_tokens(value: &Value) -> Option<Usage> {
         total_tokens: total,
         cached_input_tokens,
         cache_creation_input_tokens,
+        cost_micros: cost_micros_of(value),
     })
+}
+
+/// Reads a provider-reported dollar cost into integer micro-dollars.
+///
+/// OpenRouter (and compatible gateways) report `usage.cost` as USD with
+/// fractional cents. A missing or negative value stays `None` so cost is never
+/// zero-filled.
+fn cost_micros_of(usage: &Value) -> Option<u64> {
+    let cost = usage.get("cost")?.as_f64()?;
+    if !cost.is_finite() || cost < 0.0 {
+        return None;
+    }
+    Some((cost * 1_000_000.0).round() as u64)
 }
 
 /// Emits a finished response's reasoning and text as single deltas.
@@ -230,6 +274,7 @@ fn usage_of(value: &Value) -> Option<Usage> {
         total_tokens,
         cached_input_tokens,
         cache_creation_input_tokens,
+        cost_micros: cost_micros_of(usage),
     })
 }
 

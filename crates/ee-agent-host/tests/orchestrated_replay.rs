@@ -118,6 +118,8 @@ fn test_config() -> Config {
         rubber_duck_model_family: None,
         rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
         api_url: String::from("https://openrouter.invalid/api/v1"),
+        api_kind: ee_agent_openrouter::config::OpenRouterApiKind::Chat,
+        responses_url: String::from(ee_agent_openrouter::config::DEFAULT_RESPONSES_URL),
         api_key: Some(String::from("sk-hermetic-test-key")),
         site_url: None,
         app_title: String::from("ee-host-integration-test"),

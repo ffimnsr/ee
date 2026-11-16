@@ -274,7 +274,36 @@ pub fn messages_body(input: &MessagesBody<'_>) -> Value {
             object.insert(key.clone(), value.clone());
         }
     }
+    clamp_thinking_budget(&mut body, input.max_output_tokens);
     body
+}
+
+/// Keeps an enabled thinking budget strictly below the output bound.
+///
+/// Anthropic rejects a budget that is not below `max_tokens`, and a budget under
+/// 1,024 tokens is below its documented minimum. The catalog-derived budget is
+/// already bounded for the model's full output limit, so this only bites when a
+/// large prompt squeezes the fitted `max_tokens`; the field is dropped instead of
+/// sending a request the provider would reject.
+fn clamp_thinking_budget(body: &mut Value, max_tokens: u64) {
+    let Some(thinking) = body.get_mut("thinking") else {
+        return;
+    };
+    if thinking.get("type").and_then(Value::as_str) != Some("enabled") {
+        return;
+    }
+    let Some(budget) = thinking.get("budget_tokens").and_then(Value::as_u64) else {
+        return;
+    };
+    let ceiling = max_tokens.saturating_sub(1);
+    if budget <= ceiling {
+        return;
+    }
+    if ceiling < 1_024 {
+        body.as_object_mut().map(|object| object.remove("thinking"));
+        return;
+    }
+    thinking["budget_tokens"] = Value::from(ceiling);
 }
 
 /// Lowered Anthropic tool choice, including the parallel-call switch.
@@ -736,14 +765,16 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
-        let prompt = prompt_tokens
-            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let prompt = prompt_tokens.unwrap_or_else(|| {
+            estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
+        });
         let max_output_tokens =
             profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
-            transcript,
+            transcript: transcript.as_ref(),
             tools,
             stream: false,
             max_output_tokens,
@@ -760,7 +791,7 @@ impl MessagesCodec {
             response_from_buffered(label, &value)
         })
         .await
-        .map(|response| ee_chat_completions::seal_response(response, &profile.model))
+        .map(|response| crate::dialect::finalize(response, profile))
     }
 
     /// Performs one streaming round trip under the profile retry policy.
@@ -804,14 +835,16 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
-        let prompt = prompt_tokens
-            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let prompt = prompt_tokens.unwrap_or_else(|| {
+            estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
+        });
         let max_output_tokens =
             profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
-            transcript,
+            transcript: transcript.as_ref(),
             tools,
             stream: true,
             max_output_tokens,
@@ -821,7 +854,9 @@ impl MessagesCodec {
             prompt_tokens,
         });
         let mut attempt = MessagesStreamAttempt { transport: &self.transport, body: &body };
-        with_stream_retry(&self.transport.profile().retry, sink, &mut attempt).await
+        with_stream_retry(&self.transport.profile().retry, sink, &mut attempt)
+            .await
+            .map(|response| crate::dialect::finalize(response, profile))
     }
 }
 

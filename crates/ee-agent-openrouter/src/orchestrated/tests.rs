@@ -20,6 +20,8 @@ fn test_config() -> Config {
         rubber_duck_model_family: None,
         rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
         api_url: String::from(DEFAULT_API_URL),
+        api_kind: crate::config::OpenRouterApiKind::Chat,
+        responses_url: String::from(crate::config::DEFAULT_RESPONSES_URL),
         api_key: Some(String::from("sk-test")),
         site_url: None,
         app_title: String::from("ee-test"),

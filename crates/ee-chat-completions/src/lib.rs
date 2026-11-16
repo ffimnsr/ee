@@ -36,11 +36,13 @@ pub mod native;
 pub mod profile;
 mod reasoning_replay;
 mod request;
+pub mod responses;
 pub mod transport;
 pub mod wire;
 
 pub use adapter::{
-    ChatCompletionsAdapter, CompletionClient, CompletionFuture, StreamingClient, wait_cancelled,
+    ChatCompletionsAdapter, CompletionClient, CompletionFuture, ResponsesAdapter, StreamingClient,
+    wait_cancelled,
 };
 pub use cache_policy::{
     BREAKPOINT_CAP, CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective,

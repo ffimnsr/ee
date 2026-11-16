@@ -440,6 +440,10 @@ pub struct ModelUsage {
     pub cached_input_tokens: Option<usize>,
     /// Input tokens written to the provider's prompt cache (cache write).
     pub cache_creation_input_tokens: Option<usize>,
+    /// Per-turn cost in integer micro-dollars; `None` when neither the provider
+    /// nor the catalog priced the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<u64>,
 }
 
 impl ModelUsage {
@@ -489,6 +493,7 @@ impl ModelUsage {
                 self.cache_creation_input_tokens,
                 other.cache_creation_input_tokens,
             ),
+            cost_micros: add_cost(self.cost_micros, other.cost_micros),
         }
     }
 
@@ -517,6 +522,14 @@ impl ModelUsage {
 
 /// Adds two optional token counters; unknown stays unknown.
 fn add_tokens(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn add_cost(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.saturating_add(right)),
         (Some(value), None) | (None, Some(value)) => Some(value),

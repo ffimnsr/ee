@@ -35,6 +35,8 @@ fn test_config_with(
         rubber_duck_model_family: None,
         rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
         api_url: mock.api_url(),
+        api_kind: ee_agent_openrouter::config::OpenRouterApiKind::Chat,
+        responses_url: String::from(ee_agent_openrouter::config::DEFAULT_RESPONSES_URL),
         api_key: Some(String::from("sk-test")),
         site_url: None,
         app_title: String::from("ee-test"),

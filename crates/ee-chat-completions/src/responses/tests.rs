@@ -1,5 +1,5 @@
+use crate::{ChunkFuture, ChunkSource, StreamDelta, drive_sse};
 use ee_agent_orchestrator::{ModelContent, ModelRole, SideEffectClass, ToolDefinition, ToolResult};
-use ee_chat_completions::{ChunkFuture, ChunkSource, StreamDelta, drive_sse};
 use serde_json::{Value, json};
 
 use super::*;
@@ -494,7 +494,7 @@ fn second_turn_replays_reasoning_items_and_requests_encrypted_content() {
         }),
     )
     .expect("decodes");
-    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+    let decoded = crate::seal_response(decoded, "gpt-x");
 
     let mut history = ee_agent_orchestrator::Transcript::new();
     history.push_assistant(&decoded);
@@ -522,7 +522,7 @@ fn reasoning_items_never_replay_to_another_model() {
         }),
     )
     .expect("decodes");
-    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+    let decoded = crate::seal_response(decoded, "gpt-x");
 
     let mut history = ee_agent_orchestrator::Transcript::new();
     history.push_assistant(&decoded);
@@ -552,7 +552,7 @@ fn assistant_tool_call_replays_as_a_function_call_item() {
         }),
     )
     .expect("decodes");
-    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+    let decoded = crate::seal_response(decoded, "gpt-x");
 
     let mut history = ee_agent_orchestrator::Transcript::new();
     history.push_assistant(&decoded);
@@ -603,10 +603,10 @@ fn tool_choice_and_parallel_follow_the_request_control() {
 #[test]
 fn request_level_cache_ttl_uses_the_documented_field() {
     let ttl = |value: &str| CacheDirective {
-        policy: ee_chat_completions::CachePolicy::Explicit(
-            ee_chat_completions::CachePolicyObject::auto().with_ttl(Some(value.to_string())),
+        policy: crate::CachePolicy::Explicit(
+            crate::CachePolicyObject::auto().with_ttl(Some(value.to_string())),
         ),
-        ..CacheDirective::implicit(ee_chat_completions::CachePolicy::Auto)
+        ..CacheDirective::implicit(crate::CachePolicy::Auto)
     };
 
     let body = body_with(&ee_agent_orchestrator::ToolCallControl::auto(), &ttl("24h"));

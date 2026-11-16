@@ -31,6 +31,8 @@ async fn main() {
     }
     let result = if args.print_catalog {
         print_catalog()
+    } else if args.list_models {
+        print_models(args.json)
     } else if args.print_route {
         print_route()
     } else if args.discover_models {
@@ -60,6 +62,117 @@ fn print_manifest() {
 fn print_catalog() -> Result<(), String> {
     let catalog: Vec<Value> = routes::catalog().map(|route| route_json(&route)).collect();
     print_json(&Value::Array(catalog))
+}
+
+/// Prints the catalog as JSON or a stable tab-separated table.
+///
+/// Listing is strictly local and display-only: it reads the generated table,
+/// never the process environment, a credential, or the network, and its output
+/// can never select an endpoint or a route.
+fn print_models(json: bool) -> Result<(), String> {
+    let routes = sorted_catalog();
+    if json {
+        let rows: Vec<Value> = routes.iter().map(model_json).collect();
+        return print_json(&Value::Array(rows));
+    }
+    for route in &routes {
+        println!("{}", model_line(route));
+    }
+    Ok(())
+}
+
+/// Stable, sorted listing order: surface first, then catalog id.
+///
+/// Legacy rows keep their place in the same order instead of being appended
+/// unsorted, so `--list-models` output is reproducible across releases.
+fn sorted_catalog() -> Vec<OpenCodeRoute> {
+    let mut routes: Vec<OpenCodeRoute> = routes::catalog().collect();
+    routes.sort_by(|left, right| {
+        left.surface.as_str().cmp(right.surface.as_str()).then(left.model_id.cmp(right.model_id))
+    });
+    routes
+}
+
+/// One listing row: id, kind, protocol, limits, modalities, reasoning, cost.
+fn model_json(route: &OpenCodeRoute) -> Value {
+    let entry = route.entry;
+    let limits = route.limits();
+    let cost = route.cost();
+    json!({
+        "id": route.model_id,
+        "surface": route.surface.as_str(),
+        "kind": entry.kind.as_str(),
+        "protocol": route.dialect.as_str(),
+        "endpoint": route.endpoint,
+        "status": if entry.legacy { "legacy" } else if entry.status.is_empty() { "active" } else { entry.status },
+        "family": entry.family,
+        "limits": limits.map(|limits| json!({ "context": limits.context, "output": limits.output })),
+        "modalities": {
+            "input": entry.modalities.input,
+            "output": entry.modalities.output,
+        },
+        "reasoning": {
+            "supported": entry.reasoning.supported,
+            "toggle": entry.reasoning.toggle,
+            "efforts": entry.reasoning.efforts,
+            "variants": route.variants().iter().map(|variant| variant.id).collect::<Vec<_>>(),
+        },
+        "cost_micros": cost.map(|cost| json!({
+            "input": cost.input_micros,
+            "output": cost.output_micros,
+            "cache_read": cost.cache_read_micros,
+            "cache_write": cost.cache_write_micros,
+        })),
+        "tools": {
+            "supported": entry.tools_supported,
+            "strict": entry.tools_strict,
+            "freeform": entry.freeform,
+        },
+        "structured_output": entry.structured_output,
+        "legacy": entry.legacy,
+    })
+}
+
+/// One tab-separated listing line.
+fn model_line(route: &OpenCodeRoute) -> String {
+    let entry = route.entry;
+    let limits = route
+        .limits()
+        .map(|limits| format!("ctx={} out={}", limits.context, limits.output))
+        .unwrap_or_else(|| String::from("ctx=? out=?"));
+    let variants = route.variants().iter().map(|variant| variant.id).collect::<Vec<_>>().join(",");
+    let reasoning = if variants.is_empty() {
+        String::from("reasoning=none")
+    } else {
+        format!("reasoning={variants}")
+    };
+    let cost = route.cost().map_or_else(
+        || String::from("cost=unknown"),
+        |cost| {
+            format!(
+                "in={} out={}",
+                ee_agent_orchestrator::format_price_micros(cost.input_micros),
+                ee_agent_orchestrator::format_price_micros(cost.output_micros)
+            )
+        },
+    );
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        route.surface.as_str(),
+        route.model_id,
+        route.dialect.as_str(),
+        entry.kind.as_str(),
+        limits,
+        reasoning,
+        cost,
+        if entry.legacy {
+            "status=legacy"
+        } else if entry.status.is_empty() {
+            "status=active"
+        } else {
+            entry.status
+        }
+    )
 }
 
 /// Prints the exact route for `OPENCODE_SURFACE` + `OPENCODE_MODEL`, reading the
@@ -171,6 +284,53 @@ fn print_json(value: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use ee_agent_opencode::routes::OpenCodeSurface;
+
+    #[test]
+    fn list_models_rows_carry_limits_cost_variants_and_status() {
+        let route = routes::resolve_route(OpenCodeSurface::Zen, "gpt-5.5").expect("route");
+        let row = model_json(&route);
+
+        assert_eq!(row["id"], json!("gpt-5.5"));
+        assert_eq!(row["kind"], json!("chat"));
+        assert_eq!(row["status"], json!("active"));
+        assert!(row["limits"]["context"].as_u64().is_some_and(|value| value > 0));
+        assert!(row["cost_micros"]["input"].as_u64().is_some());
+        assert!(
+            row["reasoning"]["variants"]
+                .as_array()
+                .expect("variants")
+                .iter()
+                .any(|variant| variant == "high"),
+            "catalog variants are listed"
+        );
+
+        let line = model_line(&route);
+        assert!(line.starts_with("zen\tgpt-5.5\t"), "{line}");
+        assert!(line.contains("ctx="), "{line}");
+    }
+
+    #[test]
+    fn list_models_is_sorted_and_needs_no_credential() {
+        print_models(true).expect("json listing prints");
+        print_models(false).expect("text listing prints");
+
+        let routes = sorted_catalog();
+        let mut last_surface: Option<OpenCodeSurface> = None;
+        let mut last_id = "";
+        for route in &routes {
+            if last_surface != Some(route.surface) {
+                last_surface = Some(route.surface);
+                last_id = "";
+            }
+            assert!(
+                last_id <= route.model_id,
+                "ids are sorted within {}: {last_id} > {}",
+                route.surface.as_str(),
+                route.model_id
+            );
+            last_id = route.model_id;
+        }
+    }
 
     #[test]
     fn route_json_carries_exact_catalog_fields() {

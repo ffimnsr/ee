@@ -28,7 +28,7 @@
 //! `crates/ee-agent-opencode`, keep [`endpoint_for`] the only place an endpoint
 //! is assembled, and keep this module's tests passing.
 
-use crate::catalog::{self, CatalogModel};
+use crate::catalog::{self, CatalogModel, ReasoningVariant, find_variant, variant_ids};
 use crate::config::ConfigError;
 
 /// Trusted OpenCode Zen API root.
@@ -144,7 +144,8 @@ impl UnsupportedDialect {
 /// The endpoint is one of the trusted constants owned by [`endpoint_for`], and
 /// `model_id` is the catalog id rather than the caller-supplied string, so a
 /// route that exists can never carry an arbitrary origin or an unverified model
-/// id.
+/// id. `variant` is the reasoning variant selected with `model#variant`, already
+/// validated against the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenCodeRoute {
     /// Service surface that serves the model.
@@ -157,6 +158,8 @@ pub struct OpenCodeRoute {
     pub endpoint: &'static str,
     /// Catalog row this route resolved from.
     pub entry: &'static CatalogModel,
+    /// Selected reasoning variant, when the caller asked for one.
+    pub variant: Option<ReasoningVariant>,
 }
 
 impl OpenCodeRoute {
@@ -199,6 +202,12 @@ impl OpenCodeRoute {
             Some(self.entry.max_tokens_field)
         }
     }
+
+    /// Every reasoning variant this route exposes.
+    #[must_use]
+    pub fn variants(&self) -> Vec<ReasoningVariant> {
+        self.entry.variants()
+    }
 }
 
 /// Returns the trusted endpoint for one surface/dialect pair.
@@ -234,20 +243,22 @@ pub const fn endpoint_for(surface: OpenCodeSurface, dialect: OpenCodeDialect) ->
 ///
 /// Ordering follows the generated table: surface, then catalog id.
 pub fn catalog() -> impl Iterator<Item = OpenCodeRoute> {
-    catalog::models().map(route_for)
+    catalog::models().map(|entry| route_for(entry, None))
 }
 
 /// Resolves the exact route for one `(surface, model)` pair.
 ///
 /// `model_id` is matched by exact string equality against the catalog after
-/// trimming surrounding whitespace. Unknown, cross-surface, retired, and
+/// trimming surrounding whitespace. A trailing `#variant` selects one of the
+/// route's catalog-derived reasoning variants; an unknown variant fails at
+/// startup with the valid ids listed. Unknown, cross-surface, retired, and
 /// unsupported-dialect ids return a [`ConfigError`] without side effects: no
 /// request and no credential header is ever built from a rejected id.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigError::MissingModel`] for an empty model id, and the other
-/// [`ConfigError`] variants for rejected catalog lookups.
+/// [`ConfigError`] variants for rejected catalog lookups or variants.
 pub fn resolve_route(
     surface: OpenCodeSurface,
     model_id: &str,
@@ -256,10 +267,15 @@ pub fn resolve_route(
     if model_id.is_empty() {
         return Err(ConfigError::MissingModel);
     }
-    if let Some(entry) = catalog_entry(surface, model_id) {
-        return Ok(route_for(entry));
+    let (base_id, variant_id) = split_variant(model_id)?;
+    if let Some(entry) = catalog_entry(surface, base_id) {
+        let variant = match variant_id {
+            Some(variant_id) => Some(resolve_variant(entry, variant_id)?),
+            None => None,
+        };
+        return Ok(route_for(entry, variant));
     }
-    if let Some(bare_model_id) = tui_alias_target(model_id)
+    if let Some(bare_model_id) = tui_alias_target(base_id)
         && catalog_entry(surface, bare_model_id).is_some()
     {
         return Err(ConfigError::TuiAliasModel {
@@ -267,28 +283,57 @@ pub fn resolve_route(
             bare_model_id: bare_model_id.to_string(),
         });
     }
-    if let Some(other) = other_surface_entry(surface, model_id) {
+    if let Some(other) = other_surface_entry(surface, base_id) {
         return Err(ConfigError::WrongSurface {
             surface,
-            model_id: model_id.to_string(),
+            model_id: base_id.to_string(),
             documented_surface: other.surface,
         });
     }
-    if let Some(retired) = retired_entry(surface, model_id) {
+    if let Some(retired) = retired_entry(surface, base_id) {
         return Err(ConfigError::RetiredModel {
             surface,
-            model_id: model_id.to_string(),
+            model_id: base_id.to_string(),
             deprecated_on: retired.deprecated_on,
         });
     }
-    if let Some(unsupported) = unsupported_entry(surface, model_id) {
+    if let Some(unsupported) = unsupported_entry(surface, base_id) {
         return Err(ConfigError::UnsupportedModelDialect {
             surface,
-            model_id: model_id.to_string(),
+            model_id: base_id.to_string(),
             dialect: unsupported.dialect,
         });
     }
-    Err(ConfigError::UnknownModel { surface, model_id: model_id.to_string() })
+    Err(ConfigError::UnknownModel { surface, model_id: base_id.to_string() })
+}
+
+/// Splits `model#variant` after the last `#`.
+fn split_variant(model_id: &str) -> Result<(&str, Option<&str>), ConfigError> {
+    let Some((base, variant)) = model_id.rsplit_once('#') else {
+        return Ok((model_id, None));
+    };
+    let base = base.trim();
+    let variant = variant.trim();
+    if base.is_empty() {
+        return Err(ConfigError::MissingModel);
+    }
+    if variant.is_empty() {
+        return Err(ConfigError::MissingVariant { model_id: base.to_string() });
+    }
+    Ok((base, Some(variant)))
+}
+
+/// Validates one variant against the catalog-derived list.
+fn resolve_variant(
+    entry: &'static CatalogModel,
+    variant_id: &str,
+) -> Result<ReasoningVariant, ConfigError> {
+    let variants = entry.variants();
+    find_variant(&variants, variant_id).copied().ok_or_else(|| ConfigError::UnknownVariant {
+        model_id: entry.id.to_string(),
+        variant: variant_id.to_string(),
+        valid: variant_ids(&variants),
+    })
 }
 
 // Catalog rows live in `crate::catalog`; this module keeps exact resolution,
@@ -300,13 +345,14 @@ pub fn resolve_route(
 /// value fails with the bare id to use instead.
 const TUI_ALIAS_PREFIXES: &[&str] = &["opencode-go/", "opencode/"];
 
-fn route_for(entry: &'static CatalogModel) -> OpenCodeRoute {
+fn route_for(entry: &'static CatalogModel, variant: Option<ReasoningVariant>) -> OpenCodeRoute {
     OpenCodeRoute {
         surface: entry.surface,
         model_id: entry.id,
         dialect: entry.dialect,
         endpoint: endpoint_for(entry.surface, entry.dialect),
         entry,
+        variant,
     }
 }
 
@@ -650,5 +696,59 @@ mod tests {
     fn surrounding_whitespace_in_model_ids_is_trimmed() {
         assert_eq!(route(Zen, " gpt-5.5\n").model_id, "gpt-5.5");
         assert_eq!(route(Go, "\tkimi-k3 ").model_id, "kimi-k3");
+    }
+
+    #[test]
+    fn variant_suffix_selects_a_catalog_derived_variant() {
+        let route = route(Zen, "gpt-5.5#high");
+        let variant = route.variant.expect("variant selected");
+        assert_eq!(variant.id, "high");
+        assert_eq!(variant.effort, Some("high"));
+        assert_eq!(route.model_id, "gpt-5.5");
+    }
+
+    #[test]
+    fn unknown_variant_lists_the_valid_ids() {
+        let error = resolve_route(Zen, "gpt-5.5#bogus").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("no reasoning variant \"bogus\""), "{message}");
+        assert!(message.contains("none"), "{message}");
+        assert!(message.contains("high"), "{message}");
+    }
+
+    #[test]
+    fn empty_variant_suffix_fails_closed() {
+        assert_eq!(
+            resolve_route(Zen, "gpt-5.5#").unwrap_err(),
+            ConfigError::MissingVariant { model_id: String::from("gpt-5.5") }
+        );
+    }
+
+    #[test]
+    fn models_without_reasoning_support_reject_every_variant() {
+        let error = resolve_route(Zen, "claude-3-5-haiku#high").unwrap_err();
+        assert_eq!(
+            error,
+            ConfigError::UnknownVariant {
+                model_id: String::from("claude-3-5-haiku"),
+                variant: String::from("high"),
+                valid: String::from("none"),
+            }
+        );
+    }
+
+    #[test]
+    fn anthropic_routes_expose_budget_variants_within_the_output_ceiling() {
+        let route = route(Zen, "claude-opus-4-5");
+        assert_eq!(route.dialect, OpenCodeDialect::AnthropicMessages);
+        let variants = route.variants();
+        let ids: Vec<_> = variants.iter().map(|variant| variant.id).collect();
+        assert_eq!(ids, ["high", "max"]);
+        let output = route.limits().expect("limits").output;
+        for variant in variants {
+            let budget = variant.budget_tokens.expect("budget variant");
+            assert!(budget < output, "{budget} must stay below {output}");
+            assert!(budget <= 32_000, "{budget} must stay under the Anthropic ceiling");
+        }
     }
 }

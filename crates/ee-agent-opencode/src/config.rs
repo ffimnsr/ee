@@ -235,6 +235,13 @@ pub struct Args {
     /// Print every documented routable (surface, model) entry, then exit.
     #[arg(long, conflicts_with = "ee_config")]
     pub print_catalog: bool,
+    /// List catalog models with limits, modalities, reasoning variants, and
+    /// cost, then exit without reading a credential or contacting the network.
+    #[arg(long, conflicts_with_all = ["ee_config", "print_route", "discover_models"])]
+    pub list_models: bool,
+    /// Emit machine-readable JSON for `--list-models`.
+    #[arg(long, requires = "list_models")]
+    pub json: bool,
     /// Fetch the selected surface's `/models` metadata (one network call) and print it as
     /// display-only JSON; live metadata never changes routing.
     #[arg(long, conflicts_with = "ee_config")]
@@ -320,6 +327,8 @@ impl Args {
             ee_config: false,
             print_route: false,
             print_catalog: false,
+            list_models: false,
+            json: false,
             discover_models: false,
             surface: surface.map(String::from),
             model: model.map(String::from),
@@ -430,6 +439,27 @@ impl Config {
             .filter(|value| !value.trim().is_empty())
             .ok_or(ConfigError::MissingModel)?;
         let route = routes::resolve_route(surface, &model)?;
+        let reasoning_effort = match args
+            .reasoning_effort
+            .or_else(|| env_or_dotenv(REASONING_EFFORT_ENV, dotenv))
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => Some(ReasoningEffort::parse(&value).map_err(|detail| {
+                ConfigError::UnsupportedReasoningEffort { value: value.trim().to_string(), detail }
+            })?),
+            None => None,
+        };
+        // A model that declares no reasoning support has no variants to select,
+        // so the shorthand fails at startup instead of at request time.
+        if let Some(effort) = reasoning_effort
+            && route.variants().is_empty()
+        {
+            return Err(ConfigError::UnknownVariant {
+                model_id: route.model_id.to_string(),
+                variant: effort.as_str().to_string(),
+                valid: String::from("none"),
+            });
+        }
         let context_window = args
             .context_window
             .or_else(|| route.limits().map(|limits| limits.context))
@@ -461,19 +491,7 @@ impl Config {
                 },
                 ..RubberDuckConfig::default()
             },
-            reasoning_effort: match args
-                .reasoning_effort
-                .or_else(|| env_or_dotenv(REASONING_EFFORT_ENV, dotenv))
-                .filter(|value| !value.trim().is_empty())
-            {
-                Some(value) => Some(ReasoningEffort::parse(&value).map_err(|detail| {
-                    ConfigError::UnsupportedReasoningEffort {
-                        value: value.trim().to_string(),
-                        detail,
-                    }
-                })?),
-                None => None,
-            },
+            reasoning_effort,
             system_prompt: args.system_prompt,
             timeout: Duration::from_millis(args.timeout_ms),
             max_iterations: args.max_iterations,
@@ -557,9 +575,7 @@ impl Config {
     pub fn profile(&self) -> Result<EndpointProfile, ConfigError> {
         let mut profile =
             route_profile(&self.route, &self.system_prompt, self.timeout, self.retry)?;
-        profile.extensions = self
-            .reasoning_effort
-            .and_then(|effort| reasoning::request_extensions(self.route.dialect, effort));
+        profile.extensions = self.reasoning_extensions();
         profile =
             profile.with_limits(self.route.limits()).with_max_output_tokens(self.max_output_tokens);
         profile = profile.with_cache(self.cache_directive());
@@ -574,6 +590,26 @@ impl Config {
             profile = profile.with_max_tokens_field(parsed);
         }
         Ok(profile)
+    }
+
+    /// Request-body extension carrying the selected reasoning variant.
+    ///
+    /// An explicit `#variant` wins. Otherwise the effort shorthand is matched
+    /// against the route's derived variants first, so `OPENCODE_REASONING_EFFORT=
+    /// high` selects the `high` budget variant on an Anthropic route. When no
+    /// variant matches, the historical effort field is sent on the dialects that
+    /// document one.
+    #[must_use]
+    pub fn reasoning_extensions(&self) -> Option<serde_json::Value> {
+        if let Some(variant) = self.route.variant {
+            return reasoning::variant_extensions(self.route.dialect, variant);
+        }
+        let effort = self.reasoning_effort?;
+        let variants = self.route.variants();
+        if let Some(variant) = crate::catalog::find_variant(&variants, effort.as_str()) {
+            return reasoning::variant_extensions(self.route.dialect, *variant);
+        }
+        reasoning::request_extensions(self.route.dialect, effort)
     }
 
     /// Resolves the prompt-cache directive for the routed dialect.
@@ -622,7 +658,14 @@ impl Config {
     /// routed dialect, or `None` when nothing needs explaining.
     #[must_use]
     pub fn reasoning_effort_note(&self) -> Option<String> {
-        if self.reasoning_effort.is_none() || reasoning::supports_effort(self.route.dialect) {
+        if self.route.variant.is_some() {
+            return None;
+        }
+        let effort = self.reasoning_effort?;
+        if self.route.variants().iter().any(|variant| variant.id == effort.as_str()) {
+            return None;
+        }
+        if reasoning::supports_effort(self.route.dialect) {
             return None;
         }
         Some(reasoning::unsupported_note(self.route.dialect))
@@ -659,6 +702,10 @@ pub fn route_profile(
     .with_timeout(timeout)
     .with_retry(retry)
     .with_limits(route.limits())
+    .with_cost(route.cost())
+    .with_modalities(route.entry.modalities)
+    .with_tools_strict(route.entry.tools_strict)
+    .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
     .with_stream_usage(true))
 }
 
@@ -737,6 +784,21 @@ pub enum ConfigError {
         model_id: String,
         /// Catalog id the alias prefix wraps.
         bare_model_id: String,
+    },
+    /// `model#variant` carried an empty variant after the separator.
+    MissingVariant {
+        /// Model id before the `#`.
+        model_id: String,
+    },
+    /// The selected variant is not one the model's catalog row exposes.
+    UnknownVariant {
+        /// Catalog model id.
+        model_id: String,
+        /// Rejected variant id.
+        variant: String,
+        /// Comma-separated valid variant ids, or `none` when the model exposes
+        /// no reasoning variants at all.
+        valid: String,
     },
     /// A catalog endpoint is not a credential-safe origin.
     UntrustedRouteEndpoint {
@@ -823,6 +885,15 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "model id {model_id:?} is an OpenCode TUI alias: pass the documented model id \
                  {bare_model_id:?} instead"
+            ),
+            Self::MissingVariant { model_id } => write!(
+                formatter,
+                "model id {model_id:?} ends with an empty #variant: append a variant id or drop the \
+                 trailing '#'"
+            ),
+            Self::UnknownVariant { model_id, variant, valid } => write!(
+                formatter,
+                "model {model_id:?} has no reasoning variant {variant:?}: expected one of {valid}"
             ),
             Self::UntrustedRouteEndpoint { endpoint, detail } => write!(
                 formatter,

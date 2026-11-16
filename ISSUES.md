@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–5 implemented and tested (2026-11-16). Gaps 6–10 remain open; the one definition-of-done item that depends on Gap 9 (OpenRouter per-model catalog discovery) is still open and annotated below.
+**Status:** Gaps 1–10 implemented and tested (2026-11-17). Gap 11 and later (Part 5 second-pass findings) remain open.
 
 ## Execution Overview
 
@@ -1575,8 +1575,8 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 - Gap 2 is independent of Gap 1 and can ship first; it is the smallest diff that removes the largest visible gap.
 
 **Definition of done for the whole plan:**
-- [ ] For every catalog model on `opencode`, `opencode-go`, and `openrouter`, the request body is built from catalog-declared protocol, base URL, output limit, and reasoning support, with no hardcoded 8192 token cap and no surface-wide dialect assumption.
-  - OpenCode and OpenCode-Go are fully catalog-driven. OpenRouter still has no per-model catalog (limits/field detection come from the model vendor and endpoint until Gap 9 lands), so this item stays open.
+- [x] For every catalog model on `opencode`, `opencode-go`, and `openrouter`, the request body is built from catalog-declared protocol, base URL, output limit, and reasoning support, with no hardcoded 8192 token cap and no surface-wide dialect assumption.
+  - OpenCode and OpenCode-Go are fully catalog-driven. OpenRouter now ships a generated models.dev catalog too (`crates/ee-agent-openrouter/src/catalog/`), so limits, output field, reasoning field, cost, modalities, and variant support all come from the row instead of vendor name sniffing. Unknown ids still fall back to explicit configuration, which is documented rather than inferred.
 - [x] OpenRouter requests can express provider routing, plugins, usage accounting, and the full reasoning object without editing shared code.
 - [x] Multi-step tool loops preserve provider reasoning state across turns on Anthropic Messages, OpenAI Responses, and OpenRouter Chat Completions.
 - [x] Every new behavior has unit tests in the owning crate plus orchestrator/adapter-level tests (`loop_engine` tool-loop and context-overflow recovery tests run through the `ModelAdapter` boundary).
@@ -1812,50 +1812,53 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 8 — Model Variants
 
-- [ ] Support `provider/model#variant` selection derived from catalog reasoning support.
-  - [ ] **Problem:**
+- [x] Support `provider/model#variant` selection derived from catalog reasoning support.
+- [x] **Landed (Gap 8):** `ee-agent-orchestrator::model_metadata` owns `ReasoningVariant`/`ReasoningProtocol` and `reasoning_variants()` (toggle → `none`/`thinking`, declared `effort[]` with protocol defaults, Anthropic budget `high`/`max` under the 32k ceiling). `ee-agent-opencode` resolves `model#variant` in `routes::resolve_route`, validates it against the row, and lowers it in `reasoning::variant_extensions`; `OPENCODE_REASONING_EFFORT` now accepts all seven catalog efforts and maps to the matching variant first. `ee-agent-openrouter` splits the suffix after the last `#` (`Config::base_model`/`variant_id`), validates against the row for the selected API kind, and merges the overlay into `reasoning` (`effort`, `enabled:false`, or `max_tokens`). The Messages codec clamps `thinking.budget_tokens` below the fitted `max_tokens` and drops it when no budget clears 1,024 tokens. Divergence: Messages effort-only models (no declared budget) expose no variants and keep the documented no-op warning, because ee does not emit Anthropic adaptive-thinking effort fields.
+  - [x] **Problem:**
     - Reasoning is controlled by a single `*_REASONING_EFFORT` value with three accepted levels; the reference catalog declares per-model `toggle`, `effort[]` (including `none`/`xhigh`/`max`), and `budget` ranges, and derives named variants per package (`packages/core/src/variant.ts`).
     - Anthropic-route models take a token budget rather than an effort string; ee currently no-ops that knob (`crates/ee-agent-opencode/src/reasoning.rs::unsupported_note`) instead of exposing a budget variant.
     - There is no way to select a variant per request or per session, and no validation that the variant exists for the chosen model.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend the model id grammar to accept `provider/model#variant` in both binaries (OpenRouter keeps its `vendor/model` id, so the variant suffix must be parsed after the last `#`).
     - Build the variant list from catalog reasoning support per package: toggle variants (`none` + default), effort variants from the declared values, and budget variants within the declared min/max, using the same ceilings the reference uses for Anthropic output budgets.
     - Reject an unknown variant with the list of valid ids, and keep the existing effort environment variable as a shorthand that maps to the matching variant.
     - Emit the variant's request overlay (reasoning field/budget, `include`, body overlays) through the existing extensions/profiles.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - `deepseek/deepseek-v4-flash#high` selects the `high` effort variant; `#bogus` fails listing valid ids.
     - An Anthropic-route model exposes budget variants and sends `thinking.budget_tokens` within the declared range.
     - A model without reasoning support rejects every reasoning variant at startup, not at request time.
 
 ### Gap 9 — Catalog Discovery and Cost Accounting
 
-- [ ] Expose catalog-driven model listing and per-turn cost from provider-reported usage.
-  - [ ] **Problem:**
+- [x] Expose catalog-driven model listing and per-turn cost from provider-reported usage.
+- [x] **Landed (Gap 9):** `ee-agent-openrouter` gained a generated catalog (`src/catalog/{mod.rs,generated.rs}`, `catalog/models-dev.openrouter.json`, `scripts/gen_catalog.py` with `--refresh-snapshot`/`--check`) carrying kind, routes, status, limits, modalities, reasoning, tool capabilities, and text cost with context-tier overrides. Both binaries gained `--list-models` and `--list-models --json` (OpenCode sorts by surface then id; OpenRouter by id), reading only the committed table. Cost accounting: `Usage::cost_micros` decodes provider-reported `usage.cost` (never zero-filled), `ModelUsage` carries it through `response_from_turn`/`accumulate`, `EndpointProfile` gained catalog `cost`/`modalities`, and `apply_catalog_cost` fills the fallback from catalog prices including cache read/write and tier thresholds. OpenCode rows also carry `routes`/`status`/cost tiers now, so the same helpers serve both providers. ACP wire shape is unchanged; cost stays in the normalized usage record and session log.
+  - [x] **Problem:**
     - `crates/ee-agent-opencode/src/discovery.rs` is a display-only `/models` probe behind `--discover-models`; it cannot select routes and carries no metadata. `ee-agent-openrouter` has no discovery at all.
     - Usage decode records tokens and cache tokens but no monetary cost; OpenRouter returns `usage.cost`, and the catalog carries per-model input/output/cache prices with context-tier overrides.
     - There is no way to answer "what models can I use, what do they cost, what limits apply" from either binary without reading source.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `--list-models` (and `--list-models --json`) to both binaries, sourced from the generated catalog: id, kind, protocol, context/output limits, modalities, reasoning support, cost, status.
     - Parse OpenRouter `usage.cost` when present; otherwise compute cost from catalog prices including cache read/write and context-tier overrides, and expose it through `ModelUsage`/metrics without changing ACP wire compatibility.
     - Keep discovery strictly local and display-only; never let listing output select an endpoint or a credential.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - `--list-models --json` is stable, sorted, and includes every resolvable catalog row with limits and cost.
     - Cost accounting prefers provider-reported cost and falls back to catalog prices; unknown prices stay unknown, never zero.
     - Listing performs no network request and no credential access.
 
 ### Gap 10 — OpenRouter `/responses`, Decision Models, and Media
 
-- [ ] Reach parity on route kinds and input modalities that the reference agent exposes.
-  - [ ] **Problem:**
+- [x] Reach parity on route kinds and input modalities that the reference agent exposes.
+- [x] **Landed (Gap 10):** the OpenAI Responses codec moved from `ee-agent-opencode` into `ee-chat-completions` (`src/responses.rs` + `src/responses/tests.rs`); the OpenCode module is now a re-export shim so public paths and fixtures keep working. `ee-chat-completions::ResponsesAdapter` implements `ModelAdapter` over that codec, and `OpenRouterModelAdapter` is now an enum (`Chat`/`Responses`) selected by `OPENROUTER_API_KIND=chat|responses` (`OPENROUTER_RESPONSES_URL` for the endpoint). The Responses request already sends `store:false` and `include:["reasoning.encrypted_content"]`; chat-only option fields (`usage`, `reasoning.max_tokens`) are dropped on that route. Catalog gates apply before any request: non-chat kinds (System One decision, image, embedding) fail naming the missing feature, and a model without the requested route fails with the route name. Modality gates (`modality_violation`) and the 25 MiB trigger / 15 MiB target media offload (`bounded_media`, deterministic placeholder) run in `guard_transcript` before body assembly for chat, Responses, and Messages. Divergences: System One and Google `generate-content` remain explicit unsupported errors (no first-class consumer yet, and Google support needs a separate reviewed codec); image resize is an offload placeholder rather than a re-encode because ee does not ship an image codec.
+  - [x] **Problem:**
     - OpenRouter exposes both `/chat/completions` and `/responses`; `ee-agent-openrouter` only implements chat. The reference `/responses` route sends `store:false` plus `include: ["reasoning.encrypted_content"]` and shares the OpenAI Responses body builder.
     - OpenCode decision models (`/systemone`) and Google-protocol models are rejected as unsupported; the reference agent implements both, and decision models drive its typed-question features.
     - Media support is image-only in ee. The reference catalog declares PDF and video inputs, the OpenRouter provider offers a `file-parser` plugin for PDF, and the harness resizes oversized image payloads (25 MiB trigger, 15 MiB target).
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add an `/responses` route to `ee-agent-openrouter` reusing `crates/ee-agent-opencode/src/responses.rs` through a shared module (move the codec into `ee-chat-completions` or a new `ee-openai-responses` crate rather than duplicating it).
     - Implement the SystemOne decision codec only if a first-class consumer exists; until then keep the explicit unsupported error but name the feature. Google-protocol support should be a separate, security-reviewed codec, not a re-route through OpenAI shapes.
     - Enforce modality gates from the catalog: refuse audio/video/PDF on models that do not declare them, instead of silently flattening to text placeholders.
     - Add the image size guard (trigger/target bytes) before request assembly, with deterministic placeholder text for offloaded images.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - An OpenRouter model whose catalog entry lists `responses` can be called through `/responses` with `store:false` and encrypted-reasoning include.
     - Sending a PDF to a model that does not declare PDF input fails before the request with actionable guidance.
     - An image larger than the trigger size is offloaded with a deterministic placeholder and a cache-stable text substitution.
@@ -1885,12 +1888,12 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### 4.3 Suggested delivery order
 
-- [ ] Slice A: Gap 2 (OpenRouter body/options) — smallest diff, immediately visible parity.
-- [ ] Slice B: Gap 1 + Gap 9 listing (catalog generation and metadata).
-- [ ] Slice C: Gap 3 + Gap 4 (budgeting and reasoning replay; both depend on catalog metadata).
-- [ ] Slice D: Gap 5 + Gap 6 (error taxonomy and cache policy).
-- [ ] Slice E: Gap 7 + Gap 8 (tool controls, structured output, variants).
-- [ ] Slice F: Gap 10 (OpenRouter `/responses`, media gates, decision stub).
+- [x] Slice A: Gap 2 (OpenRouter body/options) — smallest diff, immediately visible parity.
+- [x] Slice B: Gap 1 + Gap 9 listing (catalog generation and metadata).
+- [x] Slice C: Gap 3 + Gap 4 (budgeting and reasoning replay; both depend on catalog metadata).
+- [x] Slice D: Gap 5 + Gap 6 (error taxonomy and cache policy).
+- [x] Slice E: Gap 7 + Gap 8 (tool controls, structured output, variants).
+- [x] Slice F: Gap 10 (OpenRouter `/responses`, media gates, decision stub).
 
 ## Part 5 — Second-Pass Findings (Deep Scan, Gap 11–Gap 24)
 

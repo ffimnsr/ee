@@ -659,3 +659,43 @@ fn tool_choice_lowers_to_the_anthropic_shape() {
         build(&ee_agent_orchestrator::ToolCallControl::auto().with_parallel(Some(false)));
     assert_eq!(parallel["tool_choice"]["disable_parallel_tool_use"], true);
 }
+
+fn body_with(max_output_tokens: u64, extensions: Value) -> Value {
+    let control = ee_agent_orchestrator::ToolCallControl::auto();
+    let cache = CacheDirective::disabled();
+    messages_body(&MessagesBody {
+        model: "claude",
+        system_prompt: "system",
+        transcript: &transcript(),
+        tools: &definitions(),
+        stream: false,
+        max_output_tokens,
+        extensions: Some(&extensions),
+        tool_control: &control,
+        cache: &cache,
+        prompt_tokens: None,
+    })
+}
+
+#[test]
+fn thinking_budget_is_clamped_below_the_output_bound() {
+    let extensions = json!({ "thinking": { "type": "enabled", "budget_tokens": 16_000 } });
+    let body = body_with(8_000, extensions.clone());
+    assert_eq!(body["thinking"]["budget_tokens"], 7_999);
+
+    let body = body_with(32_000, extensions);
+    assert_eq!(body["thinking"]["budget_tokens"], 16_000, "a fitting budget is untouched");
+}
+
+#[test]
+fn thinking_is_dropped_when_no_valid_budget_fits() {
+    let body =
+        body_with(1_024, json!({ "thinking": { "type": "enabled", "budget_tokens": 16_000 } }));
+    assert!(body.get("thinking").is_none(), "no budget above the 1024 floor fits");
+}
+
+#[test]
+fn disabled_thinking_passes_through_unchanged() {
+    let body = body_with(8_000, json!({ "thinking": { "type": "disabled" } }));
+    assert_eq!(body["thinking"]["type"], "disabled");
+}

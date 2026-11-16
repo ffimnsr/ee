@@ -87,6 +87,24 @@ fn extracts_usage_fields() {
 }
 
 #[test]
+fn provider_reported_cost_is_decoded_and_absent_cost_stays_unknown() {
+    let openai = json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "cost": 0.001_234,
+        }
+    });
+    let usage = decode_message(&openai).unwrap().usage.expect("usage parsed");
+    assert_eq!(usage.cost_micros, Some(1_234));
+
+    let responses = json!({ "input_tokens": 100, "output_tokens": 20 });
+    let usage = usage_from_tokens(&responses).expect("usage parsed");
+    assert_eq!(usage.cost_micros, None, "a missing cost is never zero-filled");
+}
+
+#[test]
 fn cache_usage_is_parsed_from_both_provider_shapes() {
     let anthropic = json!({
         "usage": {

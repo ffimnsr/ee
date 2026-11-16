@@ -4,13 +4,42 @@
 //! and argument parsing) lives in `ee-chat-completions`; this module only holds
 //! the few shapes the dialects agree on inside this crate.
 
+use std::borrow::Cow;
+
 use ee_agent_acp_server::ProviderError;
-use serde_json::{Value, json};
+use ee_agent_orchestrator::{ModelMessage, ModelResponse};
+use ee_chat_completions::EndpointProfile;
+use serde_json::Value;
+
+#[cfg(test)]
+use serde_json::json;
 
 /// Builds a codec failure whose text names the routed endpoint, never a
 /// credential.
 pub(crate) fn codec_error(label: &str, detail: impl std::fmt::Display) -> ProviderError {
-    ProviderError::BackendFailure(format!("{label}: {detail}"))
+    ee_chat_completions::wire::codec_error(label, detail)
+}
+
+/// Applies the catalog modality gate and media-size budget before a request
+/// body exists.
+///
+/// Returns the borrowed transcript when nothing changed, so the common path
+/// never copies the conversation.
+pub(crate) fn guarded_transcript<'a>(
+    profile: &EndpointProfile,
+    transcript: &'a [ModelMessage],
+) -> Result<Cow<'a, [ModelMessage]>, ProviderError> {
+    match ee_agent_orchestrator::guard_transcript(profile.modalities, &profile.model, transcript) {
+        Ok(None) => Ok(Cow::Borrowed(transcript)),
+        Ok(Some(bounded)) => Ok(Cow::Owned(bounded)),
+        Err(detail) => Err(codec_error(&profile.label, detail)),
+    }
+}
+
+/// Fills a catalog cost and seals the response for the producing model.
+pub(crate) fn finalize(mut response: ModelResponse, profile: &EndpointProfile) -> ModelResponse {
+    ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
+    ee_chat_completions::seal_response(response, &profile.model)
 }
 
 /// Parses tool arguments from their wire form.
@@ -19,14 +48,7 @@ pub(crate) fn codec_error(label: &str, detail: impl std::fmt::Display) -> Provid
 /// call identity with `Null` arguments, so the orchestrator rejects the call
 /// before any tool side effect.
 pub(crate) fn parse_arguments(raw: &str) -> Value {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return json!({});
-    }
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) if value.is_object() => value,
-        _ => Value::Null,
-    }
+    ee_chat_completions::wire::parse_arguments(raw)
 }
 
 #[cfg(test)]

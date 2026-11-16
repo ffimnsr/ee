@@ -47,8 +47,11 @@
 //! - Discovery failures surface as bounded diagnostics; the turn continues
 //!   without the failed server's tools.
 
+pub mod catalog;
 pub mod compaction;
 pub mod config;
+mod options;
+mod route_plan;
 /// Non-mutating `.env` parsing.
 ///
 /// The parser lives in `ee-agent-acp-server` so every ee agent binary shares one

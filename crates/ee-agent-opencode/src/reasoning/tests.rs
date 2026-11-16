@@ -11,10 +11,13 @@ fn effort_parses_only_the_documented_values() {
     assert_eq!(ReasoningEffort::parse(" MEDIUM "), Ok(ReasoningEffort::Medium));
     assert_eq!(ReasoningEffort::parse("High"), Ok(ReasoningEffort::High));
 
-    for rejected in ["", "none", "ultra", "3", "low high"] {
+    for rejected in ["", "ultra", "3", "low high"] {
         let error = ReasoningEffort::parse(rejected).expect_err("unsupported value");
-        assert!(error.contains("expected \"low\", \"medium\", or \"high\""), "{error}");
+        assert!(error.contains("expected \"none\", \"minimal\", \"low\""), "{error}");
         assert!(!error.contains("sk-"), "{error}");
+    }
+    for accepted in ["none", "minimal", "xhigh", "max"] {
+        assert!(ReasoningEffort::parse(accepted).is_ok(), "{accepted} is a catalog effort");
     }
 }
 

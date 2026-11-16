@@ -62,6 +62,7 @@ def compact_model(model: dict) -> dict:
     return {
         "id": model.get("id"),
         "type": model.get("type", "chat"),
+        "status": model.get("status") or "",
         "family": model.get("family") or "",
         "capabilities": {
             "tools": {
@@ -91,8 +92,12 @@ def compact_model(model: dict) -> dict:
                     "cache": {
                         key: cache[key] for key in ("read", "write") if key in cache
                     },
+                    "overrides": list(input_cost.get("overrides") or []),
                 },
-                "output": {"price": output_cost.get("price")},
+                "output": {
+                    "price": output_cost.get("price"),
+                    "overrides": list(output_cost.get("overrides") or []),
+                },
             }
         },
         "api": {
@@ -176,7 +181,67 @@ def cost_literal(model: dict) -> str:
         "Some(ModelCost { input_micros: "
         f"{micros(input_price)}, output_micros: {micros(output_price)}, "
         f"cache_read_micros: {'None' if cache_read is None else f'Some({micros(cache_read)})'}, "
-        f"cache_write_micros: {'None' if cache_write is None else f'Some({micros(cache_write)})'} }})"
+        f"cache_write_micros: {'None' if cache_write is None else f'Some({micros(cache_write)})'}, "
+        f"tiers: &[{tiers_literal(model)}] }})"
+    )
+
+
+def tiers_literal(model: dict) -> str:
+    """Renders context-tier price overrides, ascending by threshold."""
+    text = (model.get("cost") or {}).get("text") or {}
+    inputs = text.get("input") or {}
+    outputs = text.get("output") or {}
+    base_input = micros(inputs.get("price"))
+    base_output = micros(outputs.get("price"))
+    base_cache = inputs.get("cache") or {}
+    base_read = None if base_cache.get("read") is None else micros(base_cache.get("read"))
+    base_write = None if base_cache.get("write") is None else micros(base_cache.get("write"))
+    tiers: dict[int, dict[str, object]] = {}
+    for entry in inputs.get("overrides") or []:
+        threshold = _override_threshold(entry)
+        slot = tiers.setdefault(threshold, {"input": base_input, "read": base_read, "write": base_write})
+        slot["input"] = micros(entry.get("price"))
+        cache = entry.get("cache") or {}
+        if cache.get("read") is not None:
+            slot["read"] = micros(cache.get("read"))
+        if cache.get("write") is not None:
+            slot["write"] = micros(cache.get("write"))
+    for entry in outputs.get("overrides") or []:
+        threshold = _override_threshold(entry)
+        slot = tiers.setdefault(threshold, {"input": base_input, "read": base_read, "write": base_write})
+        slot["output"] = micros(entry.get("price"))
+    rendered = []
+    for threshold in sorted(tiers):
+        slot = tiers[threshold]
+        rendered.append(
+            "CostTier { input_context_above: "
+            f"{threshold}, input_micros: {slot['input']}, "
+            f"output_micros: {slot.get('output', base_output)}, "
+            f"cache_read_micros: {_option_micros(slot['read'])}, "
+            f"cache_write_micros: {_option_micros(slot['write'])} }}"
+        )
+    return ", ".join(rendered)
+
+
+def _override_threshold(entry: dict) -> int:
+    when = entry.get("when") or {}
+    context = when.get("context") or {}
+    return int(context.get("gt") or 0)
+
+
+def _option_micros(value: object) -> str:
+    return "None" if value is None else f"Some({value})"
+
+
+def routes_literal(model: dict) -> str:
+    api = model.get("api") or {}
+    return (
+        "ModelRoutes { chat: "
+        f"{'true' if 'chat-completions' in api else 'false'}, "
+        f"responses: {'true' if 'responses' in api else 'false'}, "
+        f"messages: {'true' if 'messages' in api else 'false'}, "
+        f"images: {'true' if 'images' in api else 'false'}, "
+        f"systemone: {'true' if 'systemone' in api else 'false'} }}"
     )
 
 
@@ -216,6 +281,7 @@ def model_literal(surface: str, model: dict, kind: str) -> str:
         "CatalogModel { surface: "
         f"{SURFACES[surface]}, id: {rust(model['id'])}, api_id: {rust(model['id'])}, "
         f"kind: ModelKind::Chat, dialect: {DIALECTS[kind]}, "
+        f"routes: {routes_literal(model)}, status: {rust(model.get('status') or '')}, "
         f"family: {rust(model.get('family') or '')}, "
         f"base_url: {SURFACES[surface]}.api_root(), "
         f"sdk: {rust(api.get('sdk') or '')}, "
@@ -236,7 +302,8 @@ def legacy_literal(surface: str, model_id: str, kind: str) -> str:
     return (
         "CatalogModel { surface: "
         f"{SURFACES[surface]}, id: {rust(model_id)}, api_id: {rust(model_id)}, "
-        f"kind: ModelKind::Chat, dialect: {DIALECTS[kind]}, family: \"\", "
+        f"kind: ModelKind::Chat, dialect: {DIALECTS[kind]}, "
+        f"routes: ModelRoutes::CHAT_ONLY, status: \"\", family: \"\", "
         f"base_url: {SURFACES[surface]}.api_root(), sdk: \"\", limits: None, "
         "modalities: Modalities::UNKNOWN, "
         "reasoning: ReasoningSupport::UNSUPPORTED, cost: None, "
@@ -322,7 +389,7 @@ def generate() -> str:
 use ee_agent_orchestrator::ModelLimits;
 
 use crate::catalog::{{
-    CatalogModel, Modalities, ModelCost, ModelKind, ReasoningSupport, RetiredModel,
+    CatalogModel, Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningSupport, RetiredModel,
     UnsupportedModel,
 }};
 use crate::routes::{{OpenCodeDialect as D, OpenCodeSurface as S, UnsupportedDialect}};

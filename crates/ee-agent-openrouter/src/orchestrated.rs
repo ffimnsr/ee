@@ -27,12 +27,12 @@ use ee_agent_orchestrator::{
     OrchestratorProvider, OrchestratorProviderConfig, RUBBER_DUCK_ROLE, StreamSink,
 };
 use ee_agent_protocol::Implementation;
-use ee_chat_completions::ChatCompletionsAdapter;
 #[cfg(any(test, feature = "test-utils"))]
 use ee_chat_completions::CompletionClient;
+use ee_chat_completions::{ChatCompletionsAdapter, ResponsesAdapter};
 use tokio::sync::watch;
 
-use crate::config::Config;
+use crate::config::{Config, OpenRouterApiKind};
 use crate::openrouter::{openrouter_profile, openrouter_token_source};
 
 mod policy;
@@ -187,10 +187,10 @@ pub fn openrouter_multi_model_provider(
         .and_then(Clone::clone)
         .unwrap_or_else(|| ModelFamily::Other("undeclared".into()));
     let root_identity = ModelIdentity::new(
-        config.model.clone(),
+        config.base_model().to_string(),
         "openrouter",
         declared_root_family.clone(),
-        config.model.clone(),
+        config.base_model().to_string(),
         [ModelCapability::ChatCompletion, ModelCapability::Tools, ModelCapability::Streaming],
     )
     .map_err(|error| error.to_string())?;
@@ -296,10 +296,17 @@ fn register_openrouter_critic(
 
 /// OpenRouter as a normalized [`ModelAdapter`].
 ///
-/// A thin wrapper over the shared Chat Completions adapter: the profile supplies
-/// OpenRouter's endpoint, attribution headers, reasoning shaping, retry policy,
-/// and error wording, while the shared adapter owns the protocol behavior.
-pub struct OpenRouterModelAdapter(ChatCompletionsAdapter);
+/// Chat sessions use the shared Chat Completions adapter; a session configured
+/// for `/responses` uses the shared Responses adapter. Both get the same
+/// OpenRouter profile (endpoint, attribution headers, reasoning shaping, retry
+/// policy, catalog metadata, and error wording), so protocol behavior stays in
+/// `ee-chat-completions` instead of being duplicated per route.
+pub enum OpenRouterModelAdapter {
+    /// OpenAI-compatible `/chat/completions`.
+    Chat(ChatCompletionsAdapter),
+    /// OpenAI `/responses`.
+    Responses(ResponsesAdapter),
+}
 
 impl OpenRouterModelAdapter {
     /// Builds an adapter with a real HTTP client honoring `config.timeout`.
@@ -307,11 +314,17 @@ impl OpenRouterModelAdapter {
     /// # Errors
     ///
     /// Returns a diagnostic when the configured endpoint or a header value is
-    /// unusable, or when the HTTP client cannot be built.
+    /// unusable, when the model or route cannot be served, or when the HTTP
+    /// client cannot be built.
     pub fn new(config: Config) -> Result<Self, String> {
-        let profile = openrouter_profile(&config, &config.model)?;
-        let adapter = ChatCompletionsAdapter::new(profile, openrouter_token_source(&config))?;
-        Ok(Self(adapter))
+        let profile = openrouter_profile(&config, config.base_model())?;
+        let token = openrouter_token_source(&config);
+        match config.api_kind {
+            OpenRouterApiKind::Chat => Ok(Self::Chat(ChatCompletionsAdapter::new(profile, token)?)),
+            OpenRouterApiKind::Responses => {
+                Ok(Self::Responses(ResponsesAdapter::new(profile, token)?))
+            }
+        }
     }
 
     /// Builds an adapter over an existing HTTP client (shared pools).
@@ -319,13 +332,21 @@ impl OpenRouterModelAdapter {
     /// # Errors
     ///
     /// Returns a diagnostic when the configured endpoint or a header value is
-    /// unusable.
+    /// unusable, or when the model or route cannot be served.
     fn with_http(config: Config, http: reqwest::Client) -> Result<Self, String> {
-        let profile = openrouter_profile(&config, &config.model)?;
-        Ok(Self(ChatCompletionsAdapter::with_http(profile, openrouter_token_source(&config), http)))
+        let profile = openrouter_profile(&config, config.base_model())?;
+        let token = openrouter_token_source(&config);
+        Ok(match config.api_kind {
+            OpenRouterApiKind::Chat => {
+                Self::Chat(ChatCompletionsAdapter::with_http(profile, token, http))
+            }
+            OpenRouterApiKind::Responses => {
+                Self::Responses(ResponsesAdapter::with_http(profile, token, http))
+            }
+        })
     }
 
-    /// Builds an adapter with an injected completion client (tests).
+    /// Builds a chat adapter with an injected completion client (tests).
     ///
     /// # Panics
     ///
@@ -334,9 +355,9 @@ impl OpenRouterModelAdapter {
     #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
     pub(crate) fn with_completion(config: Config, completion: Arc<CompletionClient>) -> Self {
-        let profile =
-            openrouter_profile(&config, &config.model).expect("test OpenRouter profile builds");
-        Self(ChatCompletionsAdapter::with_completion(
+        let profile = openrouter_profile(&config, config.base_model())
+            .expect("test OpenRouter profile builds");
+        Self::Chat(ChatCompletionsAdapter::with_completion(
             profile,
             openrouter_token_source(&config),
             completion,
@@ -350,7 +371,10 @@ impl ModelAdapter for OpenRouterModelAdapter {
         request: ModelRequest,
         cancel: watch::Receiver<bool>,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
-        self.0.complete(request, cancel)
+        match self {
+            Self::Chat(adapter) => adapter.complete(request, cancel),
+            Self::Responses(adapter) => adapter.complete(request, cancel),
+        }
     }
 
     fn complete_streaming(
@@ -359,7 +383,10 @@ impl ModelAdapter for OpenRouterModelAdapter {
         cancel: watch::Receiver<bool>,
         events: StreamSink,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
-        self.0.complete_streaming(request, cancel, events)
+        match self {
+            Self::Chat(adapter) => adapter.complete_streaming(request, cancel, events),
+            Self::Responses(adapter) => adapter.complete_streaming(request, cancel, events),
+        }
     }
 }
 

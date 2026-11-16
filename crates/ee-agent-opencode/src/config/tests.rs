@@ -27,6 +27,8 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         ee_config: false,
         print_route: false,
         print_catalog: false,
+        list_models: false,
+        json: false,
         discover_models: false,
         surface: surface.map(String::from),
         model: model.map(String::from),
@@ -491,7 +493,7 @@ fn unsupported_mode_and_effort_values_fail_before_any_request() {
     with_effort.reasoning_effort = Some(String::from("ultra"));
     let error = Config::from_args_and_dotenv(with_effort, &BTreeMap::new())
         .expect_err("unsupported effort is rejected at startup");
-    assert!(error.to_string().contains("expected \"low\", \"medium\", or \"high\""), "{error}");
+    assert!(error.to_string().contains("expected \"none\", \"minimal\", \"low\""), "{error}");
     assert!(!error.to_string().contains("sk-"), "{error}");
 }
 
@@ -506,6 +508,53 @@ fn blank_critic_and_effort_values_count_as_unset() {
     assert!(config.critic_model.is_none(), "an empty critic is not a critic");
     assert!(config.reasoning_effort.is_none(), "an empty effort sends nothing");
     assert_eq!(config.reasoning_effort_note(), None);
+}
+
+#[test]
+fn variant_suffix_reaches_the_request_extensions() {
+    let config = Config::from_args_and_dotenv(
+        args(Some("zen"), Some("claude-opus-4-5#high")),
+        &BTreeMap::new(),
+    )
+    .expect("variant route resolves");
+    assert_eq!(
+        config.route.variant.map(|variant| variant.id),
+        Some("high"),
+        "the catalog selects the budget variant"
+    );
+
+    let profile = config.profile().expect("profile builds");
+    let thinking = &profile.extensions.as_ref().expect("extensions")["thinking"];
+    assert_eq!(thinking["type"], "enabled");
+    let budget = thinking["budget_tokens"].as_u64().expect("budget tokens");
+    assert!(budget >= 1_024, "{budget} must clear the Anthropic floor");
+    assert!(budget < config.route.limits().expect("limits").output);
+}
+
+#[test]
+fn effort_shorthand_maps_to_the_matching_catalog_variant() {
+    let mut with_effort = args(Some("zen"), Some("claude-opus-4-5"));
+    with_effort.reasoning_effort = Some(String::from("max"));
+    let config = Config::from_args_and_dotenv(with_effort, &BTreeMap::new()).expect("resolves");
+
+    let profile = config.profile().expect("profile builds");
+    let budget = profile.extensions.as_ref().expect("extensions")["thinking"]["budget_tokens"]
+        .as_u64()
+        .expect("budget tokens");
+    assert_eq!(
+        Some(budget),
+        config.route.variants().iter().find(|v| v.id == "max").and_then(|v| v.budget_tokens)
+    );
+}
+
+#[test]
+fn effort_on_a_model_without_reasoning_support_fails_at_startup() {
+    let mut with_effort = args(Some("zen"), Some("claude-3-5-haiku"));
+    with_effort.reasoning_effort = Some(String::from("high"));
+
+    let error = Config::from_args_and_dotenv(with_effort, &BTreeMap::new())
+        .expect_err("a model without reasoning support rejects the variant");
+    assert!(error.to_string().contains("no reasoning variant"), "{error}");
 }
 
 #[test]

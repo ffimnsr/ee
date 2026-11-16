@@ -22,6 +22,8 @@ use ee_agent_protocol::setup::{
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+/// Default OpenRouter Responses endpoint.
+pub const DEFAULT_RESPONSES_URL: &str = "https://openrouter.ai/api/v1/responses";
 /// Default OpenRouter model id.
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 /// Default system prompt sent with each session history.
@@ -146,6 +148,14 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     Ok(value)
 }
 
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let value = value.parse::<u64>().map_err(|_| String::from("must be a positive integer"))?;
+    if value == 0 {
+        return Err(String::from("must be at least 1"));
+    }
+    Ok(value)
+}
+
 fn parse_rubber_duck_mode(value: &str) -> Result<RubberDuckMode, String> {
     match value {
         "off" => Ok(RubberDuckMode::Off),
@@ -190,6 +200,42 @@ fn parse_percentage(value: &str) -> Result<u8, String> {
     Ok(value)
 }
 
+/// Protocol route a session uses on OpenRouter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenRouterApiKind {
+    /// OpenAI-compatible `/chat/completions` (default).
+    #[default]
+    Chat,
+    /// OpenAI `/responses`.
+    Responses,
+}
+
+impl OpenRouterApiKind {
+    /// Stable lowercase label used by configuration and listings.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Responses => "responses",
+        }
+    }
+
+    /// Parses the configured route name.
+    ///
+    /// # Errors
+    ///
+    /// Returns guidance naming the accepted values.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "chat" | "chat-completions" => Ok(Self::Chat),
+            "responses" => Ok(Self::Responses),
+            other => Err(format!(
+                "unsupported OpenRouter API kind {other:?}: expected \"chat\" or \"responses\""
+            )),
+        }
+    }
+}
+
 /// Command-line arguments; every field also reads its `OPENROUTER_*`
 /// environment variable.
 #[derive(Debug, Parser)]
@@ -198,6 +244,13 @@ pub struct Args {
     /// Print ee setup manifest JSON and exit without starting the agent.
     #[arg(long)]
     pub ee_config: bool,
+    /// List catalog models with limits, modalities, reasoning variants, and
+    /// cost, then exit without reading a credential or contacting the network.
+    #[arg(long, conflicts_with = "ee_config")]
+    pub list_models: bool,
+    /// Emit machine-readable JSON for `--list-models`.
+    #[arg(long, requires = "list_models")]
+    pub json: bool,
     /// OpenRouter model id, e.g. deepseek/deepseek-v4-flash-0731.
     #[arg(long, env = "OPENROUTER_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
@@ -253,6 +306,17 @@ pub struct Args {
     /// Chat completions endpoint.
     #[arg(long, env = "OPENROUTER_API_URL", default_value = DEFAULT_API_URL)]
     api_url: String,
+    /// Protocol route: `chat` (default) or `responses`.
+    #[arg(
+        long,
+        env = "OPENROUTER_API_KIND",
+        default_value = "chat",
+        value_parser = OpenRouterApiKind::parse,
+    )]
+    api_kind: OpenRouterApiKind,
+    /// Responses endpoint used when `--api-kind responses`.
+    #[arg(long, env = "OPENROUTER_RESPONSES_URL", default_value = DEFAULT_RESPONSES_URL)]
+    responses_url: String,
     /// Optional HTTP-Referer value recommended by OpenRouter.
     #[arg(long, env = "OPENROUTER_SITE_URL")]
     site_url: Option<String>,
@@ -278,8 +342,9 @@ pub struct Args {
     #[arg(long, env = "OPENROUTER_COMPACT_MAX_INPUT_BYTES", default_value_t = DEFAULT_COMPACT_MAX_INPUT_BYTES)]
     compact_max_input_bytes: usize,
     /// Model context-window size in tokens (reported as `usage_update.size`).
-    #[arg(long, env = "OPENROUTER_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS)]
-    context_window: u64,
+    /// Blank uses the catalog limit, then the default.
+    #[arg(long, env = "OPENROUTER_CONTEXT_WINDOW", value_parser = parse_positive_u64)]
+    context_window: Option<u64>,
     /// Percentage of the context window that triggers automatic compaction after
     /// a reported near-limit request. Zero disables automatic compaction.
     #[arg(
@@ -355,6 +420,10 @@ pub struct Config {
     pub rubber_duck: RubberDuckConfig,
     /// Chat completions endpoint.
     pub api_url: String,
+    /// Protocol route: chat completions or OpenAI Responses.
+    pub api_kind: OpenRouterApiKind,
+    /// Responses endpoint used when `api_kind` is `Responses`.
+    pub responses_url: String,
     /// OpenRouter API key; never logged, used only for the Authorization
     /// header.
     pub api_key: Option<String>,
@@ -410,6 +479,8 @@ impl std::fmt::Debug for Config {
             .field("rubber_duck_model_family", &self.rubber_duck_model_family)
             .field("rubber_duck", &self.rubber_duck)
             .field("api_url", &self.api_url)
+            .field("api_kind", &self.api_kind)
+            .field("responses_url", &self.responses_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("site_url", &self.site_url)
             .field("app_title", &self.app_title)
@@ -424,6 +495,12 @@ impl Config {
     /// for the variables that are not CLI flags (`OPENROUTER_API_KEY`,
     /// `OPENROUTER_SITE_URL`).
     pub fn from_args_and_dotenv(args: Args, dotenv: &BTreeMap<String, String>) -> Self {
+        let catalog_limits =
+            crate::catalog::find(base_model_id(&args.model)).and_then(|entry| entry.limits);
+        let context_window = args
+            .context_window
+            .or_else(|| catalog_limits.map(|limits| limits.context))
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
         Self {
             model: args.model,
             model_family: args.model_family,
@@ -442,6 +519,8 @@ impl Config {
             rubber_duck_model: args.rubber_duck_model,
             rubber_duck_model_family: args.rubber_duck_model_family,
             api_url: args.api_url,
+            api_kind: args.api_kind,
+            responses_url: args.responses_url,
             api_key: Self::env_or_dotenv("OPENROUTER_API_KEY", dotenv),
             site_url: args.site_url.or_else(|| Self::env_or_dotenv("OPENROUTER_SITE_URL", dotenv)),
             app_title: args.app_title,
@@ -452,7 +531,7 @@ impl Config {
             compact_min_messages: args.compact_min_messages,
             compact_retained_tail: args.compact_retained_tail,
             compact_max_input_bytes: args.compact_max_input_bytes,
-            context_window: args.context_window,
+            context_window,
             auto_compact_threshold_percent: args.auto_compact_threshold_percent,
             max_iterations: args.max_iterations,
             retry_max_attempts: args.retry_max_attempts,
@@ -492,6 +571,35 @@ impl Config {
     /// parsed `.env` map; empty values count as unset.
     pub fn env_or_dotenv(name: &str, dotenv: &BTreeMap<String, String>) -> Option<String> {
         ee_agent_acp_server::env_or_dotenv(name, dotenv)
+    }
+
+    /// Model id without the optional `#variant` selector.
+    #[must_use]
+    pub fn base_model(&self) -> &str {
+        base_model_id(&self.model)
+    }
+
+    /// Variant id requested by `OPENROUTER_MODEL` after `#`, when present.
+    #[must_use]
+    pub fn variant_id(&self) -> Option<&str> {
+        self.model
+            .rsplit_once('#')
+            .map(|(_, variant)| variant.trim())
+            .filter(|variant| !variant.is_empty())
+    }
+
+    /// Catalog row for the base model id, when models.dev lists it.
+    #[must_use]
+    pub fn catalog_entry(&self) -> Option<&'static crate::catalog::CatalogModel> {
+        crate::catalog::find(self.base_model())
+    }
+}
+
+/// Strips a trailing `#variant` and trims the model id.
+fn base_model_id(model: &str) -> &str {
+    match model.rsplit_once('#') {
+        Some((base, _)) => base.trim(),
+        None => model.trim(),
     }
 }
 
@@ -545,6 +653,8 @@ mod tests {
     fn args() -> Args {
         Args {
             ee_config: false,
+            list_models: false,
+            json: false,
             model: String::from("test/model"),
             model_family: None,
             rubber_duck_model: None,
@@ -555,6 +665,8 @@ mod tests {
             rubber_duck_output_bytes: DEFAULT_RUBBER_DUCK_OUTPUT_BYTES,
             rubber_duck_timeout_ms: u64::try_from(DEFAULT_RUBBER_DUCK_TIMEOUT.as_millis()).unwrap(),
             api_url: String::from(DEFAULT_API_URL),
+            api_kind: OpenRouterApiKind::Chat,
+            responses_url: String::from(DEFAULT_RESPONSES_URL),
             site_url: None,
             app_title: String::from("ee-test"),
             timeout_ms: 1_000,
@@ -564,7 +676,7 @@ mod tests {
             compact_min_messages: DEFAULT_COMPACT_MIN_MESSAGES,
             compact_retained_tail: DEFAULT_COMPACT_RETAINED_TAIL,
             compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
-            context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            context_window: None,
             auto_compact_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             max_iterations: None,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
@@ -574,6 +686,54 @@ mod tests {
             session_log_dir: None,
             session_log_durable: false,
         }
+    }
+
+    #[test]
+    fn catalog_context_window_fills_when_unset_and_an_explicit_value_wins() {
+        let mut parsed = args();
+        parsed.model = String::from("deepseek/deepseek-v4-flash");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+        assert_eq!(config.context_window, 1_048_576, "catalog context replaces the default");
+
+        let mut parsed = args();
+        parsed.model = String::from("deepseek/deepseek-v4-flash");
+        parsed.context_window = Some(32_768);
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+        assert_eq!(config.context_window, 32_768, "an explicit window wins");
+
+        let config = Config::from_args_and_dotenv(args(), &BTreeMap::new());
+        assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
+    }
+
+    #[test]
+    fn model_id_variant_suffix_is_split_and_the_base_id_resolves() {
+        let mut parsed = args();
+        parsed.model = String::from("deepseek/deepseek-v4-flash#high");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+
+        assert_eq!(config.base_model(), "deepseek/deepseek-v4-flash");
+        assert_eq!(config.variant_id(), Some("high"));
+        assert_eq!(
+            config.catalog_entry().map(|entry| entry.id),
+            Some("deepseek/deepseek-v4-flash")
+        );
+
+        assert_eq!(config.base_model(), "deepseek/deepseek-v4-flash");
+        let mut plain = args();
+        plain.model = String::from(" test/model ");
+        let config = Config::from_args_and_dotenv(plain, &BTreeMap::new());
+        assert_eq!(config.base_model(), "test/model");
+        assert_eq!(config.variant_id(), None);
+        assert!(config.catalog_entry().is_none());
+    }
+
+    #[test]
+    fn api_kind_parses_the_documented_routes() {
+        assert_eq!(OpenRouterApiKind::parse("chat"), Ok(OpenRouterApiKind::Chat));
+        assert_eq!(OpenRouterApiKind::parse("RESPONSES"), Ok(OpenRouterApiKind::Responses));
+        assert_eq!(OpenRouterApiKind::parse("chat-completions"), Ok(OpenRouterApiKind::Chat));
+        assert!(OpenRouterApiKind::parse("grpc").is_err());
+        assert_eq!(OpenRouterApiKind::Responses.as_str(), "responses");
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::time::Duration;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 
-use ee_agent_orchestrator::{ModelLimits, OUTPUT_LIMIT_MAX, fit_output_limit};
+use ee_agent_orchestrator::{
+    Modalities, ModelCost, ModelLimits, OUTPUT_LIMIT_MAX, fit_output_limit,
+};
 
 use crate::cache_policy::{CacheDirective, CachePolicy};
 use crate::endpoint::TrustedEndpoint;
@@ -166,6 +168,11 @@ pub struct EndpointProfile {
     pub freeform: Vec<String>,
     /// Catalog-declared context/output limits, when known.
     pub limits: Option<ModelLimits>,
+    /// Catalog prices used when the provider reports tokens but no cost.
+    pub cost: Option<ModelCost>,
+    /// Catalog-declared input modalities, used to refuse undeclared media before
+    /// a request exists.
+    pub modalities: Modalities,
     /// Explicit output-token override; still clamped to the catalog ceiling.
     pub max_output_tokens: Option<u64>,
     /// Request usage in the stream with `stream_options.include_usage`.
@@ -201,6 +208,8 @@ impl EndpointProfile {
             tools_strict: false,
             freeform: Vec::new(),
             limits: None,
+            cost: None,
+            modalities: Modalities::UNKNOWN,
             max_output_tokens: None,
             stream_usage: false,
             max_tokens_field: MaxTokensField::MaxTokens,
@@ -279,6 +288,20 @@ impl EndpointProfile {
     #[must_use]
     pub fn with_limits(mut self, limits: Option<ModelLimits>) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the catalog prices used as a cost fallback.
+    #[must_use]
+    pub fn with_cost(mut self, cost: Option<ModelCost>) -> Self {
+        self.cost = cost;
+        self
+    }
+
+    /// Sets the catalog-declared input modalities.
+    #[must_use]
+    pub fn with_modalities(mut self, modalities: Modalities) -> Self {
+        self.modalities = modalities;
         self
     }
 

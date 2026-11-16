@@ -9,7 +9,7 @@ use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{ModelMessage, ModelResponse, ToolCallControl, ToolDefinition};
 use ee_chat_completions::{
     ChatCompletionsClient, ChatRequest, ChatRequestParts, DeltaSink, EndpointProfile,
-    EndpointTransport, chat_request_parts, response_from_turn, seal_response,
+    EndpointTransport, chat_request_parts, response_from_turn,
 };
 
 /// Dialect every route served by this module speaks.
@@ -68,9 +68,10 @@ impl ChatCompletionsCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
+        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let (messages, tools) = chat_request_parts(&ChatRequestParts {
             system_prompt: &profile.system_prompt,
-            transcript,
+            transcript: transcript.as_ref(),
             definitions: tools,
             cache: &profile.cache,
             model: &profile.model,
@@ -88,7 +89,7 @@ impl ChatCompletionsCodec {
                 prompt_tokens,
             })
             .await?;
-        Ok(seal_response(response_from_turn(turn), &profile.model))
+        Ok(crate::dialect::finalize(response_from_turn(turn), profile))
     }
 
     /// Performs one streaming round trip under the profile retry policy.
@@ -130,9 +131,10 @@ impl ChatCompletionsCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
+        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let (messages, tools) = chat_request_parts(&ChatRequestParts {
             system_prompt: &profile.system_prompt,
-            transcript,
+            transcript: transcript.as_ref(),
             definitions: tools,
             cache: &profile.cache,
             model: &profile.model,
@@ -148,6 +150,6 @@ impl ChatCompletionsCodec {
                 sink,
             )
             .await?;
-        Ok(seal_response(response_from_turn(turn), &profile.model))
+        Ok(crate::dialect::finalize(response_from_turn(turn), profile))
     }
 }
