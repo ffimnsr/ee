@@ -42,6 +42,8 @@ fn delegation(root: &std::path::Path, isolation_role: bool) -> DelegationRequest
         context_snapshot: Vec::new(),
         scope: Some(WorkspaceScope::new(vec![root.to_path_buf()], Vec::new())),
         model_id: None,
+        resume_child_id: None,
+        fork_context: false,
     }
 }
 

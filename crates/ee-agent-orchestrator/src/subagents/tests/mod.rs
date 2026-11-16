@@ -203,4 +203,5 @@ mod lifecycle_tests;
 mod memory_tests;
 mod model_tests;
 mod quarantine_tests;
+mod resume_tests;
 mod roles_tests;

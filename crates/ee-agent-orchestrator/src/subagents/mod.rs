@@ -217,6 +217,11 @@ pub(crate) struct DelegationRequest {
     /// Registry id of the adapter the delegating loop runs on; the fallback
     /// when the role selects no model.
     pub model_id: Option<String>,
+    /// Retained child transcript to continue, when resuming a prior child.
+    pub resume_child_id: Option<String>,
+    /// Whether an `explorer`/`planner` child inherits a compacted parent
+    /// context snapshot instead of the raw parent transcript.
+    pub fork_context: bool,
 }
 
 /// Full delegation request, built by the manager after the child task node
@@ -335,6 +340,8 @@ pub(crate) struct SubagentState {
     pub(crate) children: Arc<ChildRegistry>,
     /// Retained worktrees awaiting host apply; pruned on session close.
     pub(crate) worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
+    /// Bounded completed child transcripts for `resume_child_id`.
+    pub(crate) transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
 }
 
 impl SubagentState {
@@ -344,7 +351,16 @@ impl SubagentState {
         budget: Arc<Mutex<BudgetTracker>>,
         children: Arc<ChildRegistry>,
     ) -> Self {
-        Self { tasks, memory, budget, children, worktrees: Arc::new(Mutex::new(Vec::new())) }
+        Self {
+            tasks,
+            memory,
+            budget,
+            children,
+            worktrees: Arc::new(Mutex::new(Vec::new())),
+            transcripts: Arc::new(Mutex::new(
+                crate::subagent_transcripts::ChildTranscriptStore::default(),
+            )),
+        }
     }
 
     /// Shares an existing worktree registry (runtime-owned cleanup surface).
@@ -354,6 +370,16 @@ impl SubagentState {
         worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
     ) -> Self {
         self.worktrees = worktrees;
+        self
+    }
+
+    /// Shares a session-scoped retained transcript store.
+    #[must_use]
+    pub(crate) fn with_transcripts(
+        mut self,
+        transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
+    ) -> Self {
+        self.transcripts = transcripts;
         self
     }
 }
@@ -382,6 +408,7 @@ pub(crate) struct SubagentManager {
     quarantine: Arc<Mutex<SubagentQuarantine>>,
     children: Arc<ChildRegistry>,
     worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
+    transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
 }
 
 /// Synchronous fail-safe for a dropped or panicking child future. Normal
@@ -457,16 +484,23 @@ pub(crate) struct DelegateTool {
     manager: Arc<SubagentManager>,
 }
 
+/// Parsed and validated `delegate_task` arguments.
+#[derive(Debug)]
+struct DelegateArguments {
+    role: SubagentRole,
+    prompt: String,
+    resume_child_id: Option<String>,
+    fork_context: bool,
+}
+
 impl DelegateTool {
     /// Creates the tool backed by the given manager.
     pub(crate) fn new(manager: Arc<SubagentManager>) -> Self {
         Self { manager }
     }
 
-    /// Parses and validates delegation arguments, returning `(role, prompt)`.
-    fn role_from_arguments(
-        arguments: &serde_json::Value,
-    ) -> Result<(SubagentRole, String), String> {
+    /// Parses and validates delegation arguments.
+    fn role_from_arguments(arguments: &serde_json::Value) -> Result<DelegateArguments, String> {
         let map = arguments.as_object().ok_or("delegate arguments must be a JSON object")?;
         let prompt = map
             .get("prompt")
@@ -514,6 +548,24 @@ impl DelegateTool {
             .and_then(serde_json::Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
+        let resume_child_id = map
+            .get("resume_child_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        if let Some(child_id) = &resume_child_id
+            && child_id.chars().count() > MAX_CHILD_ROLE_CHARS
+        {
+            return Err(format!(
+                "resume_child_id must be at most {MAX_CHILD_ROLE_CHARS} characters"
+            ));
+        }
+        let fork_context = match map.get("fork_context") {
+            None => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => return Err("fork_context must be a boolean".into()),
+        };
 
         // Built-in role security contracts are immutable at the tool boundary.
         // Model-supplied instructions, tool classes, and iteration limits are
@@ -522,7 +574,7 @@ impl DelegateTool {
             let mut role = builtin.role();
             role.allowed_scope_globs = allowed_scope_globs;
             role.model = model;
-            return Ok((role, prompt));
+            return Ok(DelegateArguments { role, prompt, resume_child_id, fork_context });
         }
 
         let instructions =
@@ -551,8 +603,8 @@ impl DelegateTool {
             .map(|value| value as usize)
             .filter(|value| *value > 0)
             .unwrap_or(SUBAGENT_DEFAULT_MAX_ITERATIONS);
-        Ok((
-            SubagentRole {
+        Ok(DelegateArguments {
+            role: SubagentRole {
                 name,
                 instructions,
                 allowed_tool_classes: allowed,
@@ -563,7 +615,9 @@ impl DelegateTool {
                 workspace_isolation: crate::workspace_isolation::WorkspaceIsolation::Shared,
             },
             prompt,
-        ))
+            resume_child_id,
+            fork_context,
+        })
     }
 }
 
@@ -612,6 +666,14 @@ impl ServerTool for DelegateTool {
                         "description": "Registry model id the subagent runs on; omit to use the parent model",
                         "enum": ids,
                     },
+                    "resume_child_id": {
+                        "type": "string",
+                        "description": "Child id from a prior completed delegate_task; continues that child's retained transcript under the same role policy",
+                    },
+                    "fork_context": {
+                        "type": "boolean",
+                        "description": "For explorer/planner: inherit a compacted parent context snapshot instead of the raw parent transcript",
+                    },
                 },
                 "required": ["prompt"]
             }),
@@ -632,10 +694,11 @@ impl ServerTool for DelegateTool {
     ) -> ToolFuture<ToolResult> {
         let manager = self.manager.clone();
         Box::pin(async move {
-            let (role, prompt) = match Self::role_from_arguments(&arguments) {
-                Ok(pair) => pair,
+            let arguments = match Self::role_from_arguments(&arguments) {
+                Ok(arguments) => arguments,
                 Err(reason) => return ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
             };
+            let DelegateArguments { role, prompt, resume_child_id, fork_context } = arguments;
             let request = DelegationRequest {
                 parent_task_id: context.task.id.clone(),
                 role,
@@ -643,6 +706,8 @@ impl ServerTool for DelegateTool {
                 context_snapshot: context.transcript,
                 scope: context.scope.clone(),
                 model_id: context.model_id.clone(),
+                resume_child_id,
+                fork_context,
             };
             match manager.spawn(request, client, cancel, context.events).await {
                 Ok(result) => match result.handoff.status {

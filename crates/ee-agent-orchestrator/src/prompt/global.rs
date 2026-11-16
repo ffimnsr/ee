@@ -33,14 +33,15 @@ pub(crate) const GLOBAL_INSTRUCTION_HEADER: &str = concat!(
 const PROMPT_METADATA_KEY: &str = "ee_prompt";
 const PROMPT_METADATA_VALUE: &str = "global_instructions";
 
-/// Discovers the trusted user-level instruction file from the process
-/// environment.
-///
-/// Returns at most one message. A missing, unreadable, escaping, or empty
-/// file emits nothing; a broken user file never blocks a turn.
-pub(crate) fn discover() -> Vec<WorkspaceMessage> {
-    let Some(root) = user_config_root() else { return Vec::new() };
-    discover_at(&root)
+/// Resolves the `ee` user config directory without creating it.
+pub(crate) fn user_config_root() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let path = PathBuf::from(xdg);
+        if path.is_absolute() {
+            return Some(path.join("ee"));
+        }
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("ee"))
 }
 
 /// Discovers the trusted user-level instruction file under an explicit
@@ -69,17 +70,6 @@ pub(crate) fn discover_at(config_root: &Path) -> Vec<WorkspaceMessage> {
         .with_trust(TrustLevel::UserInstructionTrusted)
         .with_metadata([(PROMPT_METADATA_KEY.to_string(), PROMPT_METADATA_VALUE.to_string())]);
     vec![WorkspaceMessage { path: format!("(global) {}", file.display_path), message }]
-}
-
-/// Resolves the `ee` user config directory without creating it.
-fn user_config_root() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        let path = PathBuf::from(xdg);
-        if path.is_absolute() {
-            return Some(path.join("ee"));
-        }
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("ee"))
 }
 
 /// Reserves room for the notice plus the frame/header/path overhead.

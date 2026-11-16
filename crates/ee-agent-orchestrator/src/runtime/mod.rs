@@ -230,6 +230,8 @@ pub struct OrchestratorRuntime {
     /// Retained isolated worktrees awaiting host apply; pruned on session
     /// close or `/discard`.
     worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
+    /// Bounded completed child transcripts for `resume_child_id`.
+    transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
 }
 
 mod branch;

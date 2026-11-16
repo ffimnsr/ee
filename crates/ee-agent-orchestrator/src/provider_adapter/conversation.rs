@@ -356,7 +356,9 @@ pub(super) struct PromptBundleInputs<'a> {
     pub(super) policy: &'a ToolPolicy,
     pub(super) advertised_tools: &'a [String],
     pub(super) mcp_servers: &'a [String],
-    /// Test seam for trusted user instructions; `None` reads the process env.
+    /// Test seam for trusted user instructions and user skill catalogs;
+    /// `None` disables both user-global planes. Production resolves the config
+    /// root from the environment and passes it explicitly.
     pub(super) global_config_root: Option<&'a std::path::Path>,
     /// Rendered background terminal job status, when any job is tracked.
     pub(super) background_jobs: Option<&'a str>,
@@ -399,9 +401,16 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
     // the current snapshot ahead of the current prompt.
     bundle.global = match inputs.global_config_root {
         Some(root) => crate::prompt::global::discover_at(root),
-        None => crate::prompt::global::discover(),
+        None => Vec::new(),
     };
     bundle.workspace = crate::prompt::workspace::discover(inputs.cwd, inputs.workspace_roots);
+    // Skill catalogs ride in the workspace plane: repository skills are
+    // untrusted, user-global skills are trusted relative to workspace text.
+    bundle.workspace.extend(crate::prompt::skills::catalog_messages(
+        inputs.cwd,
+        inputs.workspace_roots,
+        inputs.global_config_root,
+    ));
     Ok(bundle)
 }
 

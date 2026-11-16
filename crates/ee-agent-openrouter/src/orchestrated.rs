@@ -47,6 +47,7 @@ pub fn openrouter_orchestrator_config(
 ) -> OrchestratorProviderConfig {
     let session_log_root = config.session_log_root(&session_state_dir);
     let workspace_isolation = workspace_isolation_config(&session_state_dir);
+    let approval_classifier = approval_classifier_config();
     let mut provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-agent-openrouter", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
@@ -70,6 +71,7 @@ pub fn openrouter_orchestrator_config(
                 None => ee_agent_orchestrator::RecoveryConfig::memory_only(),
             },
             workspace_isolation,
+            approval_classifier,
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
@@ -102,6 +104,24 @@ pub fn workspace_isolation_config(
         worktree_root: Some(session_state_dir.join("worktrees")),
         keep_worktrees: env_flag("EE_KEEP_WORKTREES"),
     }
+}
+
+/// Resolves the opt-in approval classifier.
+///
+/// `EE_APPROVAL_CLASSIFIER=auto` enables risk classification before host
+/// approval; `EE_APPROVAL_CLASSIFIER_MODEL` selects a registered model id.
+/// Unset or `off` keeps interactive host approval unchanged.
+#[must_use]
+pub fn approval_classifier_config() -> ee_agent_orchestrator::ApprovalClassifierConfig {
+    let mode = std::env::var("EE_APPROVAL_CLASSIFIER")
+        .ok()
+        .and_then(|value| ee_agent_orchestrator::ApprovalClassifierMode::parse(&value))
+        .unwrap_or_default();
+    let model_id = std::env::var("EE_APPROVAL_CLASSIFIER_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    ee_agent_orchestrator::ApprovalClassifierConfig { mode, model_id, ..Default::default() }
 }
 
 /// Builds the production OpenRouter adapter and orchestrator policy combination.

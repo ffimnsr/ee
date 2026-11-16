@@ -277,6 +277,7 @@ pub fn opencode_orchestrator_config(
 ) -> OrchestratorProviderConfig {
     let session_log_root = config.session_log_root(&session_state_dir);
     let workspace_isolation = workspace_isolation_config(&session_state_dir);
+    let approval_classifier = approval_classifier_config();
     let mut provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-agent-opencode", env!("CARGO_PKG_VERSION"))
             .title("OpenCode"),
@@ -298,6 +299,7 @@ pub fn opencode_orchestrator_config(
                 None => RecoveryConfig::memory_only(),
             },
             workspace_isolation,
+            approval_classifier,
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
@@ -309,6 +311,24 @@ pub fn opencode_orchestrator_config(
             ee_agent_orchestrator::SessionLogConfig::durable(root.join("session-log"));
     }
     provider_config
+}
+
+/// Resolves the opt-in approval classifier.
+///
+/// `EE_APPROVAL_CLASSIFIER=auto` enables risk classification before host
+/// approval; `EE_APPROVAL_CLASSIFIER_MODEL` selects a registered model id.
+/// Unset or `off` keeps interactive host approval unchanged.
+#[must_use]
+pub fn approval_classifier_config() -> ee_agent_orchestrator::ApprovalClassifierConfig {
+    let mode = std::env::var("EE_APPROVAL_CLASSIFIER")
+        .ok()
+        .and_then(|value| ee_agent_orchestrator::ApprovalClassifierMode::parse(&value))
+        .unwrap_or_default();
+    let model_id = std::env::var("EE_APPROVAL_CLASSIFIER_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    ee_agent_orchestrator::ApprovalClassifierConfig { mode, model_id, ..Default::default() }
 }
 
 /// Resolves the opt-in worktree isolation policy for a session state root.

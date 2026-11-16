@@ -113,6 +113,10 @@ pub(crate) struct LoopOptions {
     /// Path remap for a git-worktree-isolated child. `None` edits the primary
     /// checkout directly.
     pub workspace_remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
+    /// Runtime decision log for approval-classifier audit entries.
+    pub decisions: Option<Arc<Mutex<crate::decision_log::DecisionLog>>>,
+    /// Opt-in approval risk classifier; `None` leaves host approval unchanged.
+    pub approval_classifier: Option<Arc<crate::approval_classifier::ApprovalClassifier>>,
 }
 
 impl Default for LoopOptions {
@@ -137,6 +141,8 @@ impl Default for LoopOptions {
             workspace_instructions: None,
             background_jobs: None,
             workspace_remap: None,
+            decisions: None,
+            approval_classifier: None,
         }
     }
 }
@@ -182,6 +188,9 @@ impl LoopEngine {
         .with_model_id(options.model_id.clone());
         let executor = executor.with_background_jobs(options.background_jobs.clone());
         let executor = executor.with_workspace_remap(options.workspace_remap.clone());
+        let executor = executor
+            .with_approval_classifier(options.approval_classifier.clone())
+            .with_decisions(options.decisions.clone());
         let graph = options.graph.clone();
         let memory = options.memory.clone();
         let checkpoint = options.checkpoint.clone();

@@ -389,6 +389,7 @@ impl AgentProvider for OrchestratorProvider {
             let mcp_server_names: Vec<String> =
                 mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
             let background_jobs = runtime.background_jobs_snapshot();
+            let global_config_root = crate::prompt::skills::user_config_root_from_env();
             let bundle = prompt_bundle(PromptBundleInputs {
                 cwd: &workspace,
                 workspace_roots: &workspace_roots,
@@ -398,7 +399,7 @@ impl AgentProvider for OrchestratorProvider {
                 policy: policy.policy(),
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
-                global_config_root: None,
+                global_config_root: global_config_root.as_deref(),
                 background_jobs: background_jobs.as_deref(),
             })?;
             // `/compact` is detected here, before any MCP bridging or tool
@@ -555,6 +556,7 @@ impl AgentProvider for OrchestratorProvider {
                 store.delete_session(&session_id.to_string());
                 runtime.terminate_background_jobs(&client, &session_id).await;
                 runtime.prune_worktrees();
+                runtime.clear_subagent_transcripts();
                 let _ = sink
                     .agent_message_chunk("discard", "paused turn discarded; checkpoint cleared");
                 finish_provider_telemetry(
@@ -723,7 +725,7 @@ impl AgentProvider for OrchestratorProvider {
                 policy: policy.policy(),
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
-                global_config_root: None,
+                global_config_root: global_config_root.as_deref(),
                 background_jobs: background_jobs.as_deref(),
             })?;
             bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
@@ -946,6 +948,7 @@ impl AgentProvider for OrchestratorProvider {
                 session.runtime.cancel_all_children();
                 session.runtime.clear_background_jobs();
                 session.runtime.prune_worktrees();
+                session.runtime.clear_subagent_transcripts();
             }
             if let Some(session) = plugins.sessions().session(&session_id.to_string()) {
                 session.cancel();
@@ -975,6 +978,7 @@ impl AgentProvider for OrchestratorProvider {
             runtime.runtime.cancel_all_children();
             runtime.runtime.clear_background_jobs();
             runtime.runtime.prune_worktrees();
+            runtime.runtime.clear_subagent_transcripts();
             // Explicit close finalizes the session: pending recovery
             // checkpoints are deleted (the interrupted work is abandoned
             // unless the host loads the persisted state below).

@@ -31,6 +31,8 @@ pub enum DecisionKind {
     Routing,
     /// Subagent delegation.
     Delegation,
+    /// Approval classification or auto-approval.
+    Approval,
 }
 
 /// One recorded decision.
@@ -121,6 +123,31 @@ impl DecisionLog {
     pub fn record_delegation(&mut self, role: &str, depth: usize, allowed: bool) {
         let code = if allowed { "delegate-allowed" } else { "delegate-denied" };
         self.record(DecisionKind::Delegation, code, format!("role {role} at depth {depth}"));
+    }
+
+    /// Records one approval-classifier decision with model id, risk tier, and a
+    /// redacted reason. Only low-risk classifications may auto-approve.
+    pub fn record_approval(
+        &mut self,
+        tool_name: &str,
+        model_id: &str,
+        risk: Option<crate::approval_classifier::RiskLevel>,
+        auto_approved: bool,
+        reason: &str,
+    ) {
+        let code = if auto_approved {
+            "approval-auto-approved"
+        } else if risk.is_none() {
+            "approval-classifier-unavailable"
+        } else {
+            "approval-needs-host"
+        };
+        let risk = risk.map_or("unknown", crate::approval_classifier::RiskLevel::label);
+        self.record(
+            DecisionKind::Approval,
+            code,
+            format!("tool {tool_name} model {model_id} risk {risk}: {reason}"),
+        );
     }
 
     /// Every entry in record order.

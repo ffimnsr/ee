@@ -16,6 +16,8 @@ async fn failed_child_output_is_quarantined_not_merged() {
         context_snapshot: Vec::new(),
         scope: None,
         model_id: None,
+        resume_child_id: None,
+        fork_context: false,
     };
     let (tx, _rx) = mpsc::unbounded_channel();
     let client = ClientBridge::new_for_test(Duration::from_secs(5), tx);
@@ -50,6 +52,8 @@ async fn malformed_generic_handoff_is_failed_and_quarantined() {
         context_snapshot: Vec::new(),
         scope: None,
         model_id: None,
+        resume_child_id: None,
+        fork_context: false,
     };
     let result = harness
         .manager
@@ -77,6 +81,8 @@ async fn malformed_rubber_duck_report_is_failed_and_quarantined() {
         context_snapshot: Vec::new(),
         scope: None,
         model_id: None,
+        resume_child_id: None,
+        fork_context: false,
     };
     let result = harness
         .manager
@@ -117,6 +123,8 @@ async fn subagent_depth_limit_is_enforced_before_spawn() {
                 context_snapshot: Vec::new(),
                 scope: None,
                 model_id: None,
+                resume_child_id: None,
+                fork_context: false,
             },
             bridge(),
             watch::channel(false).1,
@@ -157,6 +165,8 @@ async fn subagent_parallel_limit_bounds_concurrency() {
                         context_snapshot: Vec::new(),
                         scope: None,
                         model_id: None,
+                        resume_child_id: None,
+                        fork_context: false,
                     },
                     bridge(),
                     watch::channel(false).1,

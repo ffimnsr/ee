@@ -35,6 +35,9 @@
 //! - [`budget`] — per-turn budget tracking: iterations, model calls, tools,
 //!   subagents, output bytes, optional token caps, and a wall-clock deadline.
 //! - [`policy`] — the conservative default tool policy.
+//! - [`approval_classifier`] — the opt-in risk-tiered approval classifier:
+//!   deterministic hard blocks plus a bounded model call; only low risk may
+//!   auto-approve, and every classification is decision-logged.
 //! - [`plugin_runtime`] — agent plugin host: `agent.*` services, session/turn
 //!   scopes, `agent.*` events, structured effects, and the mandatory-first
 //!   policy/approval bridge.
@@ -45,6 +48,8 @@
 //!   attachment, deterministic bounds, and parent payload serialization.
 //! - [`subagent_roles`] — the built-in role library: researcher, code_reader,
 //!   implementer, test_runner, reviewer, and summarizer tool scopes.
+//! - `subagent_transcripts` — bounded retained child transcripts for
+//!   `resume_child_id` continues and compacted context forks.
 //! - [`subagent_verifier`] — citation verification of child summaries against
 //!   their execution evidence, plus the [`SubagentQuarantine`] for failed,
 //!   cancelled, and unverified child output.
@@ -164,6 +169,7 @@
 //! containers, and a runtime that runs one bounded turn with a fake model
 //! and fake tools over in-memory framework plumbing.
 
+pub mod approval_classifier;
 pub mod background_jobs;
 pub mod budget;
 pub mod checkpoint;
@@ -241,6 +247,7 @@ pub mod streaming;
 pub mod stuck;
 pub mod subagent_handoff;
 pub mod subagent_roles;
+mod subagent_transcripts;
 pub mod subagent_verifier;
 pub mod subagents;
 pub mod tasks;
@@ -261,6 +268,12 @@ pub mod write_transaction;
 
 // ── Primary public types ────────────────────────────────────────────────
 
+pub use approval_classifier::{
+    ApprovalCandidate, ApprovalClassification, ApprovalClassifier, ApprovalClassifierConfig,
+    ApprovalClassifierError, ApprovalClassifierMode, ApprovalRiskClassifier, ClassifierVerdict,
+    DEFAULT_APPROVAL_CLASSIFIER_TIMEOUT, MAX_APPROVAL_CANDIDATE_BYTES, ModelRiskClassifier,
+    RiskLevel,
+};
 pub use background_jobs::{
     BACKGROUND_JOB_TAIL_BYTES, BackgroundJob, BackgroundJobRegistry, BackgroundJobStatus,
     SharedBackgroundJobs,

@@ -9,6 +9,8 @@ pub(super) struct ChildRunOptions {
     pub(super) remaining_timeout: std::time::Duration,
     /// Isolated worktree when the role and session enable isolation.
     pub(super) worktree: Option<crate::workspace_isolation::WorktreeWorkspace>,
+    /// Prior child transcript to continue, when the request resumes one.
+    pub(super) seed_transcript: Vec<ModelMessage>,
 }
 
 impl SubagentManager {
@@ -35,6 +37,7 @@ impl SubagentManager {
             quarantine,
             children: state.children,
             worktrees: state.worktrees,
+            transcripts: state.transcripts,
         }
     }
 
@@ -72,6 +75,42 @@ impl SubagentManager {
             return Err(OrchestratorError::InvalidState(format!(
                 "subagent depth limit exceeded (max {})",
                 self.config.max_subagent_depth
+            )));
+        }
+
+        // Resume validation happens before any task node or budget state is
+        // created: an unknown/expired id or a role mismatch fails closed.
+        let retained = match &request.resume_child_id {
+            Some(child_id) => {
+                let stored = self
+                    .transcripts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(child_id)
+                    .ok_or_else(|| {
+                        OrchestratorError::InvalidState(format!(
+                            "unknown or expired subagent transcript: {child_id}"
+                        ))
+                    })?;
+                if stored.role_name != request.role.name {
+                    return Err(OrchestratorError::InvalidState(format!(
+                        "cannot resume child {child_id} as role {} (retained role {})",
+                        request.role.name, stored.role_name
+                    )));
+                }
+                Some(stored)
+            }
+            None => None,
+        };
+        if request.fork_context
+            && !matches!(
+                BuiltinSubagentRole::by_name(&request.role.name),
+                Some(BuiltinSubagentRole::Researcher | BuiltinSubagentRole::CodeReader)
+            )
+        {
+            return Err(OrchestratorError::InvalidState(format!(
+                "fork_context is available only to researcher or code_reader subagents, not {}",
+                request.role.name
             )));
         }
 
@@ -159,12 +198,20 @@ impl SubagentManager {
         // never widen it.
         let child_scope =
             request.scope.as_ref().map(|scope| scope.narrow(&request.role.allowed_scope_globs));
+        // Forked read-only children inherit a compacted parent context; the
+        // raw parent snapshot stays the default for every other role.
+        let context_snapshot = if request.fork_context {
+            crate::subagent_transcripts::fork_context_snapshot(&request.context_snapshot)
+        } else {
+            request.context_snapshot
+        };
+        let seed_transcript = retained.map(|stored| stored.messages).unwrap_or_default();
         let request = SubagentRequest {
             parent_task_id: request.parent_task_id,
             child_task_id: child.id.clone(),
             role: request.role,
             scoped_prompt: request.scoped_prompt,
-            context_snapshot: request.context_snapshot,
+            context_snapshot,
             scope: child_scope,
             write_scope: Vec::new(),
             model_id: model.id.clone(),
@@ -229,6 +276,7 @@ impl SubagentManager {
                 events: heartbeat_events.clone(),
                 remaining_timeout,
                 worktree: worktree.clone(),
+                seed_transcript,
             },
         );
         tokio::pin!(child_run);
@@ -422,7 +470,7 @@ impl SubagentManager {
         cancel: watch::Receiver<bool>,
         options: ChildRunOptions,
     ) -> SubagentResult {
-        let ChildRunOptions { events, remaining_timeout, worktree } = options;
+        let ChildRunOptions { events, remaining_timeout, worktree, seed_transcript } = options;
         let child = self
             .tasks
             .lock()
@@ -535,8 +583,19 @@ impl SubagentManager {
         if !is_rubber_duck {
             transcript.prepend_system(GENERIC_HANDOFF_INSTRUCTIONS);
         }
-        for message in request.context_snapshot.clone() {
-            transcript.push_unlogged(message);
+        // A resumed child continues its prior transcript. Prior system seeds
+        // are dropped because this run re-adds the current role and handoff
+        // policy; tool results and turns are preserved.
+        if seed_transcript.is_empty() {
+            for message in request.context_snapshot.clone() {
+                transcript.push_unlogged(message);
+            }
+        } else {
+            for message in seed_transcript {
+                if message.role != ModelRole::System {
+                    transcript.push_unlogged(message);
+                }
+            }
         }
         transcript
             .push_unlogged(ModelMessage::text(ModelRole::User, request.scoped_prompt.clone()));
@@ -668,6 +727,18 @@ impl SubagentManager {
             }
         }
         self.finish_child(&request, &result, events).await;
+        // Retain completed transcripts for `resume_child_id`; failed and
+        // cancelled children are not resumable.
+        if result.handoff.status == SubagentStatus::Completed {
+            self.transcripts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(
+                crate::subagent_transcripts::retained_transcript(
+                    result.subagent_id.as_str(),
+                    &request.role.name,
+                    transcript.messages().to_vec(),
+                    result.tool_call_count,
+                ),
+            );
+        }
         result
     }
 

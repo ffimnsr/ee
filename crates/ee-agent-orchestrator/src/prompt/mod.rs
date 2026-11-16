@@ -14,6 +14,7 @@ pub(crate) mod render;
 pub(crate) mod repeat_guard;
 pub(crate) mod runtime_context;
 pub(crate) mod sections;
+pub(crate) mod skills;
 pub(crate) mod tool_guidance;
 pub(crate) mod workspace;
 

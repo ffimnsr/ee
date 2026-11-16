@@ -312,6 +312,9 @@ pub struct OrchestratorConfig {
     /// Opt-in git-worktree isolation for write subagents.
     #[serde(default)]
     pub workspace_isolation: WorkspaceIsolationConfig,
+    /// Opt-in risk-tiered approval classifier; disabled by default.
+    #[serde(default)]
+    pub approval_classifier: crate::approval_classifier::ApprovalClassifierConfig,
 }
 
 impl OrchestratorConfig {
@@ -354,6 +357,7 @@ impl OrchestratorConfig {
         }
         self.compaction.validate()?;
         self.session_log.validate()?;
+        self.approval_classifier.validate().map_err(OrchestratorError::InvalidState)?;
         Ok(())
     }
 }
@@ -387,6 +391,7 @@ impl Default for OrchestratorConfig {
             session_log: SessionLogConfig::default(),
             stop_gate: StopGateConfig::default(),
             workspace_isolation: WorkspaceIsolationConfig::default(),
+            approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::default(),
         }
     }
 }
@@ -550,6 +555,7 @@ mod tests {
             session_log: SessionLogConfig::default(),
             stop_gate: StopGateConfig::default(),
             workspace_isolation: WorkspaceIsolationConfig::default(),
+            approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::auto(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");

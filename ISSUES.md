@@ -1505,7 +1505,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 ### Improvement 7 — First-Class Skills Discovery & On-Demand `load_skill` Tool (`SKILLS` Parity)
 
-- [ ] Discover workspace/user `SKILL.md` frontmatter and provide a read-only `load_skill` tool.
+- [x] Discover workspace/user `SKILL.md` frontmatter and provide a read-only `load_skill` tool.
   - [ ] **Problem:**
     - `SKILLS` is marked `IntentionallyOmitted` in `crates/ee-agent-orchestrator/src/prompt/sections.rs:656`, even though the `ee` repository itself stores agent skills under `.agents/skills/*/SKILL.md` and `skills/system/*/SKILL.md`.
     - Without skill catalog discovery and an on-demand loader tool, the agent in `ee` agent mode either misses repo-specific skills entirely or must manually grep for `SKILL.md` files.
@@ -1519,7 +1519,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 ### Improvement 8 — Conversational / Resumable Subagents (`agent_id` Resume & Context Fork)
 
-- [ ] Allow `delegate_task` subagents to be resumed by `agent_id` or forked from parent context.
+- [x] Allow `delegate_task` subagents to be resumed by `agent_id` or forked from parent context.
   - [ ] **Problem:**
     - `DelegateTool` and `SubagentManager` (`crates/ee-agent-orchestrator/src/subagents/mod.rs`) only execute one-shot stateless subagent runs (`explorer`, `planner`, `implementer`, `verifier`, `reviewer`).
     - If a root agent needs a follow-up question answered by an `explorer` that already read 15 files, spawning a new `delegate_task` starts from a blank transcript and re-reads the same files, wasting tokens and latency.
@@ -1533,7 +1533,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 ### Improvement 9 — Opt-In Risk-Tiered Auto-Approval Classifier (`REVIEW_POLICY` Parity)
 
-- [ ] Add an opt-in structured risk classifier for medium-risk tool calls outside static `trusted-write` rules.
+- [x] Add an opt-in structured risk classifier for medium-risk tool calls outside static `trusted-write` rules.
   - [ ] **Problem:**
     - `ee` currently combines static `PolicyEngine` rules (`crates/ee-agent-orchestrator/src/policy.rs`) with host-owned `TrustRule` persistence (`crates/ee-cli/src/policy/store.rs`).
     - Any command or write outside pre-existing static `TrustRule` patterns immediately blocks on manual user approval in `trusted-write` mode, whereas `unrestricted` mode bypasses approval entirely. There is no middle tier that uses a fast/contrasting model to classify command risk (`low` / `medium` / `high`) before prompting the user.

@@ -77,6 +77,17 @@ pub enum OrchestratorEvent {
         /// Tool name.
         tool_name: String,
     },
+    /// The opt-in approval classifier evaluated a host-approval tool call.
+    ApprovalClassified {
+        /// Tool name.
+        tool_name: String,
+        /// Registry model id that classified the call.
+        model_id: String,
+        /// Classified risk tier, or `unknown` when classification failed.
+        risk: String,
+        /// Whether the classifier auto-approved the call.
+        auto_approved: bool,
+    },
     /// A classified transient retry was scheduled. Policy denial, invalid
     /// input, stale state, and approval denial never emit this event.
     RetryScheduled {
@@ -362,6 +373,12 @@ mod tests {
             OrchestratorEvent::ApprovalRequested {
                 tool_call_id: "tc-2".into(),
                 tool_name: "ee_write_text_file".into(),
+            },
+            OrchestratorEvent::ApprovalClassified {
+                tool_name: "ee_write_text_file".into(),
+                model_id: "fast".into(),
+                risk: "low".into(),
+                auto_approved: true,
             },
             OrchestratorEvent::RetryScheduled {
                 tool_name: "cargo_check".into(),

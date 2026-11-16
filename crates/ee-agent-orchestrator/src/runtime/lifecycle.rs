@@ -143,12 +143,15 @@ impl OrchestratorRuntime {
         let decisions = Arc::new(Mutex::new(DecisionLog::default()));
         let children = Arc::new(ChildRegistry::default());
         let worktrees = Arc::new(Mutex::new(Vec::new()));
+        let transcripts =
+            Arc::new(Mutex::new(crate::subagent_transcripts::ChildTranscriptStore::default()));
         let manager = Arc::new(SubagentManager::new(
             config.clone(),
             models.clone(),
             tools.clone(),
             SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone())
-                .with_worktrees(worktrees.clone()),
+                .with_worktrees(worktrees.clone())
+                .with_transcripts(transcripts.clone()),
             SubagentObservability::new(model_router.clone(), metrics.clone(), decisions.clone()),
         ));
         tools
@@ -200,6 +203,7 @@ impl OrchestratorRuntime {
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
             worktrees,
+            transcripts,
         }
     }
     /// Records the session working directory and workspace roots for mid-turn
@@ -213,6 +217,30 @@ impl OrchestratorRuntime {
     #[must_use]
     pub(crate) fn workspace_scope(&self) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
         self.workspace_scope.lock().expect("workspace scope poisoned").clone()
+    }
+
+    /// Builds the opt-in approval classifier over the configured (or default)
+    /// registered model. Disabled or unknown-model configs return `None`, so
+    /// approval stays on the interactive host path.
+    pub(crate) fn approval_classifier(
+        &self,
+    ) -> Option<Arc<crate::approval_classifier::ApprovalClassifier>> {
+        if !self.config.approval_classifier.mode.is_enabled() {
+            return None;
+        }
+        let model_id = self
+            .config
+            .approval_classifier
+            .model_id
+            .clone()
+            .unwrap_or_else(|| crate::model_registry::DEFAULT_MODEL_ID.to_string());
+        let adapter = self.models.get(&model_id)?;
+        let backend =
+            Arc::new(crate::approval_classifier::ModelRiskClassifier::new(adapter, model_id));
+        Some(Arc::new(crate::approval_classifier::ApprovalClassifier::new(
+            backend,
+            self.config.approval_classifier.timeout,
+        )))
     }
 
     /// Renders active background terminal jobs for the runtime prompt section.
@@ -255,6 +283,12 @@ impl OrchestratorRuntime {
             .iter()
             .map(|worktree| worktree.path().to_path_buf())
             .collect()
+    }
+
+    /// Drops retained subagent transcripts so `/discard`, cancel, and visit
+    /// close cannot resume a child from a discarded session.
+    pub fn clear_subagent_transcripts(&self) {
+        self.transcripts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Installs an observe-only observer on the runtime event recorder.

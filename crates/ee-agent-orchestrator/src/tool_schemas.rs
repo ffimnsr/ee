@@ -284,6 +284,29 @@ mod tests {
     "produces": []
   },
   {
+    "name": "load_skill",
+    "description": "Loads the full SKILL.md for a skill listed in the prompt catalog",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "sideEffect": "read",
+    "sideEffectSubclass": null,
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": [
+      "file_text"
+    ]
+  },
+  {
     "name": "read_file",
     "description": "Reads a text file through the editor",
     "inputSchema": {

@@ -338,6 +338,12 @@ impl OrchestratorRuntime {
         if options.background_jobs.is_none() {
             options.background_jobs = Some(self.background_jobs.clone());
         }
+        if options.decisions.is_none() {
+            options.decisions = Some(self.decisions.clone());
+        }
+        if options.approval_classifier.is_none() {
+            options.approval_classifier = self.approval_classifier();
+        }
         let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             options.session_log = Some(store.log_for(&session_id));

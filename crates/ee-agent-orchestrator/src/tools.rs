@@ -29,6 +29,7 @@ use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
 use crate::config::OrchestratorConfig;
+use crate::decision_log::DecisionLog;
 use crate::destructive_policy::SideEffectSubclass;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
@@ -793,6 +794,82 @@ impl ServerTool for CargoCheckTool {
     }
 }
 
+/// Read-only skill manifest loader.
+///
+/// The prompt advertises a bounded skill catalog; the model reads a body only
+/// when it needs one. Paths are resolved against the active workspace scope
+/// and canonicalized so symlink escapes are rejected.
+#[derive(Clone)]
+struct LoadSkillTool;
+
+impl ServerTool for LoadSkillTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "load_skill",
+            "Loads the full SKILL.md for a skill listed in the prompt catalog",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "path": { "type": "string" },
+            },
+            "required": [],
+        }))
+        .dependency(ToolDependency::new().produces(vec![ToolDataClass::FileText]))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _client: ClientBridge,
+        _cancel: watch::Receiver<bool>,
+        context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        Box::pin(async move {
+            let name = optional_string_arg(&arguments, "name");
+            let path = optional_string_arg(&arguments, "path");
+            if name.as_deref().is_none_or(str::is_empty)
+                && path.as_deref().is_none_or(str::is_empty)
+            {
+                return invalid_args(String::from(
+                    "load_skill requires a skill name or path argument",
+                ));
+            }
+            let roots = context
+                .scope
+                .as_ref()
+                .map(|scope| scope.allowed_roots.clone())
+                .filter(|roots| !roots.is_empty())
+                .or_else(|| std::env::current_dir().ok().map(|cwd| vec![cwd]))
+                .unwrap_or_default();
+            let cwd = roots.first().cloned().unwrap_or_default();
+            let config_root = crate::prompt::skills::user_config_root_from_env();
+            match crate::prompt::skills::load_skill(
+                name.as_deref(),
+                path.as_deref(),
+                &cwd,
+                &roots,
+                config_root.as_deref(),
+            ) {
+                Ok(skill) => {
+                    let bytes = skill.content.len();
+                    ToolResult::success_structured(
+                        skill.content,
+                        serde_json::json!({
+                            "name": skill.name,
+                            "path": skill.path.display().to_string(),
+                            "scope": skill.scope.label(),
+                            "bytes": bytes,
+                        }),
+                    )
+                }
+                Err(reason) => ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
+            }
+        })
+    }
+}
+
 /// All built-in tools, bound to the given session.
 fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
     let schema = |properties: &[(&str, &str)], required: &[&str]| {
@@ -827,6 +904,7 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
     let none = ToolDependency::new();
     vec![
         Arc::new(CargoCheckTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
+        Arc::new(LoadSkillTool) as Arc<dyn ServerTool>,
         make(
             BridgeCall::ReadTextFile,
             "read_file",
@@ -980,6 +1058,8 @@ pub struct ToolExecutor {
     model_id: Option<String>,
     background_jobs: Option<crate::background_jobs::SharedBackgroundJobs>,
     workspace_remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
+    approval_classifier: Option<Arc<crate::approval_classifier::ApprovalClassifier>>,
+    decisions: Option<Arc<Mutex<DecisionLog>>>,
 }
 
 impl ToolExecutor {
@@ -1005,6 +1085,8 @@ impl ToolExecutor {
             model_id: None,
             background_jobs: None,
             workspace_remap: None,
+            approval_classifier: None,
+            decisions: None,
         }
     }
 
@@ -1043,6 +1125,23 @@ impl ToolExecutor {
         remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
     ) -> Self {
         self.workspace_remap = remap;
+        self
+    }
+
+    /// Enables the opt-in risk classifier before host approval dispatch.
+    #[must_use]
+    pub fn with_approval_classifier(
+        mut self,
+        classifier: Option<Arc<crate::approval_classifier::ApprovalClassifier>>,
+    ) -> Self {
+        self.approval_classifier = classifier;
+        self
+    }
+
+    /// Shares the runtime decision log for classifier audit entries.
+    #[must_use]
+    pub fn with_decisions(mut self, decisions: Option<Arc<Mutex<DecisionLog>>>) -> Self {
+        self.decisions = decisions;
         self
     }
 
@@ -1098,10 +1197,38 @@ impl ToolExecutor {
             return Ok(result);
         }
         if definition.host_approval {
-            self.events.record(OrchestratorEvent::ApprovalRequested {
-                tool_call_id: intent.tool_call_id.clone(),
-                tool_name: definition.name.clone(),
-            });
+            if let Some(classifier) = &self.approval_classifier {
+                let candidate = crate::approval_classifier::ApprovalCandidate::new(
+                    &definition.name,
+                    definition.side_effect_class,
+                    definition.side_effect_subclass,
+                    &intent.arguments,
+                );
+                let outcome = classifier.classify(&candidate).await;
+                match &self.decisions {
+                    Some(decisions) => classifier.record(
+                        &candidate,
+                        &outcome,
+                        &mut decisions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                        &self.events,
+                    ),
+                    None => {
+                        let mut decisions = DecisionLog::default();
+                        classifier.record(&candidate, &outcome, &mut decisions, &self.events);
+                    }
+                }
+                if let crate::approval_classifier::ApprovalClassification::Deny { reason } = outcome
+                {
+                    let result = ToolResult::failure(ToolErrorKind::PermissionDenied, reason);
+                    emit_failed_tool(sink, intent, &result)?;
+                    return Ok(result);
+                }
+            } else {
+                self.events.record(OrchestratorEvent::ApprovalRequested {
+                    tool_call_id: intent.tool_call_id.clone(),
+                    tool_name: definition.name.clone(),
+                });
+            }
         }
         {
             let mut budget = self.budget.lock().expect("budget tracker poisoned");
@@ -1501,6 +1628,7 @@ mod tests {
                 "cargo_check",
                 "create_terminal",
                 "kill_terminal",
+                "load_skill",
                 "read_file",
                 "release_terminal",
                 "terminal_output",
@@ -1508,7 +1636,51 @@ mod tests {
                 "write_file"
             ]
         );
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn load_skill_reads_a_scoped_manifest_and_rejects_traversal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join(".agents/skills/atlas");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: atlas\ndescription: Graph queries\n---\n\nUse atlas.\n",
+        )
+        .expect("write skill");
+        std::fs::write(temp.path().join("outside.md"), "no").expect("outside file");
+        let mut registry = ToolRegistry::new();
+        registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+        let tool = registry.get("load_skill").expect("load_skill registered");
+        let (sink, client, _rx) = plumbing();
+        drop(sink);
+        let context = ToolCallContext {
+            task: task_fixture(),
+            transcript: Vec::new(),
+            events: EventRecorder::new(),
+            scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
+            model_id: None,
+            terminal_wait: TerminalWaitLimits::default(),
+        };
+
+        let loaded = tool
+            .execute(
+                json!({ "name": "atlas" }),
+                client.clone(),
+                watch::channel(false).1,
+                context.clone(),
+            )
+            .await;
+        assert!(loaded.success, "{}", loaded.text_output);
+        assert!(loaded.text_output.contains("Use atlas."));
+        assert_eq!(loaded.structured_output.expect("structured")["scope"], "workspace");
+
+        let traversal = tool
+            .execute(json!({ "path": "../outside.md" }), client, watch::channel(false).1, context)
+            .await;
+        assert!(!traversal.success);
+        assert_eq!(traversal.error_kind, Some(ToolErrorKind::InvalidArguments));
     }
 
     #[test]
