@@ -46,6 +46,7 @@ pub fn openrouter_orchestrator_config(
     session_state_dir: PathBuf,
 ) -> OrchestratorProviderConfig {
     let session_log_root = config.session_log_root(&session_state_dir);
+    let workspace_isolation = workspace_isolation_config(&session_state_dir);
     let mut provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-agent-openrouter", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
@@ -68,6 +69,7 @@ pub fn openrouter_orchestrator_config(
                 Some(directory) => ee_agent_orchestrator::RecoveryConfig::durable(directory),
                 None => ee_agent_orchestrator::RecoveryConfig::memory_only(),
             },
+            workspace_isolation,
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
@@ -79,6 +81,27 @@ pub fn openrouter_orchestrator_config(
             ee_agent_orchestrator::SessionLogConfig::durable(root.join("session-log"));
     }
     provider_config
+}
+
+/// Resolves the opt-in worktree isolation policy for a session state root.
+///
+/// `EE_WORKTREE_ISOLATION=1` enables isolated `implementer` children under
+/// `<session_state_dir>/worktrees`; `EE_KEEP_WORKTREES=1` retains completed
+/// worktrees for host apply instead of pruning them.
+#[must_use]
+pub fn workspace_isolation_config(
+    session_state_dir: &std::path::Path,
+) -> ee_agent_orchestrator::WorkspaceIsolationConfig {
+    fn env_flag(name: &str) -> bool {
+        std::env::var(name).ok().is_some_and(|value| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        })
+    }
+    ee_agent_orchestrator::WorkspaceIsolationConfig {
+        enabled: env_flag("EE_WORKTREE_ISOLATION"),
+        worktree_root: Some(session_state_dir.join("worktrees")),
+        keep_worktrees: env_flag("EE_KEEP_WORKTREES"),
+    }
 }
 
 /// Builds the production OpenRouter adapter and orchestrator policy combination.

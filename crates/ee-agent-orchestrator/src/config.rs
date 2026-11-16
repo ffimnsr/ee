@@ -18,13 +18,23 @@ use crate::rubber_duck_trigger::RubberDuckTriggerConfig;
 use crate::session_log::SessionLogConfig;
 use crate::stop_gate::StopGateConfig;
 use crate::stuck::StuckConfig;
+use crate::tools::SideEffectClass;
+use crate::workspace_isolation::WorkspaceIsolationConfig;
 
 /// Default maximum subagent nesting depth.
 pub const DEFAULT_MAX_SUBAGENT_DEPTH: usize = 2;
 /// Default maximum concurrently running subagents.
 pub const DEFAULT_MAX_PARALLEL_SUBAGENTS: usize = 4;
-/// Default per-tool-call wall-clock limit: 120 seconds.
-pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default wall-clock limit for fast local reads: 15 seconds.
+pub const DEFAULT_FAST_LOCAL_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Default wall-clock limit for search and external MCP reads: 30 seconds.
+pub const DEFAULT_SEARCH_AND_MCP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default wall-clock limit for writes and edit application: 60 seconds.
+pub const DEFAULT_WRITE_AND_EDIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default wall-clock limit for terminal tools and validation commands: 120 seconds.
+pub const DEFAULT_TERMINAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Hard ceiling for an explicit terminal `timeout_ms`: 300 seconds.
+pub const DEFAULT_TERMINAL_MAX_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default per-subagent wall-clock limit: 300 seconds.
 pub const DEFAULT_SUBAGENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default maximum idle interval for a running subagent: 60 seconds.
@@ -115,6 +125,121 @@ pub const DEFAULT_MAX_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
 /// Default automatic resumes per turn before manual resume is required.
 pub const DEFAULT_AUTO_RESUME_MAX: u32 = 1;
 
+/// Per-category tool wall-clock limits enforced by [`crate::tools::ToolExecutor`].
+///
+/// Categories are resolved deterministically from the tool name and its
+/// side-effect class; a tool requesting a bounded per-call `timeout_ms` is
+/// clamped to `terminal_max` instead of the flat category ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTimeoutPolicy {
+    /// Fast local reads (`read_file`, `list_files`, outlines, diagnostics).
+    pub fast_local_read: Duration,
+    /// Search and external MCP reads.
+    pub search_and_mcp: Duration,
+    /// Writes, edit application, formatting, and rename.
+    pub write_and_edit: Duration,
+    /// Terminal tools and validation commands without an explicit override.
+    pub terminal_default: Duration,
+    /// Upper bound for an explicit per-call `timeout_ms`.
+    pub terminal_max: Duration,
+}
+
+impl Default for ToolTimeoutPolicy {
+    fn default() -> Self {
+        Self {
+            fast_local_read: DEFAULT_FAST_LOCAL_READ_TIMEOUT,
+            search_and_mcp: DEFAULT_SEARCH_AND_MCP_TIMEOUT,
+            write_and_edit: DEFAULT_WRITE_AND_EDIT_TIMEOUT,
+            terminal_default: DEFAULT_TERMINAL_TIMEOUT,
+            terminal_max: DEFAULT_TERMINAL_MAX_TIMEOUT,
+        }
+    }
+}
+
+impl ToolTimeoutPolicy {
+    /// Resolves the category ceiling for one tool invocation.
+    #[must_use]
+    pub fn timeout_for_tool(&self, name: &str, class: SideEffectClass) -> Duration {
+        if terminal_tool_name(name) {
+            return self.terminal_default;
+        }
+        if fast_local_read_tool(name) {
+            return self.fast_local_read;
+        }
+        if write_and_edit_tool(name) || class == SideEffectClass::Write {
+            return self.write_and_edit;
+        }
+        match class {
+            SideEffectClass::Read => self.search_and_mcp,
+            SideEffectClass::Execute => self.terminal_default,
+            SideEffectClass::Write => self.write_and_edit,
+            SideEffectClass::Delegate => self.terminal_default,
+        }
+    }
+
+    /// Resolves the outer executor ceiling for one invocation, honoring a
+    /// bounded explicit `timeout_ms` on terminal waits.
+    #[must_use]
+    pub fn effective_timeout(
+        &self,
+        name: &str,
+        class: SideEffectClass,
+        requested_ms: Option<u64>,
+    ) -> Duration {
+        let category = self.timeout_for_tool(name, class);
+        if !terminal_tool_name(name) {
+            return category;
+        }
+        match requested_ms {
+            Some(requested_ms) => {
+                let bounded = Duration::from_millis(requested_ms)
+                    .clamp(EXPLICIT_TIMEOUT_FLOOR, self.terminal_max);
+                bounded + TERMINAL_WAIT_SLACK
+            }
+            None => category,
+        }
+    }
+
+    /// Caps every tier at `limit`, used for reduced subagent configurations.
+    #[must_use]
+    pub fn capped(mut self, limit: Duration) -> Self {
+        self.fast_local_read = self.fast_local_read.min(limit);
+        self.search_and_mcp = self.search_and_mcp.min(limit);
+        self.write_and_edit = self.write_and_edit.min(limit);
+        self.terminal_default = self.terminal_default.min(limit);
+        self.terminal_max = self.terminal_max.min(limit);
+        self
+    }
+}
+
+/// Lower bound for an explicit terminal `timeout_ms`.
+pub(crate) const EXPLICIT_TIMEOUT_FLOOR: Duration = Duration::from_secs(1);
+/// Extra outer-loop allowance so the tool can clean up a timed-out terminal.
+pub(crate) const TERMINAL_WAIT_SLACK: Duration = Duration::from_secs(5);
+
+fn terminal_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "create_terminal"
+            | "terminal_output"
+            | "wait_for_terminal_exit"
+            | "kill_terminal"
+            | "release_terminal"
+            | "cargo_check"
+    ) || name.contains("terminal")
+}
+
+fn fast_local_read_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "list_files" | "ee_file_outline" | "ee_diagnostics" | "ee_workspace_roots"
+    )
+}
+
+fn write_and_edit_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "ee_edit_apply" | "ee_format_buffer" | "ee_lsp_rename")
+}
+
 /// Shared configuration for one [`crate::OrchestratorRuntime`] instance.
 ///
 /// Exhaustive so callers can use field updates off [`Default`]; construct
@@ -133,8 +258,9 @@ pub struct OrchestratorConfig {
     pub max_parallel_subagents: usize,
     /// Per-turn wall-clock limit; `None` is unlimited.
     pub turn_timeout: Option<Duration>,
-    /// Per-tool-call wall-clock limit.
-    pub tool_timeout: Duration,
+    /// Per-tool-call wall-clock limits, resolved by tool category.
+    #[serde(default)]
+    pub tool_timeouts: ToolTimeoutPolicy,
     /// Per-subagent wall-clock limit (subagent phase).
     pub subagent_timeout: Duration,
     /// Maximum interval without model, tool, or task progress before a running
@@ -183,6 +309,9 @@ pub struct OrchestratorConfig {
     /// Evidence gate applied before a changed turn may claim completion.
     #[serde(default)]
     pub stop_gate: StopGateConfig,
+    /// Opt-in git-worktree isolation for write subagents.
+    #[serde(default)]
+    pub workspace_isolation: WorkspaceIsolationConfig,
 }
 
 impl OrchestratorConfig {
@@ -207,6 +336,22 @@ impl OrchestratorConfig {
                 "turn_timeout must be positive when set; omit it for unlimited".into(),
             ));
         }
+        for (value, name) in [
+            (self.tool_timeouts.fast_local_read, "tool_timeouts.fast_local_read"),
+            (self.tool_timeouts.search_and_mcp, "tool_timeouts.search_and_mcp"),
+            (self.tool_timeouts.write_and_edit, "tool_timeouts.write_and_edit"),
+            (self.tool_timeouts.terminal_default, "tool_timeouts.terminal_default"),
+            (self.tool_timeouts.terminal_max, "tool_timeouts.terminal_max"),
+        ] {
+            if value.is_zero() {
+                return Err(OrchestratorError::InvalidState(format!("{name} must be positive")));
+            }
+        }
+        if self.tool_timeouts.terminal_max < self.tool_timeouts.terminal_default {
+            return Err(OrchestratorError::InvalidState(
+                "tool_timeouts.terminal_max must not be below terminal_default".into(),
+            ));
+        }
         self.compaction.validate()?;
         self.session_log.validate()?;
         Ok(())
@@ -221,7 +366,7 @@ impl Default for OrchestratorConfig {
             max_subagent_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
             max_parallel_subagents: DEFAULT_MAX_PARALLEL_SUBAGENTS,
             turn_timeout: None,
-            tool_timeout: DEFAULT_TOOL_TIMEOUT,
+            tool_timeouts: ToolTimeoutPolicy::default(),
             subagent_timeout: DEFAULT_SUBAGENT_TIMEOUT,
             subagent_stall_timeout: DEFAULT_SUBAGENT_STALL_TIMEOUT,
             memory_limit_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
@@ -241,6 +386,7 @@ impl Default for OrchestratorConfig {
             rubber_duck_triggers: RubberDuckTriggerConfig::default(),
             session_log: SessionLogConfig::default(),
             stop_gate: StopGateConfig::default(),
+            workspace_isolation: WorkspaceIsolationConfig::default(),
         }
     }
 }
@@ -257,7 +403,12 @@ mod tests {
         assert_eq!(config.max_subagent_depth, 2);
         assert_eq!(config.max_parallel_subagents, 4);
         assert_eq!(config.turn_timeout, None);
-        assert_eq!(config.tool_timeout, Duration::from_secs(120));
+        assert_eq!(config.tool_timeouts, ToolTimeoutPolicy::default());
+        assert_eq!(config.tool_timeouts.fast_local_read, Duration::from_secs(15));
+        assert_eq!(config.tool_timeouts.search_and_mcp, Duration::from_secs(30));
+        assert_eq!(config.tool_timeouts.write_and_edit, Duration::from_secs(60));
+        assert_eq!(config.tool_timeouts.terminal_default, Duration::from_secs(120));
+        assert_eq!(config.tool_timeouts.terminal_max, Duration::from_secs(300));
         assert_eq!(config.subagent_timeout, Duration::from_secs(300));
         assert_eq!(config.subagent_stall_timeout, Duration::from_secs(60));
         assert_eq!(config.memory_limit_bytes, 1024 * 1024);
@@ -289,6 +440,40 @@ mod tests {
         assert_eq!(config.rubber_duck_triggers, RubberDuckTriggerConfig::default());
         assert_eq!(config.session_log, SessionLogConfig::default());
         assert_eq!(config.stop_gate, StopGateConfig::default());
+        assert_eq!(config.workspace_isolation, WorkspaceIsolationConfig::default());
+    }
+
+    #[test]
+    fn tool_timeout_categories_resolve_and_clamp() {
+        let policy = ToolTimeoutPolicy::default();
+        assert_eq!(
+            policy.timeout_for_tool("read_file", SideEffectClass::Read),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_file_outline", SideEffectClass::Read),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("search_text", SideEffectClass::Read),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("write_file", SideEffectClass::Write),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("wait_for_terminal_exit", SideEffectClass::Execute),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            policy.effective_timeout("ee_terminal_wait", SideEffectClass::Execute, Some(600_000)),
+            Duration::from_secs(300) + TERMINAL_WAIT_SLACK
+        );
+        assert_eq!(
+            policy.effective_timeout("ee_terminal_wait", SideEffectClass::Execute, None),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
@@ -299,6 +484,20 @@ mod tests {
             OrchestratorConfig { max_tool_calls_per_turn: Some(0), ..Default::default() },
             OrchestratorConfig { max_output_bytes: Some(0), ..Default::default() },
             OrchestratorConfig { turn_timeout: Some(Duration::ZERO), ..Default::default() },
+            OrchestratorConfig {
+                tool_timeouts: ToolTimeoutPolicy {
+                    fast_local_read: Duration::ZERO,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            OrchestratorConfig {
+                tool_timeouts: ToolTimeoutPolicy {
+                    terminal_max: Duration::from_secs(1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         ] {
             assert!(config.validate().is_err(), "zero finite caps must fail validation");
         }
@@ -313,7 +512,13 @@ mod tests {
             max_subagent_depth: 1,
             max_parallel_subagents: 2,
             turn_timeout: Some(Duration::from_secs(10)),
-            tool_timeout: Duration::from_secs(5),
+            tool_timeouts: ToolTimeoutPolicy {
+                fast_local_read: Duration::from_secs(2),
+                search_and_mcp: Duration::from_secs(3),
+                write_and_edit: Duration::from_secs(4),
+                terminal_default: Duration::from_secs(5),
+                terminal_max: Duration::from_secs(6),
+            },
             subagent_timeout: Duration::from_secs(20),
             subagent_stall_timeout: Duration::from_secs(7),
             memory_limit_bytes: 4096,
@@ -344,6 +549,7 @@ mod tests {
             },
             session_log: SessionLogConfig::default(),
             stop_gate: StopGateConfig::default(),
+            workspace_isolation: WorkspaceIsolationConfig::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
@@ -352,7 +558,11 @@ mod tests {
         assert_eq!(restored.max_subagent_depth, 1);
         assert_eq!(restored.max_parallel_subagents, 2);
         assert_eq!(restored.turn_timeout, Some(Duration::from_secs(10)));
-        assert_eq!(restored.tool_timeout, Duration::from_secs(5));
+        assert_eq!(restored.tool_timeouts.fast_local_read, Duration::from_secs(2));
+        assert_eq!(restored.tool_timeouts.search_and_mcp, Duration::from_secs(3));
+        assert_eq!(restored.tool_timeouts.write_and_edit, Duration::from_secs(4));
+        assert_eq!(restored.tool_timeouts.terminal_default, Duration::from_secs(5));
+        assert_eq!(restored.tool_timeouts.terminal_max, Duration::from_secs(6));
         assert_eq!(restored.subagent_timeout, Duration::from_secs(20));
         assert_eq!(restored.subagent_stall_timeout, Duration::from_secs(7));
         assert_eq!(restored.memory_limit_bytes, 4096);

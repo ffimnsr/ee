@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 use crate::prompt::error::PromptError;
 use crate::prompt::render::Section;
 use crate::prompt::sections::{
-    Slot, TOOL_APPLY_PATCH, TOOL_BASH, TOOL_EDIT, TOOL_GLOB, TOOL_GREP, TOOL_LSP, TOOL_PTY,
-    TOOL_READ, TOOL_SESSION_QUERY, TOOL_SUBAGENT, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WRITE,
+    Slot, TOOL_APPLY_PATCH, TOOL_BASH, TOOL_EDIT, TOOL_GLOB, TOOL_GREP, TOOL_JOBS, TOOL_LSP,
+    TOOL_PTY, TOOL_READ, TOOL_SESSION_QUERY, TOOL_SUBAGENT, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
+    TOOL_WRITE,
 };
 
 /// One conditional tool-guidance section.
@@ -174,6 +175,12 @@ pub(crate) const TOOL_GUIDANCE: &[ToolGuidance] = &[
         registration: "tool:dependency-map",
         requires: &["ee_file_dependency_map", "ee_symbol_dependency_map"],
         text: "`ee_file_dependency_map` returns known dependency edges for one file and `ee_symbol_dependency_map` returns fresh Tree-sitter symbol facts for one position. Both fail closed when the index is missing or stale, so treat an unavailable result as unknown rather than as no dependency.",
+    },
+    ToolGuidance {
+        slot: &TOOL_JOBS,
+        registration: "tool:jobs",
+        requires: &["create_terminal", "terminal_output", "wait_for_terminal_exit"],
+        text: "Created terminals run as background jobs by default. Keep working while a build or test runs: the runtime polls the terminal between model steps and injects the exit status with an output tail as a system reminder, so do not busy-wait or poll `terminal_output` in a loop. Use `wait_for_terminal_exit` only when the next step cannot proceed without the result, and pass a bounded timeout_ms argument for long commands.",
     },
     ToolGuidance {
         slot: &TOOL_BASH,

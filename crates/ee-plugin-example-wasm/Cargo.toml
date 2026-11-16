@@ -16,5 +16,9 @@ test = false
 doctest = false
 
 [dependencies]
+
+# Both dependencies are only used on the wasm32 guest target. Declaring them
+# under the target table keeps host-target builds warning-free.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 ee-plugin-sdk = { path = "../ee-plugin-sdk" }
 serde_json.workspace = true

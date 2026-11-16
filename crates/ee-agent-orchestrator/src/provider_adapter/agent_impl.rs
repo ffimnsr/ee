@@ -388,6 +388,7 @@ impl AgentProvider for OrchestratorProvider {
             let policy = runtime.policy();
             let mcp_server_names: Vec<String> =
                 mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
+            let background_jobs = runtime.background_jobs_snapshot();
             let bundle = prompt_bundle(PromptBundleInputs {
                 cwd: &workspace,
                 workspace_roots: &workspace_roots,
@@ -398,6 +399,7 @@ impl AgentProvider for OrchestratorProvider {
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
                 global_config_root: None,
+                background_jobs: background_jobs.as_deref(),
             })?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
@@ -551,6 +553,8 @@ impl AgentProvider for OrchestratorProvider {
                     .is_some_and(|command| command.name == DISCARD_COMMAND_NAME)
             {
                 store.delete_session(&session_id.to_string());
+                runtime.terminate_background_jobs(&client, &session_id).await;
+                runtime.prune_worktrees();
                 let _ = sink
                     .agent_message_chunk("discard", "paused turn discarded; checkpoint cleared");
                 finish_provider_telemetry(
@@ -709,6 +713,7 @@ impl AgentProvider for OrchestratorProvider {
             emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
             // Rebuild the stable prompt now that prompt-scoped MCP tools are
             // registered: guidance must name only tools the model can call.
+            let background_jobs = runtime.background_jobs_snapshot();
             let mut bundle = prompt_bundle(PromptBundleInputs {
                 cwd: &workspace,
                 workspace_roots: &workspace_roots,
@@ -719,6 +724,7 @@ impl AgentProvider for OrchestratorProvider {
                 advertised_tools: &runtime.advertised_tool_names(),
                 mcp_servers: &mcp_server_names,
                 global_config_root: None,
+                background_jobs: background_jobs.as_deref(),
             })?;
             bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
             let cleanup =
@@ -938,6 +944,8 @@ impl AgentProvider for OrchestratorProvider {
                 sessions.lock().expect("adapter sessions poisoned").get(&session_id.to_string())
             {
                 session.runtime.cancel_all_children();
+                session.runtime.clear_background_jobs();
+                session.runtime.prune_worktrees();
             }
             if let Some(session) = plugins.sessions().session(&session_id.to_string()) {
                 session.cancel();
@@ -965,6 +973,8 @@ impl AgentProvider for OrchestratorProvider {
                 return Ok(());
             };
             runtime.runtime.cancel_all_children();
+            runtime.runtime.clear_background_jobs();
+            runtime.runtime.prune_worktrees();
             // Explicit close finalizes the session: pending recovery
             // checkpoints are deleted (the interrupted work is abandoned
             // unless the host loads the persisted state below).

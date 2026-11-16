@@ -198,6 +198,7 @@ fn model_registry_runtime(
 }
 
 mod delegate_tests;
+mod isolation_tests;
 mod lifecycle_tests;
 mod memory_tests;
 mod model_tests;

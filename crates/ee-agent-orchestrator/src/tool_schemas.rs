@@ -235,9 +235,12 @@ mod tests {
   },
   {
     "name": "create_terminal",
-    "description": "Creates a terminal running a command",
+    "description": "Creates a terminal running a command; background jobs are polled between model steps and report exit status automatically.",
     "inputSchema": {
       "properties": {
+        "background": {
+          "type": "boolean"
+        },
         "command": {
           "type": "string"
         },

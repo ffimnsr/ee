@@ -1,6 +1,16 @@
 //! `impl SubagentManager`: spawn/run/cancel and child lifecycle.
 use super::*;
 
+/// Per-run child settings that would otherwise exceed the argument budget.
+pub(super) struct ChildRunOptions {
+    /// Child event recorder, including heartbeat observation.
+    pub(super) events: EventRecorder,
+    /// Time left before the child deadline.
+    pub(super) remaining_timeout: std::time::Duration,
+    /// Isolated worktree when the role and session enable isolation.
+    pub(super) worktree: Option<crate::workspace_isolation::WorktreeWorkspace>,
+}
+
 impl SubagentManager {
     /// Creates a manager sharing the runtime's stores, model registry, and
     /// per-turn budget tracker.
@@ -24,6 +34,7 @@ impl SubagentManager {
             semaphore,
             quarantine,
             children: state.children,
+            worktrees: state.worktrees,
         }
     }
 
@@ -69,7 +80,7 @@ impl SubagentManager {
         // the parent loop's adapter. Unknown ids never create a node.
         let model = self.resolve_model(
             request.role.model.clone(),
-            request.model_id,
+            request.model_id.clone(),
             &request.role.name,
             &events,
         )?;
@@ -97,6 +108,7 @@ impl SubagentManager {
             child
         };
         let subagent_id = SubagentId::new(child.id.as_str());
+        let worktree = self.prepare_isolation(&request, &subagent_id)?;
         let registration = self.children.register(
             subagent_id.clone(),
             child.id.clone(),
@@ -213,8 +225,11 @@ impl SubagentManager {
             model,
             client,
             child_cancel,
-            heartbeat_events.clone(),
-            remaining_timeout,
+            ChildRunOptions {
+                events: heartbeat_events.clone(),
+                remaining_timeout,
+                worktree: worktree.clone(),
+            },
         );
         tokio::pin!(child_run);
         let result = tokio::select! {
@@ -273,6 +288,10 @@ impl SubagentManager {
             },
             result = &mut child_run => result,
         };
+        let result = match worktree {
+            Some(worktree) => self.finalize_isolation(worktree, result),
+            None => result,
+        };
         let registry_state = match result.handoff.status {
             SubagentStatus::Completed => ChildState::Completed,
             SubagentStatus::Failed => ChildState::Failed,
@@ -281,6 +300,77 @@ impl SubagentManager {
         self.children.finish(&subagent_id, registry_state);
         guard.disarm();
         Ok(result)
+    }
+
+    /// Creates an isolated worktree for a role that requested it when the
+    /// session enables worktree isolation. Fails closed when no workspace root
+    /// is known, because the primary checkout cannot be derived safely.
+    pub(super) fn prepare_isolation(
+        &self,
+        request: &DelegationRequest,
+        subagent_id: &SubagentId,
+    ) -> Result<Option<crate::workspace_isolation::WorktreeWorkspace>, OrchestratorError> {
+        if !self.config.workspace_isolation.allows(request.role.workspace_isolation) {
+            return Ok(None);
+        }
+        let primary = request
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.allowed_roots.first().cloned())
+            .ok_or_else(|| {
+                OrchestratorError::InvalidState(
+                    "worktree isolation requires a workspace root scope".into(),
+                )
+            })?;
+        let root = self.config.workspace_isolation.root_for(&primary);
+        Ok(Some(crate::workspace_isolation::WorktreeWorkspace::create(
+            &primary,
+            &root,
+            subagent_id.as_str(),
+        )?))
+    }
+
+    /// Captures isolated child changes as verified handoff evidence, writes a
+    /// patch beside the worktree, and prunes or retains the worktree according
+    /// to session policy.
+    pub(super) fn finalize_isolation(
+        &self,
+        worktree: crate::workspace_isolation::WorktreeWorkspace,
+        mut result: SubagentResult,
+    ) -> SubagentResult {
+        match worktree.capture() {
+            Ok(capture) => {
+                let mut evidence = capture.evidence_text();
+                if let Ok(patch) = capture.write_patch() {
+                    evidence.push_str(&format!("\nPatch: {}", patch.display()));
+                }
+                result
+                    .handoff
+                    .recommended_actions
+                    .push(truncate(&evidence, SUBAGENT_SUMMARY_MAX_CHARS));
+                let keep = result.handoff.status == SubagentStatus::Completed
+                    && self.config.workspace_isolation.keep_worktrees;
+                if keep {
+                    self.worktrees
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(worktree);
+                } else if let Err(error) = worktree.prune()
+                    && result.error_summary.is_none()
+                {
+                    result.error_summary =
+                        Some(truncate(&error.to_string(), SUBAGENT_SUMMARY_MAX_CHARS));
+                }
+            }
+            Err(error) => {
+                let _ = worktree.prune();
+                if result.error_summary.is_none() {
+                    result.error_summary =
+                        Some(truncate(&error.to_string(), SUBAGENT_SUMMARY_MAX_CHARS));
+                }
+            }
+        }
+        result
     }
 
     /// Resolves the child adapter: the role's explicit `model` selection when
@@ -330,9 +420,9 @@ impl SubagentManager {
         model: ResolvedModel,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        events: EventRecorder,
-        remaining_timeout: std::time::Duration,
+        options: ChildRunOptions,
     ) -> SubagentResult {
+        let ChildRunOptions { events, remaining_timeout, worktree } = options;
         let child = self
             .tasks
             .lock()
@@ -358,7 +448,8 @@ impl SubagentManager {
             child_config.memory_limit_bytes = RUBBER_DUCK_MAX_CONTEXT_BYTES;
             child_config.max_output_bytes = Some(RUBBER_DUCK_MAX_OUTPUT_BYTES);
             child_config.turn_timeout = Some(RUBBER_DUCK_TIMEOUT.min(remaining_timeout));
-            child_config.tool_timeout = RUBBER_DUCK_TOOL_TIMEOUT.min(self.config.tool_timeout);
+            child_config.tool_timeouts =
+                self.config.tool_timeouts.clone().capped(RUBBER_DUCK_TOOL_TIMEOUT);
             child_config.max_subagent_depth = RUBBER_DUCK_MAX_RECURSION_DEPTH;
             child_config.max_subagents = 0;
             child_config.max_parallel_subagents = 0;
@@ -382,10 +473,21 @@ impl SubagentManager {
                 self.config.max_parallel_subagents
             },
             // Destructive subclasses default to denied for children; scope
-            // narrows from the parent's active scope.
+            // narrows from the parent's active scope. An isolated child sees
+            // only its worktree root with the parent's glob narrowing.
             allowed_side_effect_subclasses: Default::default(),
             owned_terminal_ids: Default::default(),
-            scope: request.scope.clone(),
+            scope: match (&request.scope, &worktree) {
+                (_, Some(worktree)) => Some(WorkspaceScope::new(
+                    vec![worktree.path().to_path_buf()],
+                    request
+                        .scope
+                        .as_ref()
+                        .map(|scope| scope.allowed_globs.clone())
+                        .unwrap_or_default(),
+                )),
+                (scope, None) => scope.clone(),
+            },
         };
         // Discovery and dispatch use same exact immutable critic tool set.
         let visible_tool_names = is_rubber_duck.then(|| {
@@ -419,6 +521,7 @@ impl SubagentManager {
                 available_models: self.models.advertised(),
                 model_id: model.id,
                 visible_tool_names,
+                workspace_remap: worktree.as_ref().map(|worktree| Arc::new(worktree.remap())),
                 ..LoopOptions::default()
             },
         );

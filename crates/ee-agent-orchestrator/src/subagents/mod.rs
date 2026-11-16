@@ -128,6 +128,10 @@ pub struct SubagentRole {
     /// Whether successful output must cite backend-observed files or tools.
     /// Custom roles default fail-closed through [`SubagentRole::new`].
     pub requires_evidence: bool,
+    /// Whether this role's writes run in an isolated git worktree when the
+    /// session enables worktree isolation. Defaults to the shared checkout.
+    #[serde(default)]
+    pub workspace_isolation: crate::workspace_isolation::WorkspaceIsolation,
 }
 
 impl SubagentRole {
@@ -142,6 +146,7 @@ impl SubagentRole {
             allowed_scope_globs: Vec::new(),
             model: None,
             requires_evidence: true,
+            workspace_isolation: crate::workspace_isolation::WorkspaceIsolation::Shared,
         }
     }
 
@@ -180,6 +185,17 @@ impl SubagentRole {
     #[must_use]
     pub fn with_requires_evidence(mut self, requires_evidence: bool) -> Self {
         self.requires_evidence = requires_evidence;
+        self
+    }
+
+    /// Requests git-worktree isolation for this role's writes. The manager
+    /// honors it only when session isolation is enabled.
+    #[must_use]
+    pub fn with_workspace_isolation(
+        mut self,
+        isolation: crate::workspace_isolation::WorkspaceIsolation,
+    ) -> Self {
+        self.workspace_isolation = isolation;
         self
     }
 }
@@ -317,6 +333,8 @@ pub(crate) struct SubagentState {
     pub(crate) memory: Arc<Mutex<MemoryStore>>,
     pub(crate) budget: Arc<Mutex<BudgetTracker>>,
     pub(crate) children: Arc<ChildRegistry>,
+    /// Retained worktrees awaiting host apply; pruned on session close.
+    pub(crate) worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
 }
 
 impl SubagentState {
@@ -326,7 +344,17 @@ impl SubagentState {
         budget: Arc<Mutex<BudgetTracker>>,
         children: Arc<ChildRegistry>,
     ) -> Self {
-        Self { tasks, memory, budget, children }
+        Self { tasks, memory, budget, children, worktrees: Arc::new(Mutex::new(Vec::new())) }
+    }
+
+    /// Shares an existing worktree registry (runtime-owned cleanup surface).
+    #[must_use]
+    pub(crate) fn with_worktrees(
+        mut self,
+        worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
+    ) -> Self {
+        self.worktrees = worktrees;
+        self
     }
 }
 
@@ -353,6 +381,7 @@ pub(crate) struct SubagentManager {
     semaphore: Arc<Semaphore>,
     quarantine: Arc<Mutex<SubagentQuarantine>>,
     children: Arc<ChildRegistry>,
+    worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
 }
 
 /// Synchronous fail-safe for a dropped or panicking child future. Normal
@@ -531,6 +560,7 @@ impl DelegateTool {
                 allowed_scope_globs,
                 model,
                 requires_evidence: true,
+                workspace_isolation: crate::workspace_isolation::WorkspaceIsolation::Shared,
             },
             prompt,
         ))

@@ -19,6 +19,7 @@ pub(crate) use ee_agent_protocol::{
 };
 pub(crate) use tokio::sync::watch;
 
+pub(crate) use crate::background_jobs::{BackgroundJobRegistry, SharedBackgroundJobs};
 pub(crate) use crate::budget::BudgetTracker;
 pub(crate) use crate::checkpoint::{
     CheckpointContextProvenance, OrchestratorCheckpoint, current_unix_millis,
@@ -224,6 +225,11 @@ pub struct OrchestratorRuntime {
     /// Content digests of workspace instructions already injected this session,
     /// shared by every per-turn tracker.
     workspace_instruction_seen: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,
+    /// Background terminal jobs polled between model steps.
+    background_jobs: SharedBackgroundJobs,
+    /// Retained isolated worktrees awaiting host apply; pruned on session
+    /// close or `/discard`.
+    worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
 }
 
 mod branch;

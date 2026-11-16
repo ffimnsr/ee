@@ -335,6 +335,9 @@ impl OrchestratorRuntime {
         if options.workspace_instructions.is_none() {
             options.workspace_instructions = self.workspace_instruction_tracker();
         }
+        if options.background_jobs.is_none() {
+            options.background_jobs = Some(self.background_jobs.clone());
+        }
         let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             options.session_log = Some(store.log_for(&session_id));

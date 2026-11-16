@@ -317,6 +317,13 @@ fn orchestrator_config_carries_durable_session_log_when_opted_in() {
 }
 
 #[test]
+fn workspace_isolation_defaults_under_the_session_state_dir() {
+    let state_dir = PathBuf::from("/tmp/ee-agent-opencode-isolation-test");
+    let isolation = workspace_isolation_config(&state_dir);
+    assert_eq!(isolation.worktree_root.as_deref(), Some(state_dir.join("worktrees").as_path()));
+}
+
+#[test]
 fn reasoning_effort_shapes_only_the_dialect_that_documents_it() {
     let mut chat = test_config(OpenCodeSurface::Zen, "kimi-k3");
     chat.reasoning_effort = Some(crate::reasoning::ReasoningEffort::High);

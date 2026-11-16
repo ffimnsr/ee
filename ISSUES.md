@@ -1458,40 +1458,40 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 ### Improvement 4 — Git Worktree Isolation for Write Subagents & Parallel Sessions
 
-- [ ] Add optional `git worktree` isolation for `implementer` subagents and concurrent write sessions.
-  - [ ] **Problem:**
+- [x] Add optional `git worktree` isolation for `implementer` subagents and concurrent write sessions.
+  - [x] **Problem:**
     - Phase 5 (Worktree isolation) was excluded from the initial Unified Harness Runtime Plan (`ISSUES.md:1067`).
     - Currently, parallel write sessions fail closed on overlapping buffer/path claims (`WriteConflict` in `docs/upgrades/parallel-agent-sessions.md`), and `implementer` subagents spawned via `delegate_task` mutate the shared working tree directly, making speculative or parallel subagent edits unsafe.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add an opt-in `WorkspaceIsolation::GitWorktree` mode on `SubagentSpawnSpec` and session configuration.
     - When enabled in a git repository, create a temporary detached or branch-scoped worktree under `<session_state_dir>/worktrees/<session_or_child_id>` before executing `implementer` writes, scoping the child's `cwd`, `workspace_roots`, and `PolicyEngine` write roots to that worktree.
     - On child completion, capture `git diff` / changed file inventory as verified handoff evidence, allow the root agent or host to apply/cherry-pick the patch cleanly into the primary workspace, and auto-prune the worktree on session close or `/discard`.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Worktree-isolated `implementer` subagents cannot mutate files in the primary checkout directly.
     - Parallel isolated subagents can edit overlapping files in separate worktrees without `WriteConflict` until merge/apply time.
     - Stale worktrees are cleaned up deterministically on cancellation, `/discard`, and `session/close`.
 
 ### Improvement 5 — Async Background Terminals & Reactive Session Wakeup (`TOOL_JOBS` Parity)
 
-- [ ] Support background terminal jobs with runtime status projection and reactive completion notices.
-  - [ ] **Problem:**
+- [x] Support background terminal jobs with runtime status projection and reactive completion notices.
+  - [x] **Problem:**
     - `ee_terminal_spawn` and `ee_terminal_wait` (`crates/ee-mcp`) require the model to block or poll `ee_terminal_output` / `ee_terminal_wait` synchronously within a turn.
     - Long-running builds, dev servers, or test suites either block the turn loop until `tool_timeout` expires or require manual user re-prompting to check status.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend terminal management in `ee-agent-host` / `ee-mcp` with a background job registry per session (`background: true` on `ee_terminal_spawn` or auto-background after `wait_ms_before_async`).
     - Project active/completed background jobs into `RuntimeSnapshot` via a new `BACKGROUND_JOBS` runtime context section (ordered in `RUNTIME_CONTEXT_ORDER` and hashed for `RuntimeSnapshotMode::Delta`).
     - Emit a bounded system-reminder notice at the next step boundary (or wake an idle session via ACP update) when a background terminal job exits.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Model can launch a build/test command with `wait_ms_before_async`, continue read/analysis steps while it runs, and receive exit status + tail output automatically on the step after completion.
     - All background jobs are terminated cleanly on `session/cancel` and `session/close`.
 
 ### Improvement 6 — Per-Tool Category Timeout Tiers
 
-- [ ] Replace flat global `tool_timeout` with per-category timeout tiers and bounded per-call override.
-  - [ ] **Problem:**
+- [x] Replace flat global `tool_timeout` with per-category timeout tiers and bounded per-call override.
+  - [x] **Problem:**
     - `OrchestratorConfig::tool_timeout` (`crates/ee-agent-orchestrator/src/config.rs`) applies one flat `120s` timeout to every tool call.
     - Fast local read/LSP tools (`read_file`, `ee_file_outline`, `ee_diagnostics`) should fail fast (15s–30s) when hung, whereas workspace test/build runs via `ee_terminal_wait` legitimately need up to 300s when explicitly requested.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `ToolTimeoutPolicy` to `OrchestratorConfig` with category defaults:
       - `fast_local_read`: `15s` (`read_file`, `list_files`, `ee_file_outline`, `ee_diagnostics`, `ee_workspace_roots`)
       - `search_and_mcp`: `30s` (`search_text`, `ee_search_text`, external MCP reads)
@@ -1499,7 +1499,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
       - `terminal_default`: `120s` (`ee_terminal_wait`, validation commands)
       - `terminal_max`: `300s` (opt-in via bounded `timeout_ms` argument on `ee_terminal_wait`)
     - Enforce `timeout_ms.clamp(1_000, terminal_max)` inside `ToolExecutor`.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Hung read/search tools time out at their category ceiling (15s/30s) without waiting 120s.
     - `ee_terminal_wait` respects an explicit `timeout_ms` parameter up to `terminal_max` (`300s`), clamped against `OrchestratorConfig`.
 

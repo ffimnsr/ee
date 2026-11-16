@@ -25,9 +25,7 @@ use regex_syntax::hir::{Class, Hir, HirKind};
 use std::borrow::Cow;
 use std::str;
 
-/// The result of a [`find`][find] operation.
-///
-/// [find]: fn.find.html
+/// The result of a [`find`] operation.
 pub enum FindResult {
     /// The pattern was found at this position.
     Found(usize),
@@ -160,7 +158,7 @@ pub fn find_in_slice(
     }
 }
 
-/// A variant of [`find`][find] that makes a bounded amount of progress, then either
+/// A variant of [`find`] that makes a bounded amount of progress, then either
 /// returns or suspends (returning `TryAgain`).
 ///
 /// The `num_steps` parameter controls the number of "steps" processed per
@@ -169,8 +167,6 @@ pub fn find_in_slice(
 /// when scanning produces a result. It should be empirically tuned for a
 /// balance between overhead and impact on interactive performance, but the
 /// exact value is probably not critical.
-///
-/// [find]: fn.find.html
 pub fn find_progress(
     cursor: &mut Cursor<RopeInfo>,
     lines: &mut LinesRaw,

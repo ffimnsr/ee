@@ -35,6 +35,10 @@ pub struct FanOutFanInCoordinator {
     max_parallel: usize,
     tasks: Arc<Mutex<TaskGraph>>,
     write_conflicts: Option<Arc<Mutex<WriteScopeConflictDetector>>>,
+    /// Whether session worktree isolation is enabled. When set, children whose
+    /// role requests `GitWorktree` edit private worktrees, so their primary
+    /// write scopes may overlap without a conflict.
+    workspace_isolation: bool,
 }
 
 impl FanOutFanInCoordinator {
@@ -46,7 +50,17 @@ impl FanOutFanInCoordinator {
             max_parallel,
             tasks,
             write_conflicts: Some(Arc::new(Mutex::new(WriteScopeConflictDetector::new()))),
+            workspace_isolation: false,
         }
+    }
+
+    /// Declares whether the session enables git-worktree isolation. Isolated
+    /// children skip primary-path write-scope arbitration because each edits a
+    /// private worktree; merging happens at apply time.
+    #[must_use]
+    pub fn with_workspace_isolation(mut self, enabled: bool) -> Self {
+        self.workspace_isolation = enabled;
+        self
     }
 
     /// Replaces the default write-scope conflict detector. Children whose
@@ -138,6 +152,14 @@ impl FanOutFanInCoordinator {
             let mut detector = detector.lock().expect("write-scope detector poisoned");
             for (index, request) in requests.iter().enumerate() {
                 if request.write_scope.is_empty() {
+                    continue;
+                }
+                // Isolated children edit private worktrees, so overlapping
+                // primary paths are not a conflict until apply time.
+                if self.workspace_isolation
+                    && request.role.workspace_isolation
+                        == crate::workspace_isolation::WorkspaceIsolation::GitWorktree
+                {
                     continue;
                 }
                 let subagent = SubagentId::new(request.child_task_id.as_str());
@@ -624,6 +646,53 @@ mod tests {
             tasks.lock().expect("graph").get(&children[1].id).expect("child").status,
             TaskStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_implementers_may_overlap_primary_write_scopes() {
+        let tasks = Arc::new(Mutex::new(TaskGraph::new()));
+        let detector = Arc::new(Mutex::new(WriteScopeConflictDetector::new()));
+        let coordinator = FanOutFanInCoordinator::new(2, tasks.clone())
+            .with_write_conflicts(detector.clone())
+            .with_workspace_isolation(true);
+        let (root, _children) = root_with_children(&tasks, 2);
+
+        let requests = coordinator
+            .plan_requests(
+                &root,
+                crate::subagent_roles::BuiltinSubagentRole::Implementer.role(),
+                None,
+            )
+            .into_iter()
+            .map(|mut request| {
+                request.write_scope = vec![PathBuf::from("/work/a.rs")];
+                request
+            })
+            .collect::<Vec<_>>();
+
+        let spawns = Arc::new(Mutex::new(0usize));
+        let spawn = {
+            let spawns = spawns.clone();
+            move |request: SubagentRequest| {
+                let spawns = spawns.clone();
+                async move {
+                    *spawns.lock().expect("spawns") += 1;
+                    Ok(completed_for_role(
+                        "done",
+                        &SubagentId::new(request.child_task_id.as_str()),
+                        &request.role.name,
+                    ))
+                }
+            }
+        };
+        let results = coordinator.run(requests, spawn).await;
+
+        assert_eq!(*spawns.lock().expect("spawns"), 2, "isolated children spawn");
+        assert!(
+            results.iter().all(|result| result.handoff.status == SubagentStatus::Completed),
+            "no write conflict for isolated worktrees"
+        );
+        assert!(detector.lock().expect("detector").is_empty());
     }
 
     #[tokio::test]

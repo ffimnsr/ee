@@ -164,6 +164,7 @@
 //! containers, and a runtime that runs one bounded turn with a fake model
 //! and fake tools over in-memory framework plumbing.
 
+pub mod background_jobs;
 pub mod budget;
 pub mod checkpoint;
 mod checkpoint_budget;
@@ -253,12 +254,17 @@ pub mod trace;
 mod transcript_log;
 pub mod trust;
 pub mod validation;
+pub mod workspace_isolation;
 pub mod workspace_scope;
 pub mod write_conflicts;
 pub mod write_transaction;
 
 // ── Primary public types ────────────────────────────────────────────────
 
+pub use background_jobs::{
+    BACKGROUND_JOB_TAIL_BYTES, BackgroundJob, BackgroundJobRegistry, BackgroundJobStatus,
+    SharedBackgroundJobs,
+};
 pub use budget::{BudgetConfig, BudgetSnapshot, BudgetTracker};
 pub use checkpoint::{
     CHECKPOINT_SCHEMA_VERSION, CheckpointCaptureMetadata, CheckpointCaptureOrigin,
@@ -286,7 +292,7 @@ pub use completion::{
     CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionState, EvidenceStatus,
     derive_completion,
 };
-pub use config::{OrchestratorConfig, RecoveryConfig};
+pub use config::{OrchestratorConfig, RecoveryConfig, ToolTimeoutPolicy};
 pub use context_pack::{
     ActiveTaskSummary, ContextItemProvenance, ContextMemoryItem, ContextPack, ContextPackBuilder,
     ContextPackConfig, ContextTruncation, DEFAULT_CONTEXT_PACK_MAX_BYTES,
@@ -465,6 +471,10 @@ pub use subagent_handoff::{
     MAX_HANDOFF_FINDING_CLAIM_CHARS, MAX_HANDOFF_FINDING_KEY_CHARS, MAX_HANDOFF_FINDINGS,
     MAX_HANDOFF_ITEM_CHARS, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_SUMMARY_CHARS,
     MAX_SUBAGENT_HANDOFF_BYTES, SUBAGENT_HANDOFF_SCHEMA_VERSION, SubagentHandoff, SubagentStatus,
+};
+pub use workspace_isolation::{
+    MAX_WORKTREE_PATCH_BYTES, WORKTREE_DIR, WorkspaceIsolation, WorkspaceIsolationConfig,
+    WorkspacePathRemap, WorktreeCapture, WorktreeWorkspace,
 };
 
 pub use rubber_duck_trigger::{

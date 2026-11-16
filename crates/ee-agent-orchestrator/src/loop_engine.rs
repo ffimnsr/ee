@@ -19,7 +19,7 @@ use std::{
 };
 
 use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
-use ee_agent_protocol::{SessionUpdate, StopReason, UsageUpdate};
+use ee_agent_protocol::{SessionId, SessionUpdate, StopReason, UsageUpdate};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
@@ -107,6 +107,12 @@ pub(crate) struct LoopOptions {
     /// `CLAUDE.md` files once per session.
     pub workspace_instructions:
         Option<Arc<Mutex<crate::prompt::workspace::WorkspaceInstructionTracker>>>,
+    /// Background terminal jobs polled between model steps; `None` disables
+    /// job tracking and exit notices.
+    pub background_jobs: Option<crate::background_jobs::SharedBackgroundJobs>,
+    /// Path remap for a git-worktree-isolated child. `None` edits the primary
+    /// checkout directly.
+    pub workspace_remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
 }
 
 impl Default for LoopOptions {
@@ -129,6 +135,8 @@ impl Default for LoopOptions {
             stop_veto: None,
             transcript_out: None,
             workspace_instructions: None,
+            background_jobs: None,
+            workspace_remap: None,
         }
     }
 }
@@ -172,6 +180,8 @@ impl LoopEngine {
             events.clone(),
         )
         .with_model_id(options.model_id.clone());
+        let executor = executor.with_background_jobs(options.background_jobs.clone());
+        let executor = executor.with_workspace_remap(options.workspace_remap.clone());
         let graph = options.graph.clone();
         let memory = options.memory.clone();
         let checkpoint = options.checkpoint.clone();
@@ -394,6 +404,15 @@ impl LoopEngine {
         loop {
             if *cancel.borrow() {
                 return Err(OrchestratorError::Cancellation);
+            }
+            // Surface exited background terminal jobs before the next model
+            // call so their status and output tail arrive as a bounded notice
+            // without the model polling or blocking.
+            if let Some(jobs) = &self.options.background_jobs {
+                let notices = jobs.poll(client, &SessionId::new(session_id)).await;
+                for notice in notices {
+                    transcript.push_system_notice(notice);
+                }
             }
             let budget_snapshot = {
                 let mut budget = self.budget.lock().expect("budget tracker poisoned");

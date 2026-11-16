@@ -171,6 +171,11 @@ impl BuiltinSubagentRole {
             allowed_scope_globs: Vec::new(),
             model: None,
             requires_evidence: self.requires_evidence(),
+            workspace_isolation: if self == Self::Implementer {
+                crate::workspace_isolation::WorkspaceIsolation::GitWorktree
+            } else {
+                crate::workspace_isolation::WorkspaceIsolation::Shared
+            },
         }
     }
 

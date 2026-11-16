@@ -62,6 +62,26 @@ pub struct ToolCallContext {
     /// Registry model id of the adapter the current loop runs on; delegation
     /// uses it as the fallback child adapter when the role selects none.
     pub model_id: Option<String>,
+    /// Per-call terminal wait bounds derived from the timeout policy.
+    pub terminal_wait: TerminalWaitLimits,
+}
+
+/// Default and maximum terminal wait for the built-in terminal lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalWaitLimits {
+    /// Wait used when the model supplies no `timeout_ms`.
+    pub default: Duration,
+    /// Hard ceiling for an explicit `timeout_ms`.
+    pub max: Duration,
+}
+
+impl Default for TerminalWaitLimits {
+    fn default() -> Self {
+        Self {
+            default: crate::config::DEFAULT_TERMINAL_TIMEOUT,
+            max: crate::config::DEFAULT_TERMINAL_MAX_TIMEOUT,
+        }
+    }
 }
 
 /// Side-effect class of a tool, used by the policy engine.
@@ -453,9 +473,6 @@ impl ToolRegistry {
     }
 }
 
-/// Default maximum terminal wait before automatic timeout cleanup.
-const DEFAULT_TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
-
 /// Which framework `ClientBridge` method a built-in tool wraps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BridgeCall {
@@ -488,6 +505,7 @@ impl ClientBridgeTool {
         session_id: SessionId,
         arguments: serde_json::Value,
         client: &ClientBridge,
+        terminal_wait: TerminalWaitLimits,
     ) -> Result<ToolResult, ToolResult> {
         let outcome = match call {
             BridgeCall::ReadTextFile => {
@@ -547,7 +565,7 @@ impl ClientBridgeTool {
             }
             BridgeCall::WaitForTerminalExit => {
                 let terminal_id = terminal_arg(&arguments)?;
-                let timeout = terminal_wait_timeout(&arguments)?;
+                let timeout = terminal_wait_timeout(&arguments, terminal_wait)?;
                 let wait = client.wait_for_terminal_exit(WaitForTerminalExitRequest::new(
                     session_id.clone(),
                     terminal_id.clone(),
@@ -650,12 +668,14 @@ impl ServerTool for ClientBridgeTool {
         arguments: serde_json::Value,
         client: ClientBridge,
         _cancel: watch::Receiver<bool>,
-        _context: ToolCallContext,
+        context: ToolCallContext,
     ) -> ToolFuture<ToolResult> {
         let call = self.call;
         let session_id = self.session_id.clone();
         Box::pin(async move {
-            Self::run(call, session_id, arguments, &client).await.unwrap_or_else(|result| result)
+            Self::run(call, session_id, arguments, &client, context.terminal_wait)
+                .await
+                .unwrap_or_else(|result| result)
         })
     }
 }
@@ -683,9 +703,10 @@ impl ServerTool for CargoCheckTool {
         arguments: serde_json::Value,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
-        _context: ToolCallContext,
+        context: ToolCallContext,
     ) -> ToolFuture<ToolResult> {
         let session_id = self.session_id.clone();
+        let wait_timeout = context.terminal_wait.default;
         Box::pin(async move {
             if *cancel.borrow() {
                 return ToolResult::failure(ToolErrorKind::Cancelled, "validation cancelled");
@@ -707,7 +728,7 @@ impl ServerTool for CargoCheckTool {
             ));
             let mut cancel_wait = cancel.clone();
             let waited = tokio::select! {
-                result = tokio::time::timeout(DEFAULT_TERMINAL_WAIT_TIMEOUT, wait) => result,
+                result = tokio::time::timeout(wait_timeout, wait) => result,
                 changed = cancel_wait.changed() => {
                     let _ = changed;
                     let _ = client.kill_terminal(KillTerminalRequest::new(session_id.clone(), terminal.clone())).await;
@@ -827,11 +848,14 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
         make(
             BridgeCall::CreateTerminal,
             "create_terminal",
-            "Creates a terminal running a command",
+            "Creates a terminal running a command; background jobs are polled between model steps and report exit status automatically.",
             SideEffectClass::Execute,
             None,
             none.clone().produces(vec![ToolDataClass::TerminalHandle]),
-            schema(&[("command", "string"), ("cwd", "string")], &["command"]),
+            schema(
+                &[("command", "string"), ("cwd", "string"), ("background", "boolean")],
+                &["command"],
+            ),
         ),
         make(
             BridgeCall::TerminalOutput,
@@ -901,14 +925,17 @@ fn terminal_arg(arguments: &serde_json::Value) -> Result<TerminalId, ToolResult>
     string_arg(arguments, "terminal_id").map(TerminalId::new)
 }
 
-fn terminal_wait_timeout(arguments: &serde_json::Value) -> Result<Duration, ToolResult> {
+fn terminal_wait_timeout(
+    arguments: &serde_json::Value,
+    limits: TerminalWaitLimits,
+) -> Result<Duration, ToolResult> {
     let Some(timeout_ms) = arguments.get("timeout_ms") else {
-        return Ok(DEFAULT_TERMINAL_WAIT_TIMEOUT);
+        return Ok(limits.default);
     };
     let timeout_ms = timeout_ms.as_u64().filter(|timeout_ms| *timeout_ms > 0).ok_or_else(|| {
         invalid_args(String::from("tool argument timeout_ms must be a positive integer"))
     })?;
-    let max_ms = DEFAULT_TERMINAL_WAIT_TIMEOUT.as_millis() as u64;
+    let max_ms = limits.max.as_millis() as u64;
     if timeout_ms > max_ms {
         return Err(invalid_args(format!("tool argument timeout_ms must not exceed {max_ms}")));
     }
@@ -951,6 +978,8 @@ pub struct ToolExecutor {
     events: EventRecorder,
     cache: Option<Arc<Mutex<ToolResultCache>>>,
     model_id: Option<String>,
+    background_jobs: Option<crate::background_jobs::SharedBackgroundJobs>,
+    workspace_remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
 }
 
 impl ToolExecutor {
@@ -965,7 +994,18 @@ impl ToolExecutor {
         depth: usize,
         events: EventRecorder,
     ) -> Self {
-        Self { config, tools, budget, policy, depth, events, cache: None, model_id: None }
+        Self {
+            config,
+            tools,
+            budget,
+            policy,
+            depth,
+            events,
+            cache: None,
+            model_id: None,
+            background_jobs: None,
+            workspace_remap: None,
+        }
     }
 
     /// Sets the registry model id of the adapter the loop runs on; passed to
@@ -984,6 +1024,28 @@ impl ToolExecutor {
         self
     }
 
+    /// Registers created terminals as background jobs and clears a job when
+    /// the model waits on it in the foreground.
+    #[must_use]
+    pub fn with_background_jobs(
+        mut self,
+        jobs: Option<crate::background_jobs::SharedBackgroundJobs>,
+    ) -> Self {
+        self.background_jobs = jobs;
+        self
+    }
+
+    /// Remaps primary-checkout paths into an isolated worktree before policy
+    /// evaluation and execution.
+    #[must_use]
+    pub fn with_workspace_remap(
+        mut self,
+        remap: Option<Arc<crate::workspace_isolation::WorkspacePathRemap>>,
+    ) -> Self {
+        self.workspace_remap = remap;
+        self
+    }
+
     /// Executes one tool intent, emitting the pending → in-progress →
     /// completed/failed update lifecycle.
     pub async fn execute(
@@ -995,6 +1057,18 @@ impl ToolExecutor {
         task: &TaskNode,
         transcript: &[ModelMessage],
     ) -> Result<ToolResult, OrchestratorError> {
+        // Isolated children see primary-checkout paths in prompts and scope
+        // rules but must operate on their worktree; remap before validation,
+        // policy, cache keys, and execution so every layer agrees.
+        let mut remapped;
+        let intent = match &self.workspace_remap {
+            Some(remap) => {
+                remapped = intent.clone();
+                remap.remap_arguments(&mut remapped.arguments);
+                &remapped
+            }
+            None => intent,
+        };
         let tool = self.tools.lock().expect("tool registry poisoned").get(&intent.name);
         let Some(tool) = tool else {
             let result = ToolResult::failure(
@@ -1083,14 +1157,24 @@ impl ToolExecutor {
             .map_err(map_update_error)?;
 
         let arguments = intent.arguments.clone();
+        let terminal_wait = TerminalWaitLimits {
+            default: self.config.tool_timeouts.terminal_default,
+            max: self.config.tool_timeouts.terminal_max,
+        };
         let context = ToolCallContext {
             task: task.clone(),
             transcript: transcript.to_vec(),
             events: self.events.clone(),
             scope: self.policy.policy().scope.clone(),
             model_id: self.model_id.clone(),
+            terminal_wait,
         };
-        let tool_timeout = self.config.tool_timeout;
+        let requested_ms = intent.arguments.get("timeout_ms").and_then(serde_json::Value::as_u64);
+        let tool_timeout = self.config.tool_timeouts.effective_timeout(
+            &definition.name,
+            definition.side_effect_class,
+            requested_ms,
+        );
         let result = tokio::time::timeout(
             tool_timeout,
             tool.execute(arguments, client.clone(), cancel.clone(), context),
@@ -1106,6 +1190,7 @@ impl ToolExecutor {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
+        self.track_background_job(&definition, intent, &result);
         if let Some(cache) = &self.cache {
             if result.success && definition.side_effect_class == SideEffectClass::Read {
                 let key = cache_key(
@@ -1125,6 +1210,56 @@ impl ToolExecutor {
         }
         emit_tool_outcome(sink, intent, &result)?;
         Ok(result)
+    }
+
+    /// Records or clears background terminal jobs from terminal lifecycle
+    /// outcomes. Only successful calls change registry state.
+    fn track_background_job(
+        &self,
+        definition: &ToolDefinition,
+        intent: &ToolIntent,
+        result: &ToolResult,
+    ) {
+        let Some(jobs) = &self.background_jobs else {
+            return;
+        };
+        if !result.success {
+            return;
+        }
+        match definition.name.as_str() {
+            "create_terminal" => {
+                let background = intent
+                    .arguments
+                    .get("background")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                if !background {
+                    return;
+                }
+                let Some(terminal_id) = result
+                    .structured_output
+                    .as_ref()
+                    .and_then(|value| value.get("terminal_id"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return;
+                };
+                let command = intent
+                    .arguments
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("terminal command");
+                jobs.register(terminal_id.to_string(), command.to_string());
+            }
+            "wait_for_terminal_exit" => {
+                if let Some(terminal_id) =
+                    intent.arguments.get("terminal_id").and_then(serde_json::Value::as_str)
+                {
+                    jobs.note_foreground_wait(terminal_id);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1489,6 +1624,7 @@ mod tests {
                 SessionId::new("s-1"),
                 json!({ "terminal_id": "term-1", "timeout_ms": 1 }),
                 &task_bridge,
+                TerminalWaitLimits::default(),
             )
             .await
         });
@@ -1696,10 +1832,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_terminal_jobs_register_and_clear() {
+        let jobs = Arc::new(crate::background_jobs::BackgroundJobRegistry::new());
+        let (_tools, _budget, executor) = harness(OrchestratorConfig::default());
+        let executor = executor.with_background_jobs(Some(jobs.clone()));
+
+        let create = ToolDefinition::new("create_terminal", "creates");
+        let create_intent =
+            ToolIntent::new("tc-1", "create_terminal", json!({ "command": "cargo build" }));
+        executor.track_background_job(
+            &create,
+            &create_intent,
+            &ToolResult::success_structured("ok", json!({ "terminal_id": "term-1" })),
+        );
+        assert!(jobs.snapshot_text().expect("job tracked").contains("cargo build"));
+
+        let wait = ToolDefinition::new("wait_for_terminal_exit", "waits");
+        let wait_intent =
+            ToolIntent::new("tc-2", "wait_for_terminal_exit", json!({ "terminal_id": "term-1" }));
+        executor.track_background_job(&wait, &wait_intent, &ToolResult::success("exited"));
+        assert!(jobs.is_empty(), "foreground wait clears the background job");
+    }
+
+    #[tokio::test]
     async fn tool_executor_timeout_emits_failed_update() {
         let (sink, bridge, mut rx) = plumbing();
         let config = OrchestratorConfig {
-            tool_timeout: Duration::from_millis(50),
+            tool_timeouts: crate::config::ToolTimeoutPolicy {
+                fast_local_read: Duration::from_millis(50),
+                search_and_mcp: Duration::from_millis(50),
+                write_and_edit: Duration::from_millis(50),
+                terminal_default: Duration::from_millis(50),
+                terminal_max: Duration::from_millis(50),
+            },
             ..OrchestratorConfig::default()
         };
         let (tools, _budget, executor) = harness(config);

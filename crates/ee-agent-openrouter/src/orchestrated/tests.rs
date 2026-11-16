@@ -75,6 +75,13 @@ fn durable_session_log_dir_is_opt_in_and_propagates() {
 }
 
 #[test]
+fn workspace_isolation_defaults_under_the_session_state_dir() {
+    let state_dir = PathBuf::from("/tmp/ee-openrouter-session-state");
+    let isolation = workspace_isolation_config(&state_dir);
+    assert_eq!(isolation.worktree_root.as_deref(), Some(state_dir.join("worktrees").as_path()));
+}
+
+#[test]
 fn production_registry_uses_distinct_declared_model_families() {
     let mut config = test_config();
     config.model = "anthropic/root".into();
@@ -786,13 +793,43 @@ async fn orchestrated_mode_executes_terminal_create_through_client_bridge() {
         terminal_request.id.clone(),
         Ok(json!({ "terminalId": "term-1" })),
     ));
-    let frames = handle.next_frames(4).await;
+    // The completed update is followed by the between-step background poll.
+    let frames = handle.next_frames(2).await;
     let completed_update = raw_params_to_value(match &frames[0] {
         RawJsonRpcMessage::Notification(update) => update.params.clone(),
         other => panic!("expected completed tool-call update, got {other:?}"),
     });
     assert_eq!(completed_update["update"]["status"], "completed");
-    assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
+    let RawJsonRpcMessage::Request(poll) = &frames[1] else {
+        panic!("second frame is the background terminal poll, got {:?}", frames[1]);
+    };
+    assert_eq!(poll.method.as_ref(), "terminal/output");
+    handle.send(RawJsonRpcMessage::response(
+        poll.id.clone(),
+        Ok(json!({
+            "output": "hi",
+            "truncated": false,
+            "exitStatus": { "exitCode": 0 },
+        })),
+    ));
+    let frames = handle.next_frames(2).await;
+    assert!(
+        matches!(&frames[0], RawJsonRpcMessage::Notification(_)),
+        "first frame after the poll is streamed output: {:?}",
+        frames[0]
+    );
+    let mut stop_reason = None;
+    for _ in 0..12 {
+        let frame = handle.next_frames(1).await.remove(0);
+        if let RawJsonRpcMessage::Response(response) = frame {
+            let Response::Result { result, .. } = response else {
+                panic!("expected a result response");
+            };
+            stop_reason = Some(result["stopReason"].clone());
+            break;
+        }
+    }
+    assert_eq!(stop_reason.expect("turn completed"), "end_turn");
 
     handle.shutdown(task).await;
 }

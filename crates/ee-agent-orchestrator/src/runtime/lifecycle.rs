@@ -142,11 +142,13 @@ impl OrchestratorRuntime {
         let metrics = Arc::new(Mutex::new(OrchestratorMetrics::new()));
         let decisions = Arc::new(Mutex::new(DecisionLog::default()));
         let children = Arc::new(ChildRegistry::default());
+        let worktrees = Arc::new(Mutex::new(Vec::new()));
         let manager = Arc::new(SubagentManager::new(
             config.clone(),
             models.clone(),
             tools.clone(),
-            SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone()),
+            SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone())
+                .with_worktrees(worktrees.clone()),
             SubagentObservability::new(model_router.clone(), metrics.clone(), decisions.clone()),
         ));
         tools
@@ -196,6 +198,8 @@ impl OrchestratorRuntime {
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
             workspace_scope: Mutex::new(None),
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            background_jobs: Arc::new(BackgroundJobRegistry::new()),
+            worktrees,
         }
     }
     /// Records the session working directory and workspace roots for mid-turn
@@ -209,6 +213,48 @@ impl OrchestratorRuntime {
     #[must_use]
     pub(crate) fn workspace_scope(&self) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
         self.workspace_scope.lock().expect("workspace scope poisoned").clone()
+    }
+
+    /// Renders active background terminal jobs for the runtime prompt section.
+    #[must_use]
+    pub fn background_jobs_snapshot(&self) -> Option<String> {
+        self.background_jobs.snapshot_text()
+    }
+
+    /// Kills and releases every running background terminal job and clears the
+    /// registry. Used by `/discard`; session cancel/close clear state only
+    /// because the host owns the terminal processes.
+    pub async fn terminate_background_jobs(
+        &self,
+        client: &ClientBridge,
+        session_id: &ee_agent_protocol::SessionId,
+    ) {
+        self.background_jobs.terminate_all(client, session_id).await;
+    }
+
+    /// Drops background job state without touching host terminals.
+    pub fn clear_background_jobs(&self) {
+        self.background_jobs.clear();
+    }
+
+    /// Prunes every retained isolated worktree. Called on `/discard` and
+    /// session close so speculative child patches never outlive the session.
+    pub fn prune_worktrees(&self) {
+        let mut worktrees = self.worktrees.lock().expect("worktrees poisoned");
+        for worktree in worktrees.drain(..) {
+            let _ = worktree.prune();
+        }
+    }
+
+    /// Worktrees retained for host apply.
+    #[must_use]
+    pub fn retained_worktrees(&self) -> Vec<std::path::PathBuf> {
+        self.worktrees
+            .lock()
+            .expect("worktrees poisoned")
+            .iter()
+            .map(|worktree| worktree.path().to_path_buf())
+            .collect()
     }
 
     /// Installs an observe-only observer on the runtime event recorder.

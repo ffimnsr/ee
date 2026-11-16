@@ -358,6 +358,8 @@ pub(super) struct PromptBundleInputs<'a> {
     pub(super) mcp_servers: &'a [String],
     /// Test seam for trusted user instructions; `None` reads the process env.
     pub(super) global_config_root: Option<&'a std::path::Path>,
+    /// Rendered background terminal job status, when any job is tracked.
+    pub(super) background_jobs: Option<&'a str>,
 }
 
 /// Builds the stable prompt and runtime snapshot for one session mode.
@@ -383,6 +385,15 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
         preset: PromptPreset::Standard,
     })
     .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))?;
+    // Background job status is derived per turn from live terminal state and
+    // participates in the runtime-snapshot delta hash like every other section.
+    if let Some(text) = inputs.background_jobs
+        && let Some(runtime) = bundle.runtime.as_mut()
+    {
+        let slot = crate::prompt::sections::BACKGROUND_JOBS;
+        runtime
+            .push_section(crate::prompt::context::RuntimeSection::new(slot.name, slot.order, text));
+    }
     // Recompute every turn: instruction files are attack surface, so a stale
     // snapshot is never carried in history. `TurnSystemContext` replays only
     // the current snapshot ahead of the current prompt.
@@ -415,6 +426,7 @@ mod tests {
             advertised_tools: &[],
             mcp_servers: &[],
             global_config_root: None,
+            background_jobs: None,
         })
         .expect("bundle");
 
@@ -444,6 +456,7 @@ mod tests {
             advertised_tools: &[],
             mcp_servers: &[],
             global_config_root: Some(&global),
+            background_jobs: None,
         })
         .expect("bundle");
 
@@ -510,6 +523,7 @@ mod tests {
             advertised_tools: &[],
             mcp_servers: &[],
             global_config_root: None,
+            background_jobs: None,
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");
@@ -518,5 +532,32 @@ mod tests {
             "{}",
             runtime.text
         );
+    }
+
+    #[test]
+    fn background_jobs_render_as_a_hashed_runtime_section() {
+        let roots: Vec<std::path::PathBuf> = Vec::new();
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: std::path::Path::new("/workspace"),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: Some("- terminal term-1 [running]: cargo build"),
+        })
+        .expect("bundle");
+        let runtime = bundle.runtime.expect("runtime context");
+        let section = runtime
+            .sections
+            .iter()
+            .find(|section| section.name == "BACKGROUND_JOBS")
+            .expect("background jobs section");
+        assert!(section.text.contains("cargo build"));
+        assert!(!section.hash.is_empty());
     }
 }

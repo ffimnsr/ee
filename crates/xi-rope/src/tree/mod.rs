@@ -102,7 +102,7 @@ pub trait DefaultMetric: NodeInfo {
     type DefaultMetric: Metric<Self>;
 }
 
-/// A trait for the leaves of trees of type [Node](struct.Node.html).
+/// A trait for the leaves of trees of type [Node].
 ///
 /// Two leafs can be concatenated using `push_maybe_split`.
 pub trait Leaf: Sized + Clone + Default {
@@ -171,21 +171,21 @@ enum NodeVal<N: NodeInfo> {
 // help separate metrics
 
 /// A trait for quickly processing attributes of a
-/// [NodeInfo](struct.NodeInfo.html).
+/// [NodeInfo].
 ///
 /// For the conceptual background see the
 /// [blog post, Rope science, part 2: metrics](https://github.com/google/xi-editor/blob/master/docs/docs/rope_science_02.md).
 pub trait Metric<N: NodeInfo> {
     /// Return the size of the
-    /// [NodeInfo::L](trait.NodeInfo.html#associatedtype.L), as measured by this
+    /// [`NodeInfo::L`], as measured by this
     /// metric.
     ///
     /// The usize argument is the total size/length of the node, in base units.
     ///
     /// # Examples
-    /// For the [LinesMetric](../rope/struct.LinesMetric.html), this gives the number of
+    /// For the [`LinesMetric`](crate::rope::LinesMetric), this gives the number of
     /// lines in string contained in the leaf. For the
-    /// [BaseMetric](../rope/struct.BaseMetric.html), this gives the size of the string
+    /// [`BaseMetric`](crate::rope::BaseMetric), this gives the size of the string
     /// in uft8 code units, that is, bytes.
     ///
     fn measure(info: &N, len: usize) -> usize;

@@ -191,6 +191,8 @@ pub(crate) const RUNTIME_WEB_SURFACE: Slot =
     Slot { name: "WEB_SURFACE", order: 210, registrations: &["app:web-surface"] };
 pub(crate) const EE_TURN_GUIDANCE: Slot =
     Slot { name: "EE_TURN_GUIDANCE", order: 130, registrations: &["ee:turn-guidance"] };
+pub(crate) const BACKGROUND_JOBS: Slot =
+    Slot { name: "BACKGROUND_JOBS", order: 135, registrations: &["ee:background-jobs"] };
 pub(crate) const MCP_SERVER_INSTRUCTIONS: Slot =
     Slot { name: "MCP_SERVER_INSTRUCTIONS", order: 140, registrations: &["mcp:<server>"] };
 
@@ -202,6 +204,7 @@ pub(crate) const CONTEXT_SECTIONS: &[Slot] = &[
     SUBAGENT_DELEGATION,
     EE_MODE_POLICY,
     EE_TURN_GUIDANCE,
+    BACKGROUND_JOBS,
     MCP_SERVER_INSTRUCTIONS,
     RUNTIME_HARNESS_SOURCE,
     RUNTIME_WEB_SURFACE,
@@ -311,6 +314,7 @@ mod tests {
         ),
         ("EE_MODE_POLICY", SlotStatus::Conditional, "ask/write/unknown mode text"),
         ("EE_TURN_GUIDANCE", SlotStatus::Conditional, "strategy guidance emitted"),
+        ("BACKGROUND_JOBS", SlotStatus::Conditional, "a terminal job is tracked"),
         ("MCP_SERVER_INSTRUCTIONS", SlotStatus::Conditional, "a server supplied instructions"),
         ("HARNESS_SOURCE", SlotStatus::Omit, "no source-attribution surface"),
         ("WEB_SURFACE", SlotStatus::Omit, "no web GUI surface"),
@@ -397,6 +401,7 @@ mod tests {
             ("SUBAGENT_DELEGATION", 120),
             ("EE_MODE_POLICY", 125),
             ("EE_TURN_GUIDANCE", 130),
+            ("BACKGROUND_JOBS", 135),
             ("MCP_SERVER_INSTRUCTIONS", 140),
             ("HARNESS_SOURCE", 200),
             ("WEB_SURFACE", 210),
