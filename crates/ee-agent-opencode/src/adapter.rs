@@ -60,6 +60,30 @@ pub trait DialectCodec: Send + Sync + 'static {
         tools: &'a [ToolDefinition],
         sink: DeltaSink<'a>,
     ) -> CodecFuture<'a>;
+
+    /// Buffered round trip with the provider-reported prompt size when known.
+    ///
+    /// Codecs that fit an output bound override this; the default ignores the
+    /// measurement and estimates from the transcript.
+    fn complete_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        _prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        self.complete(transcript, tools)
+    }
+
+    /// Streaming round trip with the provider-reported prompt size when known.
+    fn complete_streaming_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        sink: DeltaSink<'a>,
+        _prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        self.complete_streaming(transcript, tools, sink)
+    }
 }
 
 impl DialectCodec for ResponsesCodec {
@@ -83,6 +107,31 @@ impl DialectCodec for ResponsesCodec {
     ) -> CodecFuture<'a> {
         Box::pin(ResponsesCodec::complete_streaming(self, transcript, tools, sink))
     }
+
+    fn complete_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(ResponsesCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+    }
+
+    fn complete_streaming_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        sink: DeltaSink<'a>,
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(ResponsesCodec::complete_streaming_with_prompt(
+            self,
+            transcript,
+            tools,
+            sink,
+            prompt_tokens,
+        ))
+    }
 }
 
 impl DialectCodec for MessagesCodec {
@@ -105,6 +154,31 @@ impl DialectCodec for MessagesCodec {
         sink: DeltaSink<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(MessagesCodec::complete_streaming(self, transcript, tools, sink))
+    }
+
+    fn complete_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(MessagesCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+    }
+
+    fn complete_streaming_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        sink: DeltaSink<'a>,
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(MessagesCodec::complete_streaming_with_prompt(
+            self,
+            transcript,
+            tools,
+            sink,
+            prompt_tokens,
+        ))
     }
 }
 
@@ -211,7 +285,11 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 return Err(ModelError::Cancelled);
             }
             credential?;
-            let completion = codec.complete(&request.transcript, &request.tools);
+            let completion = codec.complete_with_prompt(
+                &request.transcript,
+                &request.tools,
+                request.prompt_tokens,
+            );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),
                 () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
@@ -236,8 +314,12 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(forward_error),
             };
-            let completion =
-                codec.complete_streaming(&request.transcript, &request.tools, &mut sink);
+            let completion = codec.complete_streaming_with_prompt(
+                &request.transcript,
+                &request.tools,
+                &mut sink,
+                request.prompt_tokens,
+            );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),
                 () = wait_cancelled(cancel) => Err(ModelError::Cancelled),

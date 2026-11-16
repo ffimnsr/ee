@@ -45,6 +45,7 @@
 //! cannot disclose a credential to an arbitrary origin.
 
 pub mod adapter;
+pub mod catalog;
 pub mod chat_completions;
 pub mod config;
 pub mod critic;

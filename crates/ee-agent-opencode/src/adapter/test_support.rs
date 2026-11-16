@@ -60,6 +60,7 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
         max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+        max_output_tokens: None,
         retry: RetryPolicy {
             max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             base_delay: Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS),

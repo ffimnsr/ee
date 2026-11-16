@@ -1637,24 +1637,24 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 1 — Catalog-Driven Per-Model Routing and Metadata (`ee-agent-opencode`)
 
-- [ ] Replace the static surface catalog with a generated per-model catalog that carries protocol, base URL, limits, capabilities, reasoning support, and cost.
-  - [ ] **Problem:**
+- [x] Replace the static surface catalog with a generated per-model catalog that carries protocol, base URL, limits, capabilities, reasoning support, and cost.
+  - [x] **Problem:**
     - `crates/ee-agent-opencode/src/routes.rs::CATALOG` is a hand-maintained table of `(surface, model_id, dialect)` rows pinned to OpenCode docs read on 2026-09-24, with `endpoint_for()` assembling URLs from only two roots (`/zen/v1`, `/zen/go/v1`).
     - The shipped opencode v2.3.0 catalog resolves a per-model `api` entry instead: `base_url` plus `sdk` package plus `capabilities`/`compatibility`, and a single model id can be served by `responses`, `chat-completions`, or `messages` depending on that entry (`packages/core/src/models-dev.ts`, `packages/schema/src/model.ts`).
     - `routes.rs` carries no context window, output limit, modality list, cost, cache prices, reasoning support (`toggle`/`effort[]`/`budget`), `structured_output`, `tools.strict`, or `maxTokensField`. Those values cannot be recovered at call time, so downstream code substitutes constants (see Gap 3).
     - `gemini-*` and `jev-*` are hard-failed through `UnsupportedDialect`, while the reference agent serves Google models through a native protocol and `jev-*` through SystemOne decision routes.
     - The catalog id is used directly as the wire model id; the reference model carries both a catalog `id` and an API `modelID`, and `Model.Ref` supports `provider/model#variant`.
     - Unknown models fail closed (correct), but the table drifts silently between releases because nothing generates or validates it against the upstream catalog.
-  - [ ] **Fix:**
-    - Add `crates/ee-agent-opencode/src/catalog/` with `mod.rs` (resolution API), `generated.rs` (data table), and `README.md` (provenance + regeneration instructions). Move data out of `routes.rs`; keep its public resolution functions (`resolve_route`, `endpoint_for`, `catalog`) as the stable surface and keep `routes.rs` under 1,000 LOC (currently 804).
+  - [x] **Fix:**
+    - Add `crates/ee-agent-opencode/src/catalog/` with `mod.rs` (resolution API) and `generated.rs` (data table), plus `crates/ee-agent-opencode/catalog/README.md` for provenance and regeneration instructions. Move data out of `routes.rs`; keep its public resolution functions (`resolve_route`, `endpoint_for`, `catalog`) as the stable surface and keep `routes.rs` under 1,000 LOC (now 654).
     - Generate the table from a pinned models.dev snapshot for providers `opencode` and `opencode-go`: per entry `(provider, model_id, api_kind, base_url, sdk, input_modalities, output_modalities, tools_supported, tools_strict, freeform_formats, structured_output, reasoning{enabled, toggle, effort, budget}, limit{context, input, output}, cost{input, output, cache_read, cache_write}, max_tokens_field, reasoning_field)`.
-    - Add a small generator (`crates/ee-agent-opencode/scripts/gen_catalog.rs` or a `xtask`) that consumes `models.dev/api.json` (or the snapshot committed for opencode v2.3.0) and writes `generated.rs` with a `SOURCE_SHA256` and generation date. Keep the snapshot in `crates/ee-agent-opencode/catalog/models-dev.snapshot.json` with its upstream URL documented.
+    - Add a small generator (`crates/ee-agent-opencode/scripts/gen_catalog.py`, with `--check` and `--refresh-snapshot`) that consumes `models.dev/api.json` (or the snapshot committed for opencode v2.3.0) and writes `generated.rs` with a `SNAPSHOT_SHA256`. Keep the compacted snapshot in `crates/ee-agent-opencode/catalog/models-dev.subset.json` and the curated retired/unsupported/legacy inputs in `catalog/sources.json`, both documented in `catalog/README.md`.
     - Preserve the security invariant while widening routing: every base URL is an HTTPS literal from the generated allowlist, matched by exact catalog lookup; no environment variable and no model metadata may introduce a new origin. `OPENCODE_API_KEY` remains bound to the catalog origin only.
     - Support per-model API id translation: `CatalogEntry { catalog_id, api_model_id }`, with `catalog_id` used for lookup/diagnostics and `api_model_id` sent on the wire. Keep retired/unsupported tables as explicit generation inputs rather than silent omissions, and keep them failing closed with the existing guidance.
     - Add `kind` to the catalog (`chat`, `decision`, `image`) so non-chat entries cannot be selected by the session path even though they are listed.
     - Verify the `/zen/v1` vs `/inference/...` question against the live service before switching roots: record the probe result in `catalog/README.md`, and keep both only if the docs and service genuinely disagree (then prefer the service-verified root per surface).
-  - [ ] **Acceptance criteria:**
-    - `resolve_route("zen", "gpt-5.5")` returns protocol `openai_responses`, a catalog-declared base URL, `limit.context > 0`, and `limit.output > 0`; the same holds for every row in `generated.rs`.
+  - [x] **Acceptance criteria:**
+    - `resolve_route("zen", "gpt-5.5")` returns protocol `openai_responses`, a catalog-declared base URL, `limit.context > 0`, and `limit.output > 0`; the same holds for every non-legacy row in `generated.rs` (`LEGACY` rows are explicitly marked and carry no invented metadata).
     - A model only present on `opencode-go` still fails with `WrongSurface`, and a retired id still fails with `RetiredModel`; both keep their current guidance text.
     - No routing input can produce an origin outside the generated allowlist, and a test asserts `endpoint` is always `https://` and always catalog-derived.
     - The generator is reproducible: running it twice on the same snapshot yields byte-identical `generated.rs`, and a `--check` mode fails when the committed file is stale.
@@ -1662,21 +1662,21 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 2 — OpenRouter Request-Body Parity
 
-- [ ] Make every documented OpenRouter chat request option expressible from `ee-agent-openrouter` without editing shared code.
-  - [ ] **Problem:**
+- [x] Make every documented OpenRouter chat request option expressible from `ee-agent-openrouter` without editing shared code.
+  - [x] **Problem:**
     - `crates/ee-agent-openrouter/src/openrouter.rs::openrouter_profile` sets bearer auth, `X-Title`, optional `HTTP-Referer`, a retry policy, `reasoning.effort`, and a name-based Anthropic cache flag. That is the entire OpenRouter-specific surface.
     - The shared body builder (`crates/ee-chat-completions/src/wire.rs::request_body`) emits only `model`, `messages`, `stream`, `tool_choice: "auto"`, optional `tools`, and merged `extensions`. It never requests usage in a stream and never emits provider preferences.
     - The reference agent sends `provider` routing (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `only`, `ignore`, `quantizations`, `sort`, `max_price`, `zdr`), `plugins` (`web`, `file-parser`, `moderation`, `response-healing`, `auto-router`), `web_search_options`, `models` fallback list, `user`, `session_id`, `trace`, `debug.echo_upstream_body`, and `usage: {include:true}` by default (`packages/ai/src/providers/openrouter.ts`).
     - OpenRouter reasoning support is reduced to `effort`. The reference object supports `enabled`, `exclude`, `effort` including `none`/`xhigh`/`max`, and `max_tokens` fitted below the output limit with a 1,024-token floor for Anthropic upstreams (`fitReasoning`).
     - Streaming responses currently report no usage because `stream_options.include_usage` is never sent, so per-turn cost and cache-hit accounting are invisible for OpenRouter chat routes.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a typed `OpenRouterOptions` to `crates/ee-agent-openrouter/src/openrouter.rs` mirroring the reference shape, and merge it into the body through the existing `EndpointProfile.extensions` slot. Keep unknown top-level option keys passthrough so new upstream options do not require an ee release.
     - Add explicit configuration sources: `OPENROUTER_PROVIDER_PREFERENCES` (JSON), `OPENROUTER_PLUGINS` (JSON), `OPENROUTER_MODELS` (comma list), `OPENROUTER_USER`, and a bounded `OPENROUTER_OPTIONS_JSON` escape hatch for the remaining documented fields. Parse with size caps, reject unknown types with actionable diagnostics, and redact values in errors/logs (`Debug` already avoids secrets; extend it).
     - Split reasoning shaping into `none`/`low`/`medium`/`high`/`xhigh`/`max` plus `max_tokens`, and fit `max_tokens` against the resolved output limit (Gap 1/3) with a minimum of 1,024 when the upstream is Anthropic.
     - Add `stream_options.include_usage` to the shared chat body behind a profile flag, default-on for OpenRouter and opt-in for other providers, and keep decoding `usage` plus `usage.cost` when present.
     - Teach `ee-chat-completions` to detect the output-token field (`max_tokens` vs `max_completion_tokens`), since some OpenRouter upstreams require the latter; drive it from catalog compatibility when available.
     - Add `models` fallback list support and keep it ordered; OpenRouter uses it only on the chat route.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - A configured provider-routing object appears verbatim under `provider` in the request body, and omitting it produces no `provider` key at all (no empty object).
     - `usage.include` defaults to true and can be disabled; streaming responses then either carry usage or omit the field, never zero-fill.
     - `reasoning.max_tokens` never equals or exceeds `max_tokens`; the Anthropic floor is enforced in a unit test.
@@ -1685,21 +1685,21 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### Gap 3 — Per-Model Token Budgeting and Length Continuation
 
-- [ ] Replace constant output limits and percent-only compaction with catalog-driven token budgets, and continue truncated replies.
-  - [ ] **Problem:**
+- [x] Replace constant output limits and percent-only compaction with catalog-driven token budgets, and continue truncated replies.
+  - [x] **Problem:**
     - `crates/ee-agent-opencode/src/messages.rs` hardcodes `DEFAULT_MAX_OUTPUT_TOKENS = 8192` and sends it for every Anthropic-route model, including models whose catalog output limit is 128k–262k. The Responses codec sends no output limit at all unless an extension supplies it.
     - `crates/ee-agent-opencode/src/config.rs` and `crates/ee-agent-openrouter/src/config.rs` default the context window to 200,000 for every model, and the ACP usage denominator therefore misstates pressure on 1M-context models and overstates it on 32k models.
     - `crates/ee-agent-orchestrator/src/compaction/mod.rs` triggers compaction on `auto_compact_threshold_percent` of that static window; there is no measured-or-estimated prompt size and no reserve for the summary itself.
     - `ee_chat_completions::wire::AssistantTurn` carries `finish_reason`, and each provider codec maps its native stop reason into it, but `ee_agent_orchestrator::ModelResponse` (`crates/ee-agent-orchestrator/src/model.rs:439`) has no finish-reason field, so adapters drop it. Nothing can react to `length`.
     - The reference agent computes `outputLimit = min(catalog_output, 256_000)`, fits it to `context - measured - estimated*1.15 - 1% headroom`, floors at 1,024, and injects a continuation prompt on `finish_reason == "length"` (`packages/core/src/session/model-request.ts`, `packages/core/src/session/runner/llm.ts`).
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend `ee_agent_orchestrator::ModelResponse` with `finish_reason: Option<String>` and thread it from `AssistantTurn` through `response_from_turn` in both provider crates; keep the field optional and default to `None` for adapters that cannot report it.
     - Add `ModelLimits` to the catalog (Gap 1) and a shared helper in `ee-agent-orchestrator` (e.g. `model::output_limit(limits, prompt_tokens)`) implementing the fit formula with 1,024/256,000 bounds and documented headroom.
     - In `messages.rs` and `responses.rs`, send the fitted value as `max_tokens` / `max_output_tokens` instead of the constant; add `OPENCODE_MAX_OUTPUT_TOKENS` (and `OPENROUTER_MAX_OUTPUT_TOKENS`) as explicit overrides validated against the catalog ceiling.
     - Feed the measured prompt size back from the last response into the next request's fit calculation; when no measurement exists, estimate from serialized transcript bytes with the documented 4-bytes-per-token heuristic and margin.
     - In the loop engine, treat `finish_reason == "length"` with no tool intents as a continuation opportunity: append the bounded continuation notice as a system/user message and re-enter the step loop, with a per-turn continuation cap so a loop cannot run unbounded.
     - Keep compaction threshold semantics but express them in tokens derived from `limit.context`, reserving room for the summary output; keep `auto_compact_threshold_percent = 0` as the disable switch.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - A Messages-route model with a 131,072-token output limit gets a `max_tokens` above 8,192, and a 4,096-limit model never receives more than its ceiling after fitting.
     - Fitted output plus estimated prompt never exceeds the catalog context window in a property-style test over boundary cases (tiny window, huge prompt, unknown limit).
     - A scripted adapter returning `finish_reason: "length"` with no tool calls triggers exactly one continuation message per step and stops at the configured cap.

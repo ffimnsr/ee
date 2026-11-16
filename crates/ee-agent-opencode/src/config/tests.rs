@@ -36,7 +36,8 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
         timeout_ms: DEFAULT_TIMEOUT_MS,
         max_iterations: None,
-        context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+        context_window: None,
+        max_output_tokens: None,
         retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
         retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
         retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
@@ -55,7 +56,7 @@ fn explicit_args_resolve_the_route_and_keep_the_knobs() {
     let mut args = args(Some("go"), Some("kimi-k3"));
     args.timeout_ms = 5_000;
     args.max_iterations = Some(7);
-    args.context_window = 32_768;
+    args.context_window = Some(32_768);
     args.retry_max_attempts = 4;
     args.system_prompt = String::from("custom");
     args.checkpoint_dir = Some(PathBuf::from("/tmp/ee-checkpoints"));
@@ -339,7 +340,7 @@ fn route_resolution_never_reads_the_api_key() {
     for (surface, model) in [
         (Some("zen"), Some("gpt-5-codex")),
         (Some("zen"), Some("gemini-3.8-flash")),
-        (Some("zen"), Some("qwen3.8-max")),
+        (Some("zen"), Some("longcat-2.0")),
         (Some("zen"), Some("opencode/gpt-5.5")),
         (Some("zen"), Some("codex-mini-latest")),
         (Some("go"), Some("kimi-k3.5")),
@@ -505,4 +506,40 @@ fn blank_critic_and_effort_values_count_as_unset() {
     assert!(config.critic_model.is_none(), "an empty critic is not a critic");
     assert!(config.reasoning_effort.is_none(), "an empty effort sends nothing");
     assert_eq!(config.reasoning_effort_note(), None);
+}
+
+#[test]
+fn catalog_limits_drive_context_and_output_bounds() {
+    let config = Config::from_args_and_dotenv(args(Some("zen"), Some("gpt-5.5")), &BTreeMap::new())
+        .expect("config resolves");
+    let limits = config.route.limits().expect("catalog limits");
+    assert_eq!(config.context_window, limits.context);
+
+    let profile = config.profile().expect("profile builds");
+    let fitted = profile.fitted_output_limit(1).expect("fitted limit");
+    assert!(fitted > 8_192, "catalog output limit replaces the old constant: {fitted}");
+    assert!(fitted <= limits.output);
+
+    let mut overridden = args(Some("zen"), Some("gpt-5.5"));
+    overridden.context_window = Some(32_768);
+    overridden.max_output_tokens = Some(4_096);
+    let config = Config::from_args_and_dotenv(overridden, &BTreeMap::new())
+        .expect("explicit override validates");
+    assert_eq!(config.context_window, 32_768);
+    assert_eq!(config.max_output_tokens, Some(4_096));
+
+    let mut too_large = args(Some("zen"), Some("gpt-5.5"));
+    too_large.max_output_tokens = Some(limits.output + 1);
+    let error = Config::from_args_and_dotenv(too_large, &BTreeMap::new())
+        .expect_err("override above the catalog ceiling is rejected");
+    assert!(matches!(error, ConfigError::OutputLimitExceeded { .. }), "{error:?}");
+}
+
+#[test]
+fn legacy_routes_fall_back_to_the_configured_context_window() {
+    let config =
+        Config::from_args_and_dotenv(args(Some("go"), Some("qwen3.7-max")), &BTreeMap::new())
+            .expect("legacy route resolves");
+    assert!(config.route.limits().is_none());
+    assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
 }

@@ -23,7 +23,9 @@
 use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{ModelMessage, ModelResponse, ModelRole, ToolDefinition};
+use ee_agent_orchestrator::{
+    ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
+};
 use ee_chat_completions::{
     AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, StreamDelta,
     ToolCall, Usage, content_text, drive_sse, emit_finished_deltas, is_event_stream,
@@ -37,12 +39,12 @@ use crate::dialect::{codec_error, parse_arguments};
 pub const DIALECT: crate::routes::OpenCodeDialect =
     crate::routes::OpenCodeDialect::AnthropicMessages;
 
-/// Output bound sent when the provider profile does not override it.
+/// Output bound sent when the route carries no catalog limit.
 ///
-/// Messages requires `max_tokens`; EE sends a conservative bound instead of
-/// letting the provider pick an unbounded default. A profile extension
-/// (`{"max_tokens": N}`) overrides it.
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 8192;
+/// Messages requires `max_tokens`; EE sends the shared fallback rather than
+/// letting the provider pick an unbounded default. A catalog limit or an
+/// explicit override replaces it.
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = ee_agent_orchestrator::OUTPUT_LIMIT_FALLBACK;
 
 /// Builds an Anthropic Messages request body.
 ///
@@ -56,6 +58,7 @@ pub fn request_body(
     transcript: &[ModelMessage],
     tools: &[ToolDefinition],
     stream: bool,
+    max_output_tokens: u64,
     extensions: Option<&Value>,
 ) -> Value {
     let mut system_parts = Vec::new();
@@ -119,7 +122,7 @@ pub fn request_body(
     }
     let mut body = json!({
         "model": model,
-        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "max_tokens": max_output_tokens,
         "messages": messages,
         "stream": stream,
         "tool_choice": { "type": "auto" },
@@ -451,13 +454,29 @@ impl MessagesCodec {
         transcript: &[ModelMessage],
         tools: &[ToolDefinition],
     ) -> Result<ModelResponse, ProviderError> {
+        self.complete_with_prompt(transcript, tools, None).await
+    }
+
+    /// Performs one buffered round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
+        let prompt = prompt_tokens
+            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let max_output_tokens =
+            profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = request_body(
             &profile.model,
             &profile.system_prompt,
             transcript,
             tools,
             false,
+            max_output_tokens,
             profile.extensions.as_ref(),
         );
         let transport = &self.transport;
@@ -485,13 +504,30 @@ impl MessagesCodec {
         tools: &[ToolDefinition],
         sink: DeltaSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
+        self.complete_streaming_with_prompt(transcript, tools, sink, None).await
+    }
+
+    /// Performs one streaming round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_streaming_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
+        let prompt = prompt_tokens
+            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let max_output_tokens =
+            profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = request_body(
             &profile.model,
             &profile.system_prompt,
             transcript,
             tools,
             true,
+            max_output_tokens,
             profile.extensions.as_ref(),
         );
         let mut attempt = MessagesStreamAttempt { transport: &self.transport, body: &body };

@@ -6,7 +6,45 @@ use std::time::Duration;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 
+use ee_agent_orchestrator::{ModelLimits, OUTPUT_LIMIT_MAX, fit_output_limit};
+
 use crate::endpoint::TrustedEndpoint;
+
+/// Body field carrying the output-token bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MaxTokensField {
+    /// `max_tokens`, the historical OpenAI-compatible field.
+    #[default]
+    MaxTokens,
+    /// `max_completion_tokens`, required by newer OpenAI-family upstreams.
+    MaxCompletionTokens,
+}
+
+impl MaxTokensField {
+    /// Wire field name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+
+    /// Parses the configured field name.
+    ///
+    /// # Errors
+    ///
+    /// Returns guidance naming the accepted values.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "max_tokens" => Ok(Self::MaxTokens),
+            "max_completion_tokens" => Ok(Self::MaxCompletionTokens),
+            other => Err(format!(
+                "unsupported output-token field {other:?}: expected \"max_tokens\" or \"max_completion_tokens\""
+            )),
+        }
+    }
+}
 
 /// Bounded retry policy for transient and rate-limited failures.
 ///
@@ -94,6 +132,14 @@ pub struct EndpointProfile {
     /// planes. Opt-in because only Anthropic-compatible routes understand the
     /// marker; text is never rewritten.
     pub prompt_cache: bool,
+    /// Catalog-declared context/output limits, when known.
+    pub limits: Option<ModelLimits>,
+    /// Explicit output-token override; still clamped to the catalog ceiling.
+    pub max_output_tokens: Option<u64>,
+    /// Request usage in the stream with `stream_options.include_usage`.
+    pub stream_usage: bool,
+    /// Body field carrying the output-token bound.
+    pub max_tokens_field: MaxTokensField,
 }
 
 impl EndpointProfile {
@@ -117,6 +163,10 @@ impl EndpointProfile {
             headers: Vec::new(),
             extensions: None,
             prompt_cache: false,
+            limits: None,
+            max_output_tokens: None,
+            stream_usage: false,
+            max_tokens_field: MaxTokensField::MaxTokens,
         }
     }
 
@@ -160,6 +210,51 @@ impl EndpointProfile {
     pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
         self.prompt_cache = enabled;
         self
+    }
+
+    /// Sets the catalog-declared model limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: Option<ModelLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Sets an explicit output-token bound, clamped to the catalog ceiling when
+    /// one is known.
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, max_output_tokens: Option<u64>) -> Self {
+        self.max_output_tokens = max_output_tokens;
+        self
+    }
+
+    /// Requests usage in streamed responses.
+    #[must_use]
+    pub fn with_stream_usage(mut self, enabled: bool) -> Self {
+        self.stream_usage = enabled;
+        self
+    }
+
+    /// Selects the body field carrying the output-token bound.
+    #[must_use]
+    pub fn with_max_tokens_field(mut self, field: MaxTokensField) -> Self {
+        self.max_tokens_field = field;
+        self
+    }
+
+    /// Output-token bound fitted to the prompt and catalog window.
+    ///
+    /// An explicit override is clamped to the catalog output ceiling when one
+    /// is known; the prompt estimate then leaves the documented margin. When no
+    /// catalog limit exists, only an explicit override is returned, so callers
+    /// omit the field rather than guess.
+    #[must_use]
+    pub fn fitted_output_limit(&self, prompt_tokens: u64) -> Option<u64> {
+        let Some(limits) = self.limits else {
+            return self.max_output_tokens;
+        };
+        let ceiling = limits.output.clamp(1, OUTPUT_LIMIT_MAX);
+        let requested = self.max_output_tokens.map_or(ceiling, |value| value.min(ceiling));
+        fit_output_limit(Some(ModelLimits::new(limits.context, requested)), Some(prompt_tokens))
     }
 }
 

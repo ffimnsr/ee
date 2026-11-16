@@ -15,20 +15,21 @@
 //! fallback, so [`resolve_route`] fails closed before any HTTP client, request
 //! body, or `Authorization` header exists.
 //!
-//! Provenance: the endpoint tables of `https://opencode.ai/docs/zen/` and
-//! `https://opencode.ai/docs/go/` as published 2026-09-24. Where Zen's endpoint
-//! table still lists an id whose Zen deprecation date has passed, the
-//! deprecation table wins and the id is listed as retired instead. Model classes
-//! EE implements no codec for are listed as unsupported, so they fail with
-//! explicit guidance rather than a generic unknown-model error.
+//! Provenance: the models.dev catalog snapshot for `opencode` and
+//! `opencode-go` (see `crates/ee-agent-opencode/catalog/README.md`), plus the
+//! curated retired/unsupported ids in `catalog/sources.json`. Every routable
+//! row carries limits, reasoning support, and cost. The base URL stays a
+//! trusted surface root, so no catalog or environment value can introduce a new
+//! origin. Model classes EE implements no codec for are listed as unsupported,
+//! so they fail with explicit guidance rather than a generic unknown-model
+//! error.
 //!
-//! Maintenance: refresh the catalog from the upstream endpoint tables, move
-//! withdrawn ids to the retired table, keep [`endpoint_for`] the only place an
-//! endpoint is assembled, and keep this module's tests passing.
+//! Maintenance: regenerate with `python3 scripts/gen_catalog.py` from
+//! `crates/ee-agent-opencode`, keep [`endpoint_for`] the only place an endpoint
+//! is assembled, and keep this module's tests passing.
 
+use crate::catalog::{self, CatalogModel};
 use crate::config::ConfigError;
-use OpenCodeDialect::{AnthropicMessages, OpenAiChatCompletions, OpenAiResponses};
-use OpenCodeSurface::{Go, Zen};
 
 /// Trusted OpenCode Zen API root.
 pub const ZEN_API_ROOT: &str = "https://opencode.ai/zen/v1";
@@ -154,6 +155,50 @@ pub struct OpenCodeRoute {
     pub dialect: OpenCodeDialect,
     /// Trusted endpoint for the surface/dialect pair.
     pub endpoint: &'static str,
+    /// Catalog row this route resolved from.
+    pub entry: &'static CatalogModel,
+}
+
+impl OpenCodeRoute {
+    /// Catalog-declared context/output limits, when known.
+    #[must_use]
+    pub const fn limits(&self) -> Option<ee_agent_orchestrator::ModelLimits> {
+        self.entry.limits
+    }
+
+    /// Catalog-declared reasoning support.
+    #[must_use]
+    pub const fn reasoning(&self) -> crate::catalog::ReasoningSupport {
+        self.entry.reasoning
+    }
+
+    /// Catalog-declared prices, when known.
+    #[must_use]
+    pub const fn cost(&self) -> Option<crate::catalog::ModelCost> {
+        self.entry.cost
+    }
+
+    /// Wire model id; equals the catalog id unless the row translates it.
+    #[must_use]
+    pub const fn api_model_id(&self) -> &'static str {
+        self.entry.api_id
+    }
+
+    /// Whether this row is a legacy route without catalog metadata.
+    #[must_use]
+    pub const fn is_legacy(&self) -> bool {
+        self.entry.legacy
+    }
+
+    /// Catalog-declared Chat Completions output-token field, when known.
+    #[must_use]
+    pub const fn max_tokens_field(&self) -> Option<&'static str> {
+        if self.entry.max_tokens_field.is_empty() {
+            None
+        } else {
+            Some(self.entry.max_tokens_field)
+        }
+    }
 }
 
 /// Returns the trusted endpoint for one surface/dialect pair.
@@ -185,12 +230,11 @@ pub const fn endpoint_for(surface: OpenCodeSurface, dialect: OpenCodeDialect) ->
     }
 }
 
-/// Every documented routable `(surface, model)` entry, in table order.
+/// Every routable `(surface, model)` entry.
 ///
-/// Ordering is grouped by surface and then by dialect, which keeps diagnostic
-/// output stable for auditing and documentation.
+/// Ordering follows the generated table: surface, then catalog id.
 pub fn catalog() -> impl Iterator<Item = OpenCodeRoute> {
-    CATALOG.iter().map(route_for)
+    catalog::models().map(route_for)
 }
 
 /// Resolves the exact route for one `(surface, model)` pair.
@@ -247,210 +291,8 @@ pub fn resolve_route(
     Err(ConfigError::UnknownModel { surface, model_id: model_id.to_string() })
 }
 
-/// One documented, routable `(surface, model)` catalog row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CatalogEntry {
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    dialect: OpenCodeDialect,
-}
-
-/// Builds one catalog row; the table below is the only routing truth.
-const fn entry(
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    dialect: OpenCodeDialect,
-) -> CatalogEntry {
-    CatalogEntry { surface, model_id, dialect }
-}
-
-/// Documented model id that its surface has retired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RetiredEntry {
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    /// Upstream published deprecation date.
-    deprecated_on: &'static str,
-}
-
-const fn retired(
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    deprecated_on: &'static str,
-) -> RetiredEntry {
-    RetiredEntry { surface, model_id, deprecated_on }
-}
-
-/// Documented model id whose protocol class has no codec in EE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UnsupportedEntry {
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    dialect: UnsupportedDialect,
-}
-
-const fn unsupported(
-    surface: OpenCodeSurface,
-    model_id: &'static str,
-    dialect: UnsupportedDialect,
-) -> UnsupportedEntry {
-    UnsupportedEntry { surface, model_id, dialect }
-}
-
-/// Every documented, routable `(surface, model)` entry.
-///
-/// One row per currently documented model, in upstream endpoint-table order
-/// within each surface/dialect group. No wildcard, prefix, or alias rows exist
-/// here: accept an alias only by adding an explicit row, never by matching one.
-const CATALOG: &[CatalogEntry] = &[
-    // OpenCode Zen, OpenAI Responses.
-    entry(Zen, "gpt-6-astra", OpenAiResponses),
-    entry(Zen, "gpt-6-sol", OpenAiResponses),
-    entry(Zen, "gpt-6-luna", OpenAiResponses),
-    entry(Zen, "gpt-5.6-sol", OpenAiResponses),
-    entry(Zen, "gpt-5.6-terra", OpenAiResponses),
-    entry(Zen, "gpt-5.6-luna", OpenAiResponses),
-    entry(Zen, "gpt-5.5", OpenAiResponses),
-    entry(Zen, "gpt-5.5-pro", OpenAiResponses),
-    entry(Zen, "gpt-5.4", OpenAiResponses),
-    entry(Zen, "gpt-5.4-pro", OpenAiResponses),
-    entry(Zen, "gpt-5.4-mini", OpenAiResponses),
-    entry(Zen, "gpt-5.4-nano", OpenAiResponses),
-    entry(Zen, "gpt-5.3-codex", OpenAiResponses),
-    entry(Zen, "gpt-5.3-codex-spark", OpenAiResponses),
-    entry(Zen, "gpt-5.2", OpenAiResponses),
-    entry(Zen, "gpt-5.1", OpenAiResponses),
-    entry(Zen, "gpt-5", OpenAiResponses),
-    entry(Zen, "gpt-5-nano", OpenAiResponses),
-    entry(Zen, "grok-4.7", OpenAiResponses),
-    entry(Zen, "grok-4.6", OpenAiResponses),
-    entry(Zen, "grok-4.5", OpenAiResponses),
-    entry(Zen, "grok-build-0.1", OpenAiResponses),
-    entry(Zen, "muse-spark-1.3", OpenAiResponses),
-    entry(Zen, "muse-spark-1.2", OpenAiResponses),
-    entry(Zen, "muse-spark-1.3-contributor-free", OpenAiResponses),
-    // OpenCode Zen, Anthropic Messages.
-    entry(Zen, "claude-fable-5-1", AnthropicMessages),
-    entry(Zen, "claude-fable-5", AnthropicMessages),
-    entry(Zen, "claude-opus-5-5", AnthropicMessages),
-    entry(Zen, "claude-opus-5", AnthropicMessages),
-    entry(Zen, "claude-opus-4-8", AnthropicMessages),
-    entry(Zen, "claude-opus-4-7", AnthropicMessages),
-    entry(Zen, "claude-opus-4-6", AnthropicMessages),
-    entry(Zen, "claude-opus-4-5", AnthropicMessages),
-    entry(Zen, "claude-sonnet-5", AnthropicMessages),
-    entry(Zen, "claude-sonnet-4-6", AnthropicMessages),
-    entry(Zen, "claude-sonnet-4-5", AnthropicMessages),
-    entry(Zen, "claude-haiku-4-5", AnthropicMessages),
-    entry(Zen, "qwen3.8-flash", AnthropicMessages),
-    entry(Zen, "qwen3.7-max", AnthropicMessages),
-    entry(Zen, "qwen3.7-plus", AnthropicMessages),
-    entry(Zen, "qwen3.6-plus", AnthropicMessages),
-    entry(Zen, "qwen3.5-plus", AnthropicMessages),
-    // OpenCode Zen, OpenAI-compatible Chat Completions.
-    entry(Zen, "deepseek-v4.1-flash", OpenAiChatCompletions),
-    entry(Zen, "deepseek-v4-pro", OpenAiChatCompletions),
-    entry(Zen, "deepseek-v4-flash", OpenAiChatCompletions),
-    entry(Zen, "deepseek-v4-flash-vision-exp", OpenAiChatCompletions),
-    entry(Zen, "minimax-m3", OpenAiChatCompletions),
-    entry(Zen, "minimax-m2.7", OpenAiChatCompletions),
-    entry(Zen, "glm-5.3-flash", OpenAiChatCompletions),
-    entry(Zen, "glm-5.3", OpenAiChatCompletions),
-    entry(Zen, "glm-5.2", OpenAiChatCompletions),
-    entry(Zen, "glm-5.1", OpenAiChatCompletions),
-    entry(Zen, "kimi-k2.6", OpenAiChatCompletions),
-    entry(Zen, "kimi-k2.7-code", OpenAiChatCompletions),
-    entry(Zen, "kimi-k3", OpenAiChatCompletions),
-    entry(Zen, "big-pickle", OpenAiChatCompletions),
-    entry(Zen, "space-bunny-free", OpenAiChatCompletions),
-    entry(Zen, "mimo-v2.6-flash-free", OpenAiChatCompletions),
-    entry(Zen, "mimo-v2.5-free", OpenAiChatCompletions),
-    entry(Zen, "ling-3.0-flash-fin-free", OpenAiChatCompletions),
-    entry(Zen, "nemotron-3-ultra-free", OpenAiChatCompletions),
-    entry(Zen, "nemotron-3.5-lightning-free", OpenAiChatCompletions),
-    // OpenCode Go, OpenAI Responses.
-    entry(Go, "grok-4.7", OpenAiResponses),
-    entry(Go, "grok-4.6", OpenAiResponses),
-    entry(Go, "gpt-6-luna", OpenAiResponses),
-    entry(Go, "gpt-5.6-luna", OpenAiResponses),
-    entry(Go, "muse-spark-1.3-contributor", OpenAiResponses),
-    entry(Go, "muse-spark-1.2-contributor", OpenAiResponses),
-    // OpenCode Go, Anthropic Messages.
-    entry(Go, "minimax-m3", AnthropicMessages),
-    entry(Go, "minimax-m2.7", AnthropicMessages),
-    entry(Go, "minimax-m2.5", AnthropicMessages),
-    entry(Go, "qwen3.8-max", AnthropicMessages),
-    entry(Go, "qwen3.8-flash", AnthropicMessages),
-    entry(Go, "qwen3.7-max", AnthropicMessages),
-    entry(Go, "qwen3.7-plus", AnthropicMessages),
-    entry(Go, "qwen3.6-plus", AnthropicMessages),
-    // OpenCode Go, OpenAI-compatible Chat Completions.
-    entry(Go, "glm-5.3-flash", OpenAiChatCompletions),
-    entry(Go, "glm-5.3", OpenAiChatCompletions),
-    entry(Go, "glm-5.2", OpenAiChatCompletions),
-    entry(Go, "glm-5.1", OpenAiChatCompletions),
-    entry(Go, "kimi-k3", OpenAiChatCompletions),
-    entry(Go, "kimi-k2.7-code", OpenAiChatCompletions),
-    entry(Go, "kimi-k2.6", OpenAiChatCompletions),
-    entry(Go, "longcat-2.0", OpenAiChatCompletions),
-    entry(Go, "deepseek-v4.1-flash", OpenAiChatCompletions),
-    entry(Go, "deepseek-v4-pro", OpenAiChatCompletions),
-    entry(Go, "deepseek-v4-flash", OpenAiChatCompletions),
-    entry(Go, "deepseek-v4-flash-vision-exp", OpenAiChatCompletions),
-    entry(Go, "mimo-v2.6-flash", OpenAiChatCompletions),
-    entry(Go, "mimo-v2.6-pro", OpenAiChatCompletions),
-    entry(Go, "mimo-v2.5", OpenAiChatCompletions),
-    entry(Go, "mimo-v2.5-pro", OpenAiChatCompletions),
-    // `Ox Alpha` was listed for Go on 2026-08-24 but is absent from the current
-    // docs; add explicit rows here only if upstream restores it.
-    entry(Go, "hy4-preview", OpenAiChatCompletions),
-    entry(Go, "hy3", OpenAiChatCompletions),
-    entry(Go, "space-bunny-free", OpenAiChatCompletions),
-];
-
-/// Model ids documented as retired on their surface.
-///
-/// The published date is retained so the exclusion stays auditable and the
-/// failure can explain itself. Ids that are retired on one surface but still
-/// documented on the other fail with cross-surface guidance instead, because the
-/// surface mismatch is the actionable part.
-const RETIRED: &[RetiredEntry] = &[
-    retired(Zen, "gpt-5.2-codex", "2026-07-23"),
-    retired(Zen, "gpt-5.1-codex", "2026-07-23"),
-    retired(Zen, "gpt-5.1-codex-max", "2026-07-23"),
-    retired(Zen, "gpt-5.1-codex-mini", "2026-07-23"),
-    retired(Zen, "gpt-5-codex", "2026-07-23"),
-    retired(Zen, "claude-opus-4.1", "2026-08-05"),
-    retired(Zen, "claude-sonnet-4", "2026-06-15"),
-    retired(Zen, "claude-haiku-3.5", "2026-02-16"),
-    retired(Zen, "gemini-3-pro", "2026-03-09"),
-    retired(Zen, "minimax-m2.5", "2026-08-05"),
-    retired(Zen, "minimax-m2.1", "2026-03-15"),
-    retired(Zen, "glm-5", "2026-05-14"),
-    retired(Zen, "glm-4.7", "2026-03-15"),
-    retired(Zen, "glm-4.6", "2026-03-15"),
-    retired(Zen, "kimi-k2.5", "2026-08-05"),
-    retired(Zen, "kimi-k2-thinking", "2026-03-06"),
-    retired(Zen, "kimi-k2", "2026-03-06"),
-    retired(Zen, "qwen3-coder-480b", "2026-02-06"),
-];
-
-/// Documented model ids whose protocol class EE does not implement yet.
-///
-/// Google Generative Language support requires a separate protocol and security
-/// review, and System One is a decision API rather than a chat transcript, so
-/// neither is guessed at through another codec.
-const UNSUPPORTED: &[UnsupportedEntry] = &[
-    unsupported(Zen, "gemini-3.8-flash", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3.7-flash", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3.6-flash", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3.5-flash", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3.5-flash-lite", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3.1-pro", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "gemini-3-flash", UnsupportedDialect::GoogleGenerativeLanguage),
-    unsupported(Zen, "jev-1.13", UnsupportedDialect::SystemOne),
-    unsupported(Zen, "jev-1.13-free", UnsupportedDialect::SystemOne),
-];
+// Catalog rows live in `crate::catalog`; this module keeps exact resolution,
+// trusted endpoint assembly, and the retired/unsupported guidance.
 
 /// TUI-only provider alias prefixes documented by OpenCode for its config files.
 ///
@@ -458,32 +300,36 @@ const UNSUPPORTED: &[UnsupportedEntry] = &[
 /// value fails with the bare id to use instead.
 const TUI_ALIAS_PREFIXES: &[&str] = &["opencode-go/", "opencode/"];
 
-fn route_for(entry: &CatalogEntry) -> OpenCodeRoute {
+fn route_for(entry: &'static CatalogModel) -> OpenCodeRoute {
     OpenCodeRoute {
         surface: entry.surface,
-        model_id: entry.model_id,
+        model_id: entry.id,
         dialect: entry.dialect,
         endpoint: endpoint_for(entry.surface, entry.dialect),
+        entry,
     }
 }
 
-fn catalog_entry(surface: OpenCodeSurface, model_id: &str) -> Option<&'static CatalogEntry> {
-    CATALOG.iter().find(|entry| entry.surface == surface && entry.model_id == model_id)
+fn catalog_entry(surface: OpenCodeSurface, model_id: &str) -> Option<&'static CatalogModel> {
+    catalog::find(surface, model_id)
 }
 
-fn other_surface_entry(surface: OpenCodeSurface, model_id: &str) -> Option<&'static CatalogEntry> {
-    CATALOG.iter().find(|entry| entry.surface != surface && entry.model_id == model_id)
+fn other_surface_entry(surface: OpenCodeSurface, model_id: &str) -> Option<&'static CatalogModel> {
+    catalog::find_other_surface(surface, model_id)
 }
 
-fn retired_entry(surface: OpenCodeSurface, model_id: &str) -> Option<&'static RetiredEntry> {
-    RETIRED.iter().find(|entry| entry.surface == surface && entry.model_id == model_id)
+fn retired_entry(
+    surface: OpenCodeSurface,
+    model_id: &str,
+) -> Option<&'static crate::catalog::RetiredModel> {
+    catalog::retired(surface, model_id)
 }
 
 fn unsupported_entry(
     surface: OpenCodeSurface,
     model_id: &str,
-) -> Option<&'static UnsupportedEntry> {
-    UNSUPPORTED.iter().find(|entry| entry.surface == surface && entry.model_id == model_id)
+) -> Option<&'static crate::catalog::UnsupportedModel> {
+    catalog::unsupported(surface, model_id)
 }
 
 fn tui_alias_target(model_id: &str) -> Option<&str> {
@@ -498,6 +344,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::routes::OpenCodeDialect::{
+        AnthropicMessages, OpenAiChatCompletions, OpenAiResponses,
+    };
+    use crate::routes::OpenCodeSurface::{Go, Zen};
 
     fn route(surface: OpenCodeSurface, model_id: &str) -> OpenCodeRoute {
         resolve_route(surface, model_id).expect("documented route")
@@ -639,7 +489,7 @@ mod tests {
                 entry.model_id
             );
         }
-        for entry in RETIRED {
+        for entry in crate::catalog::generated::RETIRED {
             assert!(
                 catalog_entry(entry.surface, entry.model_id).is_none(),
                 "retired {} model {} is also routable",
@@ -647,7 +497,7 @@ mod tests {
                 entry.model_id
             );
         }
-        for entry in UNSUPPORTED {
+        for entry in crate::catalog::generated::UNSUPPORTED {
             assert!(
                 catalog_entry(entry.surface, entry.model_id).is_none(),
                 "unsupported {} model {} is also routable",
@@ -665,7 +515,7 @@ mod tests {
             ("chat_completions", crate::chat_completions::DIALECT),
         ] {
             assert!(
-                CATALOG.iter().any(|entry| entry.dialect == dialect),
+                crate::catalog::models().any(|entry| entry.dialect == dialect),
                 "{module} declares {dialect:?} with no catalog routes"
             );
         }
@@ -706,10 +556,10 @@ mod tests {
     #[test]
     fn cross_surface_model_fails_closed_with_surface_guidance() {
         assert_eq!(
-            resolve_route(Zen, "qwen3.8-max").unwrap_err(),
+            resolve_route(Zen, "longcat-2.0").unwrap_err(),
             ConfigError::WrongSurface {
                 surface: Zen,
-                model_id: String::from("qwen3.8-max"),
+                model_id: String::from("longcat-2.0"),
                 documented_surface: Go,
             }
         );

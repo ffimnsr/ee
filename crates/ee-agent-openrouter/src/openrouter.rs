@@ -18,7 +18,8 @@
 use std::sync::Arc;
 
 use ee_chat_completions::{
-    BearerToken, ChatCompletionsClient, EndpointProfile, RetryPolicy, TokenSource, TrustedEndpoint,
+    BearerToken, ChatCompletionsClient, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource,
+    TrustedEndpoint,
 };
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -36,6 +37,294 @@ pub(crate) const API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 pub(crate) const MISSING_API_KEY: &str =
     "OPENROUTER_API_KEY is not set; export it before starting ee";
 
+/// Largest accepted option JSON value, in bytes.
+pub(crate) const MAX_OPTION_JSON_BYTES: usize = 64 * 1024;
+/// Largest accepted fallback-model list length.
+pub(crate) const MAX_FALLBACK_MODELS: usize = 16;
+/// Longest accepted `OPENROUTER_USER` value, in bytes.
+pub(crate) const MAX_USER_BYTES: usize = 256;
+/// Reasoning effort levels OpenRouter documents.
+pub(crate) const REASONING_EFFORTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// OpenRouter request options parsed from the environment at startup.
+///
+/// Parsing happens once, before any request exists, so a malformed option or an
+/// unsupported effort fails startup instead of failing a billable call.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenRouterOptions {
+    provider: Option<Value>,
+    plugins: Option<Value>,
+    models: Option<Vec<String>>,
+    user: Option<String>,
+    passthrough: Option<Value>,
+    include_usage: bool,
+    reasoning: Option<Value>,
+    max_output_tokens: Option<u64>,
+    max_tokens_field: MaxTokensField,
+}
+
+impl OpenRouterOptions {
+    /// Parses every option from the process environment.
+    pub(crate) fn from_env(reasoning_effort: Option<&str>) -> Result<Self, String> {
+        Self::parse(
+            OptionSources {
+                provider: std::env::var("OPENROUTER_PROVIDER_PREFERENCES").ok(),
+                plugins: std::env::var("OPENROUTER_PLUGINS").ok(),
+                models: std::env::var("OPENROUTER_MODELS").ok(),
+                user: std::env::var("OPENROUTER_USER").ok(),
+                passthrough: std::env::var("OPENROUTER_OPTIONS_JSON").ok(),
+                include_usage: std::env::var("OPENROUTER_INCLUDE_USAGE").ok(),
+                reasoning_max_tokens: std::env::var("OPENROUTER_REASONING_MAX_TOKENS").ok(),
+                max_output_tokens: std::env::var("OPENROUTER_MAX_OUTPUT_TOKENS").ok(),
+                max_tokens_field: std::env::var("OPENROUTER_MAX_TOKENS_FIELD").ok(),
+            },
+            reasoning_effort,
+        )
+    }
+
+    /// Parses explicit sources, so tests never mutate the environment.
+    pub(crate) fn parse(
+        sources: OptionSources,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Self, String> {
+        let OptionSources {
+            provider,
+            plugins,
+            models,
+            user,
+            passthrough,
+            include_usage,
+            reasoning_max_tokens,
+            max_output_tokens,
+            max_tokens_field,
+        } = sources;
+        let provider = provider
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_object("OPENROUTER_PROVIDER_PREFERENCES", value))
+            .transpose()?;
+        let plugins = plugins
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(parse_plugins)
+            .transpose()?;
+        let models = models
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(parse_models)
+            .transpose()?;
+        let user = user.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        if let Some(user) = user.as_deref()
+            && user.len() > MAX_USER_BYTES
+        {
+            return Err(format!("OPENROUTER_USER must be at most {MAX_USER_BYTES} bytes"));
+        }
+        let passthrough = passthrough
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_object("OPENROUTER_OPTIONS_JSON", value))
+            .transpose()?;
+        let include_usage =
+            include_usage.as_deref().map(parse_boolish).transpose()?.unwrap_or(true);
+        let max_output_tokens = max_output_tokens
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_positive_u64("OPENROUTER_MAX_OUTPUT_TOKENS", value))
+            .transpose()?
+            .map(|value| value.min(ee_agent_orchestrator::OUTPUT_LIMIT_MAX));
+        let max_tokens_field = max_tokens_field
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(MaxTokensField::parse)
+            .transpose()?
+            .unwrap_or_default();
+        let reasoning =
+            reasoning_object(reasoning_effort, reasoning_max_tokens, max_output_tokens)?;
+        Ok(Self {
+            provider,
+            plugins,
+            models,
+            user,
+            passthrough,
+            include_usage,
+            reasoning,
+            max_output_tokens,
+            max_tokens_field,
+        })
+    }
+
+    /// Whether the streamed request asks for usage.
+    pub(crate) const fn include_usage(&self) -> bool {
+        self.include_usage
+    }
+
+    /// Explicit output-token bound, when configured.
+    pub(crate) const fn max_output_tokens(&self) -> Option<u64> {
+        self.max_output_tokens
+    }
+
+    /// Body field carrying the output-token bound.
+    pub(crate) const fn max_tokens_field(&self) -> MaxTokensField {
+        self.max_tokens_field
+    }
+
+    /// Builds the extension object merged into every request body.
+    ///
+    /// Passthrough options are applied first so typed fields win, and no empty
+    /// object is ever emitted for a setting that was not configured.
+    pub(crate) fn body_extensions(&self) -> Value {
+        let mut object =
+            self.passthrough.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
+        if let Some(provider) = &self.provider {
+            object.insert("provider".into(), provider.clone());
+        }
+        if let Some(plugins) = &self.plugins {
+            object.insert("plugins".into(), plugins.clone());
+        }
+        if let Some(models) = &self.models {
+            object.insert("models".into(), json!(models));
+        }
+        if let Some(user) = &self.user {
+            object.insert("user".into(), json!(user));
+        }
+        if let Some(reasoning) = &self.reasoning {
+            object.insert("reasoning".into(), reasoning.clone());
+        }
+        object.insert("usage".into(), json!({ "include": self.include_usage }));
+        Value::Object(object)
+    }
+}
+
+/// Raw option values read from the environment, before validation.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OptionSources {
+    /// `OPENROUTER_PROVIDER_PREFERENCES`.
+    pub provider: Option<String>,
+    /// `OPENROUTER_PLUGINS`.
+    pub plugins: Option<String>,
+    /// `OPENROUTER_MODELS`.
+    pub models: Option<String>,
+    /// `OPENROUTER_USER`.
+    pub user: Option<String>,
+    /// `OPENROUTER_OPTIONS_JSON`.
+    pub passthrough: Option<String>,
+    /// `OPENROUTER_INCLUDE_USAGE`.
+    pub include_usage: Option<String>,
+    /// `OPENROUTER_REASONING_MAX_TOKENS`.
+    pub reasoning_max_tokens: Option<String>,
+    /// `OPENROUTER_MAX_OUTPUT_TOKENS`.
+    pub max_output_tokens: Option<String>,
+    /// `OPENROUTER_MAX_TOKENS_FIELD`.
+    pub max_tokens_field: Option<String>,
+}
+
+fn parse_object(name: &str, raw: &str) -> Result<Value, String> {
+    if raw.len() > MAX_OPTION_JSON_BYTES {
+        return Err(format!("{name} must be at most {MAX_OPTION_JSON_BYTES} bytes"));
+    }
+    let value: Value =
+        serde_json::from_str(raw).map_err(|error| format!("{name} is not valid JSON: {error}"))?;
+    if !value.is_object() {
+        return Err(format!("{name} must be a JSON object"));
+    }
+    Ok(value)
+}
+
+fn parse_plugins(raw: &str) -> Result<Value, String> {
+    if raw.len() > MAX_OPTION_JSON_BYTES {
+        return Err(format!("OPENROUTER_PLUGINS must be at most {MAX_OPTION_JSON_BYTES} bytes"));
+    }
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|error| format!("OPENROUTER_PLUGINS is not valid JSON: {error}"))?;
+    let Some(entries) = value.as_array() else {
+        return Err(String::from("OPENROUTER_PLUGINS must be a JSON array"));
+    };
+    if entries.iter().any(|entry| !entry.is_object()) {
+        return Err(String::from("OPENROUTER_PLUGINS entries must be JSON objects"));
+    }
+    Ok(value)
+}
+
+fn parse_models(raw: &str) -> Result<Vec<String>, String> {
+    let models: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    if models.is_empty() {
+        return Err(String::from("OPENROUTER_MODELS must name at least one model"));
+    }
+    if models.len() > MAX_FALLBACK_MODELS {
+        return Err(format!("OPENROUTER_MODELS accepts at most {MAX_FALLBACK_MODELS} entries"));
+    }
+    Ok(models)
+}
+
+fn parse_boolish(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!("expected a boolean (1/0, true/false, yes/no, on/off), got {value:?}")),
+    }
+}
+
+fn parse_positive_u64(name: &str, value: &str) -> Result<u64, String> {
+    let parsed: u64 =
+        value.trim().parse().map_err(|_| format!("{name} must be a positive integer"))?;
+    if parsed == 0 {
+        return Err(format!("{name} must be at least 1"));
+    }
+    Ok(parsed)
+}
+
+fn reasoning_object(
+    effort: Option<&str>,
+    max_tokens: Option<String>,
+    max_output_tokens: Option<u64>,
+) -> Result<Option<Value>, String> {
+    let effort = effort.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(effort) = effort
+        && !REASONING_EFFORTS.contains(&effort)
+    {
+        return Err(format!(
+            "unsupported reasoning effort {effort:?}: expected one of {}",
+            REASONING_EFFORTS.join(", ")
+        ));
+    }
+    let max_tokens = max_tokens
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| parse_positive_u64("OPENROUTER_REASONING_MAX_TOKENS", value))
+        .transpose()?;
+    if effort.is_none() && max_tokens.is_none() {
+        return Ok(None);
+    }
+    let mut object = serde_json::Map::new();
+    if let Some(effort) = effort {
+        object.insert("effort".into(), json!(effort));
+    }
+    if let Some(max_tokens) = max_tokens {
+        // The thinking budget must stay below the output bound; Anthropic
+        // upstreams reject anything below 1,024 tokens.
+        let fitted = match max_output_tokens {
+            Some(output) => {
+                let ceiling = output.saturating_sub(1).max(1);
+                if ceiling < 1_024 {
+                    return Err(String::from(
+                        "OPENROUTER_MAX_OUTPUT_TOKENS must exceed the reasoning budget floor of 1024",
+                    ));
+                }
+                max_tokens.clamp(1_024, ceiling)
+            }
+            None => max_tokens,
+        };
+        object.insert("max_tokens".into(), json!(fitted));
+    }
+    Ok(Some(Value::Object(object)))
+}
+
 /// Builds the OpenRouter profile for one model id.
 ///
 /// `model` is explicit because the rubber-duck critic runs the same provider
@@ -47,6 +336,16 @@ pub(crate) const MISSING_API_KEY: &str =
 /// unusable, so a broken configuration fails at startup instead of on the first
 /// billable request.
 pub(crate) fn openrouter_profile(config: &Config, model: &str) -> Result<EndpointProfile, String> {
+    let options = OpenRouterOptions::from_env(config.reasoning_effort.as_deref())?;
+    openrouter_profile_with_options(config, model, &options)
+}
+
+/// Builds an OpenRouter profile from already parsed options.
+pub(crate) fn openrouter_profile_with_options(
+    config: &Config,
+    model: &str,
+    options: &OpenRouterOptions,
+) -> Result<EndpointProfile, String> {
     let endpoint = TrustedEndpoint::parse(&config.api_url)
         .map_err(|error| format!("invalid OPENROUTER_API_URL: {error}"))?;
     let mut headers = vec![(
@@ -70,9 +369,13 @@ pub(crate) fn openrouter_profile(config: &Config, model: &str) -> Result<Endpoin
             max_delay: config.retry_max_delay,
         })
         .with_prompt_cache(supports_anthropic_prompt_cache(model))
-        .with_headers(headers);
-    if let Some(effort) = config.reasoning_effort.as_deref().filter(|effort| !effort.is_empty()) {
-        profile = profile.with_extensions(json!({ "reasoning": { "effort": effort } }));
+        .with_headers(headers)
+        .with_stream_usage(options.include_usage())
+        .with_max_output_tokens(options.max_output_tokens())
+        .with_max_tokens_field(options.max_tokens_field());
+    let extensions = options.body_extensions();
+    if extensions.as_object().is_some_and(|object| !object.is_empty()) {
+        profile = profile.with_extensions(extensions);
     }
     Ok(profile)
 }
@@ -211,8 +514,15 @@ mod tests {
         let messages = messages_from_transcript(&profile.system_prompt, &[]);
         let tools = tools_from_definitions(&[]);
 
-        let body =
-            request_body(&profile.model, &messages, &tools, false, profile.extensions.as_ref());
+        let body = request_body(
+            &profile.model,
+            &messages,
+            &tools,
+            ee_chat_completions::RequestBodyOptions {
+                extensions: profile.extensions.as_ref(),
+                ..ee_chat_completions::RequestBodyOptions::default()
+            },
+        );
 
         assert_eq!(body["model"], "test/model");
         assert_eq!(body["messages"][0]["content"], "system");
@@ -223,7 +533,118 @@ mod tests {
         let mut without = test_config();
         without.reasoning_effort = Some(String::new());
         let profile = openrouter_profile(&without, &without.model).expect("profile builds");
-        assert!(profile.extensions.is_none(), "an empty effort is not sent");
+        let extensions = profile.extensions.expect("usage extension");
+        assert!(extensions.get("reasoning").is_none(), "an empty effort is not sent");
+        assert_eq!(extensions["usage"]["include"], true);
+    }
+
+    #[test]
+    fn provider_preferences_are_verbatim_and_absent_when_unset() {
+        let config = test_config();
+        let preferences = json!({
+            "order": ["anthropic"],
+            "allow_fallbacks": false,
+            "data_collection": "deny",
+            "max_price": { "prompt": 3 }
+        });
+        let options = OpenRouterOptions::parse(
+            OptionSources { provider: Some(preferences.to_string()), ..OptionSources::default() },
+            None,
+        )
+        .expect("options parse");
+        let profile = openrouter_profile_with_options(&config, &config.model, &options)
+            .expect("profile builds");
+        let extensions = profile.extensions.expect("extensions");
+        assert_eq!(extensions["provider"], preferences);
+
+        let options = OpenRouterOptions::parse(OptionSources::default(), None)
+            .expect("default options parse");
+        let profile = openrouter_profile_with_options(&config, &config.model, &options)
+            .expect("profile builds");
+        assert_eq!(profile.fitted_output_limit(1), None);
+        assert!(profile.extensions.expect("usage")["provider"].is_null());
+    }
+
+    #[test]
+    fn usage_include_defaults_true_and_can_be_disabled() {
+        let config = test_config();
+        let options =
+            OpenRouterOptions::parse(OptionSources::default(), None).expect("defaults parse");
+        assert!(options.include_usage());
+        let profile = openrouter_profile_with_options(&config, &config.model, &options)
+            .expect("profile builds");
+        assert!(profile.stream_usage);
+        assert_eq!(profile.extensions.expect("extensions")["usage"]["include"], true);
+
+        let options = OpenRouterOptions::parse(
+            OptionSources {
+                include_usage: Some(String::from("false")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect("disabled usage parses");
+        let profile = openrouter_profile_with_options(&config, &config.model, &options)
+            .expect("profile builds");
+        assert!(!profile.stream_usage);
+        assert_eq!(profile.extensions.expect("extensions")["usage"]["include"], false);
+    }
+
+    #[test]
+    fn reasoning_budget_stays_below_the_output_bound() {
+        let config = test_config();
+        let options = OpenRouterOptions::parse(
+            OptionSources {
+                reasoning_max_tokens: Some(String::from("8192")),
+                max_output_tokens: Some(String::from("4096")),
+                ..OptionSources::default()
+            },
+            Some("high"),
+        )
+        .expect("options parse");
+        let profile = openrouter_profile_with_options(&config, &config.model, &options)
+            .expect("profile builds");
+        let fitted = profile.fitted_output_limit(1);
+        let extensions = profile.extensions.as_ref().expect("extensions");
+        assert_eq!(extensions["reasoning"]["effort"], "high");
+        let budget = extensions["reasoning"]["max_tokens"].as_u64().expect("budget");
+        assert!(budget >= 1_024, "Anthropic floor applies: {budget}");
+        assert!(budget < 4_096, "budget must stay below max_tokens: {budget}");
+        assert_eq!(fitted, Some(4_096));
+    }
+
+    #[test]
+    fn invalid_or_oversized_options_fail_before_any_request() {
+        let non_object = OpenRouterOptions::parse(
+            OptionSources { provider: Some(String::from("[\"x\"]")), ..OptionSources::default() },
+            None,
+        )
+        .expect_err("provider must be an object");
+        assert!(non_object.contains("OPENROUTER_PROVIDER_PREFERENCES"), "{non_object}");
+
+        let oversized = OpenRouterOptions::parse(
+            OptionSources {
+                passthrough: Some(format!("{{}}\"{}\"", "x".repeat(MAX_OPTION_JSON_BYTES))),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect_err("oversized options must fail");
+        assert!(oversized.contains("OPENROUTER_OPTIONS_JSON"), "{oversized}");
+
+        let effort = OpenRouterOptions::parse(OptionSources::default(), Some("extreme"))
+            .expect_err("unknown effort must fail");
+        assert!(effort.contains("unsupported reasoning effort"), "{effort}");
+
+        let bad_field = OpenRouterOptions::parse(
+            OptionSources {
+                max_tokens_field: Some(String::from("max_new_tokens")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect_err("unknown field must fail");
+        assert!(bad_field.contains("max_completion_tokens"), "{bad_field}");
     }
 
     #[test]

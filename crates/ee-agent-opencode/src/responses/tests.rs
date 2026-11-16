@@ -75,7 +75,7 @@ async fn decode_stream(
 
 #[test]
 fn request_body_carries_instructions_input_items_and_tools() {
-    let body = request_body("gpt-5.5", "system", &transcript(), &definitions(), false, None);
+    let body = request_body("gpt-5.5", "system", &transcript(), &definitions(), false, None, None);
 
     assert_eq!(body["model"], "gpt-5.5");
     assert_eq!(body["instructions"], "system");
@@ -85,7 +85,7 @@ fn request_body_carries_instructions_input_items_and_tools() {
     );
     assert_eq!(
         body["prompt_cache_key"],
-        request_body("gpt-5.5", "system", &transcript(), &definitions(), false, None)["prompt_cache_key"],
+        request_body("gpt-5.5", "system", &transcript(), &definitions(), false, None, None)["prompt_cache_key"],
         "same session configuration yields the same key"
     );
     assert_eq!(body["stream"], false);
@@ -111,7 +111,7 @@ fn request_body_carries_instructions_input_items_and_tools() {
 fn request_body_streams_and_merges_extensions() {
     let extensions = json!({ "reasoning": { "effort": "low" } });
 
-    let body = request_body("m", "system", &[], &[], true, Some(&extensions));
+    let body = request_body("m", "system", &[], &[], true, None, Some(&extensions));
 
     assert_eq!(body["stream"], true);
     assert_eq!(body["reasoning"]["effort"], "low");
@@ -123,7 +123,7 @@ fn request_body_omits_empty_text_and_empty_instructions() {
     let transcript =
         vec![ModelMessage::text(ModelRole::User, ""), ModelMessage::text(ModelRole::User, "kept")];
 
-    let body = request_body("m", "", &transcript, &[], false, None);
+    let body = request_body("m", "", &transcript, &[], false, None, None);
 
     assert!(body.get("instructions").is_none());
     assert!(body.get("tools").is_none());
@@ -133,7 +133,8 @@ fn request_body_omits_empty_text_and_empty_instructions() {
 
 #[test]
 fn request_body_never_carries_a_credential() {
-    let body = request_body("m", "system", &transcript(), &definitions(), true, None).to_string();
+    let body =
+        request_body("m", "system", &transcript(), &definitions(), true, None, None).to_string();
 
     assert!(!body.contains("api_key"), "{body}");
     assert!(!body.contains("authorization"), "{body}");
@@ -153,7 +154,7 @@ fn request_body_encodes_image_inputs_as_input_image_parts() {
         },
     ])];
 
-    let body = request_body("m", "system", &transcript, &[], false, None);
+    let body = request_body("m", "system", &transcript, &[], false, None, None);
 
     let parts = body["input"][0]["content"].as_array().expect("content parts");
     assert_eq!(parts[0], json!({ "type": "input_text", "text": "look" }));

@@ -20,7 +20,7 @@ use ee_agent_orchestrator::{
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
-use crate::profile::RetryPolicy;
+use crate::profile::{MaxTokensField, RetryPolicy};
 use crate::transport::DeltaSink;
 
 /// One decoded assistant turn.
@@ -87,18 +87,61 @@ pub enum StreamDelta {
     Reasoning(String),
 }
 
+/// Optional fields for one Chat Completions request body.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestBodyOptions<'a> {
+    /// Whether the response is streamed.
+    pub stream: bool,
+    /// Whether a streamed response requests `stream_options.include_usage`.
+    pub stream_usage: bool,
+    /// Output-token bound, written to [`Self::max_tokens_field`].
+    pub max_tokens: Option<u64>,
+    /// Body field carrying [`Self::max_tokens`].
+    pub max_tokens_field: MaxTokensField,
+    /// Provider body fields merged last, e.g. reasoning shaping.
+    pub extensions: Option<&'a Value>,
+}
+
+impl Default for RequestBodyOptions<'_> {
+    fn default() -> Self {
+        Self {
+            stream: false,
+            stream_usage: false,
+            max_tokens: None,
+            max_tokens_field: MaxTokensField::MaxTokens,
+            extensions: None,
+        }
+    }
+}
+
+impl<'a> RequestBodyOptions<'a> {
+    /// Options for a buffered request with no extra fields.
+    #[must_use]
+    pub fn buffered() -> Self {
+        Self::default()
+    }
+
+    /// Options for a streamed request with no extra fields.
+    #[must_use]
+    pub fn streaming() -> Self {
+        Self { stream: true, ..Self::default() }
+    }
+}
+
 /// Builds a Chat Completions request body.
 ///
-/// `extensions` must be a JSON object when present; its fields are merged last
-/// so a provider can shape the request without editing shared code.
+/// `options` controls streaming, usage reporting, the output bound, and
+/// provider body fields. Extension fields are merged last so a provider can
+/// shape the request without editing shared code.
 #[must_use]
 pub fn request_body(
     model: &str,
     messages: &[Value],
     tools: &[Value],
-    stream: bool,
-    extensions: Option<&Value>,
+    options: RequestBodyOptions<'_>,
 ) -> Value {
+    let RequestBodyOptions { stream, stream_usage, max_tokens, max_tokens_field, extensions } =
+        options;
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -107,6 +150,12 @@ pub fn request_body(
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if stream && stream_usage {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
+    if let Some(max_tokens) = max_tokens {
+        body[max_tokens_field.as_str()] = Value::from(max_tokens);
     }
     if let Some(Value::Object(extra)) = extensions
         && let Some(object) = body.as_object_mut()
@@ -219,6 +268,7 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
         reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
+    response = response.with_finish_reason(answer.finish_reason);
     if !answer.reasoning.is_empty() {
         response = response.reasoning(answer.reasoning);
     }

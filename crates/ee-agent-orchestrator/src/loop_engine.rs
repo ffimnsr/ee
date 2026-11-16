@@ -34,7 +34,8 @@ use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
 use crate::model::{
-    ModelAdapter, ModelMessage, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage,
+    ModelAdapter, ModelMessage, ModelRequest, ModelRole, ModelUsage, Transcript,
+    prompt_result_with_usage,
 };
 use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
@@ -49,6 +50,14 @@ use crate::tools::{
     SideEffectClass, ToolDefinition, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry,
     ToolResult,
 };
+
+/// Notice appended to the transcript when a reply is cut by the output bound.
+pub(crate) const CONTINUE_AFTER_OUTPUT_LIMIT: &str = "Your last response hit the output token limit (stop reason: length). Do not apologize, \
+     recap, or repeat yourself. Break the remaining work into smaller pieces.";
+
+/// Maximum automatic continuations after a length-truncated reply in one turn.
+#[cfg(test)]
+pub(crate) const MAX_OUTPUT_CONTINUATIONS: usize = crate::config::DEFAULT_MAX_OUTPUT_CONTINUATIONS;
 
 /// How the loop engine executes one turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +411,8 @@ impl LoopEngine {
         let mut empty_responses = 0usize;
         let mut message_seq = 0usize;
         let mut repairs_used = 0usize;
+        let mut output_continuations = 0usize;
+        let mut measured_prompt_tokens: Option<u64> = None;
         let mut detector = StuckDetector::new(self.config.stuck);
         let mut repeat_guard = RepeatGuard::new(RepeatGuardConfig::default());
         let graph_handle = self.graph.clone();
@@ -480,7 +491,8 @@ impl LoopEngine {
             let request =
                 ModelRequest::new(prepared.messages, tools, budget_snapshot, task.clone())
                     .with_available_models(self.options.available_models.clone())
-                    .with_model_id(self.options.model_id.clone());
+                    .with_model_id(self.options.model_id.clone())
+                    .with_prompt_tokens(measured_prompt_tokens);
             // Fail closed before the model call: every model-visible message
             // and the effective request must be durable first.
             if let Err(error) = transcript.record_model_request(&request) {
@@ -544,6 +556,31 @@ impl LoopEngine {
             // Model response before tools: persist the assistant turn so an
             // interruption after tools leaves a durable transcript tail.
             self.capture_checkpoint(transcript, track, task, false).await;
+
+            // Feed the measured prompt size into the next round so the adapter
+            // can fit its output bound to the room left in the window.
+            measured_prompt_tokens =
+                response.usage.input_tokens.and_then(|tokens| u64::try_from(tokens).ok());
+
+            // A reply cut by the output bound is continued with a bounded
+            // notice, matching the reference agent's length handling. After the
+            // per-turn cap the partial answer is returned instead of looping.
+            if response.finish_reason.as_deref() == Some("length")
+                && response.tool_intents.is_empty()
+            {
+                if self.options.mode == LoopMode::Standard
+                    && output_continuations < self.config.max_output_continuations
+                {
+                    output_continuations += 1;
+                    transcript.push_message(ModelMessage::text(
+                        ModelRole::User,
+                        CONTINUE_AFTER_OUTPUT_LIMIT,
+                    ));
+                    self.capture_checkpoint(transcript, track, task, false).await;
+                    continue;
+                }
+                return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
+            }
 
             if self.options.mode == LoopMode::SimpleAnswer && !response.tool_intents.is_empty() {
                 return Err(OrchestratorError::ModelFailure(
@@ -1738,6 +1775,67 @@ mod tests {
             events
                 .events()
                 .contains(&OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn length_finish_continues_with_a_bounded_notice() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new().text("part one").with_finish_reason(Some(String::from("length"))),
+            ModelResponse::new().text("part two").completed(),
+        ]);
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            EventRecorder::new(),
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn ends");
+
+        assert_eq!(model.call_count(), 2, "one continuation then stop");
+        let second = &model.requests()[1].transcript;
+        let last = second.last().expect("continuation notice");
+        assert_eq!(last.role, ModelRole::User);
+        match &last.content[0] {
+            ModelContent::Text(text) => {
+                assert!(text.contains("output token limit"), "notice text: {text}");
+                assert!(text.contains("Break the remaining work"), "notice action: {text}");
+            }
+            other => panic!("expected text notice, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn length_continuations_stop_at_the_cap() {
+        let length = || {
+            ModelResponse::new().text("partial").with_finish_reason(Some(String::from("length")))
+        };
+        let model = FakeModel::new(vec![length(), length(), length()]);
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            EventRecorder::new(),
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn ends");
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            model.call_count(),
+            MAX_OUTPUT_CONTINUATIONS + 1,
+            "initial call plus one continuation per cap slot"
         );
     }
 

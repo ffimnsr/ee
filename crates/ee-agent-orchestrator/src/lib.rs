@@ -383,8 +383,10 @@ pub use milestones::{
     MilestoneObservation, MilestoneSummary, MilestoneTracker, store_observation,
 };
 pub use model::{
-    ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, ModelUsage, Transcript, TranscriptTruncation,
+    ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage, ModelRequest,
+    ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
+    OUTPUT_LIMIT_MIN, Transcript, TranscriptTruncation, estimate_json_prompt_tokens,
+    estimate_prompt_tokens, fit_output_limit,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,

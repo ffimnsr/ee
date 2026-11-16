@@ -291,6 +291,7 @@ mod tests {
             task: crate::tasks::TaskNode::new(crate::tasks::TaskId::new("task-1"), "main", "root"),
             available_models: Vec::new(),
             model_id: None,
+            prompt_tokens: None,
         }
     }
 

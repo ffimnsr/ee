@@ -20,7 +20,9 @@
 use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition};
+use ee_agent_orchestrator::{
+    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
+};
 use ee_chat_completions::{
     AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, ToolCall, Usage,
     content_text, drive_sse, emit_finished_deltas, is_event_stream, response_from_turn,
@@ -46,6 +48,7 @@ pub fn request_body(
     transcript: &[ModelMessage],
     tools: &[ToolDefinition],
     stream: bool,
+    max_output_tokens: Option<u64>,
     extensions: Option<&Value>,
 ) -> Value {
     let mut input = Vec::new();
@@ -62,6 +65,9 @@ pub fn request_body(
         // EE never asks the provider to keep the response for later retrieval.
         "store": false,
     });
+    if let Some(max_output_tokens) = max_output_tokens {
+        body["max_output_tokens"] = Value::from(max_output_tokens);
+    }
     if !system_prompt.is_empty() {
         body["instructions"] = Value::String(system_prompt.to_string());
         // Deterministic, session-config-scoped cache key: stable across every
@@ -543,13 +549,28 @@ impl ResponsesCodec {
         transcript: &[ModelMessage],
         tools: &[ToolDefinition],
     ) -> Result<ModelResponse, ProviderError> {
+        self.complete_with_prompt(transcript, tools, None).await
+    }
+
+    /// Performs one buffered round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
+        let prompt = prompt_tokens
+            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let max_output_tokens = profile.fitted_output_limit(prompt);
         let body = request_body(
             &profile.model,
             &profile.system_prompt,
             transcript,
             tools,
             false,
+            max_output_tokens,
             profile.extensions.as_ref(),
         );
         let transport = &self.transport;
@@ -577,13 +598,29 @@ impl ResponsesCodec {
         tools: &[ToolDefinition],
         sink: DeltaSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
+        self.complete_streaming_with_prompt(transcript, tools, sink, None).await
+    }
+
+    /// Performs one streaming round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_streaming_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
+        let prompt = prompt_tokens
+            .unwrap_or_else(|| estimate_prompt_tokens(transcript, tools, &profile.system_prompt));
+        let max_output_tokens = profile.fitted_output_limit(prompt);
         let body = request_body(
             &profile.model,
             &profile.system_prompt,
             transcript,
             tools,
             true,
+            max_output_tokens,
             profile.extensions.as_ref(),
         );
         let mut attempt = ResponsesStreamAttempt { transport: &self.transport, body: &body };

@@ -10,7 +10,7 @@ use std::path::Path;
 use ee_agent_opencode::config::{ConfigError, route_profile};
 use ee_agent_opencode::discovery::{HttpMetadataFetcher, metadata_endpoint};
 use ee_agent_opencode::routes::{
-    self, GO_API_ROOT, OpenCodeDialect, OpenCodeRoute, OpenCodeSurface, ZEN_API_ROOT, catalog,
+    self, GO_API_ROOT, OpenCodeDialect, OpenCodeSurface, ZEN_API_ROOT, catalog,
 };
 use ee_chat_completions::{EndpointTransport, RetryPolicy, TrustedEndpoint};
 use serde_json::json;
@@ -78,12 +78,9 @@ fn every_catalog_row_is_an_exact_https_route_for_its_declared_dialect() {
 fn malformed_endpoint_metadata_cannot_carry_a_credential() {
     // A catalog endpoint that is not credential-safe is rejected before any
     // codec exists, so a defective table cannot leak the key.
-    let route = OpenCodeRoute {
-        surface: OpenCodeSurface::Zen,
-        model_id: "gpt-5.5",
-        dialect: OpenCodeDialect::OpenAiResponses,
-        endpoint: "http://insecure.test/v1/responses",
-    };
+    let mut route =
+        routes::resolve_route(OpenCodeSurface::Zen, "gpt-5.5").expect("documented route");
+    route.endpoint = "http://insecure.test/v1/responses";
 
     let error =
         route_profile(&route, "system", std::time::Duration::from_secs(1), RetryPolicy::none())

@@ -130,11 +130,33 @@ fn default_session_state_dir() -> Result<PathBuf, String> {
 
 /// One machine-readable route record; never carries a credential.
 fn route_json(route: &OpenCodeRoute) -> Value {
+    let limits = route.limits();
+    let reasoning = route.reasoning();
+    let cost = route.cost();
     json!({
         "surface": route.surface.as_str(),
         "model_id": route.model_id,
+        "api_model_id": route.api_model_id(),
         "dialect": route.dialect.as_str(),
         "endpoint": route.endpoint,
+        "legacy": route.is_legacy(),
+        "limits": limits.map(|limits| json!({
+            "context": limits.context,
+            "output": limits.output,
+        })),
+        "reasoning": {
+            "supported": reasoning.supported,
+            "toggle": reasoning.toggle,
+            "efforts": reasoning.efforts,
+            "budget_min": reasoning.budget_min,
+            "budget_max": reasoning.budget_max,
+        },
+        "cost_micros": cost.map(|cost| json!({
+            "input": cost.input_micros,
+            "output": cost.output_micros,
+            "cache_read": cost.cache_read_micros,
+            "cache_write": cost.cache_write_micros,
+        })),
     })
 }
 
@@ -161,7 +183,13 @@ mod tests {
         assert_eq!(value["model_id"], json!("gpt-5.5"));
         assert_eq!(value["dialect"], json!("openai_responses"));
         assert_eq!(value["endpoint"], json!("https://opencode.ai/zen/v1/responses"));
-        assert_eq!(value.as_object().map(serde_json::Map::len), Some(4));
+        assert_eq!(value["api_model_id"], json!("gpt-5.5"));
+        assert_eq!(value["legacy"], json!(false));
+        assert!(value["limits"]["context"].as_u64().is_some_and(|value| value > 0));
+        assert!(value["limits"]["output"].as_u64().is_some_and(|value| value > 0));
+        assert_eq!(value["reasoning"]["supported"], json!(true));
+        assert!(value["cost_micros"]["input"].as_u64().is_some());
+        assert_eq!(value.as_object().map(serde_json::Map::len), Some(9));
     }
 
     #[test]

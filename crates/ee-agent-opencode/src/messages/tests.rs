@@ -70,7 +70,15 @@ async fn decode_stream(
 
 #[test]
 fn request_body_hoists_system_and_correlates_tool_results() {
-    let body = request_body("kimi-k3", "system", &transcript(), &definitions(), false, None);
+    let body = request_body(
+        "kimi-k3",
+        "system",
+        &transcript(),
+        &definitions(),
+        false,
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        None,
+    );
 
     assert_eq!(body["model"], "kimi-k3");
     assert_eq!(body["system"][0]["text"], "system");
@@ -109,7 +117,8 @@ fn cache_breakpoints_mark_only_the_last_pinned_instruction() {
         ModelMessage::text(ModelRole::User, "current request"),
     ];
 
-    let body = request_body("claude", "system", &transcript, &[], false, None);
+    let body =
+        request_body("claude", "system", &transcript, &[], false, DEFAULT_MAX_OUTPUT_TOKENS, None);
 
     assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
     let pinned = &body["messages"][1]["content"][0];
@@ -125,7 +134,7 @@ fn request_body_groups_consecutive_tool_results_into_one_turn() {
         ModelMessage::tool_result("call_2", ToolResult::success("two")),
     ];
 
-    let body = request_body("m", "", &transcript, &[], false, None);
+    let body = request_body("m", "", &transcript, &[], false, DEFAULT_MAX_OUTPUT_TOKENS, None);
 
     assert_eq!(body["messages"].as_array().expect("messages").len(), 1);
     assert_eq!(body["messages"][0]["content"].as_array().expect("blocks").len(), 2);
@@ -137,7 +146,8 @@ fn request_body_groups_consecutive_tool_results_into_one_turn() {
 fn request_body_extension_overrides_max_tokens_and_streams() {
     let extensions = json!({ "max_tokens": 256 });
 
-    let body = request_body("m", "system", &[], &[], true, Some(&extensions));
+    let body =
+        request_body("m", "system", &[], &[], true, DEFAULT_MAX_OUTPUT_TOKENS, Some(&extensions));
 
     assert_eq!(body["stream"], true);
     assert_eq!(body["max_tokens"], 256);
@@ -145,7 +155,16 @@ fn request_body_extension_overrides_max_tokens_and_streams() {
 
 #[test]
 fn request_body_never_carries_a_credential() {
-    let body = request_body("m", "system", &transcript(), &definitions(), true, None).to_string();
+    let body = request_body(
+        "m",
+        "system",
+        &transcript(),
+        &definitions(),
+        true,
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        None,
+    )
+    .to_string();
 
     assert!(!body.contains("api_key"), "{body}");
     assert!(!body.contains("authorization"), "{body}");

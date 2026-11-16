@@ -52,6 +52,7 @@ fn encode(route: &OpenCodeRoute, stream: bool) -> Value {
             &transcript(),
             &definitions(),
             stream,
+            Some(32_000),
             None,
         ),
         OpenCodeDialect::AnthropicMessages => messages::request_body(
@@ -60,14 +61,18 @@ fn encode(route: &OpenCodeRoute, stream: bool) -> Value {
             &transcript(),
             &definitions(),
             stream,
+            32_000,
             None,
         ),
         OpenCodeDialect::OpenAiChatCompletions => ee_chat_completions::request_body(
             route.model_id,
             &ee_chat_completions::messages_from_transcript("system", &transcript()),
             &ee_chat_completions::tools_from_definitions(&definitions()),
-            stream,
-            None,
+            ee_chat_completions::RequestBodyOptions {
+                stream,
+                max_tokens: Some(32_000),
+                ..ee_chat_completions::RequestBodyOptions::default()
+            },
         ),
     }
 }

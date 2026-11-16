@@ -1,0 +1,48 @@
+{
+  "snapshot_source": "https://models.dev/api.json",
+  "snapshot_providers": ["opencode", "opencode-go"],
+  "retired": [
+    ["zen", "gpt-5.2-codex", "2026-07-23"],
+    ["zen", "gpt-5.1-codex", "2026-07-23"],
+    ["zen", "gpt-5.1-codex-max", "2026-07-23"],
+    ["zen", "gpt-5.1-codex-mini", "2026-07-23"],
+    ["zen", "gpt-5-codex", "2026-07-23"],
+    ["zen", "claude-opus-4.1", "2026-08-05"],
+    ["zen", "claude-sonnet-4", "2026-06-15"],
+    ["zen", "claude-haiku-3.5", "2026-02-16"],
+    ["zen", "gemini-3-pro", "2026-03-09"],
+    ["zen", "minimax-m2.5", "2026-08-05"],
+    ["zen", "minimax-m2.1", "2026-03-15"],
+    ["zen", "glm-5", "2026-05-14"],
+    ["zen", "glm-4.7", "2026-03-15"],
+    ["zen", "glm-4.6", "2026-03-15"],
+    ["zen", "kimi-k2.5", "2026-08-05"],
+    ["zen", "kimi-k2-thinking", "2026-03-06"],
+    ["zen", "kimi-k2", "2026-03-06"],
+    ["zen", "qwen3-coder-480b", "2026-02-06"]
+  ],
+  "unsupported": [
+    ["zen", "gemini-3.8-flash", "google"],
+    ["zen", "gemini-3.7-flash", "google"],
+    ["zen", "gemini-3.6-flash", "google"],
+    ["zen", "gemini-3.5-flash", "google"],
+    ["zen", "gemini-3.5-flash-lite", "google"],
+    ["zen", "gemini-3.1-pro", "google"],
+    ["zen", "gemini-3-flash", "google"],
+    ["zen", "jev-1.13", "systemone"],
+    ["zen", "jev-1.13-free", "systemone"]
+  ],
+  "legacy": [
+    ["go", "deepseek-v4-flash", "chat-completions"],
+    ["go", "deepseek-v4-flash-vision-exp", "chat-completions"],
+    ["go", "glm-5.1", "chat-completions"],
+    ["go", "grok-4.6", "responses"],
+    ["go", "kimi-k2.6", "chat-completions"],
+    ["go", "minimax-m2.5", "messages"],
+    ["go", "qwen3.6-plus", "messages"],
+    ["go", "qwen3.7-max", "messages"],
+    ["go", "space-bunny-free", "chat-completions"],
+    ["zen", "qwen3.7-max", "messages"],
+    ["zen", "qwen3.7-plus", "messages"]
+  ]
+}

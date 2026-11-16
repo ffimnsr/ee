@@ -58,8 +58,8 @@ pub const MODEL_LABEL: &str = "Exact model id for the selected surface (required
 pub const CRITIC_LABEL: &str = "Optional second-opinion critic model id on the same surface, from a different vendor, e.g. grok-4.5 while the root model is gpt-5.5; leave empty to run without a critic";
 /// Default request timeout: 120 seconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-/// Default model context-window size in tokens, used for the ACP `usage_update`
-/// context-window denominator.
+/// Default model context-window size in tokens, used when the catalog carries
+/// no limit for the selected model.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 /// Default maximum transient/429 retries per model call.
 pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 2;
@@ -140,9 +140,17 @@ pub fn setup_manifest() -> SetupManifest {
             },
             SetupInput {
                 key: String::from("context_window"),
-                label: String::from("Model context-window size in tokens"),
-                default: Some(DEFAULT_CONTEXT_WINDOW_TOKENS.to_string()),
+                label: String::from(
+                    "Model context-window size in tokens (blank = catalog limit or default)",
+                ),
+                default: None,
                 config: SetupInputConfig { env: String::from("OPENCODE_CONTEXT_WINDOW") },
+            },
+            SetupInput {
+                key: String::from("max_output_tokens"),
+                label: String::from("Maximum output tokens per model call (blank = catalog limit)"),
+                default: None,
+                config: SetupInputConfig { env: String::from("OPENCODE_MAX_OUTPUT_TOKENS") },
             },
             SetupInput {
                 key: String::from("retry_max_attempts"),
@@ -253,8 +261,13 @@ pub struct Args {
     #[arg(long, env = "OPENCODE_MAX_ITERATIONS", value_parser = parse_positive_usize)]
     max_iterations: Option<usize>,
     /// Model context-window size in tokens, used for the ACP `usage_update`.
-    #[arg(long, env = "OPENCODE_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS, value_parser = parse_positive_u64)]
-    context_window: u64,
+    /// Blank falls back to the catalog limit, then to the default.
+    #[arg(long, env = "OPENCODE_CONTEXT_WINDOW", value_parser = parse_positive_u64)]
+    context_window: Option<u64>,
+    /// Maximum output tokens per model call; blank uses the catalog limit fitted
+    /// to the context window.
+    #[arg(long, env = "OPENCODE_MAX_OUTPUT_TOKENS", value_parser = parse_positive_u64)]
+    max_output_tokens: Option<u64>,
     /// Maximum transient/429 retries per model call.
     #[arg(long, env = "OPENCODE_RETRY_MAX_ATTEMPTS", default_value_t = DEFAULT_RETRY_MAX_ATTEMPTS)]
     retry_max_attempts: u32,
@@ -310,7 +323,8 @@ impl Args {
             system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             max_iterations: None,
-            context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            context_window: None,
+            max_output_tokens: None,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
@@ -345,6 +359,8 @@ pub struct Config {
     pub max_iterations: Option<usize>,
     /// Context-window size reported to the client.
     pub context_window: u64,
+    /// Explicit output-token bound; validated against the catalog ceiling.
+    pub max_output_tokens: Option<u64>,
     /// Retry policy for rate-limited and transient failures.
     pub retry: RetryPolicy,
     /// Durable checkpoint directory, when configured.
@@ -367,6 +383,7 @@ impl std::fmt::Debug for Config {
             .field("timeout", &self.timeout)
             .field("max_iterations", &self.max_iterations)
             .field("context_window", &self.context_window)
+            .field("max_output_tokens", &self.max_output_tokens)
             .field("retry", &self.retry)
             .field("checkpoint_dir", &self.checkpoint_dir)
             .finish_non_exhaustive()
@@ -402,6 +419,19 @@ impl Config {
             .filter(|value| !value.trim().is_empty())
             .ok_or(ConfigError::MissingModel)?;
         let route = routes::resolve_route(surface, &model)?;
+        let context_window = args
+            .context_window
+            .or_else(|| route.limits().map(|limits| limits.context))
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
+        if let (Some(requested), Some(limits)) = (args.max_output_tokens, route.limits())
+            && requested > limits.output
+        {
+            return Err(ConfigError::OutputLimitExceeded {
+                model_id: route.model_id.to_string(),
+                requested,
+                maximum: limits.output,
+            });
+        }
         Ok(Self {
             route,
             api_key: env_or_dotenv(API_KEY_ENV, dotenv),
@@ -436,7 +466,8 @@ impl Config {
             system_prompt: args.system_prompt,
             timeout: Duration::from_millis(args.timeout_ms),
             max_iterations: args.max_iterations,
-            context_window: args.context_window,
+            context_window,
+            max_output_tokens: args.max_output_tokens,
             retry: RetryPolicy {
                 max_attempts: args.retry_max_attempts,
                 base_delay: Duration::from_millis(args.retry_base_delay_ms),
@@ -502,6 +533,18 @@ impl Config {
         profile.extensions = self
             .reasoning_effort
             .and_then(|effort| reasoning::request_extensions(self.route.dialect, effort));
+        profile =
+            profile.with_limits(self.route.limits()).with_max_output_tokens(self.max_output_tokens);
+        if let Some(field) = self.route.max_tokens_field() {
+            let parsed = ee_chat_completions::MaxTokensField::parse(field).map_err(|_| {
+                ConfigError::InvalidCatalogMetadata {
+                    model_id: self.route.model_id.to_string(),
+                    field: "max_tokens_field",
+                    value: field,
+                }
+            })?;
+            profile = profile.with_max_tokens_field(parsed);
+        }
         Ok(profile)
     }
 
@@ -544,7 +587,9 @@ pub fn route_profile(
     )
     .with_system_prompt(system_prompt)
     .with_timeout(timeout)
-    .with_retry(retry))
+    .with_retry(retry)
+    .with_limits(route.limits())
+    .with_stream_usage(true))
 }
 
 /// Why an OpenCode surface/model selection could not be routed.
@@ -623,6 +668,24 @@ pub enum ConfigError {
         /// Why the endpoint cannot carry a credential.
         detail: String,
     },
+    /// `OPENCODE_MAX_OUTPUT_TOKENS` exceeds the catalog output limit.
+    OutputLimitExceeded {
+        /// Catalog model id.
+        model_id: String,
+        /// Requested output bound.
+        requested: u64,
+        /// Catalog maximum output bound.
+        maximum: u64,
+    },
+    /// A generated catalog value is not one the codec understands.
+    InvalidCatalogMetadata {
+        /// Catalog model id.
+        model_id: String,
+        /// Field name.
+        field: &'static str,
+        /// Rejected value.
+        value: &'static str,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -687,6 +750,16 @@ impl std::fmt::Display for ConfigError {
             Self::UntrustedRouteEndpoint { endpoint, detail } => write!(
                 formatter,
                 "route endpoint {endpoint:?} is not a credential-safe origin: {detail}"
+            ),
+            Self::OutputLimitExceeded { model_id, requested, maximum } => write!(
+                formatter,
+                "max output tokens {requested} exceeds the documented ceiling {maximum} for model \
+                 {model_id:?}: lower OPENCODE_MAX_OUTPUT_TOKENS or leave it unset"
+            ),
+            Self::InvalidCatalogMetadata { model_id, field, value } => write!(
+                formatter,
+                "catalog metadata {field}={value:?} for model {model_id:?} is not supported by this \
+                 ee release: regenerate the catalog with scripts/gen_catalog.py"
             ),
         }
     }

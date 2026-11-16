@@ -381,12 +381,22 @@ impl ChatCompletionsClient {
         messages: &[Value],
         tools: &[Value],
     ) -> Result<AssistantTurn, ProviderError> {
+        let profile = self.transport.profile();
+        let prompt = ee_agent_orchestrator::estimate_json_prompt_tokens(
+            &Value::Array(messages.to_vec()),
+            &Value::Array(tools.to_vec()),
+        );
         let body = request_body(
-            &self.transport.profile().model,
+            &profile.model,
             messages,
             tools,
-            false,
-            self.transport.profile().extensions.as_ref(),
+            crate::wire::RequestBodyOptions {
+                stream: false,
+                stream_usage: profile.stream_usage,
+                max_tokens: profile.fitted_output_limit(prompt),
+                max_tokens_field: profile.max_tokens_field,
+                extensions: profile.extensions.as_ref(),
+            },
         );
         let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
         let value = self.transport.read_json(&mut response, "response").await?;
@@ -454,7 +464,22 @@ impl ChatCompletionsClient {
     ) -> Result<AssistantTurn, ProviderError> {
         let profile = self.transport.profile();
         let label = profile.label.as_str();
-        let body = request_body(&profile.model, messages, tools, true, profile.extensions.as_ref());
+        let prompt = ee_agent_orchestrator::estimate_json_prompt_tokens(
+            &Value::Array(messages.to_vec()),
+            &Value::Array(tools.to_vec()),
+        );
+        let body = request_body(
+            &profile.model,
+            messages,
+            tools,
+            crate::wire::RequestBodyOptions {
+                stream: true,
+                stream_usage: profile.stream_usage,
+                max_tokens: profile.fitted_output_limit(prompt),
+                max_tokens_field: profile.max_tokens_field,
+                extensions: profile.extensions.as_ref(),
+            },
+        );
         let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
         let headers = response.headers().clone();
         if !is_event_stream(&headers) {

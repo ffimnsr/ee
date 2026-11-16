@@ -13,7 +13,7 @@
 
 use ee_agent_orchestrator::ModelFamily;
 
-use crate::routes::OpenCodeRoute;
+use crate::routes::{OpenCodeRoute, OpenCodeSurface};
 
 /// Vendor identity as declared in this table.
 ///
@@ -184,30 +184,57 @@ const VENDORS: &[VendorGroup] = &[
 
 /// Declared family for one catalog model id.
 ///
-/// Returns `None` for an id the table does not declare, which is a table defect
-/// rather than a routing result; callers must treat it as "contrast
-/// unavailable" and never as permission to guess a vendor.
+/// Curated vendor groups win so contrast keeps its established labels; a model
+/// the curated table does not list falls back to the family slug the upstream
+/// catalog declares. An id outside the catalog has no family, and a missing
+/// family never changes routing.
 #[must_use]
 pub fn family_for(model_id: &str) -> Option<ModelFamily> {
     VENDORS
         .iter()
         .find(|group| group.model_ids.contains(&model_id))
         .map(|group| group.vendor.to_family())
+        .or_else(|| catalog_family(model_id))
 }
+
+fn catalog_family(model_id: &str) -> Option<ModelFamily> {
+    let entry = crate::catalog::find(OpenCodeSurface::Zen, model_id)
+        .or_else(|| crate::catalog::find(OpenCodeSurface::Go, model_id))?;
+    Some(if entry.family.is_empty() {
+        ModelFamily::Other(String::from(UNDISCLOSED))
+    } else {
+        ModelFamily::Other(entry.family.to_string())
+    })
+}
+
+/// Family used when the upstream catalog discloses none. Every such model shares
+/// one bucket, so contrast refuses to pair two undisclosed vendors rather than
+/// guessing they differ.
+const UNDISCLOSED: &str = "undisclosed";
 
 /// Declared family for one resolved route.
 #[must_use]
 pub fn route_family(route: &OpenCodeRoute) -> Option<ModelFamily> {
-    family_for(route.model_id)
+    if let Some(group) = VENDORS.iter().find(|group| group.model_ids.contains(&route.model_id)) {
+        return Some(group.vendor.to_family());
+    }
+    Some(if route.entry.family.is_empty() {
+        ModelFamily::Other(String::from(UNDISCLOSED))
+    } else {
+        ModelFamily::Other(route.entry.family.to_string())
+    })
 }
 
 /// Bounded label for diagnostics: the declared family of a route, or `unknown`.
 #[must_use]
 pub fn family_label(route: &OpenCodeRoute) -> String {
-    VENDORS
-        .iter()
-        .find(|group| group.model_ids.contains(&route.model_id))
-        .map_or_else(|| String::from("unknown"), |group| group.vendor.label().to_string())
+    if let Some(group) = VENDORS.iter().find(|group| group.model_ids.contains(&route.model_id)) {
+        return group.vendor.label().to_string();
+    }
+    if route.entry.family.is_empty() {
+        return String::from(UNDISCLOSED);
+    }
+    route.entry.family.to_string()
 }
 
 /// Every declared model id, in table order.

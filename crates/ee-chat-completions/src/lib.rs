@@ -38,16 +38,16 @@ pub use adapter::{
     ChatCompletionsAdapter, CompletionClient, CompletionFuture, StreamingClient, wait_cancelled,
 };
 pub use endpoint::{EndpointError, TrustedEndpoint};
-pub use profile::{BearerToken, EndpointProfile, RetryPolicy, TokenSource};
+pub use profile::{BearerToken, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource};
 pub use transport::{
     ChatCompletionsClient, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest, EndpointTransport,
     MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse, is_event_stream,
     with_buffered_retry, with_stream_retry,
 };
 pub use wire::{
-    AssistantTurn, StreamDelta, ToolCall, Usage, classify_http_error, classify_status_error,
-    content_has_media, content_parts, content_text, decode_message, emit_finished_deltas,
-    http_error_message, is_retryable, messages_from_transcript,
+    AssistantTurn, RequestBodyOptions, StreamDelta, ToolCall, Usage, classify_http_error,
+    classify_status_error, content_has_media, content_parts, content_text, decode_message,
+    emit_finished_deltas, http_error_message, is_retryable, messages_from_transcript,
     messages_from_transcript_with_cache, parse_retry_after, request_body, response_from_turn,
     retry_after_of, retry_delay, tool_call_id_of, tools_from_definitions, usage_from_tokens,
 };

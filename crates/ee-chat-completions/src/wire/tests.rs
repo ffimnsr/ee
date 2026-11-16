@@ -145,7 +145,16 @@ fn request_body_carries_model_messages_tools_and_extensions() {
     let tools = tools_from_definitions(&[ToolDefinition::new("read_file", "reads")]);
     let extensions = json!({ "reasoning": { "effort": "medium" } });
 
-    let body = request_body("m", &messages, &tools, true, Some(&extensions));
+    let body = request_body(
+        "m",
+        &messages,
+        &tools,
+        RequestBodyOptions {
+            stream: true,
+            extensions: Some(&extensions),
+            ..RequestBodyOptions::default()
+        },
+    );
 
     assert_eq!(body["model"], "m");
     assert_eq!(body["stream"], true);
@@ -156,8 +165,47 @@ fn request_body_carries_model_messages_tools_and_extensions() {
 }
 
 #[test]
+fn request_body_requests_stream_usage_and_output_bound() {
+    let body = request_body(
+        "m",
+        &[],
+        &[],
+        RequestBodyOptions {
+            stream: true,
+            stream_usage: true,
+            max_tokens: Some(1_234),
+            max_tokens_field: crate::profile::MaxTokensField::MaxCompletionTokens,
+            extensions: None,
+        },
+    );
+
+    assert_eq!(body["stream_options"]["include_usage"], true);
+    assert_eq!(body["max_completion_tokens"], 1_234);
+    assert!(body.get("max_tokens").is_none());
+}
+
+#[test]
+fn request_body_omits_stream_usage_when_not_requested_or_buffered() {
+    let streaming = request_body(
+        "m",
+        &[],
+        &[],
+        RequestBodyOptions { stream: true, ..RequestBodyOptions::default() },
+    );
+    assert!(streaming.get("stream_options").is_none());
+
+    let buffered = request_body(
+        "m",
+        &[],
+        &[],
+        RequestBodyOptions { stream: false, stream_usage: true, ..RequestBodyOptions::default() },
+    );
+    assert!(buffered.get("stream_options").is_none());
+}
+
+#[test]
 fn request_body_omits_tools_when_no_definitions_exist() {
-    let body = request_body("m", &[], &[], false, None);
+    let body = request_body("m", &[], &[], RequestBodyOptions::default());
     assert_eq!(body["stream"], false);
     assert!(body.get("tools").is_none());
 }

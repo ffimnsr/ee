@@ -198,8 +198,10 @@ fn request_body_carries_profile_system_prompt_tools_and_reasoning() {
         &profile.model,
         &messages,
         &tools,
-        false,
-        profile.extensions.as_ref(),
+        ee_chat_completions::RequestBodyOptions {
+            extensions: profile.extensions.as_ref(),
+            ..ee_chat_completions::RequestBodyOptions::default()
+        },
     );
 
     assert_eq!(body["model"], "test/model");

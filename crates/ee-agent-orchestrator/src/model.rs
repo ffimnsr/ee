@@ -40,6 +40,86 @@ pub const TOOL_RESULT_PRUNE_TAIL: usize = 1024;
 /// Exact marker substituted for the pruned middle span.
 pub const TOOL_RESULT_PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
+/// Output-token bound used when a model's catalog limit is unknown.
+pub const OUTPUT_LIMIT_FALLBACK: u64 = 32_000;
+/// Largest output-token bound ee requests, however large the catalog limit is.
+pub const OUTPUT_LIMIT_MAX: u64 = 256_000;
+/// Smallest useful output-token bound used when a context window has room.
+pub const OUTPUT_LIMIT_MIN: u64 = 1_024;
+/// Prompt bytes per estimated token (documented 4:1 heuristic).
+pub const PROMPT_BYTES_PER_TOKEN: u64 = 4;
+/// Margin applied to the estimated prompt before fitting output tokens.
+pub const PROMPT_ESTIMATE_MARGIN_PERCENT: u64 = 16;
+
+/// Catalog-declared context and output limits for one model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLimits {
+    /// Total context window in tokens.
+    pub context: u64,
+    /// Maximum output tokens the model documents.
+    pub output: u64,
+}
+
+impl ModelLimits {
+    /// Builds limits from a context and output bound.
+    #[must_use]
+    pub const fn new(context: u64, output: u64) -> Self {
+        Self { context, output }
+    }
+}
+
+/// Fits an output-token bound to the room a prompt leaves in the context window.
+///
+/// Returns `None` when the model carries no catalog limit, so a caller can omit
+/// the field instead of guessing. The requested bound is the catalog output
+/// limit capped at [`OUTPUT_LIMIT_MAX`]; when the prompt size is known the
+/// result also leaves [`PROMPT_ESTIMATE_MARGIN_PERCENT`] of headroom. A window
+/// with no room yields a one-token bound rather than a value that would exceed
+/// the window.
+#[must_use]
+pub fn fit_output_limit(limits: Option<ModelLimits>, prompt_tokens: Option<u64>) -> Option<u64> {
+    let limits = limits?;
+    let requested = limits.output.clamp(1, OUTPUT_LIMIT_MAX);
+    let Some(prompt) = prompt_tokens else {
+        return Some(requested);
+    };
+    if limits.context == 0 {
+        return Some(requested);
+    }
+    let margin = prompt.saturating_mul(PROMPT_ESTIMATE_MARGIN_PERCENT).saturating_div(100);
+    let headroom = limits.context.saturating_div(100);
+    let room =
+        limits.context.saturating_sub(headroom).saturating_sub(prompt).saturating_sub(margin);
+    let fitted = room.min(requested);
+    Some(if fitted >= OUTPUT_LIMIT_MIN { fitted } else { fitted.max(1) })
+}
+
+/// Estimates prompt tokens from the normalized transcript, tools, and system
+/// prompt using the documented 4-bytes-per-token heuristic.
+#[must_use]
+pub fn estimate_prompt_tokens(
+    transcript: &[ModelMessage],
+    tools: &[ToolDefinition],
+    system_prompt: &str,
+) -> u64 {
+    let messages = serde_json::to_vec(transcript).map_or(0, |bytes| bytes.len() as u64);
+    let tools = serde_json::to_vec(tools).map_or(0, |bytes| bytes.len() as u64);
+    let system = system_prompt.len() as u64;
+    messages
+        .saturating_add(tools)
+        .saturating_add(system)
+        .saturating_div(PROMPT_BYTES_PER_TOKEN)
+        .max(1)
+}
+
+/// Estimates prompt tokens from wire-level message and tool arrays.
+#[must_use]
+pub fn estimate_json_prompt_tokens(messages: &serde_json::Value, tools: &serde_json::Value) -> u64 {
+    let messages = serde_json::to_vec(messages).map_or(0, |bytes| bytes.len() as u64);
+    let tools = serde_json::to_vec(tools).map_or(0, |bytes| bytes.len() as u64);
+    messages.saturating_add(tools).saturating_div(PROMPT_BYTES_PER_TOKEN).max(1)
+}
+
 /// Message metadata key: the tool name that produced a result.
 pub const TOOL_NAME_METADATA_KEY: &str = "tool_name";
 /// Message metadata key: the tool's side-effect class label.
@@ -292,6 +372,11 @@ pub struct ModelRequest {
     /// child's selection is recorded here too).
     #[serde(default)]
     pub model_id: Option<String>,
+    /// Prompt size measured by the provider on the previous call, when known.
+    /// Adapters fit their output bound against this value; `None` falls back to
+    /// [`estimate_prompt_tokens`].
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
 }
 
 impl ModelRequest {
@@ -304,7 +389,22 @@ impl ModelRequest {
         budget: BudgetSnapshot,
         task: TaskNode,
     ) -> Self {
-        Self { transcript, tools, budget, task, available_models: Vec::new(), model_id: None }
+        Self {
+            transcript,
+            tools,
+            budget,
+            task,
+            available_models: Vec::new(),
+            model_id: None,
+            prompt_tokens: None,
+        }
+    }
+
+    /// Sets the prompt size measured by the provider on the previous call.
+    #[must_use]
+    pub fn with_prompt_tokens(mut self, prompt_tokens: Option<u64>) -> Self {
+        self.prompt_tokens = prompt_tokens;
+        self
     }
 
     /// Sets the advertised model list the delegating model can pick from.
@@ -445,6 +545,10 @@ pub struct ModelResponse {
     pub tool_intents: Vec<ToolIntent>,
     /// Whether the model signals turn completion.
     pub completed: bool,
+    /// Provider stop reason as reported (for example `stop`, `length`, or
+    /// `tool_calls`); `None` when the adapter could not report one.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
     /// Reported token usage; unknown fields stay `None`.
     pub usage: ModelUsage,
 }
@@ -458,8 +562,16 @@ impl ModelResponse {
             reasoning: None,
             tool_intents: Vec::new(),
             completed: false,
+            finish_reason: None,
             usage: ModelUsage::new(),
         }
+    }
+
+    /// Sets the provider stop reason.
+    #[must_use]
+    pub fn with_finish_reason(mut self, finish_reason: Option<String>) -> Self {
+        self.finish_reason = finish_reason;
+        self
     }
 
     /// Sets the reported token usage.
@@ -904,6 +1016,7 @@ mod tests {
             task: TaskNode::new(TaskId::new("task-1"), "hello", "hello"),
             available_models: Vec::new(),
             model_id: None,
+            prompt_tokens: None,
         }
     }
 
@@ -1229,5 +1342,41 @@ mod tests {
         let response = model.complete(sample_request(), cancel_rx).await.expect("fake succeeds");
         assert!(response.is_empty());
         assert!(!response.completed);
+    }
+
+    #[test]
+    fn output_limit_caps_fits_and_never_exceeds_the_window() {
+        let limits = ModelLimits::new(200_000, 500_000);
+        assert_eq!(fit_output_limit(Some(limits), None), Some(OUTPUT_LIMIT_MAX));
+
+        let fitted = fit_output_limit(Some(limits), Some(150_000)).expect("fits");
+        assert!(fitted >= 1, "fitted {fitted}");
+        assert!(
+            fitted + 150_000 * 116 / 100 + 2_000 <= 200_000,
+            "output plus prompt margin must fit the window: {fitted}"
+        );
+
+        let small = ModelLimits::new(200_000, 4_096);
+        assert_eq!(fit_output_limit(Some(small), Some(1_000)), Some(4_096));
+        assert_eq!(fit_output_limit(Some(small), Some(199_999)), Some(1));
+        assert_eq!(fit_output_limit(None, Some(1_000)), None);
+    }
+
+    #[test]
+    fn prompt_estimate_is_positive_for_empty_and_populated_requests() {
+        assert!(estimate_prompt_tokens(&[], &[], "") >= 1);
+        let transcript = vec![ModelMessage::text(ModelRole::User, "hello")];
+        let tools = vec![ToolDefinition::new("read_file", "reads a file")];
+        let estimate = estimate_prompt_tokens(&transcript, &tools, "system");
+        assert!(estimate >= 2, "estimate {estimate}");
+    }
+
+    #[test]
+    fn response_carries_finish_reason() {
+        let response = ModelResponse::new().with_finish_reason(Some(String::from("length")));
+        assert_eq!(response.finish_reason.as_deref(), Some("length"));
+        let json = serde_json::to_string(&response).expect("serializes");
+        let restored: ModelResponse = serde_json::from_str(&json).expect("parses");
+        assert_eq!(restored.finish_reason.as_deref(), Some("length"));
     }
 }

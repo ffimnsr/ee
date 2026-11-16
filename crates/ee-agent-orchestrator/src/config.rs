@@ -283,6 +283,10 @@ pub struct OrchestratorConfig {
     pub max_input_tokens: Option<usize>,
     /// Optional per-turn output-token cap; unknown provider usage fails closed.
     pub max_output_tokens: Option<usize>,
+    /// Maximum automatic continuations after a length-truncated reply in one
+    /// turn. `0` disables continuation.
+    #[serde(default = "default_output_continuations")]
+    pub max_output_continuations: usize,
     /// Model context-window size in tokens; the ACP `usage_update.size`.
     pub context_window_tokens: u64,
     /// Stuck-detection thresholds for the loop engine.
@@ -362,6 +366,13 @@ impl OrchestratorConfig {
     }
 }
 
+/// Maximum automatic continuations after a length-truncated reply.
+pub const DEFAULT_MAX_OUTPUT_CONTINUATIONS: usize = 2;
+
+fn default_output_continuations() -> usize {
+    DEFAULT_MAX_OUTPUT_CONTINUATIONS
+}
+
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
@@ -380,6 +391,7 @@ impl Default for OrchestratorConfig {
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             max_input_tokens: None,
             max_output_tokens: None,
+            max_output_continuations: DEFAULT_MAX_OUTPUT_CONTINUATIONS,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             stuck: StuckConfig::default(),
             reflection: ReflectionConfig::default(),
@@ -533,6 +545,7 @@ mod tests {
             max_parallel_tools: 3,
             max_input_tokens: Some(1000),
             max_output_tokens: Some(2000),
+            max_output_continuations: 3,
             context_window_tokens: 250_000,
             stuck: StuckConfig {
                 max_repeated_model_responses: 2,
@@ -578,6 +591,7 @@ mod tests {
         assert_eq!(restored.max_parallel_tools, 3);
         assert_eq!(restored.max_input_tokens, Some(1000));
         assert_eq!(restored.max_output_tokens, Some(2000));
+        assert_eq!(restored.max_output_continuations, 3);
         assert_eq!(restored.context_window_tokens, 250_000);
         assert_eq!(restored.stuck.max_repeated_model_responses, 2);
         assert_eq!(restored.stuck.max_no_progress_iterations, 2);
