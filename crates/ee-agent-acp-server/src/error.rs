@@ -66,7 +66,7 @@ pub enum AcpServerError {
 }
 
 /// Provider-owned failure, distinct from framework failures.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
     /// The provider rejected the request as invalid for its backend.
     InvalidRequest(String),
@@ -86,6 +86,11 @@ pub enum ProviderError {
     RateLimited {
         /// Server-provided retry hint, when present.
         retry_after: Option<Duration>,
+        /// Bounded rate-limit metadata from `x-ratelimit-*` headers.
+        rate_limit: Option<RateLimitInfo>,
+        /// Whether the failure may be retried. A provider `x-should-retry:
+        /// false` override clears it.
+        retryable: bool,
         /// Human-readable detail.
         detail: String,
     },
@@ -95,9 +100,91 @@ pub enum ProviderError {
     Transient {
         /// Server-provided retry hint, when present.
         retry_after: Option<Duration>,
+        /// Whether the failure may be retried. A provider `x-should-retry:
+        /// false` override clears it.
+        retryable: bool,
         /// Human-readable detail.
         detail: String,
     },
+    /// The request exceeded the model's context window. Recovered by shrinking
+    /// or compacting the prompt; repeating the same body cannot succeed.
+    ContextOverflow(String),
+    /// The request payload exceeded the provider's size limit.
+    PayloadTooLarge(String),
+    /// The account's quota or credits are exhausted. Rotating the credential
+    /// does not help, so this is never reported as an authentication failure.
+    QuotaExceeded {
+        /// Server-provided retry hint, when present.
+        retry_after: Option<Duration>,
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// The provider rejected the request on content-policy grounds.
+    ContentPolicy(String),
+    /// A failure before or while the request crossed the network.
+    Transport {
+        /// Whether the provider received and ran the request.
+        delivery: Delivery,
+        /// Network error code (`ENOTFOUND`, `ECONNREFUSED`, `Timeout`, ...).
+        code: Option<String>,
+        /// Human-readable detail.
+        detail: String,
+    },
+}
+
+/// Whether a request reached the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// The request never left the client, so replaying it cannot duplicate work.
+    #[default]
+    NotSent,
+    /// The provider received and rejected it; a full replay is safe.
+    Rejected,
+    /// The provider may have run it; replaying can bill or duplicate the work.
+    Ambiguous,
+    /// The provider accepted it.
+    Accepted,
+}
+
+impl Delivery {
+    /// Recovery a caller may attempt for this delivery state.
+    #[must_use]
+    pub const fn recovery(self) -> Recovery {
+        match self {
+            Self::NotSent => Recovery::RetryConnect,
+            Self::Rejected => Recovery::RetryFull,
+            Self::Ambiguous => Recovery::Fail,
+            Self::Accepted => Recovery::Fail,
+        }
+    }
+}
+
+/// Recovery action a caller may take for a transport failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// Reconnect and replay: the request never reached the provider.
+    RetryConnect,
+    /// Replay the whole request: the provider rejected it.
+    RetryFull,
+    /// Rotate the credential and replay: the provider rejected this one.
+    RotateAndRetryFull,
+    /// Fall back to another transport.
+    FallbackHttp,
+    /// Do not retry.
+    Fail,
+}
+
+/// Bounded rate-limit metadata reported by a provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RateLimitInfo {
+    /// `retry-after` hint.
+    pub retry_after: Option<Duration>,
+    /// `x-ratelimit-limit`: requests or tokens allowed per window.
+    pub limit: Option<u64>,
+    /// `x-ratelimit-remaining`: allowance left in the window.
+    pub remaining: Option<u64>,
+    /// `x-ratelimit-reset`: seconds until the window resets.
+    pub reset: Option<Duration>,
 }
 
 impl AcpServerError {
@@ -156,11 +243,18 @@ impl ProviderError {
     #[must_use]
     pub fn jsonrpc_code(&self) -> i32 {
         match self {
-            Self::InvalidRequest(_) => -32600,
+            Self::InvalidRequest(_)
+            | Self::ContextOverflow(_)
+            | Self::PayloadTooLarge(_)
+            | Self::ContentPolicy(_) => -32600,
             Self::BackendFailure(_) | Self::ClientRequestFailure(_) => -32603,
             Self::Cancellation => CODE_REQUEST_CANCELLED,
             Self::PermissionDenied(_) => CODE_PERMISSION_DENIED,
-            Self::Recoverable(_) | Self::RateLimited { .. } | Self::Transient { .. } => -32603,
+            Self::Recoverable(_)
+            | Self::RateLimited { .. }
+            | Self::Transient { .. }
+            | Self::QuotaExceeded { .. }
+            | Self::Transport { .. } => -32603,
         }
     }
 
@@ -178,6 +272,13 @@ impl ProviderError {
             }
             Self::RateLimited { detail, .. } => format!("provider rate limited: {detail}"),
             Self::Transient { detail, .. } => format!("transient provider failure: {detail}"),
+            Self::ContextOverflow(detail) => format!("context window exceeded: {detail}"),
+            Self::PayloadTooLarge(detail) => format!("request payload too large: {detail}"),
+            Self::QuotaExceeded { detail, .. } => format!("provider quota exhausted: {detail}"),
+            Self::ContentPolicy(detail) => format!("content policy rejection: {detail}"),
+            Self::Transport { delivery, detail, .. } => {
+                format!("transport failure ({delivery:?}): {detail}")
+            }
         }
     }
 
@@ -191,10 +292,15 @@ impl ProviderError {
                 RpcError::new(self.jsonrpc_code(), self.jsonrpc_message())
                     .data(serde_json::json!({ "recoverable": recoverable }))
             }
-            Self::RateLimited { retry_after, .. } => {
+            Self::RateLimited { retry_after, rate_limit, .. } => {
                 RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
                     serde_json::json!({ "rate_limited": {
                         "retry_after_ms": retry_after.map(|duration| duration.as_millis() as u64),
+                        "limit": rate_limit.and_then(|info| info.limit),
+                        "remaining": rate_limit.and_then(|info| info.remaining),
+                        "reset_ms": rate_limit
+                            .and_then(|info| info.reset)
+                            .map(|duration| duration.as_millis() as u64),
                     } }),
                 )
             }
@@ -202,6 +308,24 @@ impl ProviderError {
                 RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
                     serde_json::json!({ "transient": {
                         "retry_after_ms": retry_after.map(|duration| duration.as_millis() as u64),
+                    } }),
+                )
+            }
+            Self::QuotaExceeded { retry_after, .. } => {
+                RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
+                    serde_json::json!({ "quota_exceeded": {
+                        "retry_after_ms": retry_after.map(|duration| duration.as_millis() as u64),
+                    } }),
+                )
+            }
+            Self::ContextOverflow(_) => RpcError::new(self.jsonrpc_code(), self.jsonrpc_message())
+                .data(serde_json::json!({ "context_overflow": { "recoverable": "compact" } })),
+            Self::Transport { delivery, code, .. } => {
+                RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
+                    serde_json::json!({ "transport": {
+                        "delivery": format!("{delivery:?}").to_lowercase(),
+                        "recovery": format!("{:?}", delivery.recovery()).to_lowercase(),
+                        "code": code,
                     } }),
                 )
             }
@@ -245,6 +369,13 @@ impl fmt::Display for ProviderError {
             }
             Self::RateLimited { detail, .. } => write!(f, "provider rate limited: {detail}"),
             Self::Transient { detail, .. } => write!(f, "transient provider failure: {detail}"),
+            Self::ContextOverflow(detail) => write!(f, "context window exceeded: {detail}"),
+            Self::PayloadTooLarge(detail) => write!(f, "request payload too large: {detail}"),
+            Self::QuotaExceeded { detail, .. } => write!(f, "provider quota exhausted: {detail}"),
+            Self::ContentPolicy(detail) => write!(f, "content policy rejection: {detail}"),
+            Self::Transport { delivery, detail, .. } => {
+                write!(f, "transport failure ({delivery:?}): {detail}")
+            }
         }
     }
 }
@@ -297,13 +428,24 @@ mod tests {
             (
                 ProviderError::RateLimited {
                     retry_after: Some(std::time::Duration::from_secs(30)),
+                    rate_limit: Some(RateLimitInfo {
+                        retry_after: Some(std::time::Duration::from_secs(30)),
+                        limit: Some(100),
+                        remaining: Some(0),
+                        reset: Some(std::time::Duration::from_secs(30)),
+                    }),
+                    retryable: true,
                     detail: "429".into(),
                 },
                 -32603,
                 "provider rate limited",
             ),
             (
-                ProviderError::Transient { retry_after: None, detail: "503".into() },
+                ProviderError::Transient {
+                    retry_after: None,
+                    retryable: true,
+                    detail: "503".into(),
+                },
                 -32603,
                 "transient provider failure",
             ),
@@ -389,6 +531,8 @@ mod tests {
     fn rate_limited_error_carries_retry_hint() {
         let error = ProviderError::RateLimited {
             retry_after: Some(std::time::Duration::from_secs(30)),
+            rate_limit: None,
+            retryable: true,
             detail: "slow down".into(),
         };
         let rpc = error.into_rpc_error();
@@ -400,6 +544,7 @@ mod tests {
     fn transient_error_carries_retry_hint() {
         let error = ProviderError::Transient {
             retry_after: Some(std::time::Duration::from_secs(5)),
+            retryable: true,
             detail: "upstream down".into(),
         };
         let rpc = error.into_rpc_error();

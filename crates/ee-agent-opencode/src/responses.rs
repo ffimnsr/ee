@@ -53,7 +53,15 @@ pub fn request_body(
 ) -> Value {
     let mut input = Vec::new();
     for message in transcript {
-        if let Some(item) = input_item(message) {
+        // Reasoning items precede the assistant item they belong to: the
+        // protocol replays them as their own input items, in generation order.
+        if message.role == ModelRole::Assistant {
+            input.extend(replay_reasoning_items(message, model));
+            if let Some(item) = input_item(message) {
+                input.push(item);
+            }
+            input.extend(function_call_items(message));
+        } else if let Some(item) = input_item(message) {
             input.push(item);
         }
     }
@@ -64,6 +72,9 @@ pub fn request_body(
         "tool_choice": "auto",
         // EE never asks the provider to keep the response for later retrieval.
         "store": false,
+        // Encrypted reasoning travels back in the transcript, so a stateless
+        // multi-step loop keeps its reasoning without server-side storage.
+        "include": ["reasoning.encrypted_content"],
     });
     if let Some(max_output_tokens) = max_output_tokens {
         body["max_output_tokens"] = Value::from(max_output_tokens);
@@ -203,6 +214,66 @@ fn input_image(data: &str, mime_type: &str) -> Value {
     })
 }
 
+/// Replays the assistant tool calls a turn's observations answer.
+///
+/// Responses keeps a function call as its own input item, so the assistant turn
+/// is kept in the transcript and re-encoded here; a `function_call_output`
+/// without its matching call is rejected.
+fn function_call_items(message: &ModelMessage) -> Vec<Value> {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ModelContent::ToolCall { tool_call_id, name, arguments } => Some(json!({
+                "type": "function_call",
+                "call_id": tool_call_id,
+                "name": name,
+                "arguments": arguments.to_string(),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Key holding the replayable Responses reasoning items.
+const REASONING_ITEMS: &str = "reasoning_items";
+
+/// Reasoning input items a transcript message may replay to `model`.
+///
+/// Only documented fields are replayed: `id` addresses the item, `summary`
+/// carries its text, and `encrypted_content` is the stateless proof of
+/// generation that lets the model resume a tool loop without server storage.
+fn replay_reasoning_items(message: &ModelMessage, model: &str) -> Vec<Value> {
+    let Some(state) =
+        message.native.as_ref().and_then(|native| ee_chat_completions::replayable(native, model))
+    else {
+        return Vec::new();
+    };
+    let Some(items) = state.get(REASONING_ITEMS).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut replayed = Vec::new();
+    for item in items {
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        let mut replay = json!({ "type": "reasoning", "summary": [] });
+        if let Some(summary) = item.get("summary").filter(|summary| summary.is_array()) {
+            replay["summary"] = summary.clone();
+        }
+        for key in ["id", "encrypted_content"] {
+            if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+                replay[key] = value.clone();
+            }
+        }
+        let has_summary = replay["summary"].as_array().is_some_and(|summary| !summary.is_empty());
+        if has_summary || replay.get("encrypted_content").is_some() {
+            replayed.push(replay);
+        }
+    }
+    replayed
+}
+
 /// Decodes a buffered Responses payload into a normalized response.
 ///
 /// # Errors
@@ -224,6 +295,7 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
     }
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut reasoning_items = Vec::new();
     let mut tool_calls = Vec::new();
     for item in output_items(value) {
         match item.get("type").and_then(Value::as_str) {
@@ -231,15 +303,21 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
                 text.push_str(&item_text(item));
                 text.push_str(&refusal_text(item));
             }
-            Some("reasoning") => reasoning.push_str(&item_reasoning(item)),
+            Some("reasoning") => {
+                reasoning.push_str(&item_reasoning(item));
+                reasoning_items.push(item.clone());
+            }
             Some("function_call") => tool_calls.push(function_call_of(label, item)?),
             _ => {}
         }
     }
+    let native_reasoning =
+        (!reasoning_items.is_empty()).then(|| json!({ REASONING_ITEMS: reasoning_items }));
     Ok(response_from_turn(AssistantTurn {
         content: text,
         reasoning,
         raw: Value::Array(output_items(value).to_vec()),
+        native_reasoning,
         tool_calls,
         finish_reason: Some(finish_reason(status, value)),
         usage: usage_from_tokens(value.get("usage").unwrap_or(&Value::Null)),
@@ -351,6 +429,7 @@ pub struct StreamDecoder {
     label: String,
     text: String,
     reasoning: String,
+    reasoning_items: BTreeMap<u64, Value>,
     calls: BTreeMap<u64, PendingCall>,
     finish_reason: Option<String>,
     usage: Option<Usage>,
@@ -371,6 +450,7 @@ impl StreamDecoder {
             label: label.to_string(),
             text: String::new(),
             reasoning: String::new(),
+            reasoning_items: BTreeMap::new(),
             calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
@@ -460,29 +540,40 @@ impl StreamDecoder {
         Ok(SseControl::Continue)
     }
 
-    /// Records `call_id`/`name`/`arguments` from an output item event.
+    /// Records `call_id`/`name`/`arguments` from a function-call output item and
+    /// keeps reasoning items so they can be replayed with the next request.
     fn apply_output_item(&mut self, value: &Value) {
         let Some(item) = value.get("item") else {
             return;
         };
-        if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            return;
-        }
         let Ok(index) = output_index(value, &self.label) else {
             return;
         };
-        let call = self.calls.entry(index).or_default();
-        if let Some(id) = item.get("call_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
-            call.id = Some(id.to_string());
-        }
-        if let Some(name) = item.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
-        {
-            call.name = Some(name.to_string());
-        }
-        if let Some(arguments) =
-            item.get("arguments").and_then(Value::as_str).filter(|args| !args.is_empty())
-        {
-            call.arguments = arguments.to_string();
+        match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => {
+                // `done` carries the encrypted payload the `added` event omits, so
+                // the later event replaces the earlier one for the same index.
+                self.reasoning_items.insert(index, item.clone());
+            }
+            Some("function_call") => {
+                let call = self.calls.entry(index).or_default();
+                if let Some(id) =
+                    item.get("call_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+                {
+                    call.id = Some(id.to_string());
+                }
+                if let Some(name) =
+                    item.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
+                {
+                    call.name = Some(name.to_string());
+                }
+                if let Some(arguments) =
+                    item.get("arguments").and_then(Value::as_str).filter(|args| !args.is_empty())
+                {
+                    call.arguments = arguments.to_string();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -503,10 +594,14 @@ impl StreamDecoder {
             })?;
             tool_calls.push(ToolCall { id, name, arguments: parse_arguments(&call.arguments) });
         }
+        let native_reasoning = (!self.reasoning_items.is_empty()).then(
+            || json!({ REASONING_ITEMS: self.reasoning_items.into_values().collect::<Vec<_>>() }),
+        );
         Ok(response_from_turn(AssistantTurn {
             content: self.text,
             reasoning: self.reasoning,
             raw: Value::Null,
+            native_reasoning,
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
@@ -581,6 +676,7 @@ impl ResponsesCodec {
             response_from_buffered(label, &value)
         })
         .await
+        .map(|response| ee_chat_completions::seal_response(response, &profile.model))
     }
 
     /// Performs one streaming round trip under the profile retry policy.
@@ -642,16 +738,17 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for ResponsesStreamAttemp
         Box::pin(async move {
             let transport = self.transport;
             let label = transport.profile().label.clone();
+            let model = transport.profile().model.clone();
             let mut response = EndpointRequest::new(transport, self.body).send().await?;
             if !is_event_stream(response.headers()) {
                 let value = transport.read_json(&mut response, "streaming response").await?;
                 let decoded = response_from_buffered(&label, &value)?;
                 emit_finished_deltas(&decoded, sink)?;
-                return Ok(decoded);
+                return Ok(ee_chat_completions::seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
             drive_sse(&label, &mut response, |event| decoder.apply(event, sink)).await?;
-            decoder.finish()
+            decoder.finish().map(|response| ee_chat_completions::seal_response(response, &model))
         })
     }
 }

@@ -203,6 +203,31 @@ impl DialectCodec for ChatCompletionsCodec {
     ) -> CodecFuture<'a> {
         Box::pin(ChatCompletionsCodec::complete_streaming(self, transcript, tools, sink))
     }
+
+    fn complete_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(ChatCompletionsCodec::complete_with_prompt(self, transcript, tools, prompt_tokens))
+    }
+
+    fn complete_streaming_with_prompt<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        sink: DeltaSink<'a>,
+        prompt_tokens: Option<u64>,
+    ) -> CodecFuture<'a> {
+        Box::pin(ChatCompletionsCodec::complete_streaming_with_prompt(
+            self,
+            transcript,
+            tools,
+            sink,
+            prompt_tokens,
+        ))
+    }
 }
 
 /// One OpenCode route bound to the codec its dialect selected.
@@ -335,7 +360,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
 fn adapter_error(error: ProviderError) -> ModelError {
     match error {
         ProviderError::Cancellation => ModelError::Cancelled,
-        other => ModelError::Adapter(other.to_string()),
+        other => ModelError::Provider(other),
     }
 }
 

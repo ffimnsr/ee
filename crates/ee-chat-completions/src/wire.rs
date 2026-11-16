@@ -11,16 +11,22 @@
 //! normalize it identically.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelContent, ModelMessage, ModelResponse, ModelRole, ModelUsage, ToolDefinition, ToolIntent,
 };
-use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
-use crate::profile::{MaxTokensField, RetryPolicy};
+pub use crate::error_classification::{
+    classify_http_error, classify_status_error, http_error_message, is_retryable, is_timeout,
+    is_unreachable, parse_rate_limit, parse_retry_after, parse_should_retry, retry_after_of,
+    retry_delay, unreachable_delay,
+};
+use crate::profile::MaxTokensField;
+use crate::reasoning_replay::{
+    append_reasoning_detail, native_reasoning_of, replay_reasoning, replay_tool_calls,
+};
 use crate::transport::DeltaSink;
 
 /// One decoded assistant turn.
@@ -38,6 +44,10 @@ pub struct AssistantTurn {
     /// dialect-aware transcript appending. Never re-encoded into another
     /// dialect.
     pub raw: Value,
+    /// Reasoning-specific provider state to replay verbatim on the next turn
+    /// (thinking blocks with signatures, `reasoning_details`, encrypted
+    /// reasoning items). `None` when the dialect produced no replayable state.
+    pub native_reasoning: Option<Value>,
     /// Tool calls the model requested.
     pub tool_calls: Vec<ToolCall>,
     /// Canonical stop signal: `stop` for a natural end, `tool_calls` when the
@@ -190,6 +200,25 @@ pub fn messages_from_transcript_with_cache(
     transcript: &[ModelMessage],
     cache_breakpoints: bool,
 ) -> Vec<Value> {
+    messages_from_transcript_replaying(system_prompt, transcript, cache_breakpoints, "", None)
+}
+
+/// Converts a normalized transcript into chat messages, replaying provider
+/// reasoning state the current model produced.
+///
+/// `model` is the model the request targets; native reasoning sealed for another
+/// model is never replayed. `reasoning_field` names a scalar assistant field the
+/// route requires even when the provider only streamed structured details (for
+/// example Kimi's `reasoning_content`); it falls back to the message's reasoning
+/// summary.
+#[must_use]
+pub fn messages_from_transcript_replaying(
+    system_prompt: &str,
+    transcript: &[ModelMessage],
+    cache_breakpoints: bool,
+    model: &str,
+    reasoning_field: Option<&str>,
+) -> Vec<Value> {
     let mut messages = Vec::new();
     if cache_breakpoints && !system_prompt.is_empty() {
         messages.push(json!({
@@ -207,7 +236,7 @@ pub fn messages_from_transcript_with_cache(
             ModelRole::Tool => "tool",
         };
         let content = content_text(&message.content);
-        let entry = if role == "tool" {
+        let mut entry = if role == "tool" {
             json!({
                 "role": "tool",
                 "tool_call_id": tool_call_id_of(&message.content),
@@ -223,6 +252,10 @@ pub fn messages_from_transcript_with_cache(
         } else {
             json!({ "role": role, "content": content })
         };
+        if message.role == ModelRole::Assistant {
+            replay_tool_calls(&mut entry, message, content.is_empty());
+            replay_reasoning(&mut entry, message, model, reasoning_field);
+        }
         messages.push(entry);
     }
     messages
@@ -269,6 +302,9 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
     response = response.with_finish_reason(answer.finish_reason);
+    response = response.with_native(
+        answer.native_reasoning.and_then(ee_agent_orchestrator::OpaqueProviderState::new),
+    );
     if !answer.reasoning.is_empty() {
         response = response.reasoning(answer.reasoning);
     }
@@ -292,106 +328,16 @@ pub fn decode_message(value: &Value) -> Option<AssistantTurn> {
         .unwrap_or_default();
     let finish_reason =
         value.pointer("/choices/0/finish_reason").and_then(Value::as_str).map(str::to_string);
+    let native_reasoning = native_reasoning_of(message);
     Some(AssistantTurn {
         content,
         reasoning,
         raw: message.clone(),
+        native_reasoning,
         tool_calls,
         finish_reason,
         usage: usage_of(value),
     })
-}
-
-/// Builds the failure detail for a non-success HTTP status.
-#[must_use]
-pub fn http_error_message(label: &str, status: u16, value: &Value) -> String {
-    if let Some(message) = value.pointer("/error/message").and_then(Value::as_str) {
-        format!("{label} HTTP {status}: {message}")
-    } else {
-        format!("{label} HTTP {status}: {value}")
-    }
-}
-
-/// Classifies a non-success status after its body was read, reusing the
-/// provider's own message when the body carries one.
-#[must_use]
-pub fn classify_status_error(
-    label: &str,
-    status: u16,
-    headers: &HeaderMap,
-    value: &Value,
-) -> ProviderError {
-    classify_http_error(
-        status,
-        parse_retry_after(headers),
-        http_error_message(label, status, value),
-    )
-}
-
-/// Classifies a non-success status into a retry decision and a typed provider
-/// error. Structural classification: never string parsing.
-#[must_use]
-pub fn classify_http_error(
-    status: u16,
-    retry_after: Option<Duration>,
-    detail: String,
-) -> ProviderError {
-    match status {
-        429 => ProviderError::RateLimited { retry_after, detail },
-        // Transient server/network classes; safe to retry only before any
-        // response bytes were produced (the streaming path guards that itself).
-        408 | 409 | 425 | 500 | 502 | 503 | 504 | 521 | 522 | 524 => {
-            ProviderError::Transient { retry_after, detail }
-        }
-        // 401/403 are permanent credential/policy problems: never retried,
-        // never auto-resumed.
-        401 | 403 => ProviderError::BackendFailure(detail),
-        _ if status >= 500 => ProviderError::Transient { retry_after, detail },
-        _ => ProviderError::InvalidRequest(detail),
-    }
-}
-
-/// Whether a provider error may be retried (rate limits and transient failures
-/// only; never side-effecting retries).
-#[must_use]
-pub fn is_retryable(error: &ProviderError) -> bool {
-    matches!(error, ProviderError::RateLimited { .. } | ProviderError::Transient { .. })
-}
-
-/// Server-provided retry hint, when the error carries one.
-#[must_use]
-pub fn retry_after_of(error: &ProviderError) -> Option<Duration> {
-    match error {
-        ProviderError::RateLimited { retry_after, .. }
-        | ProviderError::Transient { retry_after, .. } => *retry_after,
-        _ => None,
-    }
-}
-
-/// Parses a `Retry-After` header value (delta-seconds form; HTTP dates are rare
-/// and rejected rather than mis-parsed).
-#[must_use]
-pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get("retry-after")?.to_str().ok()?.trim();
-    value.parse::<u64>().ok().map(Duration::from_secs)
-}
-
-/// Retry delay for `attempt` (0-based): the server hint wins when present
-/// (capped), otherwise exponential backoff with bounded jitter.
-#[must_use]
-pub fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after: Option<Duration>) -> Duration {
-    if let Some(hint) = retry_after {
-        return hint.min(policy.max_delay);
-    }
-    let base = policy.base_delay.as_millis() as u64;
-    let backoff = base.saturating_mul(1 << attempt.min(10));
-    let capped = backoff.min(policy.max_delay.as_millis() as u64);
-    // Bounded jitter (±20%) so bursts do not retry in lockstep.
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos() as u64)
-        % (capped / 5 + 1);
-    Duration::from_millis(capped + jitter)
 }
 
 /// Extracts usage from an object carrying the neutral
@@ -732,6 +678,13 @@ pub(crate) struct StreamAccumulator {
     label: String,
     content: String,
     reasoning: String,
+    /// Structured reasoning entries, merged as they stream so the replayed
+    /// array keeps the provider's own entry boundaries and indexes.
+    native_details: Vec<Value>,
+    /// Scalar reasoning field the provider streamed, with its accumulated text.
+    native_scalar: Option<(String, String)>,
+    /// Opaque per-turn reasoning token the provider echoed.
+    native_opaque: Option<String>,
     tool_calls: BTreeMap<usize, PendingToolCall>,
     finish_reason: Option<String>,
     /// Latest reported usage; chunks carry cumulative totals, so later
@@ -752,6 +705,9 @@ impl StreamAccumulator {
             label: label.to_string(),
             content: String::new(),
             reasoning: String::new(),
+            native_details: Vec::new(),
+            native_scalar: None,
+            native_opaque: None,
             tool_calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
@@ -789,12 +745,61 @@ impl StreamAccumulator {
             self.reasoning.push_str(&reasoning);
             output.push(StreamDelta::Reasoning(reasoning));
         }
+        self.absorb_native_reasoning(delta);
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
                 self.apply_tool_call_delta(call)?;
             }
         }
         Ok(output)
+    }
+
+    /// Records dialect-native reasoning state so the next turn can replay it.
+    ///
+    /// The displayed reasoning text and the replay payload are separate: the
+    /// first is flattened for the client, the second keeps the provider's own
+    /// structure (including `index`) so the provider accepts it back.
+    fn absorb_native_reasoning(&mut self, delta: &Value) {
+        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+            for detail in details {
+                append_reasoning_detail(&mut self.native_details, detail.clone());
+            }
+        }
+        if self.native_scalar.is_none() {
+            for key in ["reasoning_content", "reasoning", "reasoning_text"] {
+                if delta.get(key).and_then(Value::as_str).is_some_and(|text| !text.is_empty()) {
+                    self.native_scalar = Some((key.to_string(), String::new()));
+                    break;
+                }
+            }
+        }
+        if let Some((key, text)) = self.native_scalar.as_mut()
+            && let Some(chunk) = delta.get(key.as_str()).and_then(Value::as_str)
+        {
+            text.push_str(chunk);
+        }
+        if let Some(opaque) =
+            delta.get("reasoning_opaque").and_then(Value::as_str).filter(|value| !value.is_empty())
+        {
+            self.native_opaque = Some(opaque.to_string());
+        }
+    }
+
+    /// Replay payload for this turn, when the stream produced any.
+    fn native_reasoning(&self) -> Option<Value> {
+        let mut object = serde_json::Map::new();
+        if !self.native_details.is_empty() {
+            object.insert("reasoning_details".into(), Value::Array(self.native_details.clone()));
+        }
+        if let Some((key, text)) = self.native_scalar.as_ref()
+            && !text.is_empty()
+        {
+            object.insert(key.clone(), Value::String(text.clone()));
+        }
+        if let Some(opaque) = self.native_opaque.as_ref() {
+            object.insert("reasoning_opaque".into(), Value::String(opaque.clone()));
+        }
+        (!object.is_empty()).then_some(Value::Object(object))
     }
 
     fn apply_tool_call_delta(&mut self, value: &Value) -> Result<(), ProviderError> {
@@ -819,6 +824,7 @@ impl StreamAccumulator {
     }
 
     pub(crate) fn finish(self) -> Result<AssistantTurn, ProviderError> {
+        let native_reasoning = self.native_reasoning();
         let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
         for (_index, call) in self.tool_calls {
             let id = call.id.ok_or_else(|| {
@@ -859,10 +865,18 @@ impl StreamAccumulator {
         if !self.reasoning.is_empty() {
             raw["reasoning"] = Value::String(self.reasoning.clone());
         }
+        if let Some(Value::Object(fields)) = native_reasoning.as_ref()
+            && let Some(object) = raw.as_object_mut()
+        {
+            for (key, value) in fields {
+                object.insert(key.clone(), value.clone());
+            }
+        }
         Ok(AssistantTurn {
             content: self.content,
             reasoning: self.reasoning,
             raw,
+            native_reasoning,
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,

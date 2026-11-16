@@ -1,7 +1,11 @@
+use std::time::Duration;
+
 use ee_agent_orchestrator::{ModelMessage, ModelRole, SideEffectClass, ToolResult};
+use reqwest::header::HeaderMap;
 use serde_json::json;
 
 use super::*;
+use crate::profile::RetryPolicy;
 
 #[test]
 fn decodes_string_answer() {
@@ -567,8 +571,17 @@ fn classifies_http_errors_into_retry_decisions() {
         ProviderError::Transient { retry_after, .. } => assert_eq!(retry_after, hint),
         other => panic!("expected transient, got {other:?}"),
     }
-    assert!(is_retryable(&ProviderError::RateLimited { retry_after: None, detail: "x".into() }));
-    assert!(is_retryable(&ProviderError::Transient { retry_after: None, detail: "x".into() }));
+    assert!(is_retryable(&ProviderError::RateLimited {
+        retry_after: None,
+        rate_limit: None,
+        retryable: true,
+        detail: "x".into(),
+    }));
+    assert!(is_retryable(&ProviderError::Transient {
+        retry_after: None,
+        retryable: true,
+        detail: "x".into(),
+    }));
     assert!(!is_retryable(&ProviderError::BackendFailure("x".into())));
     assert!(!is_retryable(&ProviderError::InvalidRequest("x".into())));
     assert!(!is_retryable(&ProviderError::Cancellation));
@@ -588,22 +601,19 @@ fn parses_retry_after_seconds_and_ignores_dates() {
 
 #[test]
 fn retry_delay_prefers_capped_server_hint() {
-    let policy = RetryPolicy {
-        max_attempts: 2,
-        base_delay: Duration::from_millis(100),
-        max_delay: Duration::from_secs(10),
-    };
-    assert_eq!(retry_delay(&policy, 0, Some(Duration::from_secs(2))), Duration::from_secs(2));
-    assert_eq!(retry_delay(&policy, 0, Some(Duration::from_secs(60))), Duration::from_secs(10));
+    let policy = RetryPolicy::new(2, Duration::from_millis(100), Duration::from_secs(10));
+    let delay = retry_delay(&policy, 0, Some(Duration::from_secs(2))).as_millis() as u64;
+    assert!((2_000..=2_400).contains(&delay), "hint widened the gap: {delay}");
+    // The server-hint cap is independent of the backoff cap, so a long hint is
+    // honoured up to 15 minutes rather than truncated to `max_delay`.
+    let delay = retry_delay(&policy, 0, Some(Duration::from_secs(3_600))).as_millis() as u64;
+    let cap = 15 * 60 * 1_000;
+    assert!((cap..=cap + cap / 5).contains(&delay), "hint was not capped: {delay}");
 }
 
 #[test]
 fn retry_delay_backs_off_exponentially_with_bounded_jitter() {
-    let policy = RetryPolicy {
-        max_attempts: 4,
-        base_delay: Duration::from_millis(100),
-        max_delay: Duration::from_secs(10),
-    };
+    let policy = RetryPolicy::new(4, Duration::from_millis(100), Duration::from_secs(10));
     for attempt in 0..5 {
         let delay = retry_delay(&policy, attempt, None).as_millis() as u64;
         let expected = 100u64 << attempt.min(10);
@@ -615,4 +625,213 @@ fn retry_delay_backs_off_exponentially_with_bounded_jitter() {
     }
     let delay = retry_delay(&policy, 20, None).as_millis() as u64;
     assert!(delay <= 10_000 + 10_000 / 5 + 1, "{delay}");
+}
+
+// ── Gap 4: reasoning continuity and replay ──────────────────────────────
+
+fn assistant_with_native(model: &str, state: serde_json::Value) -> ModelMessage {
+    ModelMessage::text(ModelRole::Assistant, "answer")
+        .with_native(crate::native::seal(state, model))
+}
+
+#[test]
+fn reasoning_details_are_replayed_verbatim_with_index() {
+    let details = json!([
+        { "type": "reasoning.text", "text": "step", "index": 0, "signature": "sig" },
+        { "type": "reasoning.summary", "summary": "sum", "index": 1 }
+    ]);
+    let transcript =
+        vec![assistant_with_native("model-a", json!({ "reasoning_details": details }))];
+
+    let messages = messages_from_transcript_replaying("sys", &transcript, false, "model-a", None);
+    assert_eq!(messages[1]["reasoning_details"], details);
+    assert_eq!(messages[1]["reasoning_details"][0]["index"], 0);
+
+    let other = messages_from_transcript_replaying("sys", &transcript, false, "model-b", None);
+    assert!(
+        other[1].get("reasoning_details").is_none(),
+        "provider state is model-scoped and must not replay to another model"
+    );
+}
+
+#[test]
+fn configured_reasoning_field_carries_the_reasoning_text() {
+    let message = assistant_with_native(
+        "model-a",
+        json!({ "reasoning_details": [{ "type": "reasoning.summary", "summary": "thinking" }] }),
+    )
+    .with_reasoning_summary("thinking");
+
+    let messages = messages_from_transcript_replaying(
+        "",
+        &[message],
+        false,
+        "model-a",
+        Some("reasoning_content"),
+    );
+    assert_eq!(messages[1]["reasoning_content"], "thinking");
+    assert!(messages[1]["reasoning_details"].is_array());
+}
+
+#[test]
+fn streamed_reasoning_details_merge_into_one_replayable_entry() {
+    let mut accumulator = StreamAccumulator::new("test");
+    for text in ["a", "b"] {
+        let chunk = json!({ "choices": [{ "delta": { "reasoning_details": [
+            { "type": "reasoning.text", "text": text, "index": 0 }
+        ] } }] });
+        accumulator.apply(&chunk).expect("applies");
+    }
+
+    let turn = accumulator.finish().expect("finishes");
+    let native = turn.native_reasoning.expect("native reasoning");
+    assert_eq!(native["reasoning_details"][0]["text"], "ab");
+    assert_eq!(native["reasoning_details"][0]["index"], 0);
+}
+
+#[test]
+fn streamed_scalar_reasoning_is_replayed_under_its_own_field() {
+    let mut accumulator = StreamAccumulator::new("test");
+    for text in ["one", " two"] {
+        let chunk = json!({ "choices": [{ "delta": { "reasoning_content": text } }] });
+        accumulator.apply(&chunk).expect("applies");
+    }
+
+    let turn = accumulator.finish().expect("finishes");
+    let native = turn.native_reasoning.expect("native reasoning");
+    assert_eq!(native["reasoning_content"], "one two");
+}
+
+// ── Gap 5: error taxonomy, rate-limit metadata, retry budget ────────────
+
+#[test]
+fn classifies_overflow_payload_policy_and_quota() {
+    let empty = HeaderMap::new();
+    let overflow = json!({ "error": { "code": "context_length_exceeded", "message": "too long" } });
+    assert!(matches!(
+        classify_status_error("x", 400, &empty, &overflow),
+        ProviderError::ContextOverflow(_)
+    ));
+    let large = json!({ "error": { "message": "nope" } });
+    assert!(matches!(
+        classify_status_error("x", 413, &empty, &large),
+        ProviderError::PayloadTooLarge(_)
+    ));
+    let quota = json!({ "error": { "message": "payment required" } });
+    assert!(matches!(
+        classify_status_error("x", 402, &empty, &quota),
+        ProviderError::QuotaExceeded { .. }
+    ));
+    let auth = json!({ "error": { "message": "no" } });
+    assert!(matches!(
+        classify_status_error("x", 401, &empty, &auth),
+        ProviderError::BackendFailure(_)
+    ));
+    let policy = json!({ "error": { "message": "blocked by the content policy" } });
+    assert!(matches!(
+        classify_status_error("x", 400, &empty, &policy),
+        ProviderError::ContentPolicy(_)
+    ));
+}
+
+#[test]
+fn a_throttle_is_never_a_context_overflow() {
+    let body = json!({ "error": { "message": "too many tokens processed" } });
+    let error = classify_status_error("x", 429, &HeaderMap::new(), &body);
+    assert!(matches!(error, ProviderError::RateLimited { .. }), "{error:?}");
+}
+
+#[test]
+fn x_should_retry_false_suppresses_the_retry() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-should-retry", "false".parse().expect("header"));
+    let body = json!({ "error": { "message": "slow down" } });
+    let error = classify_status_error("x", 429, &headers, &body);
+    assert!(!is_retryable(&error), "{error:?}");
+    assert!(matches!(error, ProviderError::RateLimited { retryable: false, .. }));
+}
+
+#[test]
+fn rate_limit_headers_are_exposed() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", "30".parse().expect("header"));
+    headers.insert("x-ratelimit-limit", "100".parse().expect("header"));
+    headers.insert("x-ratelimit-remaining", "0".parse().expect("header"));
+    headers.insert("x-ratelimit-reset", "60".parse().expect("header"));
+    let body = json!({ "error": { "message": "slow down" } });
+
+    match classify_status_error("x", 429, &headers, &body) {
+        ProviderError::RateLimited { retry_after, rate_limit: Some(info), .. } => {
+            assert_eq!(retry_after, Some(Duration::from_secs(30)));
+            assert_eq!(info.limit, Some(100));
+            assert_eq!(info.remaining, Some(0));
+            assert_eq!(info.reset, Some(Duration::from_secs(60)));
+        }
+        other => panic!("expected rate limit metadata, got {other:?}"),
+    }
+}
+
+#[test]
+fn ambiguous_transport_failures_are_not_retried() {
+    use ee_agent_acp_server::Delivery;
+
+    let ambiguous = ProviderError::Transport {
+        delivery: Delivery::Ambiguous,
+        code: None,
+        detail: "connection dropped".into(),
+    };
+    assert!(!is_retryable(&ambiguous), "a sent request may already have run");
+
+    let not_sent = ProviderError::Transport {
+        delivery: Delivery::NotSent,
+        code: Some("ENOTFOUND".into()),
+        detail: "dns".into(),
+    };
+    assert!(is_retryable(&not_sent));
+    assert!(is_unreachable(&not_sent));
+
+    let refused = ProviderError::Transport {
+        delivery: Delivery::NotSent,
+        code: Some("ECONNREFUSED".into()),
+        detail: "refused".into(),
+    };
+    assert!(!is_unreachable(&refused), "something answered, so it is the server's state");
+}
+
+#[test]
+fn timeout_transport_failures_are_recognised() {
+    let timeout = ProviderError::Transport {
+        delivery: ee_agent_acp_server::Delivery::Ambiguous,
+        code: Some("Timeout".into()),
+        detail: "timed out".into(),
+    };
+    assert!(is_timeout(&timeout));
+    assert!(!is_unreachable(&timeout));
+}
+
+#[test]
+fn assistant_tool_calls_replay_before_their_observations() {
+    let mut transcript = vec![
+        ModelMessage::text(ModelRole::User, "read it"),
+        ModelMessage::tool_call("call_1", "read_file", json!({ "path": "a" }))
+            .with_native(crate::native::seal(
+                json!({ "reasoning_details": [{ "type": "reasoning.text", "text": "plan", "index": 0 }] }),
+                "model-a",
+            )),
+    ];
+    transcript.push(ModelMessage::tool_result("call_1", ToolResult::success("body")));
+
+    let messages = messages_from_transcript_replaying("sys", &transcript, false, "model-a", None);
+    let assistant = &messages[2];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"], Value::Null, "a tool-only turn has null content");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read_file");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a\"}",
+        "arguments replay as a JSON string"
+    );
+    assert_eq!(assistant["reasoning_details"][0]["index"], 0);
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call_1");
 }

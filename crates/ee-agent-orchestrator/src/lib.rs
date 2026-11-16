@@ -180,6 +180,7 @@ pub mod command_intelligence;
 pub mod compaction;
 pub mod completion;
 pub mod config;
+pub mod context_budget;
 pub mod context_pack;
 pub mod context_planner;
 pub mod critic_observability;
@@ -206,6 +207,7 @@ pub mod model;
 pub mod model_registry;
 pub mod model_router;
 pub mod observability;
+pub mod opaque_state;
 pub mod parallel_tools;
 pub mod plan_compiler;
 pub mod plugin_runtime;
@@ -385,8 +387,9 @@ pub use milestones::{
 pub use model::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage, ModelRequest,
     ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
-    OUTPUT_LIMIT_MIN, Transcript, TranscriptTruncation, estimate_json_prompt_tokens,
-    estimate_prompt_tokens, fit_output_limit,
+    OUTPUT_LIMIT_MIN, OpaqueProviderState, Transcript, TranscriptTruncation,
+    compaction_threshold_tokens, estimate_json_prompt_tokens, estimate_prompt_tokens,
+    fit_output_limit,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,

@@ -23,6 +23,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::budget::BudgetSnapshot;
+pub use crate::context_budget::{
+    COMPACTION_SUMMARY_RESERVE_DIVISOR, COMPACTION_SUMMARY_RESERVE_FLOOR, ModelLimits,
+    OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX, OUTPUT_LIMIT_MIN, PROMPT_BYTES_PER_TOKEN,
+    PROMPT_ESTIMATE_MARGIN_PERCENT, compaction_threshold_tokens, estimate_json_prompt_tokens,
+    estimate_prompt_tokens, fit_output_limit,
+};
+pub use crate::opaque_state::OpaqueProviderState;
 use crate::session_log::SessionLog;
 use crate::tasks::TaskNode;
 use crate::tools::{ToolDefinition, ToolIntent, ToolResult};
@@ -39,86 +46,6 @@ pub const TOOL_RESULT_PRUNE_HEAD: usize = 4096;
 pub const TOOL_RESULT_PRUNE_TAIL: usize = 1024;
 /// Exact marker substituted for the pruned middle span.
 pub const TOOL_RESULT_PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
-
-/// Output-token bound used when a model's catalog limit is unknown.
-pub const OUTPUT_LIMIT_FALLBACK: u64 = 32_000;
-/// Largest output-token bound ee requests, however large the catalog limit is.
-pub const OUTPUT_LIMIT_MAX: u64 = 256_000;
-/// Smallest useful output-token bound used when a context window has room.
-pub const OUTPUT_LIMIT_MIN: u64 = 1_024;
-/// Prompt bytes per estimated token (documented 4:1 heuristic).
-pub const PROMPT_BYTES_PER_TOKEN: u64 = 4;
-/// Margin applied to the estimated prompt before fitting output tokens.
-pub const PROMPT_ESTIMATE_MARGIN_PERCENT: u64 = 16;
-
-/// Catalog-declared context and output limits for one model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelLimits {
-    /// Total context window in tokens.
-    pub context: u64,
-    /// Maximum output tokens the model documents.
-    pub output: u64,
-}
-
-impl ModelLimits {
-    /// Builds limits from a context and output bound.
-    #[must_use]
-    pub const fn new(context: u64, output: u64) -> Self {
-        Self { context, output }
-    }
-}
-
-/// Fits an output-token bound to the room a prompt leaves in the context window.
-///
-/// Returns `None` when the model carries no catalog limit, so a caller can omit
-/// the field instead of guessing. The requested bound is the catalog output
-/// limit capped at [`OUTPUT_LIMIT_MAX`]; when the prompt size is known the
-/// result also leaves [`PROMPT_ESTIMATE_MARGIN_PERCENT`] of headroom. A window
-/// with no room yields a one-token bound rather than a value that would exceed
-/// the window.
-#[must_use]
-pub fn fit_output_limit(limits: Option<ModelLimits>, prompt_tokens: Option<u64>) -> Option<u64> {
-    let limits = limits?;
-    let requested = limits.output.clamp(1, OUTPUT_LIMIT_MAX);
-    let Some(prompt) = prompt_tokens else {
-        return Some(requested);
-    };
-    if limits.context == 0 {
-        return Some(requested);
-    }
-    let margin = prompt.saturating_mul(PROMPT_ESTIMATE_MARGIN_PERCENT).saturating_div(100);
-    let headroom = limits.context.saturating_div(100);
-    let room =
-        limits.context.saturating_sub(headroom).saturating_sub(prompt).saturating_sub(margin);
-    let fitted = room.min(requested);
-    Some(if fitted >= OUTPUT_LIMIT_MIN { fitted } else { fitted.max(1) })
-}
-
-/// Estimates prompt tokens from the normalized transcript, tools, and system
-/// prompt using the documented 4-bytes-per-token heuristic.
-#[must_use]
-pub fn estimate_prompt_tokens(
-    transcript: &[ModelMessage],
-    tools: &[ToolDefinition],
-    system_prompt: &str,
-) -> u64 {
-    let messages = serde_json::to_vec(transcript).map_or(0, |bytes| bytes.len() as u64);
-    let tools = serde_json::to_vec(tools).map_or(0, |bytes| bytes.len() as u64);
-    let system = system_prompt.len() as u64;
-    messages
-        .saturating_add(tools)
-        .saturating_add(system)
-        .saturating_div(PROMPT_BYTES_PER_TOKEN)
-        .max(1)
-}
-
-/// Estimates prompt tokens from wire-level message and tool arrays.
-#[must_use]
-pub fn estimate_json_prompt_tokens(messages: &serde_json::Value, tools: &serde_json::Value) -> u64 {
-    let messages = serde_json::to_vec(messages).map_or(0, |bytes| bytes.len() as u64);
-    let tools = serde_json::to_vec(tools).map_or(0, |bytes| bytes.len() as u64);
-    messages.saturating_add(tools).saturating_div(PROMPT_BYTES_PER_TOKEN).max(1)
-}
 
 /// Message metadata key: the tool name that produced a result.
 pub const TOOL_NAME_METADATA_KEY: &str = "tool_name";
@@ -168,6 +95,19 @@ pub enum ModelContent {
         /// The normalized execution outcome.
         result: ToolResult,
     },
+    /// A tool call the model requested.
+    ///
+    /// Assistant tool-call turns are kept so the next request replays the call
+    /// the observations answer; providers reject an orphan tool result, and
+    /// signed reasoning is only meaningful alongside its own call.
+    ToolCall {
+        /// The tool-call id the matching result carries.
+        tool_call_id: String,
+        /// The function name the model requested.
+        name: String,
+        /// Parsed argument object.
+        arguments: serde_json::Value,
+    },
     /// A reference to a workspace file.
     FileReference { path: String },
     /// A reference to a terminal session (later phases).
@@ -213,6 +153,9 @@ pub struct ModelMessage {
     pub content: Vec<ModelContent>,
     /// Optional condensed reasoning summary kept separate from the text.
     pub reasoning_summary: Option<String>,
+    /// Opaque provider reasoning state replayed only to the producing model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<OpaqueProviderState>,
     /// Bounded diagnostic metadata; never carries required fields.  Provider
     /// metadata is flattened into at most [`MAX_METADATA_ENTRIES`] string
     /// entries so the transcript stays deterministic and bounded.
@@ -231,6 +174,7 @@ impl ModelMessage {
             role,
             content: Vec::new(),
             reasoning_summary: None,
+            native: None,
             metadata: BTreeMap::new(),
             trust: trust_for_role(role),
         }
@@ -252,6 +196,20 @@ impl ModelMessage {
         }])
     }
 
+    /// Creates an assistant message replaying one tool call.
+    #[must_use]
+    pub fn tool_call(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self::new(ModelRole::Assistant).with_content(vec![ModelContent::ToolCall {
+            tool_call_id: tool_call_id.into(),
+            name: name.into(),
+            arguments,
+        }])
+    }
+
     /// Replaces the message content.
     #[must_use]
     pub fn with_content(mut self, content: Vec<ModelContent>) -> Self {
@@ -260,9 +218,17 @@ impl ModelMessage {
     }
 
     /// Sets the optional reasoning summary.
+    /// Sets the reasoning summary.
     #[must_use]
     pub fn with_reasoning_summary(mut self, summary: impl Into<String>) -> Self {
         self.reasoning_summary = Some(summary.into());
+        self
+    }
+
+    /// Sets opaque provider reasoning state.
+    #[must_use]
+    pub fn with_native(mut self, native: Option<OpaqueProviderState>) -> Self {
+        self.native = native;
         self
     }
 
@@ -549,6 +515,9 @@ pub struct ModelResponse {
     /// `tool_calls`); `None` when the adapter could not report one.
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// Opaque provider reasoning state for the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<OpaqueProviderState>,
     /// Reported token usage; unknown fields stay `None`.
     pub usage: ModelUsage,
 }
@@ -563,8 +532,16 @@ impl ModelResponse {
             tool_intents: Vec::new(),
             completed: false,
             finish_reason: None,
+            native: None,
             usage: ModelUsage::new(),
         }
+    }
+
+    /// Sets opaque provider reasoning state for the next request.
+    #[must_use]
+    pub fn with_native(mut self, native: Option<OpaqueProviderState>) -> Self {
+        self.native = native;
+        self
     }
 
     /// Sets the provider stop reason.
@@ -747,20 +724,29 @@ impl Transcript {
     }
 
     /// Appends the assistant message for a model response: text stays in
-    /// content, reasoning stays in the separate reasoning summary.  Empty
-    /// responses append nothing.
+    /// content, reasoning stays in the separate reasoning summary, and tool
+    /// calls are kept so the next request can replay the turn. Empty responses
+    /// append nothing.
     pub fn push_assistant(&mut self, response: &ModelResponse) {
-        let has_text = !response.text.is_empty();
+        let mut content = Vec::new();
+        if !response.text.is_empty() {
+            content.push(ModelContent::Text(response.text.clone()));
+        }
+        content.extend(response.tool_intents.iter().map(|intent| ModelContent::ToolCall {
+            tool_call_id: intent.tool_call_id.clone(),
+            name: intent.name.clone(),
+            arguments: intent.arguments.clone(),
+        }));
         let has_reasoning = response.reasoning.as_deref().is_some_and(|text| !text.is_empty());
-        if !has_text && !has_reasoning {
+        if content.is_empty() && !has_reasoning && response.native.is_none() {
             return;
         }
-        let mut message = ModelMessage::new(ModelRole::Assistant);
-        if has_text {
-            message = message.with_content(vec![ModelContent::Text(response.text.clone())]);
-        }
+        let mut message = ModelMessage::new(ModelRole::Assistant).with_content(content);
         if let Some(reasoning) = response.reasoning.as_deref() {
             message = message.with_reasoning_summary(reasoning);
+        }
+        if response.native.is_some() {
+            message = message.with_native(response.native.clone());
         }
         self.messages.push(message);
         let id = self.record_message_at(self.messages.len() - 1, None);
@@ -869,6 +855,50 @@ impl Transcript {
         }
     }
 
+    /// Drops the oldest half of the removable messages, keeping the system
+    /// prefix and the newest message.
+    ///
+    /// Used once when a provider reports a context overflow: the request can
+    /// then be retried with a smaller prompt instead of ending the turn. Returns
+    /// `false` when there is nothing left to drop.
+    pub fn shrink_oldest(&mut self) -> bool {
+        let first = self
+            .messages
+            .iter()
+            .position(|message| message.role != ModelRole::System)
+            .unwrap_or(self.messages.len());
+        let removable = self.messages.len().saturating_sub(first + 1);
+        if removable == 0 {
+            return false;
+        }
+        let drop_count = removable.div_ceil(2);
+        // Never leave the surviving tail starting with a tool observation whose
+        // call was dropped: providers reject an orphan result.
+        let mut drop_count = drop_count;
+        while first + drop_count < self.messages.len()
+            && self.messages[first + drop_count].role == ModelRole::Tool
+        {
+            drop_count += 1;
+        }
+        let removed_bytes: usize =
+            self.messages[first..first + drop_count].iter().map(message_bytes).sum();
+        self.messages.drain(first..first + drop_count);
+        if self.log_ids.len() >= first + drop_count {
+            self.log_ids.drain(first..first + drop_count);
+        }
+        let retained_bytes: usize = self.messages.iter().map(message_bytes).sum();
+        self.truncation = Some(TranscriptTruncation {
+            removed_messages: drop_count,
+            removed_bytes,
+            retained_bytes,
+            limit_bytes: 0,
+        });
+        if let (Some(log), Some(truncation)) = (&self.log, &self.truncation) {
+            log.record_truncation(truncation);
+        }
+        true
+    }
+
     /// All normalized messages in chronological order.
     #[must_use]
     pub fn messages(&self) -> &[ModelMessage] {
@@ -921,6 +951,9 @@ pub enum ModelError {
     InvalidResponse(String),
     /// The adapter observed cancellation and stopped.
     Cancelled,
+    /// The provider returned a typed failure the loop can act on (a context
+    /// overflow triggers compaction, a quota failure reports its reset time).
+    Provider(ee_agent_acp_server::ProviderError),
 }
 
 impl std::fmt::Display for ModelError {
@@ -929,6 +962,7 @@ impl std::fmt::Display for ModelError {
             Self::Adapter(message) => write!(f, "model adapter failed: {message}"),
             Self::InvalidResponse(message) => write!(f, "invalid model response: {message}"),
             Self::Cancelled => f.write_str("model call cancelled"),
+            Self::Provider(error) => write!(f, "provider failure: {error}"),
         }
     }
 }
@@ -1378,5 +1412,67 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serializes");
         let restored: ModelResponse = serde_json::from_str(&json).expect("parses");
         assert_eq!(restored.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn opaque_provider_state_is_redacted_and_bounded() {
+        let state = OpaqueProviderState::new(serde_json::json!({
+            "thinking": "secret reasoning text",
+            "signature": "sig",
+        }))
+        .expect("fits");
+        let debug = format!("{state:?}");
+        assert_eq!(debug, "OpaqueProviderState([opaque])");
+        assert!(!debug.contains("secret reasoning text"));
+        assert_eq!(state.as_value()["signature"], "sig");
+
+        let huge = OpaqueProviderState::new(serde_json::json!({
+            "blob": "x".repeat(OpaqueProviderState::MAX_BYTES),
+        }));
+        assert!(huge.is_none(), "oversized state is dropped, never replayed truncated");
+    }
+
+    #[test]
+    fn shrink_oldest_drops_half_the_removable_messages_and_keeps_the_system_prefix() {
+        let mut transcript = Transcript::new();
+        transcript.messages.push(ModelMessage::text(ModelRole::System, "policy"));
+        transcript.log_ids.push(None);
+        for index in 0..5 {
+            transcript
+                .messages
+                .push(ModelMessage::text(ModelRole::User, format!("message {index}")));
+            transcript.log_ids.push(None);
+        }
+        assert!(transcript.shrink_oldest());
+        assert_eq!(transcript.messages[0].role, ModelRole::System);
+        // Five removable messages, half dropped (2), newest kept.
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(transcript.truncation.as_ref().map(|t| t.removed_messages), Some(2));
+        assert_eq!(transcript.log_ids.len(), transcript.messages.len());
+    }
+
+    #[test]
+    fn shrink_oldest_never_starts_with_an_orphan_tool_result() {
+        let mut transcript = Transcript::new();
+        transcript.messages.push(ModelMessage::text(ModelRole::User, "read it"));
+        transcript.log_ids.push(None);
+        transcript.messages.push(ModelMessage::tool_call(
+            "call_1",
+            "read_file",
+            serde_json::json!({}),
+        ));
+        transcript.log_ids.push(None);
+        transcript.messages.push(ModelMessage::tool_result("call_1", ToolResult::success("body")));
+        transcript.log_ids.push(None);
+        transcript.messages.push(ModelMessage::text(ModelRole::User, "next"));
+        transcript.log_ids.push(None);
+
+        assert!(transcript.shrink_oldest());
+        assert_ne!(
+            transcript.messages.first().map(|message| message.role),
+            Some(ModelRole::Tool),
+            "the dropped call must take its observation with it"
+        );
+        assert_eq!(transcript.log_ids.len(), transcript.messages.len());
     }
 }

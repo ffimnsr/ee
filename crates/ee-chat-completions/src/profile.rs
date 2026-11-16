@@ -50,22 +50,50 @@ impl MaxTokensField {
 ///
 /// `max_attempts` counts *retries* after the first attempt, so `0` disables
 /// retrying. Delays are capped by `max_delay` regardless of what the server
-/// asks for in `Retry-After`.
+/// asks for in `Retry-After`, and `retry_after_max` bounds a server hint
+/// separately so a hint never shortens a retry below the backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Retries after the first attempt.
     pub max_attempts: u32,
     /// Initial backoff delay.
     pub base_delay: Duration,
-    /// Upper bound for any single delay.
+    /// Upper bound for any single backoff delay.
     pub max_delay: Duration,
+    /// Upper bound for a server-provided `Retry-After` hint (reference: 15 min).
+    pub retry_after_max: Duration,
+    /// Budget for retries that never reached the provider (reference: 1 hour).
+    pub unreachable_window: Duration,
+    /// Extra retries allowed for timed-out attempts (reference: 3).
+    pub max_timeout_retries: u32,
 }
 
 impl RetryPolicy {
     /// Never retries.
     #[must_use]
     pub const fn none() -> Self {
-        Self { max_attempts: 0, base_delay: Duration::ZERO, max_delay: Duration::ZERO }
+        Self {
+            max_attempts: 0,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            retry_after_max: Duration::ZERO,
+            unreachable_window: Duration::ZERO,
+            max_timeout_retries: 0,
+        }
+    }
+
+    /// Retry policy with the documented defaults for the server-hint cap,
+    /// unreachable-network budget, and timeout allowance.
+    #[must_use]
+    pub const fn new(max_attempts: u32, base_delay: Duration, max_delay: Duration) -> Self {
+        Self {
+            max_attempts,
+            base_delay,
+            max_delay,
+            retry_after_max: Duration::from_secs(15 * 60),
+            unreachable_window: Duration::from_secs(60 * 60),
+            max_timeout_retries: 3,
+        }
     }
 }
 
@@ -140,6 +168,9 @@ pub struct EndpointProfile {
     pub stream_usage: bool,
     /// Body field carrying the output-token bound.
     pub max_tokens_field: MaxTokensField,
+    /// Assistant field a route requires for replayed reasoning when the provider
+    /// streamed only structured details (for example Kimi's `reasoning_content`).
+    pub reasoning_field: Option<String>,
 }
 
 impl EndpointProfile {
@@ -167,6 +198,7 @@ impl EndpointProfile {
             max_output_tokens: None,
             stream_usage: false,
             max_tokens_field: MaxTokensField::MaxTokens,
+            reasoning_field: None,
         }
     }
 
@@ -241,6 +273,13 @@ impl EndpointProfile {
         self
     }
 
+    /// Selects the assistant field a route requires for replayed reasoning.
+    #[must_use]
+    pub fn with_reasoning_field(mut self, field: Option<String>) -> Self {
+        self.reasoning_field = field;
+        self
+    }
+
     /// Output-token bound fitted to the prompt and catalog window.
     ///
     /// An explicit override is clamped to the catalog output ceiling when one
@@ -290,6 +329,7 @@ mod tests {
             max_attempts: 2,
             base_delay: Duration::from_millis(10),
             max_delay: Duration::from_secs(1),
+            ..RetryPolicy::none()
         })
         .with_extensions(serde_json::json!({ "reasoning": { "effort": "low" } }));
 

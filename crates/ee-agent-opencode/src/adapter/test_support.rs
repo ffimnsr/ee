@@ -61,11 +61,11 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
         max_output_tokens: None,
-        retry: RetryPolicy {
-            max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-            base_delay: Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS),
-            max_delay: Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS),
-        },
+        retry: RetryPolicy::new(
+            DEFAULT_RETRY_MAX_ATTEMPTS,
+            Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS),
+            Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS),
+        ),
         checkpoint_dir: None,
         session_log_dir: None,
         session_log_durable: false,

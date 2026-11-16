@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
+    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition, estimate_prompt_tokens,
 };
 use ee_chat_completions::{
     AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, StreamDelta,
@@ -110,11 +110,29 @@ pub fn request_body(
             }
             ModelRole::Assistant => {
                 let text = content_text(&message.content);
-                if !text.is_empty() {
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": [text_block(&text, pinned)],
-                    }));
+                // Anthropic accepts reasoning blocks only when they are signed
+                // and followed by output; an unsigned or thinking-only tail is
+                // dropped rather than rejected by the provider.
+                let has_calls = message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ModelContent::ToolCall { .. }));
+                if !text.is_empty() || has_calls {
+                    let mut blocks = replay_thinking_blocks(message, model).unwrap_or_default();
+                    if !text.is_empty() {
+                        blocks.push(text_block(&text, pinned));
+                    }
+                    for block in &message.content {
+                        if let ModelContent::ToolCall { tool_call_id, name, arguments } = block {
+                            blocks.push(json!({
+                                "type": "tool_use",
+                                "id": tool_call_id,
+                                "name": name,
+                                "input": arguments,
+                            }));
+                        }
+                    }
+                    messages.push(json!({ "role": "assistant", "content": blocks }));
                 }
             }
         }
@@ -198,10 +216,74 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
         content: text,
         reasoning,
         raw: Value::Array(content_blocks(value).to_vec()),
+        native_reasoning: thinking_blocks_of(content_blocks(value)),
         tool_calls,
         finish_reason: Some(finish_reason(value.get("stop_reason").and_then(Value::as_str))),
         usage: usage_from_tokens(value.get("usage").unwrap_or(&Value::Null)),
     }))
+}
+
+/// Key holding the replayable Anthropic thinking blocks.
+const THINKING_BLOCKS: &str = "thinking_blocks";
+
+/// Collects signed thinking blocks for replay.
+///
+/// Signatures are opaque proof of generation: the block is kept byte-identical
+/// and replayed only to the model that produced it (see [`seal_response`]).
+fn thinking_blocks_of(blocks: &[Value]) -> Option<Value> {
+    let mut kept = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or_default();
+                let signature = block.get("signature").and_then(Value::as_str);
+                let mut item = json!({ "type": "thinking", "thinking": thinking });
+                if let Some(signature) = signature {
+                    item["signature"] = Value::String(signature.to_string());
+                }
+                kept.push(item);
+            }
+            Some("redacted_thinking") => {
+                if let Some(data) = block.get("data").and_then(Value::as_str) {
+                    kept.push(json!({ "type": "redacted_thinking", "data": data }));
+                }
+            }
+            _ => {}
+        }
+    }
+    (!kept.is_empty()).then(|| json!({ THINKING_BLOCKS: kept }))
+}
+
+/// Thinking blocks a transcript message may replay to `model`.
+fn replay_thinking_blocks(message: &ModelMessage, model: &str) -> Option<Vec<Value>> {
+    let state = message
+        .native
+        .as_ref()
+        .and_then(|native| ee_chat_completions::replayable(native, model))?;
+    let stored = state.get(THINKING_BLOCKS)?.as_array()?;
+    let mut blocks = Vec::new();
+    for block in stored {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                let signature = block.get("signature").and_then(Value::as_str).unwrap_or_default();
+                let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or_default();
+                if !signature.is_empty() {
+                    blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }));
+                }
+            }
+            Some("redacted_thinking") => {
+                if let Some(data) = block.get("data").and_then(Value::as_str) {
+                    blocks.push(json!({ "type": "redacted_thinking", "data": data }));
+                }
+            }
+            _ => {}
+        }
+    }
+    (!blocks.is_empty()).then_some(blocks)
 }
 
 /// Whether one message should carry an Anthropic cache breakpoint block.
@@ -269,9 +351,18 @@ pub struct StreamDecoder {
     label: String,
     text: String,
     reasoning: String,
+    thinking: BTreeMap<u64, PendingThinking>,
     calls: BTreeMap<u64, PendingCall>,
     finish_reason: Option<String>,
     usage: Option<Usage>,
+}
+
+/// One streamed thinking block: its text, its signature, or its redacted payload.
+#[derive(Debug, Default)]
+struct PendingThinking {
+    thinking: String,
+    signature: Option<String>,
+    redacted: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -289,6 +380,7 @@ impl StreamDecoder {
             label: label.to_string(),
             text: String::new(),
             reasoning: String::new(),
+            thinking: BTreeMap::new(),
             calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
@@ -323,11 +415,30 @@ impl StreamDecoder {
             "content_block_start" => {
                 let index = block_index(&value, &self.label)?;
                 let block = value.get("content_block").unwrap_or(&Value::Null);
-                // Text and thinking are accumulated from their deltas.
-                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let call = self.calls.entry(index).or_default();
-                    call.id = block.get("id").and_then(Value::as_str).map(str::to_string);
-                    call.name = block.get("name").and_then(Value::as_str).map(str::to_string);
+                // Text and thinking are accumulated from their deltas; a redacted
+                // block arrives whole and is never streamed in pieces.
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let call = self.calls.entry(index).or_default();
+                        call.id = block.get("id").and_then(Value::as_str).map(str::to_string);
+                        call.name = block.get("name").and_then(Value::as_str).map(str::to_string);
+                    }
+                    Some("thinking") => {
+                        let entry = self.thinking.entry(index).or_default();
+                        if let Some(thinking) = block.get("thinking").and_then(Value::as_str)
+                            && !thinking.is_empty()
+                        {
+                            entry.thinking.push_str(thinking);
+                        }
+                    }
+                    Some("redacted_thinking") => {
+                        self.thinking.entry(index).or_default().redacted = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .filter(|data| !data.is_empty())
+                            .map(str::to_string);
+                    }
+                    _ => {}
                 }
             }
             "content_block_delta" => {
@@ -345,8 +456,17 @@ impl StreamDecoder {
                         let text =
                             delta.get("thinking").and_then(Value::as_str).unwrap_or_default();
                         if !text.is_empty() {
+                            let index = block_index(&value, &self.label)?;
+                            self.thinking.entry(index).or_default().thinking.push_str(text);
                             self.reasoning.push_str(text);
                             sink(StreamDelta::Reasoning(text.to_string()))?;
+                        }
+                    }
+                    Some("signature_delta") => {
+                        let index = block_index(&value, &self.label)?;
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            self.thinking.entry(index).or_default().signature =
+                                Some(signature.to_string());
                         }
                     }
                     Some("input_json_delta") => {
@@ -398,10 +518,25 @@ impl StreamDecoder {
             let name = call.name.unwrap_or_default();
             tool_calls.push(ToolCall { id, name, arguments: parse_arguments(&call.arguments) });
         }
+        let mut thinking_blocks = Vec::new();
+        for (_index, block) in self.thinking {
+            if let Some(data) = block.redacted {
+                thinking_blocks.push(json!({ "type": "redacted_thinking", "data": data }));
+                continue;
+            }
+            let mut item = json!({ "type": "thinking", "thinking": block.thinking });
+            if let Some(signature) = block.signature {
+                item["signature"] = Value::String(signature);
+            }
+            thinking_blocks.push(item);
+        }
+        let native_reasoning =
+            (!thinking_blocks.is_empty()).then(|| json!({ THINKING_BLOCKS: thinking_blocks }));
         Ok(response_from_turn(AssistantTurn {
             content: self.text,
             reasoning: self.reasoning,
             raw: Value::Null,
+            native_reasoning,
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
@@ -487,6 +622,7 @@ impl MessagesCodec {
             response_from_buffered(label, &value)
         })
         .await
+        .map(|response| ee_chat_completions::seal_response(response, &profile.model))
     }
 
     /// Performs one streaming round trip under the profile retry policy.
@@ -549,16 +685,17 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for MessagesStreamAttempt
         Box::pin(async move {
             let transport = self.transport;
             let label = transport.profile().label.clone();
+            let model = transport.profile().model.clone();
             let mut response = EndpointRequest::new(transport, self.body).send().await?;
             if !is_event_stream(response.headers()) {
                 let value = transport.read_json(&mut response, "streaming response").await?;
                 let decoded = response_from_buffered(&label, &value)?;
                 emit_finished_deltas(&decoded, sink)?;
-                return Ok(decoded);
+                return Ok(ee_chat_completions::seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
             drive_sse(&label, &mut response, |event| decoder.apply(event, sink)).await?;
-            decoder.finish()
+            decoder.finish().map(|response| ee_chat_completions::seal_response(response, &model))
         })
     }
 }

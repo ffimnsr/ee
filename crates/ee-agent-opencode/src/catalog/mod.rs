@@ -5,9 +5,27 @@
 //! surface base URL, catalog limits, reasoning support, cost, and capability
 //! flags, so callers never substitute constants for model metadata.
 //!
-//! Regeneration and provenance live in `catalog/README.md`; the committed
+//! Regeneration and provenance live in `catalog/README.md` (kept with the
+//! crate but untracked by the repository's `*.md` ignore rule); the committed
 //! models.dev subset and the curated retired/unsupported/legacy inputs live next
 //! to it.
+//!
+//! # Base-root probe
+//!
+//! On 2026-11-16 both documented root families answered live requests, so ee
+//! keeps the `/zen` roots this crate's release gate verifies:
+//!
+//! - `GET /zen/v1/models`, `/inference/openai/v1/models`,
+//!   `/inference/anthropic/v1/models`, `/zen/go/v1/models`, and
+//!   `/inference/go/openai/v1/models` all returned `200`.
+//! - `POST {}` to `/zen/v1/{responses,messages,chat/completions}`,
+//!   `/inference/openai/v1/{responses,chat/completions}`, and
+//!   `/inference/anthropic/v1/messages` all returned `400` from the dialect
+//!   handlers, proving the paths are served.
+//!
+//! A future release that serves only one family should switch to that family and
+//! regenerate the table; routing stays exact-match against generated HTTPS
+//! literals either way.
 
 pub(crate) mod generated;
 

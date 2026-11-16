@@ -488,8 +488,8 @@ impl LoopEngine {
                     excerpt: detection.excerpt.clone(),
                 });
             }
-            let request =
-                ModelRequest::new(prepared.messages, tools, budget_snapshot, task.clone())
+            let mut request =
+                ModelRequest::new(prepared.messages, tools.clone(), budget_snapshot, task.clone())
                     .with_available_models(self.options.available_models.clone())
                     .with_model_id(self.options.model_id.clone())
                     .with_prompt_tokens(measured_prompt_tokens);
@@ -504,18 +504,52 @@ impl LoopEngine {
             });
             message_seq += 1;
             let message_id = format!("msg-{message_seq}");
-            let response = match run_streaming_response(
-                |events| self.model.complete_streaming(request, cancel.clone(), events),
-                Some(sink),
-                &cancel,
-                &message_id,
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    self.events.record(OrchestratorEvent::Error { error: error.to_string() });
-                    return Err(error);
+            // A provider that rejects the prompt as too large gets one bounded
+            // recovery: drop the oldest half of the conversation and retry the
+            // request, instead of ending the turn with an unrecoverable error.
+            let mut overflow_retried = false;
+            let response = loop {
+                match run_streaming_response(
+                    |events| self.model.complete_streaming(request.clone(), cancel.clone(), events),
+                    Some(sink),
+                    &cancel,
+                    &message_id,
+                )
+                .await
+                {
+                    Ok(response) => break response,
+                    Err(OrchestratorError::ContextOverflow(detail)) if !overflow_retried => {
+                        if !transcript.shrink_oldest() {
+                            self.events.record(OrchestratorEvent::Error {
+                                error: format!("context window exceeded: {detail}"),
+                            });
+                            return Err(OrchestratorError::ContextOverflow(detail));
+                        }
+                        overflow_retried = true;
+                        self.events.record(OrchestratorEvent::Error {
+                            error: format!(
+                                "context window exceeded; dropping oldest messages and retrying: {detail}"
+                            ),
+                        });
+                        let projected = crate::prompt_injection::prepare_request(
+                            &crate::compaction::prune_redundant_readonly_tool_outputs(
+                                transcript.request_messages(),
+                            ),
+                        );
+                        request = ModelRequest::new(
+                            projected.messages,
+                            tools.clone(),
+                            budget_snapshot,
+                            task.clone(),
+                        )
+                        .with_available_models(self.options.available_models.clone())
+                        .with_model_id(self.options.model_id.clone())
+                        .with_prompt_tokens(None);
+                    }
+                    Err(error) => {
+                        self.events.record(OrchestratorEvent::Error { error: error.to_string() });
+                        return Err(error);
+                    }
                 }
             };
             self.events.record(OrchestratorEvent::ModelResponded {
@@ -1318,14 +1352,16 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(
             calls[1].transcript.len(),
-            3,
-            "user message plus tool observation plus policy reminder"
+            4,
+            "user message, the assistant tool call, the observation, and the policy reminder"
         );
         assert_eq!(calls[1].transcript[0].role, ModelRole::User);
-        assert_eq!(calls[1].transcript[1].role, ModelRole::Tool);
-        assert_eq!(calls[1].transcript[2].role, ModelRole::System, "reminder appended last");
-        assert!(calls[1].transcript[2].text_content().contains("cannot modify"));
-        match &calls[1].transcript[1].content[0] {
+        assert_eq!(calls[1].transcript[1].role, ModelRole::Assistant);
+        assert!(matches!(calls[1].transcript[1].content[0], ModelContent::ToolCall { .. }));
+        assert_eq!(calls[1].transcript[2].role, ModelRole::Tool);
+        assert_eq!(calls[1].transcript[3].role, ModelRole::System, "reminder appended last");
+        assert!(calls[1].transcript[3].text_content().contains("cannot modify"));
+        match &calls[1].transcript[2].content[0] {
             ModelContent::ToolResult { tool_call_id, result } => {
                 assert_eq!(tool_call_id, "tc-1");
                 assert!(result.success);
@@ -1381,7 +1417,7 @@ mod tests {
         assert_eq!(model.call_count(), 2);
         assert_eq!(failing_tool.call_count(), 1);
         let calls = model.requests();
-        match &calls[1].transcript[1].content[0] {
+        match &calls[1].transcript[2].content[0] {
             ModelContent::ToolResult { result, .. } => {
                 assert!(!result.success);
                 assert_eq!(result.error_kind, Some(ToolErrorKind::Backend));
@@ -2051,5 +2087,103 @@ mod tests {
         assert!(stuck, "expected a stuck error, got: {reason}");
         assert!(reason.contains("progress"));
         assert_eq!(model.call_count(), 4, "stopped before the iteration budget");
+    }
+
+    #[tokio::test]
+    async fn context_overflow_shrinks_the_transcript_and_retries_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct OverflowOnSecondCall {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl ModelAdapter for OverflowOnSecondCall {
+            fn complete(
+                &self,
+                _request: ModelRequest,
+                _cancel: watch::Receiver<bool>,
+            ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+                let calls = self.calls.clone();
+                Box::pin(async move {
+                    match calls.fetch_add(1, Ordering::SeqCst) {
+                        0 => Ok(ModelResponse::new().tool_intents(vec![ToolIntent::new(
+                            "tc-1",
+                            "echo",
+                            json!({}),
+                        )])),
+                        1 => Err(ModelError::Provider(
+                            ee_agent_acp_server::ProviderError::ContextOverflow(
+                                "prompt too long".into(),
+                            ),
+                        )),
+                        _ => Ok(ModelResponse::new().text("done").completed()),
+                    }
+                })
+            }
+        }
+
+        let model = Arc::new(OverflowOnSecondCall { calls: Arc::new(AtomicUsize::new(0)) });
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            model.clone(),
+            echo_tool(),
+            EventRecorder::new(),
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("overflow is recovered by shrinking the transcript");
+
+        assert_eq!(
+            model.calls.load(Ordering::SeqCst),
+            3,
+            "tool round, overflow, then the retried call"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loops_keep_the_assistant_call_and_its_native_state() {
+        let native = crate::model::OpaqueProviderState::new(json!({
+            "_ee": { "model": "model-a" },
+            "thinking_blocks": [{ "type": "thinking", "thinking": "plan", "signature": "sig" }],
+        }))
+        .expect("fits");
+        let model = FakeModel::new(vec![
+            ModelResponse::new()
+                .tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))])
+                .with_native(Some(native.clone())),
+            ModelResponse::new().text("done").completed(),
+        ]);
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            EventRecorder::new(),
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn ends");
+
+        let second = &model.requests()[1].transcript;
+        let assistant = second
+            .iter()
+            .find(|message| message.role == ModelRole::Assistant)
+            .expect("the tool-call turn stays in the transcript");
+        assert!(assistant.content.iter().any(|block| matches!(
+            block,
+            ModelContent::ToolCall { tool_call_id, .. } if tool_call_id == "tc-1"
+        )));
+        assert_eq!(
+            assistant.native,
+            Some(native),
+            "provider reasoning state must survive into the next request"
+        );
     }
 }

@@ -60,8 +60,9 @@ pub(crate) struct OpenRouterOptions {
     passthrough: Option<Value>,
     include_usage: bool,
     reasoning: Option<Value>,
+    reasoning_field: Option<String>,
     max_output_tokens: Option<u64>,
-    max_tokens_field: MaxTokensField,
+    max_tokens_field: Option<MaxTokensField>,
 }
 
 impl OpenRouterOptions {
@@ -76,6 +77,7 @@ impl OpenRouterOptions {
                 passthrough: std::env::var("OPENROUTER_OPTIONS_JSON").ok(),
                 include_usage: std::env::var("OPENROUTER_INCLUDE_USAGE").ok(),
                 reasoning_max_tokens: std::env::var("OPENROUTER_REASONING_MAX_TOKENS").ok(),
+                reasoning_field: std::env::var("OPENROUTER_REASONING_FIELD").ok(),
                 max_output_tokens: std::env::var("OPENROUTER_MAX_OUTPUT_TOKENS").ok(),
                 max_tokens_field: std::env::var("OPENROUTER_MAX_TOKENS_FIELD").ok(),
             },
@@ -96,6 +98,7 @@ impl OpenRouterOptions {
             passthrough,
             include_usage,
             reasoning_max_tokens,
+            reasoning_field,
             max_output_tokens,
             max_tokens_field,
         } = sources;
@@ -137,10 +140,15 @@ impl OpenRouterOptions {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(MaxTokensField::parse)
-            .transpose()?
-            .unwrap_or_default();
+            .transpose()?;
         let reasoning =
             reasoning_object(reasoning_effort, reasoning_max_tokens, max_output_tokens)?;
+        let reasoning_field = reasoning_field
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(parse_reasoning_field)
+            .transpose()?;
         Ok(Self {
             provider,
             plugins,
@@ -149,6 +157,7 @@ impl OpenRouterOptions {
             passthrough,
             include_usage,
             reasoning,
+            reasoning_field,
             max_output_tokens,
             max_tokens_field,
         })
@@ -164,9 +173,16 @@ impl OpenRouterOptions {
         self.max_output_tokens
     }
 
-    /// Body field carrying the output-token bound.
-    pub(crate) const fn max_tokens_field(&self) -> MaxTokensField {
+    /// Body field carrying the output-token bound, when configured explicitly.
+    ///
+    /// `None` means the field is detected from the model vendor and endpoint.
+    pub(crate) const fn max_tokens_field(&self) -> Option<MaxTokensField> {
         self.max_tokens_field
+    }
+
+    /// Assistant field this route requires when replaying reasoning.
+    pub(crate) fn reasoning_field(&self) -> Option<String> {
+        self.reasoning_field.clone()
     }
 
     /// Builds the extension object merged into every request body.
@@ -213,6 +229,8 @@ pub(crate) struct OptionSources {
     pub include_usage: Option<String>,
     /// `OPENROUTER_REASONING_MAX_TOKENS`.
     pub reasoning_max_tokens: Option<String>,
+    /// `OPENROUTER_REASONING_FIELD`.
+    pub reasoning_field: Option<String>,
     /// `OPENROUTER_MAX_OUTPUT_TOKENS`.
     pub max_output_tokens: Option<String>,
     /// `OPENROUTER_MAX_TOKENS_FIELD`.
@@ -268,6 +286,21 @@ fn parse_boolish(value: &str) -> Result<bool, String> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(format!("expected a boolean (1/0, true/false, yes/no, on/off), got {value:?}")),
     }
+}
+
+/// Validates the assistant field a route requires for replayed reasoning.
+///
+/// Only the scalar field names the shared codec replays are accepted, so a typo
+/// fails at startup instead of emitting an unknown field on every request.
+fn parse_reasoning_field(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if ee_chat_completions::CHAT_REPLAY_FIELDS.contains(&value) {
+        return Ok(value.to_string());
+    }
+    Err(format!(
+        "unsupported OPENROUTER_REASONING_FIELD {value:?}: expected one of {}",
+        ee_chat_completions::CHAT_REPLAY_FIELDS.join(", ")
+    ))
 }
 
 fn parse_positive_u64(name: &str, value: &str) -> Result<u64, String> {
@@ -363,21 +396,73 @@ pub(crate) fn openrouter_profile_with_options(
     let mut profile = EndpointProfile::new("OpenRouter", API_KEY_ENV, endpoint, model)
         .with_system_prompt(config.system_prompt.clone())
         .with_timeout(config.timeout)
-        .with_retry(RetryPolicy {
-            max_attempts: config.retry_max_attempts,
-            base_delay: config.retry_base_delay,
-            max_delay: config.retry_max_delay,
-        })
+        .with_retry(RetryPolicy::new(
+            config.retry_max_attempts,
+            config.retry_base_delay,
+            config.retry_max_delay,
+        ))
         .with_prompt_cache(supports_anthropic_prompt_cache(model))
         .with_headers(headers)
         .with_stream_usage(options.include_usage())
         .with_max_output_tokens(options.max_output_tokens())
-        .with_max_tokens_field(options.max_tokens_field());
+        .with_max_tokens_field(
+            options
+                .max_tokens_field()
+                .unwrap_or_else(|| detect_max_tokens_field(model, &config.api_url)),
+        )
+        .with_reasoning_field(options.reasoning_field());
     let extensions = options.body_extensions();
     if extensions.as_object().is_some_and(|object| !object.is_empty()) {
         profile = profile.with_extensions(extensions);
     }
     Ok(profile)
+}
+
+/// Vendors whose OpenAI-compatible surface still requires `max_tokens`.
+///
+/// Anything else gets `max_completion_tokens`, matching the reference agent's
+/// detection. Vendors are matched on the id prefix before `/`, and endpoints by
+/// host substring.
+const MAX_TOKENS_VENDORS: [&str; 9] = [
+    "deepseek",
+    "moonshotai",
+    "togetherai",
+    "zai",
+    "z-ai",
+    "zhipuai",
+    "nvidia",
+    "cerebras",
+    "chutes",
+];
+const MAX_TOKENS_HOSTS: [&str; 10] = [
+    "deepseek.com",
+    "api.moonshot.ai",
+    "api.together.",
+    "api.z.ai",
+    "open.bigmodel.cn",
+    "integrate.api.nvidia.com",
+    "cerebras.ai",
+    "llm.chutes.ai",
+    "gateway.ai.cloudflare.com",
+    "api.cloudflare.com",
+];
+
+/// Detects the output-token body field for one OpenRouter model and endpoint.
+///
+/// An explicit `OPENROUTER_MAX_TOKENS_FIELD` wins; otherwise the model vendor
+/// prefix and endpoint host decide. Cloudflare vendors always use `max_tokens`.
+#[must_use]
+pub(crate) fn detect_max_tokens_field(model: &str, endpoint: &str) -> MaxTokensField {
+    let vendor = model.split('/').next().unwrap_or(model).trim().to_ascii_lowercase();
+    let host = endpoint.to_ascii_lowercase();
+    let requires_max_tokens = MAX_TOKENS_VENDORS.iter().any(|name| vendor.starts_with(name))
+        || vendor.starts_with("cloudflare")
+        || MAX_TOKENS_HOSTS.iter().any(|name| host.contains(name));
+    if requires_max_tokens {
+        MaxTokensField::MaxTokens
+    } else {
+        MaxTokensField::MaxCompletionTokens
+    }
 }
 
 /// Whether an OpenRouter model id routes to an Anthropic-family model, whose
@@ -693,5 +778,75 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["function"]["name"], "tool_read_file");
         assert_eq!(tools[0]["function"]["parameters"]["required"][0], "path");
+    }
+
+    #[test]
+    fn output_token_field_is_detected_per_vendor() {
+        let endpoint = "https://openrouter.ai/api/v1/chat/completions";
+        for model in
+            ["deepseek/deepseek-chat", "moonshotai/kimi-k2", "z-ai/glm-4.6", "nvidia/llama"]
+        {
+            assert_eq!(
+                detect_max_tokens_field(model, endpoint),
+                MaxTokensField::MaxTokens,
+                "{model} still expects max_tokens"
+            );
+        }
+        for model in ["anthropic/claude-sonnet-4", "openai/gpt-5", "google/gemini-3-pro"] {
+            assert_eq!(
+                detect_max_tokens_field(model, endpoint),
+                MaxTokensField::MaxCompletionTokens,
+                "{model} accepts the newer field"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_output_token_field_overrides_detection() {
+        let options = OpenRouterOptions::parse(
+            OptionSources {
+                max_tokens_field: Some(String::from("max_tokens")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect("parses");
+        let mut config = test_config();
+        let profile = openrouter_profile_with_options(&config, "openai/gpt-5", &options)
+            .expect("profile builds");
+        assert_eq!(profile.max_tokens_field, MaxTokensField::MaxTokens);
+
+        config.api_url = String::from("https://openrouter.ai/api/v1/chat/completions");
+        let detected = openrouter_profile(&config, "deepseek/deepseek-chat").expect("profile");
+        assert_eq!(detected.max_tokens_field, MaxTokensField::MaxTokens);
+        let detected = openrouter_profile(&config, "anthropic/claude-sonnet-4").expect("profile");
+        assert_eq!(detected.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+    }
+
+    #[test]
+    fn reasoning_field_option_is_validated_and_applied() {
+        let options = OpenRouterOptions::parse(
+            OptionSources {
+                reasoning_field: Some(String::from("reasoning_content")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect("parses");
+        assert_eq!(options.reasoning_field().as_deref(), Some("reasoning_content"));
+        let config = test_config();
+        let profile = openrouter_profile_with_options(&config, "moonshotai/kimi-k2", &options)
+            .expect("profile builds");
+        assert_eq!(profile.reasoning_field.as_deref(), Some("reasoning_content"));
+
+        let error = OpenRouterOptions::parse(
+            OptionSources {
+                reasoning_field: Some(String::from("private_thoughts")),
+                ..OptionSources::default()
+            },
+            None,
+        )
+        .expect_err("unknown field must fail");
+        assert!(error.contains("OPENROUTER_REASONING_FIELD"), "{error}");
     }
 }

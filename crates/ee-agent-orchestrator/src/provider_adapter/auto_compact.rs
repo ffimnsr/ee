@@ -25,18 +25,22 @@ pub(super) fn estimated_tokens(messages: &[ModelMessage]) -> usize {
 }
 
 /// Whether the estimated context use crosses the configured threshold.
+///
+/// The threshold leaves room for the summary the compaction call itself must
+/// produce, so compacting never leaves the next request with too little output
+/// headroom. `0` disables the trigger.
 #[must_use]
 pub(super) fn should_compact(
     estimated_tokens: usize,
     context_window_tokens: u64,
     threshold_percent: u8,
 ) -> bool {
-    if threshold_percent == 0 || context_window_tokens == 0 {
+    let Some(threshold) =
+        crate::model::compaction_threshold_tokens(context_window_tokens, threshold_percent)
+    else {
         return false;
-    }
-    let window = context_window_tokens as u128;
-    let threshold = (window * u128::from(threshold_percent)).div_ceil(100);
-    estimated_tokens as u128 >= threshold
+    };
+    estimated_tokens as u64 >= threshold
 }
 
 /// Keeps only the newest `retained` conversation messages.
@@ -70,10 +74,18 @@ mod tests {
     }
 
     #[test]
-    fn threshold_is_percentage_of_window() {
-        assert!(should_compact(80_000, 100_000, 80));
-        assert!(!should_compact(79_999, 100_000, 80));
+    fn threshold_is_percentage_of_window_minus_summary_reserve() {
+        // 80% of 100k is 80k, minus a 10k summary reserve.
+        assert!(!should_compact(69_999, 100_000, 80));
+        assert!(should_compact(70_000, 100_000, 80));
         assert!(!should_compact(100_000, 100_000, 0), "zero disables");
+    }
+
+    #[test]
+    fn tiny_window_reserves_at_most_half_the_threshold() {
+        // The floor (4k) would exceed an 8k window's 80% threshold, so the
+        // reserve is clamped to half the threshold instead of disabling it.
+        assert_eq!(crate::model::compaction_threshold_tokens(8_000, 80), Some(3_200));
     }
 
     #[test]

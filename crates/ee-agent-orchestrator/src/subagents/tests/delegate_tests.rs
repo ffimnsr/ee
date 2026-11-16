@@ -94,14 +94,17 @@ async fn delegate_task_spawns_logical_subagent() {
     // The child saw the parent transcript as context and the delegation
     // prompt as its own user message.
     let child_request = &calls[1];
-    assert_eq!(child_request.transcript.len(), 4);
+    assert_eq!(child_request.transcript.len(), 5);
     assert_eq!(child_request.transcript[0].role, ModelRole::System);
     assert!(child_request.transcript[0].text_content().contains("schema_version"));
     assert_eq!(child_request.transcript[1].role, ModelRole::System);
     assert!(child_request.transcript[1].text_content().contains("Research"));
     assert_eq!(child_request.transcript[2].role, ModelRole::User);
     assert_eq!(child_request.transcript[2].content[0], ModelContent::Text("hello world".into()));
-    assert_eq!(child_request.transcript[3].content[0], ModelContent::Text("do the thing".into()));
+    // The parent's delegation call stays in the context the child sees, so its
+    // result is never an orphan observation.
+    assert_eq!(child_request.transcript[3].role, ModelRole::Assistant);
+    assert_eq!(child_request.transcript[4].content[0], ModelContent::Text("do the thing".into()));
 
     // Unverified child output returns failure and cannot masquerade as a
     // successful parent observation.

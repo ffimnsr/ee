@@ -1037,7 +1037,12 @@ fn bridge_error(error: ProviderError) -> ToolResult {
         // are backend-class tool failures from the bridge's perspective.
         ProviderError::Recoverable(_)
         | ProviderError::RateLimited { .. }
-        | ProviderError::Transient { .. } => ToolErrorKind::Backend,
+        | ProviderError::Transient { .. }
+        | ProviderError::QuotaExceeded { .. }
+        | ProviderError::Transport { .. }
+        | ProviderError::ContextOverflow(_)
+        | ProviderError::PayloadTooLarge(_) => ToolErrorKind::Backend,
+        ProviderError::ContentPolicy(_) => ToolErrorKind::InvalidArguments,
     };
     ToolResult::failure(kind, error.to_string())
 }

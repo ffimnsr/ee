@@ -8,8 +8,8 @@
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{ModelMessage, ModelResponse, ToolDefinition};
 use ee_chat_completions::{
-    ChatCompletionsClient, DeltaSink, EndpointProfile, EndpointTransport, messages_from_transcript,
-    response_from_turn, tools_from_definitions,
+    ChatCompletionsClient, DeltaSink, EndpointProfile, EndpointTransport,
+    messages_from_transcript_replaying, response_from_turn, seal_response, tools_from_definitions,
 };
 
 /// Dialect every route served by this module speaks.
@@ -44,10 +44,28 @@ impl ChatCompletionsCodec {
         transcript: &[ModelMessage],
         tools: &[ToolDefinition],
     ) -> Result<ModelResponse, ProviderError> {
-        let messages = messages_from_transcript(&self.profile().system_prompt, transcript);
+        self.complete_with_prompt(transcript, tools, None).await
+    }
+
+    /// Performs one buffered round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let profile = self.profile();
+        let messages = messages_from_transcript_replaying(
+            &profile.system_prompt,
+            transcript,
+            profile.prompt_cache,
+            &profile.model,
+            profile.reasoning_field.as_deref(),
+        );
         let tools = tools_from_definitions(tools);
-        let turn = self.client.complete(&messages, &tools).await?;
-        Ok(response_from_turn(turn))
+        let turn = self.client.complete_with_prompt(&messages, &tools, prompt_tokens).await?;
+        Ok(seal_response(response_from_turn(turn), &profile.model))
     }
 
     /// Performs one streaming round trip under the profile retry policy.
@@ -63,9 +81,31 @@ impl ChatCompletionsCodec {
         tools: &[ToolDefinition],
         sink: DeltaSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let messages = messages_from_transcript(&self.profile().system_prompt, transcript);
+        self.complete_streaming_with_prompt(transcript, tools, sink, None).await
+    }
+
+    /// Performs one streaming round trip using the provider-reported prompt size
+    /// when the caller has one.
+    pub(crate) async fn complete_streaming_with_prompt(
+        &self,
+        transcript: &[ModelMessage],
+        tools: &[ToolDefinition],
+        sink: DeltaSink<'_>,
+        prompt_tokens: Option<u64>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let profile = self.profile();
+        let messages = messages_from_transcript_replaying(
+            &profile.system_prompt,
+            transcript,
+            profile.prompt_cache,
+            &profile.model,
+            profile.reasoning_field.as_deref(),
+        );
         let tools = tools_from_definitions(tools);
-        let turn = self.client.complete_streaming(&messages, &tools, sink).await?;
-        Ok(response_from_turn(turn))
+        let turn = self
+            .client
+            .complete_streaming_with_prompt(&messages, &tools, sink, prompt_tokens)
+            .await?;
+        Ok(seal_response(response_from_turn(turn), &profile.model))
     }
 }

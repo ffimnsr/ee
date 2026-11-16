@@ -295,11 +295,7 @@ async fn a_closed_consumer_cancels_the_stream_and_is_never_retried() {
         ]),
         runs: runs.clone(),
     };
-    let policy = RetryPolicy {
-        max_attempts: 3,
-        base_delay: Duration::from_millis(10),
-        max_delay: Duration::from_millis(10),
-    };
+    let policy = RetryPolicy::new(3, Duration::from_millis(10), Duration::from_millis(10));
     let mut sink =
         |_delta: StreamDelta| -> Result<(), ProviderError> { Err(ProviderError::Cancellation) };
 

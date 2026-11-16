@@ -468,3 +468,102 @@ async fn stream_stops_when_the_sink_is_closed() {
     assert!(matches!(error, ProviderError::Cancellation), "{error:?}");
     assert_eq!(source.chunks.len(), 1, "later chunks are never read");
 }
+
+// ── Gap 4: encrypted-reasoning continuity ────────────────────────────────
+
+#[test]
+fn second_turn_replays_reasoning_items_and_requests_encrypted_content() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "enc",
+                    "summary": [{ "type": "summary_text", "text": "why" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer" }]
+                }
+            ]
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("gpt-x", "sys", history.messages(), &[], false, None, None);
+
+    assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    let input = body["input"].as_array().expect("input items");
+    assert_eq!(input[0]["type"], "reasoning");
+    assert_eq!(input[0]["id"], "rs_1");
+    assert_eq!(input[0]["encrypted_content"], "enc");
+    assert_eq!(input[1]["type"], "message");
+}
+
+#[test]
+fn reasoning_items_never_replay_to_another_model() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "object": "response",
+            "status": "completed",
+            "output": [
+                { "type": "reasoning", "id": "rs_1", "encrypted_content": "enc" },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "answer" }] }
+            ]
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("gpt-y", "sys", history.messages(), &[], false, None, None);
+
+    let input = body["input"].as_array().expect("input items");
+    assert_eq!(input.len(), 1, "encrypted reasoning is model-scoped proof");
+    assert_eq!(input[0]["type"], "message");
+}
+
+#[test]
+fn assistant_tool_call_replays_as_a_function_call_item() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "object": "response",
+            "status": "completed",
+            "output": [
+                { "type": "reasoning", "id": "rs_1", "encrypted_content": "enc" },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"a\"}"
+                }
+            ]
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "gpt-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    history.push_tool_result("call_1", ToolResult::success("file body"));
+
+    let body = request_body("gpt-x", "sys", history.messages(), &[], false, None, None);
+    let input = body["input"].as_array().expect("input items");
+    assert_eq!(input[0]["type"], "reasoning");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[1]["name"], "read_file");
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "call_1");
+}

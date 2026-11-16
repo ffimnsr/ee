@@ -62,7 +62,7 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// no limit for the selected model.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 /// Default maximum transient/429 retries per model call.
-pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 2;
+pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 10;
 /// Default initial retry backoff: 500 ms.
 pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Default retry backoff cap: 30 seconds.
@@ -468,11 +468,11 @@ impl Config {
             max_iterations: args.max_iterations,
             context_window,
             max_output_tokens: args.max_output_tokens,
-            retry: RetryPolicy {
-                max_attempts: args.retry_max_attempts,
-                base_delay: Duration::from_millis(args.retry_base_delay_ms),
-                max_delay: Duration::from_millis(args.retry_max_delay_ms),
-            },
+            retry: RetryPolicy::new(
+                args.retry_max_attempts,
+                Duration::from_millis(args.retry_base_delay_ms),
+                Duration::from_millis(args.retry_max_delay_ms),
+            ),
             checkpoint_dir: args.checkpoint_dir,
             session_log_dir: args.session_log_dir,
             session_log_durable: args.session_log_durable,

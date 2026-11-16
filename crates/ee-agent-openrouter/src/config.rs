@@ -40,7 +40,7 @@ pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 /// compaction after OpenRouter reports a near-limit request.
 pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 80;
 /// Default maximum transient/429 retries per model call.
-pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 2;
+pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 10;
 /// Default initial retry backoff: 500 ms.
 pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Default retry backoff cap: 30 seconds.
@@ -477,15 +477,15 @@ impl Config {
     }
 
     /// Returns the reported input-token threshold for automatic compaction.
-    /// Zero-percent configuration disables the feature.
+    ///
+    /// The threshold leaves room for the compaction summary output. Zero-percent
+    /// configuration disables the feature.
     #[must_use]
     pub fn auto_compact_threshold_tokens(&self) -> Option<u64> {
-        (self.auto_compact_threshold_percent > 0).then(|| {
-            self.context_window
-                .saturating_mul(u64::from(self.auto_compact_threshold_percent))
-                .saturating_div(100)
-                .max(1)
-        })
+        ee_agent_orchestrator::compaction_threshold_tokens(
+            self.context_window,
+            self.auto_compact_threshold_percent,
+        )
     }
 
     /// Looks a variable up in the process environment first, then in the
@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(config.auto_compact_threshold_percent, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
         assert_eq!(
             config.auto_compact_threshold_tokens(),
-            Some(DEFAULT_CONTEXT_WINDOW_TOKENS * 80 / 100)
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS * 80 / 100 - DEFAULT_CONTEXT_WINDOW_TOKENS / 10)
         );
         assert_eq!(config.max_iterations, None);
         assert_eq!(config.retry_max_attempts, DEFAULT_RETRY_MAX_ATTEMPTS);

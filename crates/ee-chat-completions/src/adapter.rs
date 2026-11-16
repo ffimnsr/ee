@@ -16,10 +16,11 @@ use ee_agent_orchestrator::{
 use serde_json::Value;
 use tokio::sync::watch;
 
+use crate::native::seal_response;
 use crate::profile::{EndpointProfile, TokenSource};
 use crate::transport::ChatCompletionsClient;
 use crate::wire::{
-    AssistantTurn, StreamDelta, messages_from_transcript_with_cache, response_from_turn,
+    AssistantTurn, StreamDelta, messages_from_transcript_replaying, response_from_turn,
     tools_from_definitions,
 };
 
@@ -136,19 +137,21 @@ impl ModelAdapter for ChatCompletionsAdapter {
             // The credential is checked before any request body exists, and the
             // message names the provider's own environment variable.
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript_with_cache(
+            let messages = messages_from_transcript_replaying(
                 &profile.system_prompt,
                 &request.transcript,
                 profile.prompt_cache,
+                &profile.model,
+                profile.reasoning_field.as_deref(),
             );
             let tools = tools_from_definitions(&request.tools);
             let answer = tokio::select! {
                 answer = completion(&messages, &tools) => {
-                    answer.map_err(|error| ModelError::Adapter(error.to_string()))?
+                    answer.map_err(ModelError::Provider)?
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
             };
-            Ok(response_from_turn(answer))
+            Ok(seal_response(response_from_turn(answer), &profile.model))
         })
     }
 
@@ -180,19 +183,21 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 return Err(ModelError::Cancelled);
             }
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript_with_cache(
+            let messages = messages_from_transcript_replaying(
                 &profile.system_prompt,
                 &request.transcript,
                 profile.prompt_cache,
+                &profile.model,
+                profile.reasoning_field.as_deref(),
             );
             let tools = tools_from_definitions(&request.tools);
             let answer = tokio::select! {
                 answer = streaming(&messages, &tools, events) => {
-                    answer.map_err(|error| ModelError::Adapter(error.to_string()))?
+                    answer.map_err(ModelError::Provider)?
                 }
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
             };
-            Ok(response_from_turn(answer))
+            Ok(seal_response(response_from_turn(answer), &profile.model))
         })
     }
 }
@@ -278,6 +283,7 @@ mod tests {
                     content: String::from("answer"),
                     reasoning: String::from("thinking"),
                     raw: json!({ "role": "assistant", "content": "answer" }),
+                    native_reasoning: None,
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: Some(crate::wire::Usage {
@@ -320,6 +326,7 @@ mod tests {
                     content: String::new(),
                     reasoning: String::new(),
                     raw: json!({ "role": "assistant" }),
+                    native_reasoning: None,
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: None,
@@ -358,6 +365,7 @@ mod tests {
                     content: String::from("answer"),
                     reasoning: String::from("thinking"),
                     raw: json!({ "role": "assistant", "content": "answer" }),
+                    native_reasoning: None,
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: None,

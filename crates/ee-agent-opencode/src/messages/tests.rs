@@ -411,3 +411,144 @@ async fn stream_without_stop_reason_is_treated_as_a_finished_turn() {
     assert!(response.completed);
     assert_eq!(response.usage.input_tokens, None, "omitted usage stays unknown");
 }
+
+// ── Gap 4: thinking-block continuity ─────────────────────────────────────
+
+#[test]
+fn second_turn_replays_the_signed_thinking_block() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "type": "message",
+            "content": [
+                { "type": "thinking", "thinking": "consider", "signature": "sig-123" },
+                { "type": "text", "text": "answer" }
+            ],
+            "stop_reason": "end_turn"
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "claude-x");
+    assert!(decoded.native.is_some(), "decoded thinking state must be replayable");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("claude-x", "sys", history.messages(), &[], false, 4_096, None);
+
+    let content = body["messages"][0]["content"].as_array().expect("content blocks");
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "consider");
+    assert_eq!(content[0]["signature"], "sig-123", "signature must replay byte-identically");
+    assert_eq!(content[1]["type"], "text");
+}
+
+#[test]
+fn thinking_blocks_never_replay_to_another_model() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "type": "message",
+            "content": [
+                { "type": "thinking", "thinking": "consider", "signature": "sig-123" },
+                { "type": "text", "text": "answer" }
+            ],
+            "stop_reason": "end_turn"
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "claude-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("claude-y", "sys", history.messages(), &[], false, 4_096, None);
+
+    let content = body["messages"][0]["content"].as_array().expect("content blocks");
+    assert_eq!(content.len(), 1, "only text may be replayed across models");
+    assert_eq!(content[0]["type"], "text");
+}
+
+#[test]
+fn unsigned_thinking_blocks_are_not_replayed() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "type": "message",
+            "content": [
+                { "type": "thinking", "thinking": "consider" },
+                { "type": "text", "text": "answer" }
+            ],
+            "stop_reason": "end_turn"
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "claude-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("claude-x", "sys", history.messages(), &[], false, 4_096, None);
+
+    let content = body["messages"][0]["content"].as_array().expect("content blocks");
+    assert_eq!(content.len(), 1, "an unsigned thinking block is rejected by Anthropic");
+    assert_eq!(content[0]["type"], "text");
+}
+
+#[test]
+fn streamed_thinking_signature_survives_into_the_next_request() {
+    let mut decoder = StreamDecoder::new(LABEL);
+    let mut sink = |_delta: StreamDelta| Ok(());
+    for event in [
+        json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+        json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "plan" } }),
+        json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "sig-stream" } }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "" } }),
+        json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "answer" } }),
+        json!({ "type": "message_stop" }),
+    ] {
+        decoder.apply(&event.to_string(), &mut sink).expect("applies");
+    }
+    let decoded = decoder.finish().expect("finishes");
+    let decoded = ee_chat_completions::seal_response(decoded, "claude-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let body = request_body("claude-x", "sys", history.messages(), &[], false, 4_096, None);
+    let content = body["messages"][0]["content"].as_array().expect("content blocks");
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["signature"], "sig-stream");
+}
+
+#[test]
+fn assistant_tool_call_and_thinking_replay_before_its_result() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "type": "message",
+            "content": [
+                { "type": "thinking", "thinking": "plan", "signature": "sig-tool" },
+                { "type": "tool_use", "id": "tu-1", "name": "read_file", "input": { "path": "a" } }
+            ],
+            "stop_reason": "tool_use"
+        }),
+    )
+    .expect("decodes");
+    let decoded = ee_chat_completions::seal_response(decoded, "claude-x");
+
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    history.push_tool_result("tu-1", ToolResult::success("file body"));
+
+    let body = request_body("claude-x", "sys", history.messages(), &[], false, 4_096, None);
+    let messages = body["messages"].as_array().expect("messages");
+    let assistant = messages[0]["content"].as_array().expect("assistant blocks");
+    assert_eq!(assistant[0]["type"], "thinking");
+    assert_eq!(assistant[0]["signature"], "sig-tool");
+    assert_eq!(assistant[1]["type"], "tool_use");
+    assert_eq!(assistant[1]["id"], "tu-1");
+    assert_eq!(assistant[1]["name"], "read_file");
+    assert_eq!(assistant[1]["input"]["path"], "a");
+
+    let observation = messages[1]["content"].as_array().expect("tool result blocks");
+    assert_eq!(observation[0]["type"], "tool_result");
+    assert_eq!(observation[0]["tool_use_id"], "tu-1", "the result must answer a replayed call");
+}

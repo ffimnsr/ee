@@ -181,7 +181,7 @@ pub mod validate;
 pub use client::ClientBridge;
 pub use config::AcpAgentServerConfig;
 pub use dotenv::{env_or_dotenv, load_dotenv, parse_dotenv};
-pub use error::{AcpServerError, ProviderError};
+pub use error::{AcpServerError, Delivery, ProviderError, RateLimitInfo, Recovery};
 pub use ids::{RequestIdGenerator, SessionIdGenerator};
 pub use provider::{
     AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,

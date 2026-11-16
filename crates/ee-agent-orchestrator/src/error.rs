@@ -40,6 +40,9 @@ pub enum OrchestratorError {
     /// The loop was judged stuck (repeated responses, repeated tool calls,
     /// repeated failed edits, or no task-graph progress).
     Stuck(String),
+    /// The provider rejected the request because it exceeded the model's context
+    /// window. The loop compacts the transcript once and retries before giving up.
+    ContextOverflow(String),
 }
 
 impl OrchestratorError {
@@ -66,6 +69,7 @@ impl fmt::Display for OrchestratorError {
                 write!(f, "orchestrator serialization error: {reason}")
             }
             Self::Stuck(reason) => write!(f, "stuck: {reason}"),
+            Self::ContextOverflow(reason) => write!(f, "context window exceeded: {reason}"),
         }
     }
 }
@@ -80,6 +84,10 @@ impl From<crate::model::ModelError> for OrchestratorError {
                 Self::ModelFailure(format!("invalid model response: {reason}"))
             }
             crate::model::ModelError::Cancelled => Self::Cancellation,
+            crate::model::ModelError::Provider(error) => match error {
+                ProviderError::ContextOverflow(detail) => Self::ContextOverflow(detail),
+                other => Self::ModelFailure(other.to_string()),
+            },
         }
     }
 }
@@ -116,6 +124,7 @@ impl From<OrchestratorError> for ProviderError {
             OrchestratorError::Stuck(reason) => {
                 ProviderError::BackendFailure(format!("stuck: {reason}"))
             }
+            OrchestratorError::ContextOverflow(reason) => ProviderError::ContextOverflow(reason),
         }
     }
 }

@@ -14,6 +14,7 @@ fn policy(max_attempts: u32) -> RetryPolicy {
         max_attempts,
         base_delay: Duration::from_millis(50),
         max_delay: Duration::from_secs(5),
+        ..RetryPolicy::new(max_attempts, Duration::from_millis(50), Duration::from_secs(5))
     }
 }
 
@@ -91,7 +92,7 @@ impl ChunkSource for ScriptedChunks {
 }
 
 fn transient(detail: &str) -> ProviderError {
-    ProviderError::Transient { retry_after: None, detail: detail.to_string() }
+    ProviderError::Transient { retry_after: None, retryable: true, detail: detail.to_string() }
 }
 
 fn turn(text: &str) -> AssistantTurn {
@@ -99,6 +100,7 @@ fn turn(text: &str) -> AssistantTurn {
         content: text.to_string(),
         reasoning: String::new(),
         raw: json!({ "role": "assistant", "content": text }),
+        native_reasoning: None,
         tool_calls: Vec::new(),
         finish_reason: Some(String::from("stop")),
         usage: None,
@@ -107,12 +109,19 @@ fn turn(text: &str) -> AssistantTurn {
 
 fn clone_error(error: &ProviderError) -> ProviderError {
     match error {
-        ProviderError::RateLimited { retry_after, detail } => {
-            ProviderError::RateLimited { retry_after: *retry_after, detail: detail.clone() }
+        ProviderError::RateLimited { retry_after, rate_limit, retryable, detail } => {
+            ProviderError::RateLimited {
+                retry_after: *retry_after,
+                rate_limit: *rate_limit,
+                retryable: *retryable,
+                detail: detail.clone(),
+            }
         }
-        ProviderError::Transient { retry_after, detail } => {
-            ProviderError::Transient { retry_after: *retry_after, detail: detail.clone() }
-        }
+        ProviderError::Transient { retry_after, retryable, detail } => ProviderError::Transient {
+            retry_after: *retry_after,
+            retryable: *retryable,
+            detail: detail.clone(),
+        },
         ProviderError::BackendFailure(detail) => ProviderError::BackendFailure(detail.clone()),
         ProviderError::InvalidRequest(detail) => ProviderError::InvalidRequest(detail.clone()),
         other => ProviderError::BackendFailure(other.to_string()),
@@ -143,9 +152,11 @@ async fn buffered_retry_repeats_rate_limited_and_transient_failures() {
     for error in [
         ProviderError::RateLimited {
             retry_after: Some(Duration::from_secs(1)),
+            rate_limit: None,
+            retryable: true,
             detail: "slow".into(),
         },
-        ProviderError::Transient { retry_after: None, detail: "down".into() },
+        ProviderError::Transient { retry_after: None, retryable: true, detail: "down".into() },
     ] {
         let attempts = Arc::new(AtomicU32::new(0));
         let counter = attempts.clone();
@@ -174,6 +185,7 @@ async fn buffered_retry_stops_at_the_attempt_budget() {
             counter.fetch_add(1, Ordering::SeqCst);
             Err(ProviderError::Transient {
                 retry_after: Some(Duration::from_secs(600)),
+                retryable: true,
                 detail: "still down".into(),
             })
         }

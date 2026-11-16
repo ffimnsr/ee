@@ -30,7 +30,10 @@
 
 pub mod adapter;
 pub mod endpoint;
+mod error_classification;
+pub mod native;
 pub mod profile;
+mod reasoning_replay;
 pub mod transport;
 pub mod wire;
 
@@ -38,6 +41,7 @@ pub use adapter::{
     ChatCompletionsAdapter, CompletionClient, CompletionFuture, StreamingClient, wait_cancelled,
 };
 pub use endpoint::{EndpointError, TrustedEndpoint};
+pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
 pub use profile::{BearerToken, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource};
 pub use transport::{
     ChatCompletionsClient, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest, EndpointTransport,
@@ -48,6 +52,7 @@ pub use wire::{
     AssistantTurn, RequestBodyOptions, StreamDelta, ToolCall, Usage, classify_http_error,
     classify_status_error, content_has_media, content_parts, content_text, decode_message,
     emit_finished_deltas, http_error_message, is_retryable, messages_from_transcript,
-    messages_from_transcript_with_cache, parse_retry_after, request_body, response_from_turn,
-    retry_after_of, retry_delay, tool_call_id_of, tools_from_definitions, usage_from_tokens,
+    messages_from_transcript_replaying, messages_from_transcript_with_cache, parse_retry_after,
+    request_body, response_from_turn, retry_after_of, retry_delay, tool_call_id_of,
+    tools_from_definitions, usage_from_tokens,
 };
