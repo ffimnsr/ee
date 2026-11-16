@@ -1547,3 +1547,754 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
     - Classifier is strictly opt-in and never overrides mandatory `PolicyEngine` denials or persisted `TrustRule` deny rules.
     - Classifier timeout, parse error, or `medium`/`high` classification always fails safe to interactive host approval.
     - Every auto-approved decision records an auditable `DecisionLog` entry with model id, tool name, and redacted reason.
+
+---
+
+# OpenCode & OpenRouter Calling-Parity Plan
+
+**Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
+**Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
+**Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
+**Status:** analysis complete; no implementation started. Every checkbox below is open work.
+
+## Execution Overview
+
+**P0 — blocks "same calling level":**
+1. Gap 1: catalog-driven per-model routing and metadata (`ee-agent-opencode`).
+2. Gap 2: OpenRouter request-body parity (provider routing, plugins, usage, reasoning).
+3. Gap 3: per-model token budgeting (output limit, compaction trigger, length continuation).
+4. Gap 4: reasoning continuity/replay (thinking blocks, `reasoning_details`, encrypted reasoning).
+
+**P1 — correctness and cost control:** Gap 5 error taxonomy/retry budget, Gap 6 cache policy, Gap 7 tool-call control + structured output.
+
+**P2 — first-class ergonomics:** Gap 8 model variants, Gap 9 catalog discovery + cost accounting, Gap 10 OpenRouter `/responses` + decision models + media.
+
+**Ordering constraints:**
+- Gap 1 before Gaps 3 and 8 (limits, cost, and variants come from catalog metadata).
+- Gap 4 lands before Gap 6: both rewrite transcript assembly in `ee-chat-completions` and would otherwise conflict.
+- Gap 2 is independent of Gap 1 and can ship first; it is the smallest diff that removes the largest visible gap.
+
+**Definition of done for the whole plan:**
+- [ ] For every catalog model on `opencode`, `opencode-go`, and `openrouter`, the request body is built from catalog-declared protocol, base URL, output limit, and reasoning support, with no hardcoded 8192 token cap and no surface-wide dialect assumption.
+- [ ] OpenRouter requests can express provider routing, plugins, usage accounting, and the full reasoning object without editing shared code.
+- [ ] Multi-step tool loops preserve provider reasoning state across turns on Anthropic Messages, OpenAI Responses, and OpenRouter Chat Completions.
+- [ ] Every new behavior has unit tests in the owning crate plus one integration test through the ACP adapter path.
+
+## Part 0 — Reference Evidence and Current State
+
+### 0.1 Reference implementation map (`harness-example/opencode`)
+
+| Concern | Reference file | Behavior to match |
+|---|---|---|
+| OpenCode provider | `packages/ai/src/providers/opencode.ts` | SystemOne route, `baseURL` `https://opencode.ai/inference/systemone/v1`, bearer auth via `OPENCODE_API_KEY`, `TypeSafe-Danger-Zone-Images: true` header |
+| OpenRouter provider | `packages/ai/src/providers/openrouter.ts` | `/chat/completions` and `/responses` routes, provider routing object, plugins, `models`, `usage.include`, reasoning object with budget fitting, attribution headers |
+| Chat body fields | `packages/ai/src/protocols/openai-chat.ts` | `stream_options.include_usage` (default on), `max_tokens` vs `max_completion_tokens` detection, `parallel_tool_calls`, `strict` tools, custom/freeform grammar tools, `reasoning_details` replay (OpenRouter + Kimi dialects), Gemini thought signatures |
+| Responses body fields | `packages/ai/src/protocols/open-responses.ts` | `prompt_cache_key`, `include: ["reasoning.encrypted_content"]`, `reasoning.effort`/`summary`, `text.verbosity`, `parallel_tool_calls`, `max_tool_calls`, `truncation`, `allowed_tools` |
+| Prompt cache policy | `packages/ai/src/cache-policy.ts` | Auto breakpoints at last tool, first and last system part, and conversation tail; 4-breakpoint cap; TTL; per-provider policy table; `alibaba` cache format |
+| Error taxonomy | `packages/ai/src/provider-error.ts` | context-overflow, payload-too-large, content-policy, quota, auth, rate-limit, provider-internal, transport |
+| Retry budget | `packages/core/src/model-retry.ts` | 10 retries, exponential 2s→10s jittered, `retry-after` capped at 15 min, unreachable-network 1 h budget, timeout retry cap 3, one-shot retry only when the request never ran, `x-should-retry` override |
+| Catalog | `packages/core/src/models-dev.ts` + `packages/core/src/models-dev/snapshot.txt` | Live models.dev fetch with bundled snapshot fallback and versioned cache |
+| Model metadata | `packages/schema/src/model.ts`, `packages/schema/src/model-compatibility.ts` | capabilities, compatibility flags, cost incl. cache prices and overrides, limits, modalities, variants |
+| Variants | `packages/core/src/variant.ts` | `toggle`, `effort[]`, `budget_tokens` variants derived from catalog support and provider package |
+| Token budgeting | `packages/core/src/session/model-request.ts` | `outputLimit()` fitted to context with 1% headroom, floor 1024, ceiling 256k |
+| Compaction | `packages/core/src/session/compaction.ts` | Token-estimate trigger, background precompute, `keepID` tail, structured summary updates |
+| Length continuation | `packages/core/src/session/runner/llm.ts` | `CONTINUE_AFTER_OUTPUT_LIMIT` prompt when `finish_reason == "length"` |
+
+Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
+- `opencode`: `https://opencode.ai/inference/openai/v1`, `.../inference/anthropic/v1`, `.../inference/google/v1beta`, `.../inference/systemone/v1`
+- `opencode-go`: `https://opencode.ai/inference/go/openai/v1`, `.../inference/go/anthropic/v1`, `.../inference/go/google/v1beta`
+
+### 0.2 Current ee implementation map
+
+| Concern | Current file | State |
+|---|---|---|
+| Route catalog | `crates/ee-agent-opencode/src/routes.rs` | Hand-maintained `CATALOG`/`RETIRED`/`UNSUPPORTED` tables; two surfaces (`zen`, `go`); roots `/zen/v1` and `/zen/go/v1`; `gemini-*` and `jev-*` rejected as unsupported; no per-model metadata |
+| Responses codec | `crates/ee-agent-opencode/src/responses.rs` | `store:false`, `prompt_cache_key`, `tool_choice:"auto"`; no `include`, no `parallel_tool_calls`, no `text.format`, no reasoning-item replay, no output limit |
+| Messages codec | `crates/ee-agent-opencode/src/messages.rs` | Hardcoded `max_tokens = 8192` (`DEFAULT_MAX_OUTPUT_TOKENS`), `cache_control` on last system block and last tool only; no thinking replay, no effort budget |
+| Chat Completions codec | `crates/ee-agent-opencode/src/chat_completions.rs` | Thin binding over the shared codec; no stream usage request, no reasoning field compatibility |
+| Reasoning shaping | `crates/ee-agent-opencode/src/reasoning.rs` | `low`/`medium`/`high` only; Anthropic route is a documented no-op |
+| Runtime config | `crates/ee-agent-opencode/src/config.rs` | `OPENCODE_SURFACE`, `OPENCODE_MODEL`, fixed context window default 200k, retry policy, no output-limit or variant knobs |
+| OpenRouter profile | `crates/ee-agent-openrouter/src/openrouter.rs` | Bearer + `X-Title`/`HTTP-Referer`, `reasoning.effort` only, name-sniffed Anthropic cache enablement |
+| Shared wire codec | `crates/ee-chat-completions/src/{wire,profile,adapter,transport}.rs` | Body = `model`/`messages`/`stream`/`tool_choice:"auto"` + tools + extensions; usage decode incl. cache tokens; retry classification by status class |
+| Compaction trigger | `crates/ee-agent-orchestrator/src/compaction/mod.rs` | Percentage of a static context window; no token measurement from catalog |
+
+### 0.3 Gap summary
+
+| # | Gap | Priority | Primary crates |
+|---|---|---|---|
+| 1 | Catalog-driven per-model routing and metadata | P0 | `ee-agent-opencode` |
+| 2 | OpenRouter request-body parity | P0 | `ee-agent-openrouter`, `ee-chat-completions` |
+| 3 | Per-model token budgeting and length continuation | P0 | `ee-agent-opencode`, `ee-agent-openrouter`, `ee-agent-orchestrator` |
+| 4 | Reasoning continuity and replay | P0 | `ee-chat-completions`, both provider crates |
+| 5 | Error taxonomy and retry budget | P1 | `ee-chat-completions` |
+| 6 | Prompt cache policy parity | P1 | `ee-chat-completions`, `ee-agent-openrouter`, `ee-agent-opencode` |
+| 7 | Tool-call control and structured output | P1 | `ee-chat-completions`, `ee-agent-orchestrator` |
+| 8 | Model variants | P2 | both provider crates |
+| 9 | Catalog discovery and cost accounting | P2 | both provider crates |
+| 10 | OpenRouter `/responses`, decision models, media | P2 | `ee-agent-openrouter`, `ee-agent-opencode` |
+
+## Part 1 — P0 Calling-Level Gaps
+
+### Gap 1 — Catalog-Driven Per-Model Routing and Metadata (`ee-agent-opencode`)
+
+- [ ] Replace the static surface catalog with a generated per-model catalog that carries protocol, base URL, limits, capabilities, reasoning support, and cost.
+  - [ ] **Problem:**
+    - `crates/ee-agent-opencode/src/routes.rs::CATALOG` is a hand-maintained table of `(surface, model_id, dialect)` rows pinned to OpenCode docs read on 2026-09-24, with `endpoint_for()` assembling URLs from only two roots (`/zen/v1`, `/zen/go/v1`).
+    - The shipped opencode v2.3.0 catalog resolves a per-model `api` entry instead: `base_url` plus `sdk` package plus `capabilities`/`compatibility`, and a single model id can be served by `responses`, `chat-completions`, or `messages` depending on that entry (`packages/core/src/models-dev.ts`, `packages/schema/src/model.ts`).
+    - `routes.rs` carries no context window, output limit, modality list, cost, cache prices, reasoning support (`toggle`/`effort[]`/`budget`), `structured_output`, `tools.strict`, or `maxTokensField`. Those values cannot be recovered at call time, so downstream code substitutes constants (see Gap 3).
+    - `gemini-*` and `jev-*` are hard-failed through `UnsupportedDialect`, while the reference agent serves Google models through a native protocol and `jev-*` through SystemOne decision routes.
+    - The catalog id is used directly as the wire model id; the reference model carries both a catalog `id` and an API `modelID`, and `Model.Ref` supports `provider/model#variant`.
+    - Unknown models fail closed (correct), but the table drifts silently between releases because nothing generates or validates it against the upstream catalog.
+  - [ ] **Fix:**
+    - Add `crates/ee-agent-opencode/src/catalog/` with `mod.rs` (resolution API), `generated.rs` (data table), and `README.md` (provenance + regeneration instructions). Move data out of `routes.rs`; keep its public resolution functions (`resolve_route`, `endpoint_for`, `catalog`) as the stable surface and keep `routes.rs` under 1,000 LOC (currently 804).
+    - Generate the table from a pinned models.dev snapshot for providers `opencode` and `opencode-go`: per entry `(provider, model_id, api_kind, base_url, sdk, input_modalities, output_modalities, tools_supported, tools_strict, freeform_formats, structured_output, reasoning{enabled, toggle, effort, budget}, limit{context, input, output}, cost{input, output, cache_read, cache_write}, max_tokens_field, reasoning_field)`.
+    - Add a small generator (`crates/ee-agent-opencode/scripts/gen_catalog.rs` or a `xtask`) that consumes `models.dev/api.json` (or the snapshot committed for opencode v2.3.0) and writes `generated.rs` with a `SOURCE_SHA256` and generation date. Keep the snapshot in `crates/ee-agent-opencode/catalog/models-dev.snapshot.json` with its upstream URL documented.
+    - Preserve the security invariant while widening routing: every base URL is an HTTPS literal from the generated allowlist, matched by exact catalog lookup; no environment variable and no model metadata may introduce a new origin. `OPENCODE_API_KEY` remains bound to the catalog origin only.
+    - Support per-model API id translation: `CatalogEntry { catalog_id, api_model_id }`, with `catalog_id` used for lookup/diagnostics and `api_model_id` sent on the wire. Keep retired/unsupported tables as explicit generation inputs rather than silent omissions, and keep them failing closed with the existing guidance.
+    - Add `kind` to the catalog (`chat`, `decision`, `image`) so non-chat entries cannot be selected by the session path even though they are listed.
+    - Verify the `/zen/v1` vs `/inference/...` question against the live service before switching roots: record the probe result in `catalog/README.md`, and keep both only if the docs and service genuinely disagree (then prefer the service-verified root per surface).
+  - [ ] **Acceptance criteria:**
+    - `resolve_route("zen", "gpt-5.5")` returns protocol `openai_responses`, a catalog-declared base URL, `limit.context > 0`, and `limit.output > 0`; the same holds for every row in `generated.rs`.
+    - A model only present on `opencode-go` still fails with `WrongSurface`, and a retired id still fails with `RetiredModel`; both keep their current guidance text.
+    - No routing input can produce an origin outside the generated allowlist, and a test asserts `endpoint` is always `https://` and always catalog-derived.
+    - The generator is reproducible: running it twice on the same snapshot yields byte-identical `generated.rs`, and a `--check` mode fails when the committed file is stale.
+    - Existing tests in `crates/ee-agent-opencode/src/routes.rs` (surface parsing, exact-match rejection, TUI alias guidance) still pass.
+
+### Gap 2 — OpenRouter Request-Body Parity
+
+- [ ] Make every documented OpenRouter chat request option expressible from `ee-agent-openrouter` without editing shared code.
+  - [ ] **Problem:**
+    - `crates/ee-agent-openrouter/src/openrouter.rs::openrouter_profile` sets bearer auth, `X-Title`, optional `HTTP-Referer`, a retry policy, `reasoning.effort`, and a name-based Anthropic cache flag. That is the entire OpenRouter-specific surface.
+    - The shared body builder (`crates/ee-chat-completions/src/wire.rs::request_body`) emits only `model`, `messages`, `stream`, `tool_choice: "auto"`, optional `tools`, and merged `extensions`. It never requests usage in a stream and never emits provider preferences.
+    - The reference agent sends `provider` routing (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `only`, `ignore`, `quantizations`, `sort`, `max_price`, `zdr`), `plugins` (`web`, `file-parser`, `moderation`, `response-healing`, `auto-router`), `web_search_options`, `models` fallback list, `user`, `session_id`, `trace`, `debug.echo_upstream_body`, and `usage: {include:true}` by default (`packages/ai/src/providers/openrouter.ts`).
+    - OpenRouter reasoning support is reduced to `effort`. The reference object supports `enabled`, `exclude`, `effort` including `none`/`xhigh`/`max`, and `max_tokens` fitted below the output limit with a 1,024-token floor for Anthropic upstreams (`fitReasoning`).
+    - Streaming responses currently report no usage because `stream_options.include_usage` is never sent, so per-turn cost and cache-hit accounting are invisible for OpenRouter chat routes.
+  - [ ] **Fix:**
+    - Add a typed `OpenRouterOptions` to `crates/ee-agent-openrouter/src/openrouter.rs` mirroring the reference shape, and merge it into the body through the existing `EndpointProfile.extensions` slot. Keep unknown top-level option keys passthrough so new upstream options do not require an ee release.
+    - Add explicit configuration sources: `OPENROUTER_PROVIDER_PREFERENCES` (JSON), `OPENROUTER_PLUGINS` (JSON), `OPENROUTER_MODELS` (comma list), `OPENROUTER_USER`, and a bounded `OPENROUTER_OPTIONS_JSON` escape hatch for the remaining documented fields. Parse with size caps, reject unknown types with actionable diagnostics, and redact values in errors/logs (`Debug` already avoids secrets; extend it).
+    - Split reasoning shaping into `none`/`low`/`medium`/`high`/`xhigh`/`max` plus `max_tokens`, and fit `max_tokens` against the resolved output limit (Gap 1/3) with a minimum of 1,024 when the upstream is Anthropic.
+    - Add `stream_options.include_usage` to the shared chat body behind a profile flag, default-on for OpenRouter and opt-in for other providers, and keep decoding `usage` plus `usage.cost` when present.
+    - Teach `ee-chat-completions` to detect the output-token field (`max_tokens` vs `max_completion_tokens`), since some OpenRouter upstreams require the latter; drive it from catalog compatibility when available.
+    - Add `models` fallback list support and keep it ordered; OpenRouter uses it only on the chat route.
+  - [ ] **Acceptance criteria:**
+    - A configured provider-routing object appears verbatim under `provider` in the request body, and omitting it produces no `provider` key at all (no empty object).
+    - `usage.include` defaults to true and can be disabled; streaming responses then either carry usage or omit the field, never zero-fill.
+    - `reasoning.max_tokens` never equals or exceeds `max_tokens`; the Anthropic floor is enforced in a unit test.
+    - Options JSON larger than the documented cap, or carrying a non-object `provider`, fails at startup with a message naming the variable — never at request time.
+    - Existing `openrouter.rs` tests (headers, endpoint validation, cache flag, missing-key wording, token redaction) still pass unchanged.
+
+### Gap 3 — Per-Model Token Budgeting and Length Continuation
+
+- [ ] Replace constant output limits and percent-only compaction with catalog-driven token budgets, and continue truncated replies.
+  - [ ] **Problem:**
+    - `crates/ee-agent-opencode/src/messages.rs` hardcodes `DEFAULT_MAX_OUTPUT_TOKENS = 8192` and sends it for every Anthropic-route model, including models whose catalog output limit is 128k–262k. The Responses codec sends no output limit at all unless an extension supplies it.
+    - `crates/ee-agent-opencode/src/config.rs` and `crates/ee-agent-openrouter/src/config.rs` default the context window to 200,000 for every model, and the ACP usage denominator therefore misstates pressure on 1M-context models and overstates it on 32k models.
+    - `crates/ee-agent-orchestrator/src/compaction/mod.rs` triggers compaction on `auto_compact_threshold_percent` of that static window; there is no measured-or-estimated prompt size and no reserve for the summary itself.
+    - `ee_chat_completions::wire::AssistantTurn` carries `finish_reason`, and each provider codec maps its native stop reason into it, but `ee_agent_orchestrator::ModelResponse` (`crates/ee-agent-orchestrator/src/model.rs:439`) has no finish-reason field, so adapters drop it. Nothing can react to `length`.
+    - The reference agent computes `outputLimit = min(catalog_output, 256_000)`, fits it to `context - measured - estimated*1.15 - 1% headroom`, floors at 1,024, and injects a continuation prompt on `finish_reason == "length"` (`packages/core/src/session/model-request.ts`, `packages/core/src/session/runner/llm.ts`).
+  - [ ] **Fix:**
+    - Extend `ee_agent_orchestrator::ModelResponse` with `finish_reason: Option<String>` and thread it from `AssistantTurn` through `response_from_turn` in both provider crates; keep the field optional and default to `None` for adapters that cannot report it.
+    - Add `ModelLimits` to the catalog (Gap 1) and a shared helper in `ee-agent-orchestrator` (e.g. `model::output_limit(limits, prompt_tokens)`) implementing the fit formula with 1,024/256,000 bounds and documented headroom.
+    - In `messages.rs` and `responses.rs`, send the fitted value as `max_tokens` / `max_output_tokens` instead of the constant; add `OPENCODE_MAX_OUTPUT_TOKENS` (and `OPENROUTER_MAX_OUTPUT_TOKENS`) as explicit overrides validated against the catalog ceiling.
+    - Feed the measured prompt size back from the last response into the next request's fit calculation; when no measurement exists, estimate from serialized transcript bytes with the documented 4-bytes-per-token heuristic and margin.
+    - In the loop engine, treat `finish_reason == "length"` with no tool intents as a continuation opportunity: append the bounded continuation notice as a system/user message and re-enter the step loop, with a per-turn continuation cap so a loop cannot run unbounded.
+    - Keep compaction threshold semantics but express them in tokens derived from `limit.context`, reserving room for the summary output; keep `auto_compact_threshold_percent = 0` as the disable switch.
+  - [ ] **Acceptance criteria:**
+    - A Messages-route model with a 131,072-token output limit gets a `max_tokens` above 8,192, and a 4,096-limit model never receives more than its ceiling after fitting.
+    - Fitted output plus estimated prompt never exceeds the catalog context window in a property-style test over boundary cases (tiny window, huge prompt, unknown limit).
+    - A scripted adapter returning `finish_reason: "length"` with no tool calls triggers exactly one continuation message per step and stops at the configured cap.
+    - Unknown model limits fall back to the documented default (32,000 output) and never panic or emit `0`.
+    - ACP `usage_update` reports the catalog context window for known models and the configured fallback otherwise.
+
+### Gap 4 — Reasoning Continuity and Replay
+
+- [ ] Preserve provider reasoning state in the transcript and replay it in the shape each protocol requires.
+  - [ ] **Problem:**
+    - `crates/ee-agent-opencode/src/messages.rs::request_body` emits only `text` and `tool_use`/`tool_result` blocks; assistant `thinking` blocks and their signatures are dropped, so Anthropic-route multi-step tool loops lose signed reasoning and may be rejected or degraded on the next turn.
+    - `crates/ee-agent-opencode/src/responses.rs::input_item` emits only `message` and `function_call_output` items; reasoning items are never replayed, and the request never sets `include: ["reasoning.encrypted_content"]` (the reference OpenRouter and OpenAI routes both set it).
+    - `ee-chat-completions` decodes reasoning into a single `reasoning: String` and never re-emits `reasoning_details` or `reasoning_content`, so OpenRouter models that require unmodified `reasoning_details` (including `index`) and Kimi-style `reasoning_content` lose continuity after the first turn.
+    - Provider-specific compatibility switches from the reference model (`reasoningField`, `requireReasoning`, `supportsThinkingBlockBinding`, `supportsEffortUpdates`) do not exist, so field placement cannot follow the catalog.
+  - [ ] **Fix:**
+    - Add a normalized reasoning record to `ee-agent-orchestrator` (`ModelReasoning { text, opaque: Option<Value> }` or equivalent) carried on assistant messages, and extend `ModelResponse` so codecs can attach it.
+    - `ee-chat-completions`: keep the raw assistant reasoning payload (not just flattened text) and re-emit it in `messages_from_transcript_with_cache` using the profile's configured reasoning field; preserve `reasoning_details` entries verbatim including `index`, and support `reasoning_content`, `reasoning_text`, and `reasoning` field names.
+    - `ee-agent-opencode` Messages codec: encode assistant `thinking` blocks with `signature` when the decoded block carried one, and keep them ordered before `text`/`tool_use` as the protocol requires.
+    - `ee-agent-opencode` Responses codec: replay `reasoning` items with their `encrypted_content`/`id` and add `include: ["reasoning.encrypted_content"]` to the request body for models whose catalog marks encrypted reasoning support.
+    - `ee-agent-openrouter`: implement the reference `reasoning_details` passthrough rule and keep the raw entries in the transcript rather than re-synthesizing them.
+    - Gate every behavior on catalog compatibility (Gap 1) with conservative defaults: send nothing when unknown rather than guessing a field.
+  - [ ] **Acceptance criteria:**
+    - An Anthropic-route second turn contains the prior assistant thinking block with its signature byte-identical to the decoded input.
+    - A Responses-route second turn contains the prior reasoning item and the request carries `include: ["reasoning.encrypted_content"]`.
+    - An OpenRouter second turn replays `reasoning_details` unmodified, including `index`, and a model configured for `reasoning_content` receives that field instead.
+    - Reasoning is never injected into text, logs, or error messages; a redaction test covers the transcript assembler.
+
+## Part 2 — P1 Gaps
+
+### Gap 5 — Error Taxonomy and Retry Budget
+
+- [ ] Classify provider failures structurally and bound retries the way the reference agent does.
+  - [ ] **Problem:**
+    - `crates/ee-chat-completions/src/wire.rs::classify_http_error` maps `429` to `RateLimited` and `408/409/425/5xx` to `Transient`; everything else is permanent. There is no distinction between context overflow, payload too large, quota exhaustion, content policy, or provider-internal overload.
+    - `retry_delay` uses `base * 2^attempt` capped at `max_delay` with ±20% jitter, and the default budget is 2 attempts (`DEFAULT_RETRY_MAX_ATTEMPTS`). The reference agent allows 10 attempts with a 15-minute `retry-after` cap, a separate 1-hour budget for unreachable networks, a timeout retry cap of 3, and an `x-should-retry` override (`packages/core/src/model-retry.ts`).
+    - Context overflow cannot be distinguished from a generic 400, so it cannot trigger compaction or a prompt shrink; it surfaces as a permanent failure.
+    - Quota exhaustion bodies (OpenRouter/OpenCode free tiers) are reported as auth or generic failures, which misdirects users to rotate keys.
+  - [ ] **Fix:**
+    - Extend `ProviderError` with `ContextOverflow`, `PayloadTooLarge`, `QuotaExceeded`, and `ContentPolicy` variants (or a bounded `classification` field) and classify them from status plus provider error codes and bounded message matching, following `provider-error.ts` ordering: context-overflow and payload checks before content policy, quota before auth, rate limit last among 4xx.
+    - Never treat a `429` as context overflow even when its body mentions tokens.
+    - Replace the retry policy with an attempt budget plus per-gap cap and jittered exponential backoff; raise the default budget for interactive sessions while keeping a configurable ceiling, and keep the existing no-retry-after-first-delta rule for streams.
+    - Add a separate unreachable-network schedule keyed on transport error codes (`ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `EHOSTUNREACH`, `ENETDOWN`) with its own window, and cap timeout-driven retries independently.
+    - Surface `ContextOverflow` to the orchestrator so it triggers compaction and a single retry rather than ending the turn; surface `QuotaExceeded` with retry-after so the host can show a reset time.
+    - Classify delivery (`not_sent`, `rejected`, `ambiguous`, `accepted`) and recovery (`retry_connect`, `retry_full`, `rotate_and_retry_full`, `fallback_http`, `fail`) on transport failures, matching `packages/ai/src/schema/errors.ts:100-120`; retry a billable one-shot call only when delivery is `not_sent`, and use `recovery` to choose full-request retry versus resume.
+    - Parse rate-limit metadata from `retry-after` headers/bodies and `x-ratelimit-*` headers into a bounded `RateLimitInfo { retry_after, limit, remaining, reset }`, and honour `x-should-retry` when present.
+  - [ ] **Acceptance criteria:**
+    - A 400 `context_length_exceeded` body becomes `ContextOverflow`, a 413 becomes `PayloadTooLarge`, a 402 becomes `QuotaExceeded`, and a 401 stays permanent.
+    - A `429` with an overflow-like body remains `RateLimited`.
+    - `retry-after` hints are honored up to the cap and never exceeded; jitter stays inside its documented bound (deterministic clock injection in tests).
+    - A stream that already emitted a delta is never retried, regardless of classification.
+    - A connection dropped after the request was sent is `ambiguous` and is not retried for a one-shot billable call.
+    - A `429` carrying `x-ratelimit-remaining`/`x-ratelimit-reset` exposes both values, and `x-should-retry: false` suppresses a retry the status would otherwise allow.
+
+### Gap 6 — Prompt Cache Policy Parity
+
+- [ ] Apply an automatic, per-provider cache policy with bounded breakpoints instead of name-sniffed Anthropic enablement.
+  - [ ] **Problem:**
+    - `crates/ee-agent-openrouter/src/openrouter.rs::supports_anthropic_prompt_cache` enables breakpoints when the model id starts with `anthropic/` or contains `claude`; every other OpenRouter route gets none, including routes that cache well (Qwen) and routes served through Anthropic-compatible upstreams under other aliases (`~anthropic/...`).
+    - `ee-chat-completions::messages_from_transcript_with_cache` places a breakpoint on the system prompt and on messages explicitly marked `ee_cache_breakpoint`. There is no tool breakpoint, no first/last system-part split, no conversation-tail breakpoint, and no 4-breakpoint budget accounting.
+    - The Messages codec places breakpoints on the last system block and last tool only; there is no tail breakpoint, so long tool loops rewrite the whole conversation prefix each step.
+    - TTL and cache format (`anthropic` vs `alibaba`) are not expressible, and cache hits therefore cannot be tuned per provider.
+  - [ ] **Fix:**
+    - Port the reference policy model: a `CachePolicyObject { tools, system, messages }` with `auto` defaults (last tool, first and last system part, conversation tail), a 4-breakpoint cap that counts existing manual hints, and `none` to disable.
+    - Add a per-provider policy table: Anthropic-family routes get auto; Qwen-family routes get system + tail only; other OpenRouter routes get none; allow catalog/provider overrides.
+    - Support `ttl` on emitted `cache_control` and a per-provider cache format so `alibaba` routes skip tool-definition breakpoints.
+    - Keep the current `ee_cache_breakpoint` marker as an explicit manual override that consumes budget first.
+    - Count breakpoints after assembly and drop surplus marks deterministically (tail-last) instead of emitting an invalid request.
+    - Gate cache markers on `capabilities.cache` (`implicit`/`explicit`, allowed `ttl` values, `minTokens`, `maxBreakpoints`, `targets`) and skip the policy pass entirely for protocols that ignore inline markers, matching `packages/ai/src/cache-policy.ts:59-70,230-245`.
+    - Lower TTL in the field the protocol documents: OpenAI Responses/Chat uses `prompt_cache_retention: "24h"` for a 24-hour lifetime and `prompt_cache_options.ttl` otherwise (`packages/ai/src/protocols/utils/cache.ts:34-42`); Messages and OpenRouter carry `cache_control.ttl`.
+    - Emit one bounded warning when breakpoints exceed the cap, including the dropped count (`packages/ai/src/protocols/utils/cache.ts::warnDropped`).
+  - [ ] **Acceptance criteria:**
+    - An Anthropic-route request with 10 tools and a long transcript carries exactly 4 breakpoints: last tool, first system part, last system part, and the tail message.
+    - A non-Anthropic, non-Qwen OpenRouter route carries none.
+    - A Qwen route carries system + tail only and no tool breakpoint.
+    - Manual `ee_cache_breakpoint` markers are preserved and counted; a request with 4 manual markers adds no automatic ones.
+    - TTL values appear only when configured, never as `ttl: ""`.
+    - A route declaring no explicit cache capability receives no `cache_control` markers, and a route declaring implicit-only caching receives the policy headers/body key but no per-part markers.
+    - TTL `24h` lands in `prompt_cache_retention` on OpenAI protocols and in `cache_control.ttl` elsewhere; any other TTL lands in `prompt_cache_options.ttl`.
+    - Exceeding the breakpoint cap logs exactly once per request with the dropped count.
+
+### Gap 7 — Tool-Call Control and Structured Output
+
+- [ ] Give the request builder the tool controls and structured-output fields the reference agent supports.
+  - [ ] **Problem:**
+    - `request_body` hardcodes `tool_choice: "auto"`. There is no way to require a tool, forbid tools, or name a specific tool, and no `parallel_tool_calls` flag even though the orchestrator runs up to `DEFAULT_MAX_PARALLEL_TOOLS = 10` independent read-only tools (`crates/ee-agent-orchestrator/src/config.rs:51`).
+    - `ToolDefinition` (`crates/ee-agent-orchestrator/src/tools.rs:117`) carries only `name`, `description`, `input_schema`, and policy metadata; there is no `strict` flag and no freeform/grammar tool form, so schema-strict models cannot be satisfied and grammar tools (`lark`/`regex`) cannot be advertised.
+    - No structured-output field is emitted anywhere (`response_format` / `text.format`), so a caller that needs a JSON object must prompt for it.
+  - [ ] **Fix:**
+    - Add a `ToolCallControl` to `ModelRequest`: `choice` (`auto`, `none`, `required`, `tool { name }`), `parallel: Option<bool>`, and adapters emit the dialect-native field (`tool_choice`, `parallel_tool_calls`, Responses `allowed_tools` where supported).
+    - Add `strict: bool` and an optional `format` (`text`, `lark`, `regex`) to `ToolDefinition`, with adapters emitting them only when the catalog advertises support (`tools.strict`, `tools.freeform`).
+    - Default `parallel` to unset (do not send the field) so strict providers do not reject unknown fields, matching the reference default-off behavior.
+    - Add `ResponseFormat { JsonObject, JsonSchema { name, schema, strict } }` to `ModelRequest`. Primary parity path is the reference's hidden forced tool (`generate_object`, `packages/ai/src/llm.ts:248-287`): advertise a hidden tool whose input is the schema and decode its arguments. Native `response_format` / `text.format` is an optional optimization only where the catalog advertises `structuredOutput`; never require it, since the reference does not rely on it for cross-provider parity.
+    - Wire a first consumer: the approval classifier and recovery paths can request a strict JSON schema instead of parsing prose.
+    - Reject duplicate tool names before sending, as the reference does (`packages/ai/src/llm.ts:264-271`); a duplicate is a configuration error, not a provider error.
+    - Support mid-conversation tool-list changes only when the catalog advertises `tools.updates`; otherwise freeze the tool list for the session and document it.
+    - Model the reference's loop stop predicate (`until`) as an optional orchestrator hook so callers can end a multi-step loop deterministically instead of relying on iteration caps alone.
+  - [ ] **Acceptance criteria:**
+    - `tool_choice` is omitted when no tools are present and equals the configured control otherwise.
+    - `parallel_tool_calls` is absent unless explicitly configured, and never emitted without tools.
+    - A model whose catalog lacks `structured_output` fails the request before sending, with actionable guidance.
+    - Freeform tools are only advertised to models whose catalog lists a matching format.
+    - A structured-output request works on a provider without native response formatting because the hidden tool path is used, and the decoded value matches the schema or fails with the model's tool-argument error.
+    - Duplicate tool names fail before the request; a mid-conversation tool-list change on a route without `tools.updates` is rejected with guidance.
+    - A configured `until` predicate stops the loop after the named step condition and emits the normal final response, not a budget error.
+
+## Part 3 — P2 Gaps
+
+### Gap 8 — Model Variants
+
+- [ ] Support `provider/model#variant` selection derived from catalog reasoning support.
+  - [ ] **Problem:**
+    - Reasoning is controlled by a single `*_REASONING_EFFORT` value with three accepted levels; the reference catalog declares per-model `toggle`, `effort[]` (including `none`/`xhigh`/`max`), and `budget` ranges, and derives named variants per package (`packages/core/src/variant.ts`).
+    - Anthropic-route models take a token budget rather than an effort string; ee currently no-ops that knob (`crates/ee-agent-opencode/src/reasoning.rs::unsupported_note`) instead of exposing a budget variant.
+    - There is no way to select a variant per request or per session, and no validation that the variant exists for the chosen model.
+  - [ ] **Fix:**
+    - Extend the model id grammar to accept `provider/model#variant` in both binaries (OpenRouter keeps its `vendor/model` id, so the variant suffix must be parsed after the last `#`).
+    - Build the variant list from catalog reasoning support per package: toggle variants (`none` + default), effort variants from the declared values, and budget variants within the declared min/max, using the same ceilings the reference uses for Anthropic output budgets.
+    - Reject an unknown variant with the list of valid ids, and keep the existing effort environment variable as a shorthand that maps to the matching variant.
+    - Emit the variant's request overlay (reasoning field/budget, `include`, body overlays) through the existing extensions/profiles.
+  - [ ] **Acceptance criteria:**
+    - `deepseek/deepseek-v4-flash#high` selects the `high` effort variant; `#bogus` fails listing valid ids.
+    - An Anthropic-route model exposes budget variants and sends `thinking.budget_tokens` within the declared range.
+    - A model without reasoning support rejects every reasoning variant at startup, not at request time.
+
+### Gap 9 — Catalog Discovery and Cost Accounting
+
+- [ ] Expose catalog-driven model listing and per-turn cost from provider-reported usage.
+  - [ ] **Problem:**
+    - `crates/ee-agent-opencode/src/discovery.rs` is a display-only `/models` probe behind `--discover-models`; it cannot select routes and carries no metadata. `ee-agent-openrouter` has no discovery at all.
+    - Usage decode records tokens and cache tokens but no monetary cost; OpenRouter returns `usage.cost`, and the catalog carries per-model input/output/cache prices with context-tier overrides.
+    - There is no way to answer "what models can I use, what do they cost, what limits apply" from either binary without reading source.
+  - [ ] **Fix:**
+    - Add `--list-models` (and `--list-models --json`) to both binaries, sourced from the generated catalog: id, kind, protocol, context/output limits, modalities, reasoning support, cost, status.
+    - Parse OpenRouter `usage.cost` when present; otherwise compute cost from catalog prices including cache read/write and context-tier overrides, and expose it through `ModelUsage`/metrics without changing ACP wire compatibility.
+    - Keep discovery strictly local and display-only; never let listing output select an endpoint or a credential.
+  - [ ] **Acceptance criteria:**
+    - `--list-models --json` is stable, sorted, and includes every resolvable catalog row with limits and cost.
+    - Cost accounting prefers provider-reported cost and falls back to catalog prices; unknown prices stay unknown, never zero.
+    - Listing performs no network request and no credential access.
+
+### Gap 10 — OpenRouter `/responses`, Decision Models, and Media
+
+- [ ] Reach parity on route kinds and input modalities that the reference agent exposes.
+  - [ ] **Problem:**
+    - OpenRouter exposes both `/chat/completions` and `/responses`; `ee-agent-openrouter` only implements chat. The reference `/responses` route sends `store:false` plus `include: ["reasoning.encrypted_content"]` and shares the OpenAI Responses body builder.
+    - OpenCode decision models (`/systemone`) and Google-protocol models are rejected as unsupported; the reference agent implements both, and decision models drive its typed-question features.
+    - Media support is image-only in ee. The reference catalog declares PDF and video inputs, the OpenRouter provider offers a `file-parser` plugin for PDF, and the harness resizes oversized image payloads (25 MiB trigger, 15 MiB target).
+  - [ ] **Fix:**
+    - Add an `/responses` route to `ee-agent-openrouter` reusing `crates/ee-agent-opencode/src/responses.rs` through a shared module (move the codec into `ee-chat-completions` or a new `ee-openai-responses` crate rather than duplicating it).
+    - Implement the SystemOne decision codec only if a first-class consumer exists; until then keep the explicit unsupported error but name the feature. Google-protocol support should be a separate, security-reviewed codec, not a re-route through OpenAI shapes.
+    - Enforce modality gates from the catalog: refuse audio/video/PDF on models that do not declare them, instead of silently flattening to text placeholders.
+    - Add the image size guard (trigger/target bytes) before request assembly, with deterministic placeholder text for offloaded images.
+  - [ ] **Acceptance criteria:**
+    - An OpenRouter model whose catalog entry lists `responses` can be called through `/responses` with `store:false` and encrypted-reasoning include.
+    - Sending a PDF to a model that does not declare PDF input fails before the request with actionable guidance.
+    - An image larger than the trigger size is offloaded with a deterministic placeholder and a cache-stable text substitution.
+
+## Part 4 — Implementation Constraints and Test Gates
+
+### 4.1 Constraints
+
+- [ ] Respect the 1,000-LOC rule: `crates/ee-agent-opencode/src/routes.rs` is 804 LOC today. Data and per-model logic move to `crates/ee-agent-opencode/src/catalog/`; do not grow the existing files past the threshold.
+- [ ] Preserve the security model: catalog-derived HTTPS origins only, no env-supplied endpoints for OpenCode, credential bound to origin, no secrets or raw provider bodies in errors/logs.
+- [ ] Keep shared behavior shared: request bodies, SSE decoding, retry, and transcript assembly stay in `ee-chat-completions`; provider crates keep only their own names, headers, options, and error wording.
+- [ ] No new dependencies without justification; reuse `serde_json`, `reqwest`, `sha2`, and existing EE crates.
+- [ ] Every behavior change ships with unit tests in the owning crate and one integration test through the ACP adapter path (`crates/ee-agent-opencode/tests/acp_flows.rs`, `crates/ee-agent-openrouter/tests/provider_flows.rs`).
+- [ ] Document non-obvious wire decisions in the module docs that already explain dialect routing.
+
+### 4.2 Test gates (run quiet, mem-guarded)
+
+- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-chat-completions`
+- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-opencode`
+- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-openrouter`
+- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator model::`
+- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator compaction::`
+- [ ] `cargo check --quiet -p ee-agent-opencode -p ee-agent-openrouter --all-targets`
+- [ ] `cargo clippy --quiet -p ee-agent-opencode -p ee-agent-openrouter -p ee-chat-completions --all-targets -- -D warnings`
+- [ ] `cargo fmt --check`
+- [ ] Catalog reproducibility: generator `--check` passes against the committed snapshot; a fixture replays one recorded request per dialect and per provider.
+
+### 4.3 Suggested delivery order
+
+- [ ] Slice A: Gap 2 (OpenRouter body/options) — smallest diff, immediately visible parity.
+- [ ] Slice B: Gap 1 + Gap 9 listing (catalog generation and metadata).
+- [ ] Slice C: Gap 3 + Gap 4 (budgeting and reasoning replay; both depend on catalog metadata).
+- [ ] Slice D: Gap 5 + Gap 6 (error taxonomy and cache policy).
+- [ ] Slice E: Gap 7 + Gap 8 (tool controls, structured output, variants).
+- [ ] Slice F: Gap 10 (OpenRouter `/responses`, media gates, decision stub).
+
+## Part 5 — Second-Pass Findings (Deep Scan, Gap 11–Gap 24)
+
+Second pass over `harness-example/opencode` covered the request/transport/loop layers that the first pass summarised only loosely. These gaps are **additional** to Gaps 1–10; several extend them (noted per gap). Part 4 gates and constraints apply unchanged.
+
+| # | Gap | Priority | Reference evidence |
+|---|---|---|---|
+| 11 | Sampling and generation knobs | P1 | `packages/ai/src/schema/options.ts:166-196`, `packages/core/src/session/model-request.ts:317-320` |
+| 12 | Provider option passthrough, deep merge, HTTP overrides | P1 | `packages/ai/src/schema/options.ts:60-110`, `packages/ai/src/providers/openai-options.ts` |
+| 13 | Transport timeouts, stream stalls, session transport | P1 | `packages/ai/src/schema/options.ts:44-56`, `packages/ai/src/protocols/open-responses-channel.ts` |
+| 14 | Session affinity and cache routing headers | P1 | `packages/core/src/session/model-request.ts:318-336`, `packages/core/src/session/affinity.ts` |
+| 15 | Usage accounting extension (reasoning tokens, cost, context) | P2 | `packages/ai/src/schema/events.ts:20-120`, `packages/core/src/session/usage.ts` |
+| 16 | Tool-result bounding and overflow offload | P1 | `packages/core/src/tool-output.ts:13-145` |
+| 17 | Loop termination and recovery semantics | P1 | `packages/core/src/session/runner/max-steps.ts`, `.../runner/step.ts:198-253` |
+| 18 | Streaming event surface (partial tool args, raw, step events) | P2 | `packages/ai/src/protocols/utils/tool-stream.ts`, `packages/ai/src/schema/events.ts` |
+| 19 | Hosted tools and response continuation | P2 | `packages/ai/src/protocols/utils/responses-hosted-tools.ts`, `.../open-responses-continuation.ts` |
+| 20 | Provider-side compaction and checkpoints | P2 | `packages/ai/src/protocols/utils/responses-compaction.ts`, `.../responses-checkpoint.ts` |
+| 21 | Provider auth, credentials, configuration surface | P2 | `packages/schema/src/config/provider.ts`, `packages/core/src/provider.ts`, `packages/core/src/model.ts:232` |
+| 22 | Usage-limit and quota visibility | P3 | `packages/core/src/usage-limits.ts` |
+| 23 | Prompt payload parity (instruction sources, media gating) | P2 | `packages/core/src/instruction-discovery.ts`, `packages/core/src/session/model-request.ts:337-352` |
+| 24 | Catalog capability matrix completion | P2 (extends Gap 1) | `packages/ai/src/schema/options.ts:240-287`, `packages/schema/src/model.ts` |
+
+### Gap 11 — Sampling and Generation Knobs
+
+- [ ] Let callers set sampling parameters per model/session, gated by catalog capabilities.
+  - [ ] **Problem:**
+    - The reference defines `GenerationOptionsFields { maxTokens, temperature, topP, topK, frequencyPenalty, presencePenalty, seed, stop }`, merges them across route/model/request (`packages/ai/src/schema/options.ts:166-196`), and splits them from provider options by `GENERATION_KEYS` before building a body (`packages/core/src/session/model-request.ts:317-320`).
+    - Their capabilities carry `temperature`, `topP`, `topK` so unsupported knobs are dropped instead of rejected (`packages/ai/src/schema/options.ts:240-287`).
+    - `ee_agent_orchestrator::ModelRequest` (`crates/ee-agent-orchestrator/src/model.rs:277-294`) carries only transcript, tools, budget, task, available models, and model id. No adapter in `ee-agent-opencode` or `ee-agent-openrouter` can express temperature, top-p, top-k, penalties, seed, or stop sequences, and no request body emits them.
+  - [ ] **Fix:**
+    - Add an optional `GenerationOptions` struct to `ModelRequest`: `max_output_tokens`, `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `seed`, `stop` (bounded list, bounded string length, validated ranges).
+    - Lower it per dialect: Chat Completions `temperature`/`top_p`/`top_k`/penalties/`seed`/`stop`; Responses `temperature`/`top_p`/`seed`; Messages `temperature`/`top_k`/`stop_sequences`; reject knobs the catalog does not advertise at config time, not request time.
+    - Expose per-provider configuration (`OPENCODE_TEMPERATURE`, `OPENCODE_TOP_P`, `OPENCODE_SEED`, `OPENROUTER_TEMPERATURE`, `OPENROUTER_TOP_P`, `OPENROUTER_SEED`, and stop lists) that fills session defaults; request-level values still win.
+    - Never send zero-value defaults: absent configuration must produce absent body fields so strict providers keep working.
+  - [ ] **Acceptance criteria:**
+    - With nothing configured, no sampling key appears in any dialect's body (assertion per codec).
+    - `stop` is capped in count and length, and an empty entry is rejected at startup.
+    - A model whose catalog omits `temperature` fails configuration with the model id and the unsupported knob named.
+    - Seed and penalties round-trip into the body types (`integer` for seed, numbers for penalties) in unit tests.
+
+### Gap 12 — Provider Options, Deep Merge, and HTTP Overrides
+
+- [ ] Support nested provider options and transport-level overrides without editing shared code.
+  - [ ] **Problem:**
+    - The reference transport options include `headers`, per-phase `timeout`, and `http { query, body, encoding, tls }`, where `body` is **deep-merged** over the provider-native body and `encoding` selects `zstd`/`gzip`/`none` (`packages/ai/src/schema/options.ts:60-110`).
+    - OpenAI/Responses options include `store`, `include`, `reasoning.summary`, `text.verbosity`, `service_tier`, `safety_identifier`, `metadata`, `max_tool_calls`, `truncation`, and `top_logprobs` (`packages/ai/src/providers/openai-options.ts`, `packages/ai/src/protocols/open-responses.ts:819-844`).
+    - Our `EndpointProfile.extensions` is merged by top-level key insertion (`crates/ee-chat-completions/src/wire.rs:110-118`): supplying `{"reasoning":{"effort":"high"}}` replaces any full `reasoning` object, so partial nested overrides are impossible. There is no query-map support, no compression selection, and no TLS client configuration.
+  - [ ] **Fix:**
+    - Add a bounded `deep_merge` for JSON objects in `ee-chat-completions` and use it for `extensions`; arrays replace wholesale, objects merge recursively, `null` deletes only when explicitly requested.
+    - Add `query: Vec<(String, String)>` support to `EndpointProfile` with strict percent-encoding, and reject duplicate reserved keys.
+    - Add optional request compression (`none` default) behind an explicit setting; do not enable by default.
+    - Add typed OpenAI/Responses options (`service_tier`, `text.verbosity`, `reasoning.summary`, `safety_identifier`, `metadata`, `max_tool_calls`, `truncation`) to the OpenRouter/OpenCode option modules, gated on catalog capabilities.
+    - Keep mTLS out of scope for now; if added later it requires separate key-handling review.
+  - [ ] **Acceptance criteria:**
+    - Nested extension merge preserves sibling keys and replaces arrays (unit tests).
+    - Query values are encoded exactly once and a `?`/`&` in a value cannot inject another parameter.
+    - Compression is off unless configured; a configured value the endpoint rejects fails at startup.
+    - No option value is logged verbatim when it may carry user data (`metadata`, `safety_identifier`).
+
+### Gap 13 — Transport Timeouts, Stream Stalls, and Session Transport
+
+- [ ] Make timeouts phase-aware and stop killing long reasoning streams.
+  - [ ] **Problem:**
+    - The reference defaults to a **300 s header** budget (total unbounded unless configured) and a **900 s chunk-idle** budget, with per-phase overrides (`packages/ai/src/schema/options.ts:44-56`; the comment cites DeepSeek asking for ≥15 min of silence).
+    - Our adapters build a reqwest client with a single `.timeout(profile.timeout)` (`crates/ee-chat-completions/src/transport.rs:155-165`), and both binaries default that to 120 s (`DEFAULT_TIMEOUT_MS` in `crates/ee-agent-opencode/src/config.rs:60`; `--timeout-ms` default `120_000` in `crates/ee-agent-openrouter/src/config.rs`).
+    - There is no idle-chunk watchdog: a stream that produces no delta for 120 s is indistinguishable from a completed one and is aborted as a transport timeout.
+    - The reference also carries a stateful WebSocket `response.create` channel with rotation and HTTP fallback (`packages/ai/src/protocols/open-responses-channel.ts`, `packages/core/src/session/model-transport.ts`), which we lack entirely.
+  - [ ] **Fix:**
+    - Replace the single timeout with `total`, `headers`, and `chunk` budgets: headers 300 s and chunk 900 s by default, total unbounded unless configured (matching the reference); expose `OPENCODE_TIMEOUT_TOTAL_MS`, `OPENCODE_TIMEOUT_CHUNK_MS`, and the OpenRouter equivalents, keeping the existing variable as an alias for `total`.
+    - Implement the chunk watchdog in the SSE loop: reset on each event, fail with a typed `Timeout { phase: "chunk" }` when idle past the budget.
+    - Classify header timeouts distinctly from chunk timeouts so retry policy can treat them differently (Gap 5).
+    - Defer the WebSocket session channel to its own issue; record the decision in the module docs so it is not silently assumed.
+  - [ ] **Acceptance criteria:**
+    - A stream that stalls 200 s with a 900 s chunk budget completes when the next event arrives.
+    - Exceeding the chunk budget produces `Timeout { phase: "chunk" }`, not a generic transport failure.
+    - Total-budget expiry still bounds a stream that keeps trickling events.
+    - Timeout tests use paused Tokio time, not wall-clock sleeps.
+
+### Gap 14 — Session Affinity and Cache Routing Headers
+
+- [ ] Send stable session/project affinity so provider cache routing and per-session rate limits work.
+  - [ ] **Problem:**
+    - The reference sends `x-opencode-session-id`, `x-opencode-parent-session-id`, `x-session-affinity`, `X-Session-Id`, `x-parent-session-id`, `User-Agent`, `x-opencode-project`, `x-opencode-session`, and `x-opencode-client`, and derives `promptCacheKey` from the affinity id after stripping the `ses_` prefix (`packages/core/src/session/model-request.ts:318-336`).
+    - Affinity is deliberately group-scoped: children use the parent session id and forks use the fork source (`packages/core/src/session/affinity.ts`), so a whole agent tree shares one provider cache lineage.
+    - Our Responses codec derives `prompt_cache_key` from a SHA-256 of `model + system prompt` (`crates/ee-agent-opencode/src/responses.rs::prompt_cache_key`): every session with the same model and prompt shares one cache key, which is the opposite scoping, and child sessions have no relationship at all.
+    - No request carries a `User-Agent`, session id, or project id, so providers that key caches or rate limits on them cannot group our calls.
+  - [ ] **Fix:**
+    - Add `SessionContext { session_id, parent_session_id, project_id, client_name }` to `ModelRequest`, populated by the orchestrator runtime, and emit the reference header set from both provider crates (header names copied exactly; `x-opencode-*` only where we are actually impersonating OpenCode semantics — otherwise use `x-ee-*` and document the deviation).
+    - Derive `prompt_cache_key` from session affinity (strip the id prefix form we use), keeping the existing hash as a fallback when no session id exists.
+    - Send `User-Agent` with binary name and version; never include hostnames or usernames.
+    - Make header emission opt-out for privacy-conscious deployments, with one config switch and a documented provider disclosure.
+  - [ ] **Acceptance criteria:**
+    - A child session sends the parent's affinity value while carrying its own session id.
+    - Two sessions with identical system prompts produce different cache keys.
+    - No header contains a filesystem path, username, or credential material (test asserts on the assembled header map).
+    - Header emission is absent when the context is unset.
+
+### Gap 15 — Usage Accounting Extension
+
+- [ ] Report reasoning tokens, context size, and monetary cost the way the reference does.
+  - [ ] **Problem:**
+    - The reference `Usage` carries `inputTokens`, `outputTokens`, `visibleOutputTokens`, `nonCachedInputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens`, `reasoningTokens`, `totalTokens`, `contextTokens`, and `cost`, with the raw provider payload preserved in `providerMetadata` (`packages/ai/src/schema/events.ts:20-120`).
+    - Cost is authoritative when the provider reports it (`usage.cost`, including a reported zero), otherwise computed from catalog prices with context tiers (`packages/core/src/session/usage.ts:24-60`).
+    - Session stats aggregate tokens and cost per provider/model/variant (`packages/core/src/session/stats.ts`).
+    - Our `ModelUsage` has four fields — input, output, cached input, cache creation (`crates/ee-agent-orchestrator/src/model.rs:331-340`) — and no cost, reasoning, visible-output, or context-size reporting; nothing aggregates per model.
+  - [ ] **Fix:**
+    - Extend `ModelUsage` with `reasoning_tokens`, `context_tokens`, and `cost_micros: Option<u64>` (integer micro-dollars to avoid float drift); keep the existing fields and their `None`-means-unknown contract.
+    - Parse reasoning tokens from both dialects (`completion_tokens_details.reasoning_tokens`, `output_tokens_details.reasoning_tokens`, `reasoning_tokens` on Responses usage) and context size where reported.
+    - Add catalog-price fallback with context tiers, keeping provider-reported cost authoritative including zero.
+    - Surface totals through telemetry and the ACP usage update without changing the wire schema; aggregate per model id in metrics.
+  - [ ] **Acceptance criteria:**
+    - Reasoning tokens appear when reported and stay `None` when absent (never zero-filled).
+    - Provider cost wins over catalog price, and a reported zero stays zero.
+    - Tiered pricing picks the tier whose context threshold is crossed, deterministically for ties.
+    - Accumulating usage across steps does not overflow on `u64` and saturates with a logged warning.
+
+### Gap 16 — Tool-Result Bounding and Overflow Offload
+
+- [ ] Bound every tool result deterministically and keep the overflow readable.
+  - [ ] **Problem:**
+    - The reference truncates at **2,000 lines / 50 KiB**, writes the overflow to a retained file under its state directory, and returns the path plus `truncated` metadata (`packages/core/src/tool-output.ts:13-145`). Overflow is therefore lossy for the model but recoverable for the agent.
+    - Our compaction pipeline prunes by character count only when a result exceeds 8,192 chars, keeping 4,096 head + 1,024 tail plus a marker (`crates/ee-agent-orchestrator/src/model.rs:35-41,243-272`; call sites `crates/ee-agent-orchestrator/src/compaction/pipeline.rs:120,182`). It runs only during compaction, not when a tool result is admitted, so an oversized result is re-sent verbatim by every step until compaction triggers. There is no line-based cap, no byte cap, and no retained copy.
+    - The turn-level `max_output_bytes` budget (`crates/ee-agent-orchestrator/src/config.rs:278`) is opt-in and fails the turn when exceeded instead of bounding a single result, so default behavior is effectively unbounded.
+  - [ ] **Fix:**
+    - Add a per-result bound (`max_lines` default 2,000, `max_bytes` default 50 KiB) applied before projection, configurable through `OrchestratorConfig` and per tool category.
+    - Persist overflow to the session state directory through the existing content-addressed session log/store rather than a new ad-hoc directory, and return `output_path` + `truncated` in the tool result metadata.
+    - Keep the existing head/tail prune as a second stage for already-bounded results, and keep the turn budget as the hard stop.
+    - Redact secrets in the retained copy using the existing `SensitiveDataGuard` rules.
+  - [ ] **Acceptance criteria:**
+    - A 5 MiB read returns a truncated result plus a path, and the retained file contains the full text with `0600`/`0700` permissions.
+    - A 1,000-line, 40 KiB result is returned unchanged with `truncated: false`.
+    - Line cuts never split a UTF-8 sequence or a grapheme cluster.
+    - Retained files are cleaned up with the session lifecycle and never escape the state directory (path traversal test).
+
+### Gap 17 — Loop Termination and Recovery Semantics
+
+- [ ] End a long turn with a summary instead of a budget error, and recover from overflow.
+  - [ ] **Problem:**
+    - The reference injects `MAX_STEPS_PROMPT`, which disables tools and requires a text summary listing completed and remaining work (`packages/core/src/session/runner/max-steps.ts`).
+    - Step outcomes distinguish `OutputLimit` (continue after a length finish), `Compacted` (overflow → compaction → retry), `RecoverFull` (`retry-full` / `rotate-and-retry-full` while no output started), and `Retry` with `freshAssistant` (`packages/core/src/session/runner/step.ts:23-40, 198-253`).
+    - Our budget returns `OrchestratorError::BudgetExceeded` when the iteration cap is hit (`crates/ee-agent-orchestrator/src/budget.rs:191-198`), so the user gets an error rather than a summary; there is no overflow-triggered recovery and no distinction between a retry that can reuse partial output and one that cannot.
+  - [ ] **Fix:**
+    - On iteration-cap exhaustion, make one final text-only model call (tools disabled via Gap 7's `tool_choice: none`) with the summary instruction, emit its text as the turn's final response, and mark the stop reason `max_iterations` (already an event field).
+    - Add `finish_reason` to `ModelResponse` (Gap 3) and handle `length` per Gap 3, then treat overflow classification (Gap 5) as: compact once, rebuild the request, retry once; if it overflows again, surface a bounded diagnostic.
+    - Represent retry kinds explicitly in the loop (`RetryKind::{Fresh, Resume, Rotate}`) so adapters can report whether a request never started; keep `rotate` unimplemented until a model registry exposes alternates.
+    - Reject unknown finish reasons with a typed `InvalidProviderOutput` error instead of treating them as success.
+  - [ ] **Acceptance criteria:**
+    - Hitting the iteration cap produces a final text answer containing the stop notice and does not call tools afterwards.
+    - Overflow triggers exactly one compaction and one retry; a second overflow ends the turn without a loop.
+    - `freshAssistant` retries do not duplicate the partially streamed assistant message.
+    - Unknown finish reason surfaces a typed error naming the provider and model.
+
+### Gap 18 — Streaming Event Surface
+
+- [ ] Stream tool-call progress, usage, and step boundaries instead of only text and reasoning.
+  - [ ] **Problem:**
+    - The reference emits `step-start`, `step-finish`, `tool-input-start`, `tool-input-delta`, `tool-input-end`, `tool-input-error`, `raw`, checkpoint, and `finish` events, with partial JSON decoding for tool arguments (`packages/ai/src/schema/events.ts`, `packages/ai/src/protocols/utils/tool-stream.ts`, `.../partial-json.ts`).
+    - Its loop treats an invalid-JSON tool input as a replayable call that returns the parse error to the model (`packages/ai/src/loop.ts:15-35`).
+    - Our `StreamDelta` is only `Text` and `Reasoning` (`crates/ee-chat-completions/src/wire.rs:83-88`); tool calls become visible only after the whole argument string decodes, and malformed JSON is collapsed to `Value::Null` so the orchestrator returns the generic "tool arguments must be a JSON object" error (`crates/ee-agent-orchestrator/src/tools.rs:162-164`, test at `:1905`). There is no incremental argument stream and no raw excerpt naming the invalid JSON.
+  - [ ] **Fix:**
+    - Extend `StreamDelta` with additive variants: `ToolInputStart { id, name }`, `ToolInputDelta { id, text, parsed: Option<Value> }`, `ToolInputEnd { id }`, `Usage(ModelUsage)`, and `Raw { frame }` (debug-only, gated).
+    - Accumulate partial JSON with a bounded parser and expose the current best-effort object for UI preview; never execute from partial arguments.
+    - Map `ToolInputError` into a tool result carrying the parse error text so the model can retry, matching the reference loop.
+    - Update the ACP event mapping in `ee-agent-orchestrator` to forward the new deltas without breaking existing consumers (unknown variants ignored by older hosts).
+  - [ ] **Acceptance criteria:**
+    - Streamed tool arguments reach the sink incrementally and the final parsed object matches the buffered decode.
+    - Malformed JSON yields a tool error result whose text names the failure and includes a bounded raw excerpt.
+    - `Raw` frames are emitted only when explicitly enabled and are redacted by the same rules as errors.
+    - Existing text/reasoning-only tests pass unchanged.
+
+### Gap 19 — Hosted Tools and Response Continuation
+
+- [ ] Support provider-executed tools and incremental response continuation.
+  - [ ] **Problem:**
+    - The reference marks hosted tool calls `providerExecuted` and never dispatches them locally; their results arrive from the provider stream and are folded back into the transcript (`packages/ai/src/protocols/utils/responses-hosted-tools.ts`, `packages/ai/src/loop.ts` pending-call filtering).
+    - It also supports `previous_response_id` continuation with a full-send fallback when the id is stale (`packages/ai/src/protocols/open-responses-continuation.ts`), which is what makes `store`-based routes economical.
+    - Our loop executes **every** tool intent locally, and our Responses codec always sends the full input with `store: false` (`crates/ee-agent-opencode/src/responses.rs::request_body`), so web-search or hosted-code tools cannot be used and repeated turns resend the whole transcript.
+  - [ ] **Fix:**
+    - Add `provider_executed: bool` to `ToolIntent`; the loop skips dispatch for those ids and appends the provider's result message verbatim.
+    - Add optional continuation: when the catalog advertises store support and the previous response id is known, send `previous_response_id` plus the delta; retry the full request once on a stale-id error (classified, not string-matched).
+    - Keep `store: false` as the default for routes that do not advertise state.
+  - [ ] **Acceptance criteria:**
+    - A provider-executed tool call never reaches the local executor and its result appears in the transcript exactly once.
+    - Continuation sends only the delta after the first turn; a stale-id failure falls back to a full send exactly once.
+    - Routes without store capability never send a previous response id.
+
+### Gap 20 — Provider-Side Compaction and Checkpoints
+
+- [ ] Use provider-native compaction where available and replay encrypted checkpoints opaquely.
+  - [ ] **Problem:**
+    - The reference implements `/responses/compact` with `prompt_cache_retention`, `prompt_cache_options {mode, ttl}`, `service_tier`, `include`, and `tools`, and decodes encrypted compaction items into `CompactionPart`s that are replayed byte-identically (`packages/ai/src/protocols/utils/responses-compaction.ts`, `.../responses-checkpoint.ts`).
+    - Routes without compaction support fail with an explicit `UnsupportedCompactionError` naming provider and model (`packages/core/src/model-resolver.ts`).
+    - Our compaction is purely local summarization (`crates/ee-agent-orchestrator/src/compaction/`), and neither provider crate has a compaction capability or an opaque checkpoint part.
+  - [ ] **Fix:**
+    - Add a `compaction` capability to the generated catalog (Gap 24) for routes that support it.
+    - Implement the compact request/response in a shared module with the Responses codec, storing the encrypted checkpoint as an opaque transcript part (never parsed, never logged).
+    - Fall back to local summarization when the capability is absent, and emit the reference's explicit unsupported diagnostic when a caller forces provider compaction on an unsupported route.
+  - [ ] **Acceptance criteria:**
+    - An encrypted checkpoint round-trips byte-identically across two turns (hash equality test).
+    - Unsupported routes take the local path with a single bounded notice.
+    - Checkpoint content never appears in logs, metrics, or error messages.
+
+### Gap 21 — Provider Auth, Credentials, and Configuration Surface
+
+- [ ] Support the provider configuration surface a first-class OpenCode/OpenRouter client is expected to have.
+  - [ ] **Problem:**
+    - The reference supports OAuth login (`packages/core/src/oauth`), a credential store, `apiKey: false` providers, provider env arrays with variable interpolation, provider packages installed at runtime, per-provider and per-model `headers`/`body` overlays, model `disabled`, default and small-model selection, free-model filtering (`OPENCODE_DISABLE_FREE_MODELS`), and model status/release ordering (`packages/core/src/model.ts:232`, `packages/schema/src/config/provider.ts`).
+    - Our binaries read one API key from one environment variable, one model id, and a fixed endpoint (OpenCode) or one URL override (OpenRouter); there is no config file, credential store, per-model override, disable list, or default/small selection.
+  - [ ] **Fix:**
+    - Add a bounded JSON/TOML config file under the ee config home for each agent: provider block (`baseURL` only where already allowed, `headers`, `body` overlays), model block (`disabled`, per-model `headers`/`body`, variant defaults), and session selection (`default_model`, `small_model`).
+    - Support `${VAR}` interpolation in config values with an allowlist of names, fail closed on unresolved references, and never echo resolved values.
+    - Implement `disabled` filtering and deterministic default/small selection from the catalog; add the OpenCode free-model filter as an explicit switch.
+    - Defer OAuth and runtime package installation to a separate issue; document that only static keys are supported until then.
+  - [ ] **Acceptance criteria:**
+    - A disabled model cannot be selected by flag, env, or default resolution, and the diagnostic says it is disabled.
+    - Interpolation resolves only allowlisted variables; a missing variable fails startup with the variable name, not the value.
+    - Config-derived headers/body overlay through the same deep-merge path as Gap 12.
+    - Default selection is deterministic when several models are enabled.
+
+### Gap 22 — Usage-Limit and Quota Visibility
+
+- [ ] Make OpenCode subscription limits and rate-limit resets visible.
+  - [ ] **Problem:**
+    - The reference reads OpenCode Console budgets and the Go meter from `/zen/go/v1/usage` with an `x-opencode-org-id` header, surfaces reset times, and treats 403 as "no allowance to show" (`packages/core/src/usage-limits.ts`).
+    - Our binaries expose nothing: a 429 retry hint exists only inside the retry boundary, and there is no way to ask "how much of my Go allowance is left".
+    - The quota probe lives on `/zen/go/v1/usage` even though chat traffic in the v2.3.0 catalog uses `/inference/go/openai/v1`; the two root families coexist, so the catalog must model the chat base URL and the quota URL separately.
+  - [ ] **Fix:**
+    - Add an explicit, read-only `--usage` invocation (or ACP slash command if a host surface exists) that queries the documented usage endpoints only when invoked, with a 15 s timeout and no startup cost.
+    - Handle 403 as "not subscribed to Go" and render percentages plus reset times; never cache beyond the process lifetime.
+    - Keep the org id sourced from configuration, never inferred from the environment key.
+  - [ ] **Acceptance criteria:**
+    - The command performs no network call unless explicitly invoked.
+    - 403 renders a clear "not available" result rather than an error.
+    - Percentages and reset timestamps match the documented payload fields, and no credential is printed.
+
+### Gap 23 — Prompt Payload Parity (Instruction Sources, Media Gating)
+
+- [ ] Align the payload shape that reaches the model, not just the transport.
+  - [ ] **Problem:**
+    - The reference discovers project and global instructions including **remote URL** sources, and re-renders changed instructions mid-session as bounded diffs or replacements (`packages/core/src/instruction-discovery.ts`).
+    - It strips content parts the model cannot accept and bounds images (25 MiB trigger, 15 MiB target) before sending (`packages/core/src/session/model-request.ts:337-352`).
+    - It includes builtin instruction sources (code-mode, MCP, skills, references) in the same payload.
+    - Our prompt bundle covers stable/global/workspace/MCP sections plus runtime deltas, and subdirectory AGENTS.md discovery is implemented (see Improvement 2), but there is no remote instruction source, no diff rendering for a changed existing instruction file, and no capability-based part stripping or image bounding.
+  - [ ] **Fix:**
+    - Add opt-in remote instruction URLs: HTTPS only, bounded size and redirect count, short timeout, rendered under the untrusted-instruction trust level, and never fetched when offline mode is set.
+    - Re-emit a changed workspace instruction file as a bounded diff once per change, reusing the existing runtime-delta channel.
+    - Filter transcript parts by catalog modalities (audio/video/PDF) and replace them with deterministic placeholders instead of dropping silently.
+    - Bound image payloads with the documented trigger/target sizes and a deterministic placeholder that keeps the prefix cache stable.
+  - [ ] **Acceptance criteria:**
+    - An audio part sent to a text-only model becomes a deterministic placeholder naming the mime type and size.
+    - An image over 25 MiB is recompressed or replaced below 15 MiB before the request, with a stable placeholder when it cannot be.
+    - A changed instruction file produces exactly one diff notice per change, and an unchanged file produces none.
+    - Remote instructions fail closed offline and cannot exceed the size cap.
+
+### Gap 24 — Catalog Capability Matrix Completion
+
+- [ ] Finish the catalog so every gating decision above reads data instead of heuristics.
+  - [ ] **Problem:**
+    - The reference capability matrix includes `tools { supported, strict, choice, search, freeform, updates }`, `reasoning { supported, default, toggle, effort, budget, updates }`, `cache { implicit|explicit with ttl, minTokens, maxBreakpoints, targets }`, `structuredOutput`, `temperature`, `topP`, `topK`, `systemUpdates`, `store`, `streamUsage`, `promptCacheKey`, and `serviceTier` values (`packages/ai/src/schema/options.ts:240-287`), plus the per-provider compatibility flags `reasoningField`, `requireReasoning`, `maxTokensField`, `requireFinishReason`, and `requireAssistantAfterTool` (`packages/schema/src/model-compatibility.ts`).
+    - Catalog costs carry tiers, overrides keyed by context size, and multiplicative factors; models carry status, release time, and family (`packages/core/src/models-dev.ts`).
+    - Our generated catalog plan (Gap 1) listed only the basics. Without the full matrix, Gaps 6, 7, 11, 12, 14, 19, and 20 would have to reintroduce hardcoded provider/model lists — exactly the heuristics the reference removed.
+  - [ ] **Fix:**
+    - Extend the generated catalog schema with the capability matrix above, cost tiers/overrides/factors, status, release time, and family.
+    - Replace the remaining heuristics: `supports_anthropic_prompt_cache` name sniffing (`crates/ee-agent-openrouter/src/openrouter.rs`), fixed cache format, fixed tool-choice emission, and any provider-string checks.
+    - Validate at generation time that every capability needed by a shipped code path exists for at least one model; fail the generator when an enum value is unknown rather than silently skipping.
+  - [ ] **Acceptance criteria:**
+    - No production code path decides a request field from a model-id substring after this gap lands (grep-level assertion in review).
+    - Cost tiers and overrides resolve deterministically for a table-driven test set.
+    - The generator fails loudly on an unknown capability enum or service tier value.
+    - Catalog-driven decisions are covered by at least one fixture per dialect that asserts the emitted body.
+
+### 5.5 Additional Delivery Slices
+
+- [ ] Slice G: Gap 11 + Gap 12 (request options, deep merge, query/compression).
+- [ ] Slice H: Gap 13 + Gap 14 (phase timeouts, chunk watchdog, affinity headers).
+- [ ] Slice I: Gap 16 + Gap 17 (tool-result bounding/offload, loop termination/recovery).
+- [ ] Slice J: Gap 15 (usage accounting) with telemetry and metrics wiring.
+- [ ] Slice K: Gap 18 (streaming events) plus the ACP mapping.
+- [ ] Slice L: Gap 19 + Gap 20 (hosted tools, continuation, provider compaction).
+- [ ] Slice M: Gap 21 + Gap 22 + Gap 23 (config surface, usage probe, prompt payload parity).
+- [ ] Slice N: Gap 24 (capability matrix) — must land before inverting any remaining heuristic; can run in parallel with Slice G.
+
+**Ordering note:** Gap 24 and Gap 1 share one generator; land them together. Gap 18 changes a shared enum consumed by the orchestrator and both provider crates, so it should not be in flight at the same time as Gap 6 or Gap 4 transcript work.
+
+### 5.6 Explicitly out of scope for this plan
+
+- Image/video/speech/transcription **generation** providers (`packages/ai/src/providers/*/images.ts`, `videos.ts`, `speech.ts`, `transcription.ts`).
+- TUI/desktop/server packages, plugin marketplace, LSP integration, worktree/snapshot tooling.
+- OAuth login and runtime package installation (deferred from Gap 21).
+- WebSocket session transport (documented deferral in Gap 13).
+
+## Part 6 — Verification Pass (Correctness Audit and Residual Gaps)
+
+Third pass re-read the reference files and cross-checked every claim in Parts 0–5 against the code on both sides. Two claims were wrong and are corrected above; four calling-layer behaviors were missing and are recorded as Gaps 25–28 below.
+
+### 6.1 Verification results
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| OpenCode routing is a static `(surface, model) -> dialect` table with `/zen/v1` and `/zen/go/v1` roots | Confirmed | `crates/ee-agent-opencode/src/routes.rs::CATALOG, endpoint_for` |
+| Quota probe still lives on `/zen/go/v1/usage` while chat uses `/inference/go/...` | Confirmed | `packages/core/src/usage-limits.ts::readGo`; snapshot roots |
+| Anthropic Messages route hardcodes `max_tokens = 8192` | Confirmed | `crates/ee-agent-opencode/src/messages.rs:45,122` |
+| Responses route sends no output limit and no `include` | Confirmed | `crates/ee-agent-opencode/src/responses.rs::request_body` |
+| Responses `prompt_cache_key` hashes model + system prompt | Confirmed | `crates/ee-agent-opencode/src/responses.rs::prompt_cache_key` |
+| No session/affinity headers on any request | Confirmed | header construction in `ee-chat-completions` and both provider crates |
+| `StreamDelta` carries only `Text` and `Reasoning` | Confirmed | `crates/ee-chat-completions/src/wire.rs:83-88` |
+| Malformed tool arguments are dropped | **Incorrect** — they become `Value::Null` and the orchestrator returns a generic invalid-arguments tool result | `wire.rs:783-787`, `tools.rs:162-164,1905`; corrected in Gap 18 |
+| Tool-result pruning runs at projection | **Incorrect** — it runs only inside the compaction pipeline | `compaction/pipeline.rs:120,182`; corrected in Gap 16 |
+| Iteration cap returns `BudgetExceeded` | Confirmed | `crates/ee-agent-orchestrator/src/budget.rs:191-198` |
+| `ModelUsage` has four fields and no cost/reasoning/context | Confirmed | `crates/ee-agent-orchestrator/src/model.rs:331-340` |
+| No provider metadata on tool intents or results | Confirmed | `tools.rs:247-254,301-310`; `model.rs:82-120` |
+| Codecs never replay `reasoning_summary` | Confirmed | no encode path in either provider crate (decode-only tests in `responses/tests.rs`) |
+| `ModelMessage.metadata` is diagnostic, string-only | Confirmed | `model.rs:129-140` |
+| OpenRouter cache enablement is model-name sniffing | Confirmed | `crates/ee-agent-openrouter/src/openrouter.rs::supports_anthropic_prompt_cache` |
+| Provider error taxonomy lacks overflow/quota/content-policy | Confirmed | `crates/ee-agent-acp-server/src/error.rs:70-101` |
+| Subdirectory `AGENTS.md` discovery exists | Confirmed | `crates/ee-agent-orchestrator/src/prompt/workspace.rs:89-201` |
+| Structured output uses a hidden tool, not `response_format` | Confirmed | `packages/ai/src/llm.ts:248-287`; Gap 7 corrected earlier |
+| Part 4.2 two-filter `cargo test` invocation is valid | **Incorrect** — split into two commands | corrected in Part 4.2 |
+
+### 6.2 Corrections applied in this pass
+
+- Gap 18: malformed-argument behavior corrected from "dropped" to "collapsed to `Null` plus generic error".
+- Gap 16: prune timing corrected to compaction-only.
+- Gap 13: reference timeout defaults corrected (unbounded total, 300 s headers, 900 s chunk).
+- Gap 7: structured-output mechanism corrected to the hidden forced tool.
+- Part 4.2: test gate split into per-module commands.
+- Gap 5, 6, 7, 22, 24: extended with recovery/delivery classification, TTL lowering, duplicate tool names, quota root split, and the full compatibility matrix.
+
+### Gap 25 — Provider-Native State Passthrough and Replay Gating
+
+- [ ] Preserve opaque provider state on messages, reasoning parts, tool calls, and tool results, and replay it only to the model that produced it.
+  - [ ] **Problem:**
+    - The reference stores per-part native state and gates replay by identity: text/reasoning/tool-call metadata only for the same provider **and** model, hosted tool-result state for the same provider, and it strips the tail block's state when a stream was cut (`packages/core/src/session/runner/to-llm-message.ts:155-215`).
+    - That state is what makes Gemini's `extra_content.google.thought_signature`, Kimi `reasoning_content`, Anthropic thinking signatures, and OpenAI encrypted reasoning replayable; OpenRouter requires `reasoning_details` replay including `index` (`packages/ai/src/protocols/openai-chat.ts:96-110`, `packages/ai/src/providers/openrouter.ts`).
+    - Our `ModelMessage.metadata` is a `BTreeMap<String, String>` explicitly documented as diagnostics that "never carries required fields" (`crates/ee-agent-orchestrator/src/model.rs:129-140`). `ToolIntent` and `ToolResult` carry no metadata at all (`crates/ee-agent-orchestrator/src/tools.rs:247-254,301-310`), and `ModelContent` has no native block. The Messages decoder flattens thinking text without its signature (`messages.rs:188-190`), Chat flattens to `reasoning` text (`wire.rs:434-437`), and Responses emits no reasoning items. `reasoning_summary` is never encoded back into any request.
+  - [ ] **Fix:**
+    - Add a bounded opaque `native: BTreeMap<String, Value>` (size-capped, redaction-checked) to assistant content parts, tool calls, tool results, and message-level metadata, recorded at decode time together with the producing `(provider, model)`.
+    - Replay rules: same provider + same model for text/reasoning/tool-call native state; same provider for hosted tool results; drop native state on model switch while keeping readable text/reasoning; drop the final block's native state when the prior assistant message ended in an error or without a finish.
+    - Encode per protocol: Chat `reasoning_content`/`reasoning_text`/`reasoning_details` and `extra_content` for tool calls; Messages `thinking` blocks with `signature`; Responses `reasoning` items with `encrypted_content`/`id`, plus `include: ["reasoning.encrypted_content"]` where supported.
+    - Never log or persist native state outside the session transcript; treat it as opaque bytes for storage and equality.
+  - [ ] **Acceptance criteria:**
+    - A two-turn fixture preserves Anthropic thinking signatures, OpenRouter `reasoning_details` (including `index`), and Gemini-style `extra_content` byte-identically.
+    - Switching the model drops native state but keeps readable reasoning text, and the next request validates against the new protocol.
+    - Native state never appears in errors, metrics, telemetry, or tool output; redaction tests cover the transcript assembler.
+    - A cut stream (`error` set, `finish` absent) omits the tail block's native state and keeps only completed local tool calls.
+
+### Gap 26 — Transcript Normalization and Interrupted-Turn Repair
+
+- [ ] Normalize the outgoing transcript and repair interrupted turns before every request.
+  - [ ] **Problem:**
+    - The reference runs a normalization pass on every send: missing tool results are synthesized with `Tool result missing`, empty outputs become `(no tool output)`, tool names/namespaces are reconciled with the originating call, system messages are held until every pending call is answered, and hosted results pass through (`packages/ai/src/tool-history.ts`).
+    - Failed or cut assistant turns are repaired: keep content through the last local call that actually ran, drop calls that never ran (keeping input-error calls so the model can retry), and drop the cut tail's provider state (`packages/core/src/session/runner/to-llm-message.ts:170-215`).
+    - Our loop pushes a result for each intent in the normal path (`crates/ee-agent-orchestrator/src/loop_engine.rs:669,772-780,865`), but nothing normalizes stored or replayed transcripts: `with_pruned_tool_result` is the only rewrite and it runs only in compaction (`compaction/pipeline.rs:120,182`). There is no missing-result synthesis, no empty-output label, no system-message placement rule, and no cut-stream trimming.
+    - Reference tool dispatch is unbounded-concurrency with permission gating; ours parallelizes read-only tools only and caps at 10 (`config.rs:51,279-281`). That divergence is intentional, but it should be documented next to the normalizer so the two rules do not drift.
+  - [ ] **Fix:**
+    - Add `normalize_transcript()` in `ee-agent-orchestrator`, applied before every `ModelRequest` and before compaction: synthesize missing results, label empty outputs, reconcile tool names/ids, hold system messages between a call and its results, and trim cut turns per the rules above.
+    - Persist a synthetic aborted result for each unanswered call when a turn is cancelled or a provider stream dies mid-call, so the stored transcript is already valid on resume.
+    - Document the concurrency divergence (read-only parallel + cap) in the loop module docs.
+  - [ ] **Acceptance criteria:**
+    - A transcript with a missing tool result gains exactly one synthesized error result with a stable id.
+    - An empty tool output becomes `(no tool output)` in the request but stays empty in the stored transcript.
+    - A system message inserted between a tool call and its result is reordered after the results.
+    - A failed-turn fixture drops unrun calls and keeps input-error calls; the resulting request validates on the next turn.
+
+### Gap 27 — Attachment and Modality Normalization
+
+- [ ] Normalize user attachments and unsupported modalities consistently with the reference.
+  - [ ] **Problem:**
+    - The reference converts attachments by kind: `text/plain` inlined with a header and description, `application/x-directory` rendered as a listing, images and PDFs sent as media with a path line, unsupported MIME types dropped, and duplicate inline images deduplicated by `(mime, name, description, mention)` plus payload (`packages/core/src/session/runner/to-llm-message.ts:12-90`).
+    - Our `EmbeddedResource` becomes inline text when a text payload exists and a `[resource:uri:mime]` placeholder otherwise; images become image parts (`crates/ee-chat-completions/src/wire.rs:484-499,518-570`). There is no PDF document part, no directory listing, no MIME allowlist, no dedupe, and no size bound (Gap 23). The OpenCode provider also never sends the `TypeSafe-Danger-Zone-Images: true` opt-in header that the reference sets unconditionally on that route (`packages/ai/src/providers/opencode.ts:17-25`; the reference notes text-only requests are unchanged by it), so image support on that surface is not actually enabled by us.
+  - [ ] **Fix:**
+    - Add one attachment normalizer shared by both provider crates: classify by MIME, inline text with the reference's header format, render directories as listings, route PDFs to `input_file`/document parts where the dialect supports them and to a text placeholder otherwise, drop unknown MIME types with a single bounded notice, and dedupe identical inline images.
+    - Apply the image size guard from Gap 23 in the same pass so ordering is deterministic.
+    - Emit the OpenCode image opt-in header only when the request carries an image part and the route is an OpenCode surface, so text-only requests stay byte-identical.
+  - [ ] **Acceptance criteria:**
+    - The same inline image attached twice is sent once.
+    - A PDF on a capable route becomes a document part; on an incapable route it becomes a deterministic placeholder naming the MIME type.
+    - A directory attachment renders a bounded listing.
+    - An unknown MIME type is dropped with one notice, not silently.
+    - An OpenCode image request carries the image opt-in header; a text-only request on the same route does not.
+
+### Gap 28 — Auxiliary Generation Surfaces
+
+- [ ] Close the remaining non-chat call paths the reference exposes.
+  - [ ] **Problem:**
+    - The reference can generate session titles with a small model (`packages/core/src/session/title.ts:116`, `model.ts::small`), run one-shot `generate`, expose `compact`/`canCompact` (`packages/ai/src/llm.ts:313-330`), and stop a loop with a caller-supplied `until` predicate (`llm.ts:216-245`).
+    - Our orchestrator has rubber-duck critique, compaction, and budgeted loops, but no title/small-model selection, no one-shot generate API, no loop `until`, and no provider-compaction entry point.
+  - [ ] **Fix:**
+    - Decide per surface: titles belong to the host if the ee pane needs generated names; small-model selection belongs to the catalog (Gap 1) and can be added without a new call path.
+    - Add `until` only when a real consumer needs deterministic early stop; otherwise keep budget caps.
+    - Treat `compact` as covered by Gap 20; do not add a second compaction API.
+  - [ ] **Acceptance criteria:**
+    - No duplicate compaction API lands; provider compaction is reachable only through Gap 20.
+    - If titles are enabled, the chosen model comes from catalog small-model selection and failures never block the turn.
+    - `until`, if added, is covered by a loop test that asserts the final response is not a budget error.
+
+### 6.3 Remaining uncertainty
+
+- `/zen/v1` versus `/inference/...` needs a live probe before switching roots; this audit did not call the service. The quota endpoint evidence (`/zen/go/v1/usage`) means both families are live, so the catalog should carry per-model chat base URLs plus the separate quota URL rather than replacing one root wholesale.
+- The reference snapshot is pinned to opencode v2.3.0; upstream catalog changes after that are out of scope until the generator is wired.
+- Rendering of the new streaming delta variants in `ee-cli` was not inspected; Gap 18's ACP mapping needs a host-side check before implementation.
+- Provider-specific quirks (Mistral tool-id rewriting, Gemini JSON-schema conversion, Alibaba cache format) are only relevant when OpenRouter routes to those upstreams; cover them with fixtures under Gap 24 rather than adding provider-specific code paths.
+
+### 6.4 Additional delivery slices
+
+- [ ] Slice O: Gap 25 + Gap 26 (native state, replay gating, transcript normalization) — land before any reasoning-replay work in Gap 4.
+- [ ] Slice P: Gap 27 (attachment normalization) with the Gap 23 media bounds.
+- [ ] Slice Q: Gap 28 (deferred; decide after the P0/P1 slices).
+
+Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any later "reasoning/vision parity" claim.
