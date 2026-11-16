@@ -126,16 +126,20 @@ impl DecisionLog {
     }
 
     /// Records one approval-classifier decision with model id, risk tier, and a
-    /// redacted reason. Only low-risk classifications may auto-approve.
+    /// redacted reason. Only low-risk classifications may auto-approve; a
+    /// deterministic hard block records `denied` without a model call.
     pub fn record_approval(
         &mut self,
         tool_name: &str,
         model_id: &str,
         risk: Option<crate::approval_classifier::RiskLevel>,
         auto_approved: bool,
+        denied: bool,
         reason: &str,
     ) {
-        let code = if auto_approved {
+        let code = if denied {
+            "approval-denied"
+        } else if auto_approved {
             "approval-auto-approved"
         } else if risk.is_none() {
             "approval-classifier-unavailable"

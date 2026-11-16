@@ -1506,44 +1506,44 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 ### Improvement 7 — First-Class Skills Discovery & On-Demand `load_skill` Tool (`SKILLS` Parity)
 
 - [x] Discover workspace/user `SKILL.md` frontmatter and provide a read-only `load_skill` tool.
-  - [ ] **Problem:**
+  - [x] **Problem:**
     - `SKILLS` is marked `IntentionallyOmitted` in `crates/ee-agent-orchestrator/src/prompt/sections.rs:656`, even though the `ee` repository itself stores agent skills under `.agents/skills/*/SKILL.md` and `skills/system/*/SKILL.md`.
     - Without skill catalog discovery and an on-demand loader tool, the agent in `ee` agent mode either misses repo-specific skills entirely or must manually grep for `SKILL.md` files.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `prompt/skills.rs` to scan `<workspace>/.agents/skills/*/SKILL.md`, `<workspace>/skills/**/SKILL.md`, and `$XDG_CONFIG_HOME/ee/skills/*/SKILL.md` for YAML frontmatter (`name`, `description`), bounded to 64 skills and 8 KiB total catalog text.
     - Render a compact skill catalog block (name + 1-line description + path) into `WorkspaceInstructions` or a dedicated runtime/workspace section when skills are present, under `TrustLevel::WorkspaceInstructionUntrusted` for repo skills and `TrustLevel::UserInstructionTrusted` for user-global skills.
     - Register a built-in read-only `load_skill` tool (and `ToolGuidance` entry in `prompt/tool_guidance.rs`) that reads and returns a requested skill's `SKILL.md` content within workspace/config boundaries.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Repositories with `.agents/skills/*/SKILL.md` surface available skill names and descriptions in the prompt catalog only when skills exist.
     - Calling `load_skill` returns the validated `SKILL.md` body and rejects path traversal or symlinks escaping the skill root.
 
 ### Improvement 8 — Conversational / Resumable Subagents (`agent_id` Resume & Context Fork)
 
 - [x] Allow `delegate_task` subagents to be resumed by `agent_id` or forked from parent context.
-  - [ ] **Problem:**
+  - [x] **Problem:**
     - `DelegateTool` and `SubagentManager` (`crates/ee-agent-orchestrator/src/subagents/mod.rs`) only execute one-shot stateless subagent runs (`explorer`, `planner`, `implementer`, `verifier`, `reviewer`).
     - If a root agent needs a follow-up question answered by an `explorer` that already read 15 files, spawning a new `delegate_task` starts from a blank transcript and re-reads the same files, wasting tokens and latency.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Retain completed subagent transcripts in `ChildRegistry` / `SessionLogStore` keyed by `child_id` (bounded per session, e.g. up to 8 retained child transcripts).
     - Add an optional `resume_child_id: Option<String>` parameter on `delegate_task` so the root agent can send a follow-up task to an existing subagent instance while preserving its prior message history and role policy.
     - Add an optional `fork_context: bool` flag for `explorer` / `planner` subagents to inherit the parent's compacted summary and current runtime snapshot without re-discovering workspace basics.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Passing `resume_child_id` to `delegate_task` continues the target child's transcript and increments its bounded step/token accounting under the parent session budget.
     - Cross-session or mismatched-role `resume_child_id` requests fail closed.
 
 ### Improvement 9 — Opt-In Risk-Tiered Auto-Approval Classifier (`REVIEW_POLICY` Parity)
 
 - [x] Add an opt-in structured risk classifier for medium-risk tool calls outside static `trusted-write` rules.
-  - [ ] **Problem:**
+  - [x] **Problem:**
     - `ee` currently combines static `PolicyEngine` rules (`crates/ee-agent-orchestrator/src/policy.rs`) with host-owned `TrustRule` persistence (`crates/ee-cli/src/policy/store.rs`).
     - Any command or write outside pre-existing static `TrustRule` patterns immediately blocks on manual user approval in `trusted-write` mode, whereas `unrestricted` mode bypasses approval entirely. There is no middle tier that uses a fast/contrasting model to classify command risk (`low` / `medium` / `high`) before prompting the user.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add an opt-in `ApprovalClassifier` hook in `crates/ee-agent-orchestrator/src/policy.rs` / `crates/ee-agent-host` (disabled by default; enabled via `agents.approval_classifier = "auto"`).
     - When a tool call requires `ApprovalRequirement::NeedsApproval` and is not covered by a persisted `TrustRule` allow/deny entry:
       1. Hard-blocked patterns (secret files, `.git/hooks`, `.ee.toml`, credential env vars, destructive root commands, external network writes) immediately escalate or deny without calling the classifier.
       2. Otherwise, run a single bounded, non-streaming classification call on the registered critic/fast model with a strict JSON schema `{ "risk": "low" | "medium" | "high", "reason": "<bounded string>" }` and `TrustLevel::UntrustedToolOutput` isolation.
       3. Only `risk == "low"` auto-approves (logged in `DecisionLog` and `OrchestratorEvent`); `medium`, `high`, timeout, or schema failure falls back to the interactive host approval prompt.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Classifier is strictly opt-in and never overrides mandatory `PolicyEngine` denials or persisted `TrustRule` deny rules.
     - Classifier timeout, parse error, or `medium`/`high` classification always fails safe to interactive host approval.
     - Every auto-approved decision records an auditable `DecisionLog` entry with model id, tool name, and redacted reason.

@@ -1217,11 +1217,24 @@ impl ToolExecutor {
                         classifier.record(&candidate, &outcome, &mut decisions, &self.events);
                     }
                 }
-                if let crate::approval_classifier::ApprovalClassification::Deny { reason } = outcome
-                {
-                    let result = ToolResult::failure(ToolErrorKind::PermissionDenied, reason);
-                    emit_failed_tool(sink, intent, &result)?;
-                    return Ok(result);
+                match &outcome {
+                    crate::approval_classifier::ApprovalClassification::Deny { reason } => {
+                        let result =
+                            ToolResult::failure(ToolErrorKind::PermissionDenied, reason.clone());
+                        emit_failed_tool(sink, intent, &result)?;
+                        return Ok(result);
+                    }
+                    // A non-low classification keeps the interactive host prompt,
+                    // so the approval waterfall stage must still observe it.
+                    crate::approval_classifier::ApprovalClassification::NeedsApproval {
+                        ..
+                    } => {
+                        self.events.record(OrchestratorEvent::ApprovalRequested {
+                            tool_call_id: intent.tool_call_id.clone(),
+                            tool_name: definition.name.clone(),
+                        });
+                    }
+                    crate::approval_classifier::ApprovalClassification::AutoApprove { .. } => {}
                 }
             } else {
                 self.events.record(OrchestratorEvent::ApprovalRequested {
@@ -1981,6 +1994,158 @@ mod tests {
         assert!(matches!(next_update(&mut rx).await, SessionUpdate::ToolCallUpdate(_)));
         assert!(matches!(next_update(&mut rx).await, SessionUpdate::ToolCallUpdate(_)));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[derive(Debug)]
+    struct FixedRisk(crate::approval_classifier::RiskLevel);
+
+    impl crate::approval_classifier::ApprovalRiskClassifier for FixedRisk {
+        fn model_id(&self) -> &str {
+            "test-fast"
+        }
+
+        fn classify(
+            &self,
+            _candidate: &crate::approval_classifier::ApprovalCandidate,
+        ) -> crate::model::ModelFuture<
+            Result<
+                crate::approval_classifier::ClassifierVerdict,
+                crate::approval_classifier::ApprovalClassifierError,
+            >,
+        > {
+            let risk = self.0;
+            Box::pin(async move {
+                Ok(crate::approval_classifier::ClassifierVerdict {
+                    risk,
+                    reason: String::from("test verdict"),
+                })
+            })
+        }
+    }
+
+    fn classifier_executor(
+        risk: crate::approval_classifier::RiskLevel,
+    ) -> (
+        Arc<Mutex<ToolRegistry>>,
+        Arc<Mutex<crate::decision_log::DecisionLog>>,
+        EventRecorder,
+        ToolExecutor,
+    ) {
+        let config = OrchestratorConfig::default();
+        let tools = Arc::new(Mutex::new(ToolRegistry::new()));
+        let budget = Arc::new(Mutex::new(BudgetTracker::new(&config)));
+        let decisions = Arc::new(Mutex::new(crate::decision_log::DecisionLog::default()));
+        let events = EventRecorder::new();
+        let executor = ToolExecutor::new(
+            config,
+            tools.clone(),
+            budget,
+            PolicyEngine::default(),
+            0,
+            events.clone(),
+        )
+        .with_approval_classifier(Some(Arc::new(
+            crate::approval_classifier::ApprovalClassifier::new(
+                Arc::new(FixedRisk(risk)),
+                Duration::from_secs(1),
+            ),
+        )))
+        .with_decisions(Some(decisions.clone()));
+        (tools, decisions, events, executor)
+    }
+
+    fn host_approval_write_tool(tools: &Arc<Mutex<ToolRegistry>>) -> Arc<FakeTool> {
+        let tool = Arc::new(FakeTool::new(
+            ToolDefinition::new("write_file", "writes")
+                .side_effect_class(SideEffectClass::Write)
+                .host_approval(),
+            ToolResult::success("wrote"),
+        ));
+        tools.lock().expect("registry").register(tool.clone()).expect("registers");
+        tool
+    }
+
+    fn approval_codes(decisions: &Arc<Mutex<crate::decision_log::DecisionLog>>) -> Vec<String> {
+        decisions
+            .lock()
+            .expect("decisions")
+            .entries()
+            .iter()
+            .map(|entry| entry.reason_code.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn approval_classifier_hard_block_denies_without_executing() {
+        let (sink, bridge, _rx) = plumbing();
+        let (tools, decisions, _events, executor) =
+            classifier_executor(crate::approval_classifier::RiskLevel::Low);
+        let tool = host_approval_write_tool(&tools);
+
+        let intent = ToolIntent::new("tc-1", "write_file", json!({ "path": ".env" }));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = executor
+            .execute(&intent, &sink, &bridge, cancel_rx, &task_fixture(), &[])
+            .await
+            .expect("executes");
+
+        assert_eq!(result.error_kind, Some(ToolErrorKind::PermissionDenied));
+        assert_eq!(tool.call_count(), 0, "hard-blocked calls never execute");
+        assert_eq!(approval_codes(&decisions), vec![String::from("approval-denied")]);
+    }
+
+    #[tokio::test]
+    async fn approval_classifier_low_risk_executes_and_audits() {
+        let (sink, bridge, _rx) = plumbing();
+        let (tools, decisions, events, executor) =
+            classifier_executor(crate::approval_classifier::RiskLevel::Low);
+        let tool = host_approval_write_tool(&tools);
+
+        let intent =
+            ToolIntent::new("tc-1", "write_file", json!({ "path": "src/lib.rs", "content": "x" }));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = executor
+            .execute(&intent, &sink, &bridge, cancel_rx, &task_fixture(), &[])
+            .await
+            .expect("executes");
+
+        assert!(result.success);
+        assert_eq!(tool.call_count(), 1);
+        assert_eq!(approval_codes(&decisions), vec![String::from("approval-auto-approved")]);
+        assert!(
+            !events
+                .events()
+                .iter()
+                .any(|event| matches!(event, OrchestratorEvent::ApprovalRequested { .. })),
+            "auto-approved calls skip the approval stage"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_classifier_medium_risk_keeps_the_host_approval_stage() {
+        let (sink, bridge, _rx) = plumbing();
+        let (tools, decisions, events, executor) =
+            classifier_executor(crate::approval_classifier::RiskLevel::Medium);
+        let tool = host_approval_write_tool(&tools);
+
+        let intent =
+            ToolIntent::new("tc-1", "write_file", json!({ "path": "src/lib.rs", "content": "x" }));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = executor
+            .execute(&intent, &sink, &bridge, cancel_rx, &task_fixture(), &[])
+            .await
+            .expect("executes");
+
+        assert!(result.success);
+        assert_eq!(tool.call_count(), 1);
+        assert_eq!(approval_codes(&decisions), vec![String::from("approval-needs-host")]);
+        assert!(
+            events
+                .events()
+                .iter()
+                .any(|event| matches!(event, OrchestratorEvent::ApprovalRequested { .. })),
+            "non-low risk must still report the approval stage"
+        );
     }
 
     #[tokio::test]

@@ -310,16 +310,17 @@ impl ApprovalClassifier {
         decisions: &mut DecisionLog,
         events: &EventRecorder,
     ) {
-        let (risk, auto_approved) = match outcome {
-            ApprovalClassification::Deny { .. } => (None, false),
-            ApprovalClassification::AutoApprove { risk, .. } => (Some(*risk), true),
-            ApprovalClassification::NeedsApproval { risk, .. } => (*risk, false),
+        let (risk, auto_approved, denied) = match outcome {
+            ApprovalClassification::Deny { .. } => (None, false, true),
+            ApprovalClassification::AutoApprove { risk, .. } => (Some(*risk), true, false),
+            ApprovalClassification::NeedsApproval { risk, .. } => (*risk, false, false),
         };
         decisions.record_approval(
             &candidate.tool_name,
             self.model_id(),
             risk,
             auto_approved,
+            denied,
             outcome_reason(outcome),
         );
         events.record(OrchestratorEvent::ApprovalClassified {
