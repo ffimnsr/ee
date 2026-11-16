@@ -147,8 +147,9 @@ pub(crate) struct AgentApprovalToml {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentsToml {
-    /// Runtime switch for agents mode.  Defaults to `false`; agents mode is
-    /// disabled unless a config layer sets this to `true`.
+    /// Runtime switch for agents mode.  Defaults to `true`; no agent
+    /// subprocess runs until `[agents.servers.<id>]` is configured. Set
+    /// `false` to opt out entirely.
     pub enabled: Option<bool>,
     /// Agent server id used when the user starts a session without choosing
     /// an explicit agent.

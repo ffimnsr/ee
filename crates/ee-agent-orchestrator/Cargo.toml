@@ -5,7 +5,6 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Optional server-side agent orchestration above ee-agent-acp-server: bounded model-tool loops, tool registry, tasks, memory, budgets, and policy gates."
 categories = ["development-tools"]
-homepage = "https://github.com/ffimnsr/ee"
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true

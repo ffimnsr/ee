@@ -5,7 +5,6 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Agent host for ee agents mode: session lifecycle, approvals, and MCP startup."
 categories = ["development-tools"]
-homepage = "https://github.com/ffimnsr/ee"
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true

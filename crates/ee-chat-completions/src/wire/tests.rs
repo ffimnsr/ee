@@ -159,6 +159,66 @@ fn file_and_terminal_references_render_as_text_placeholders() {
 }
 
 #[test]
+fn image_audio_and_binary_resources_become_multimodal_parts() {
+    let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
+        ModelContent::Text("look".into()),
+        ModelContent::Image {
+            data: "aW1n".into(),
+            mime_type: "image/png".into(),
+            uri: Some("file:///shot.png".into()),
+        },
+        ModelContent::Audio { data: "YXVkaW8=".into(), mime_type: "audio/wav".into() },
+        ModelContent::EmbeddedResource {
+            uri: "file:///scan.png".into(),
+            mime_type: Some("image/png".into()),
+            text: None,
+            blob: Some("YmxvYg==".into()),
+        },
+    ])];
+
+    let messages = messages_from_transcript("", &transcript);
+    let parts = messages[1]["content"].as_array().expect("content parts array");
+    assert_eq!(parts[0], json!({ "type": "text", "text": "look" }));
+    assert_eq!(
+        parts[1],
+        json!({
+            "type": "image_url",
+            "image_url": { "url": "data:image/png;base64,aW1n" },
+        })
+    );
+    assert_eq!(
+        parts[2],
+        json!({
+            "type": "input_audio",
+            "input_audio": { "data": "YXVkaW8=", "format": "wav" },
+        })
+    );
+    assert_eq!(
+        parts[3],
+        json!({
+            "type": "image_url",
+            "image_url": { "url": "data:image/png;base64,YmxvYg==" },
+        })
+    );
+}
+
+#[test]
+fn text_only_content_keeps_plain_string_messages() {
+    let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
+        ModelContent::Text("hello".into()),
+        ModelContent::EmbeddedResource {
+            uri: "file:///notes.md".into(),
+            mime_type: None,
+            text: Some("body".into()),
+            blob: None,
+        },
+    ])];
+
+    let messages = messages_from_transcript("", &transcript);
+    assert_eq!(messages[1]["content"], "hello\n[resource:file:///notes.md]\nbody");
+}
+
+#[test]
 fn definitions_convert_to_function_schema() {
     let definitions = vec![ToolDefinition::new("read_file", "reads a file")
         .side_effect_class(SideEffectClass::Read)

@@ -228,8 +228,8 @@ impl StuckDetector {
     }
 }
 
-/// Deterministic fingerprint of one model response (text, reasoning, tool and
-/// subagent intents, completion flag).  Usage counters are included so budget
+/// Deterministic fingerprint of one model response (text, reasoning, tool
+/// intents, completion flag).  Usage counters are included so budget
 /// recording stays observable but identical outputs still compare equal.
 fn model_fingerprint(response: &ModelResponse) -> String {
     serde_json::to_string(response).expect("model response serializes")

@@ -791,7 +791,7 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Runtime switch for agents mode.  Defaults to `false`; agents mode is\ndisabled unless a config layer sets this to `true`.",
+          "description": "Runtime switch for agents mode.  Defaults to `true`; no agent\nsubprocess runs until `[agents.servers.<id>]` is configured. Set\n`false` to opt out entirely.",
           "type": [
             "boolean",
             "null"
@@ -812,6 +812,16 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "read_only_modes": {
+          "description": "Agent modes that never receive trusted-workspace write auto-approval.\nDefaults to `[\"ask\", \"plan\"]`; repository layers may only add modes.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         },
         "approval": {
           "description": "Bridge-approval alignment policy (`[agents.approval]` table).",
@@ -1488,7 +1498,7 @@
           "default": {}
         },
         "proxy": {
-          "description": "ee MCP proxy mode (off by default).",
+          "description": "ee MCP proxy mode. Raw layers may omit it; agents mode defaults it on\nunless a layer explicitly sets `enabled = false`.",
           "anyOf": [
             {
               "$ref": "#/$defs/McpProxyToml"

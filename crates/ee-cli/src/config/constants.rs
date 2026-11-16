@@ -129,7 +129,7 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # description = "Go to start of file"
 #
 # [agents]
-# enabled = false
+# enabled = true # on by default; set false to opt out
 # default_agent = "assistant"
 # max_concurrent_prompts = 4 # per configured agent connection; valid 1..32
 # read_only_modes = ["ask", "plan"] # no trusted-write auto-approval in these modes

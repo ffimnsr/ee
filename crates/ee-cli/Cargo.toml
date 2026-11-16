@@ -6,7 +6,6 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Large file viewer and editor for the terminal, built on top of xi-core backend."
 categories = ["text-editors", "command-line-utilities", "development-tools"]
-homepage = "https://github.com/ffimnsr/ee"
 repository = "https://github.com/ffimnsr/ee"
 readme = "../../README.md"
 keywords = ["text-editor", "terminal", "cli", "command-line", "editor"]
@@ -79,12 +78,14 @@ tokio-util.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
 url.workspace = true
-windows-sys = { workspace = true, features = ["Win32_System_Registry"] }
 zeroize.workspace = true
 zip = { workspace = true, optional = true }
 xi-lsp-lib.workspace = true
 xi-rpc.workspace = true
 xi-core-lib.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Registry"] }
 
 [dev-dependencies]
 criterion.workspace = true

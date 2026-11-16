@@ -118,6 +118,7 @@ pub fn prepare_request(transcript: &[ModelMessage]) -> PreparedMessages {
             let text = match block {
                 ModelContent::Text(text) => text.clone(),
                 ModelContent::ToolResult { result, .. } => result.summary_text(),
+                ModelContent::EmbeddedResource { text: Some(text), .. } => text.clone(),
                 _ => String::new(),
             };
             detections.extend(detect_injection(&text, message.trust));

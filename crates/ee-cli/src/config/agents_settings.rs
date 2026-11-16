@@ -114,6 +114,9 @@ pub(super) fn merge_agent_approval(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentsSettings {
+    /// Whether agents mode is enabled. On by default: the pane opens and
+    /// reports that no agent is configured until `[agents.servers.<id>]`
+    /// exists. Set `enabled = false` to opt out entirely.
     pub enabled: bool,
     pub default_agent: Option<String>,
     /// Maximum provider prompts in flight on each configured agent connection.
@@ -137,7 +140,7 @@ pub(crate) struct AgentsSettings {
 impl Default for AgentsSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             default_agent: None,
             max_concurrent_prompts: DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS,
             read_only_modes: DEFAULT_READ_ONLY_MODES

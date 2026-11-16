@@ -513,7 +513,7 @@ pub use subagent_verifier::{
     MAX_EVIDENCE_TOOLS, QuarantineEntry, SubagentCitations, SubagentEvidence, SubagentQuarantine,
     SubagentResultVerifier, SubagentVerification,
 };
-pub use subagents::{SubagentId, SubagentIntent, SubagentRequest, SubagentResult, SubagentRole};
+pub use subagents::{SubagentId, SubagentRequest, SubagentResult, SubagentRole};
 pub use tasks::{TaskGraph, TaskId, TaskNode, TaskStatus, TaskWorker};
 pub use tool_cache::{DEFAULT_CACHE_MAX_ENTRIES, ToolCacheKey, ToolResultCache, cache_key};
 pub use tool_dependencies::{PlannedTool, ToolDataClass, ToolDependency, ToolDependencyGraph};

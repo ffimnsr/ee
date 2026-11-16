@@ -52,6 +52,12 @@ impl OrchestratorRuntime {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text(text) => Some(text.text.clone()),
+                ContentBlock::Resource(resource) => match &resource.resource {
+                    ee_agent_protocol::EmbeddedResourceResource::TextResourceContents(text) => {
+                        Some(text.text.clone())
+                    }
+                    _ => None,
+                },
                 _ => None,
             })
             .collect::<Vec<_>>()

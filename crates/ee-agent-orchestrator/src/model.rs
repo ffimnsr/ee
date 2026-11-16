@@ -4,9 +4,8 @@
 //! The orchestrator never sees provider-specific JSON: adapters consume a
 //! normalized [`ModelRequest`] (transcript, tool schemas, budget snapshot,
 //! current task) and return a normalized [`ModelResponse`] (text, reasoning,
-//! tool intents, subagent intents, completion signal).  All message and
-//! response types are serializable and deterministic for tests and future
-//! persistence.
+//! tool intents, completion signal).  All message and response types are
+//! serializable and deterministic for tests and future persistence.
 //!
 //! [`Transcript`] normalizes ACP prompt content into a deterministic
 //! `ModelMessage` sequence and keeps the transcript inside the configured
@@ -25,7 +24,6 @@ use tokio::sync::watch;
 
 use crate::budget::BudgetSnapshot;
 use crate::session_log::SessionLog;
-use crate::subagents::SubagentIntent;
 use crate::tasks::TaskNode;
 use crate::tools::{ToolDefinition, ToolIntent, ToolResult};
 use crate::trust::{TrustLevel, trust_for_role};
@@ -86,6 +84,33 @@ pub enum ModelContent {
     FileReference { path: String },
     /// A reference to a terminal session (later phases).
     TerminalReference { terminal_id: String },
+    /// An image provided by the client, base64-encoded.
+    Image {
+        /// Base64-encoded image payload.
+        data: String,
+        /// MIME type describing the encoded payload.
+        mime_type: String,
+        /// Optional source URI reported by the client.
+        uri: Option<String>,
+    },
+    /// Audio provided by the client, base64-encoded.
+    Audio {
+        /// Base64-encoded audio payload.
+        data: String,
+        /// MIME type describing the encoded payload.
+        mime_type: String,
+    },
+    /// A resource embedded in the prompt, either text or binary.
+    EmbeddedResource {
+        /// URI identifying the resource.
+        uri: String,
+        /// MIME type when the client reported one.
+        mime_type: Option<String>,
+        /// Text payload for a text resource.
+        text: Option<String>,
+        /// Base64-encoded payload for a binary resource.
+        blob: Option<String>,
+    },
 }
 
 /// One normalized transcript message.
@@ -339,8 +364,6 @@ pub struct ModelResponse {
     pub reasoning: Option<String>,
     /// Tool intents the model wants executed, in order.
     pub tool_intents: Vec<ToolIntent>,
-    /// Subagent delegation intents (unsupported until the subagent phase).
-    pub subagent_intents: Vec<SubagentIntent>,
     /// Whether the model signals turn completion.
     pub completed: bool,
     /// Reported token usage; unknown fields stay `None`.
@@ -355,7 +378,6 @@ impl ModelResponse {
             text: String::new(),
             reasoning: None,
             tool_intents: Vec::new(),
-            subagent_intents: Vec::new(),
             completed: false,
             usage: ModelUsage::new(),
         }
@@ -389,13 +411,6 @@ impl ModelResponse {
         self
     }
 
-    /// Sets the subagent intents.
-    #[must_use]
-    pub fn subagent_intents(mut self, intents: Vec<SubagentIntent>) -> Self {
-        self.subagent_intents = intents;
-        self
-    }
-
     /// Marks the response as completing the turn.
     #[must_use]
     pub fn completed(mut self) -> Self {
@@ -409,7 +424,6 @@ impl ModelResponse {
         self.text.is_empty()
             && self.reasoning.as_deref().is_none_or(str::is_empty)
             && self.tool_intents.is_empty()
-            && self.subagent_intents.is_empty()
     }
 }
 
@@ -475,9 +489,10 @@ impl Transcript {
     /// Converts ACP prompt content into one normalized user message.
     ///
     /// Text blocks become text content, resource links become file
-    /// references, and unsupported blocks (image, audio, embedded resource)
-    /// are recorded in bounded diagnostic metadata instead of being dropped
-    /// silently.
+    /// references, and image, audio, and embedded-resource blocks keep their
+    /// payload so provider adapters can send them as native multimodal parts.
+    /// Unknown or malformed blocks are recorded in bounded diagnostic metadata
+    /// instead of being dropped silently.
     #[must_use]
     pub fn from_prompt(ctx: &PromptContext) -> Self {
         let mut content = Vec::new();
@@ -488,9 +503,36 @@ impl Transcript {
                 ContentBlock::ResourceLink(link) => {
                     content.push(ModelContent::FileReference { path: link.uri.clone() });
                 }
-                ContentBlock::Image(_) => unsupported.push("image"),
-                ContentBlock::Audio(_) => unsupported.push("audio"),
-                ContentBlock::Resource(_) => unsupported.push("embedded_resource"),
+                ContentBlock::Image(image) => content.push(ModelContent::Image {
+                    data: image.data.clone(),
+                    mime_type: image.mime_type.clone(),
+                    uri: image.uri.clone(),
+                }),
+                ContentBlock::Audio(audio) => content.push(ModelContent::Audio {
+                    data: audio.data.clone(),
+                    mime_type: audio.mime_type.clone(),
+                }),
+                ContentBlock::Resource(resource) => match &resource.resource {
+                    ee_agent_protocol::EmbeddedResourceResource::TextResourceContents(text) => {
+                        content.push(ModelContent::EmbeddedResource {
+                            uri: text.uri.clone(),
+                            mime_type: text.mime_type.clone(),
+                            text: Some(text.text.clone()),
+                            blob: None,
+                        });
+                    }
+                    ee_agent_protocol::EmbeddedResourceResource::BlobResourceContents(blob) => {
+                        content.push(ModelContent::EmbeddedResource {
+                            uri: blob.uri.clone(),
+                            mime_type: blob.mime_type.clone(),
+                            text: None,
+                            blob: Some(blob.blob.clone()),
+                        });
+                    }
+                    // The SDK enum is non-exhaustive; future resource kinds are
+                    // recorded diagnostically instead of dropped silently.
+                    _ => unsupported.push("embedded_resource"),
+                },
                 // The SDK enum is non-exhaustive; future block types are
                 // recorded diagnostically instead of dropped silently.
                 _ => unsupported.push("other"),
@@ -736,7 +778,9 @@ pub trait ModelAdapter: Send + Sync + 'static {
 mod tests {
     use ee_agent_acp_server::PromptContext;
     use ee_agent_protocol::{
-        AudioContent, ContentBlock, ImageContent, ResourceLink, SessionId, TextContent,
+        AudioContent, BlobResourceContents, ContentBlock, EmbeddedResource,
+        EmbeddedResourceResource, ImageContent, ResourceLink, SessionId, TextContent,
+        TextResourceContents,
     };
     use serde_json::json;
     use tokio::sync::watch;
@@ -862,18 +906,59 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_prompt_blocks_are_recorded_not_dropped() {
+    fn multimodal_prompt_blocks_convert_without_metadata_fallback() {
         let transcript = Transcript::from_prompt(&prompt(vec![
-            ContentBlock::Image(ImageContent::new("data", "image/png")),
-            ContentBlock::Audio(AudioContent::new("data", "audio/mp3")),
+            ContentBlock::Image(ImageContent::new("aW1n", "image/png").uri("file:///shot.png")),
+            ContentBlock::Audio(AudioContent::new("YXVkaW8=", "audio/wav")),
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                    "resource body",
+                    "file:///notes.md",
+                )),
+            )),
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(
+                    BlobResourceContents::new("YmxvYg==", "file:///scan.png")
+                        .mime_type("image/png"),
+                ),
+            )),
             ContentBlock::Text(TextContent::new("keep")),
         ]));
         let message = &transcript.messages()[0];
-        assert_eq!(message.content, vec![ModelContent::Text("keep".into())]);
         assert_eq!(
-            message.metadata.get("unsupported_blocks").map(String::as_str),
-            Some("image,audio"),
-            "unsupported blocks recorded in bounded metadata"
+            message.content[0],
+            ModelContent::Image {
+                data: "aW1n".into(),
+                mime_type: "image/png".into(),
+                uri: Some("file:///shot.png".into()),
+            }
+        );
+        assert_eq!(
+            message.content[1],
+            ModelContent::Audio { data: "YXVkaW8=".into(), mime_type: "audio/wav".into() }
+        );
+        assert_eq!(
+            message.content[2],
+            ModelContent::EmbeddedResource {
+                uri: "file:///notes.md".into(),
+                mime_type: None,
+                text: Some("resource body".into()),
+                blob: None,
+            }
+        );
+        assert_eq!(
+            message.content[3],
+            ModelContent::EmbeddedResource {
+                uri: "file:///scan.png".into(),
+                mime_type: Some("image/png".into()),
+                text: None,
+                blob: Some("YmxvYg==".into()),
+            }
+        );
+        assert_eq!(message.content[4], ModelContent::Text("keep".into()));
+        assert!(
+            !message.metadata.contains_key("unsupported_blocks"),
+            "supported multimodal blocks never enter diagnostic metadata"
         );
     }
 
@@ -1032,18 +1117,6 @@ mod tests {
         assert_eq!(intent.tool_call_id, "tc-1");
         assert_eq!(intent.name, "read_file");
         assert_eq!(intent.arguments, json!({"path": "/a"}));
-    }
-
-    #[tokio::test]
-    async fn subagent_intent_parsing_from_fake_model_response() {
-        let model = FakeModel::new(vec![
-            ModelResponse::new()
-                .subagent_intents(vec![SubagentIntent::new("investigate the failure")]),
-        ]);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let response = model.complete(sample_request(), cancel_rx).await.expect("fake succeeds");
-        assert_eq!(response.subagent_intents.len(), 1);
-        assert_eq!(response.subagent_intents[0].task_description, "investigate the failure");
     }
 
     #[tokio::test]

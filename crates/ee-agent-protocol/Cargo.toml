@@ -5,7 +5,6 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "ACP v1 wire protocol facade for ee agents mode, built on the official agent-client-protocol SDK."
 categories = ["development-tools"]
-homepage = "https://github.com/ffimnsr/ee"
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true

@@ -396,6 +396,14 @@ impl AgentProvider for OrchestratorProvider {
                 .iter()
                 .filter_map(|block| match block {
                     ee_agent_protocol::ContentBlock::Text(text) => Some(text.text.clone()),
+                    ee_agent_protocol::ContentBlock::Resource(resource) => {
+                        match &resource.resource {
+                            ee_agent_protocol::EmbeddedResourceResource::TextResourceContents(
+                                text,
+                            ) => Some(text.text.clone()),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()

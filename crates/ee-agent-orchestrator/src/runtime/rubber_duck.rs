@@ -147,7 +147,7 @@ impl OrchestratorRuntime {
                 result.map_err(|_| OrchestratorError::Timeout("rubber-duck root synthesis timed out".into()))??
             }
         };
-        if !response.tool_intents.is_empty() || !response.subagent_intents.is_empty() {
+        if !response.tool_intents.is_empty() {
             return Err(OrchestratorError::PolicyDenied(
                 "rubber-duck root synthesis requested tools or delegation".into(),
             ));

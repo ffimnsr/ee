@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{ModelMessage, ModelResponse, ModelRole, ToolDefinition};
+use ee_agent_orchestrator::{ModelContent, ModelMessage, ModelResponse, ModelRole, ToolDefinition};
 use ee_chat_completions::{
     AssistantTurn, DeltaSink, EndpointRequest, EndpointTransport, SseControl, ToolCall, Usage,
     content_text, drive_sse, emit_finished_deltas, is_event_stream, response_from_turn,
@@ -102,25 +102,83 @@ fn input_item(message: &ModelMessage) -> Option<Value> {
             "output": text,
         })),
         ModelRole::User | ModelRole::Subagent | ModelRole::System | ModelRole::Assistant => {
-            if text.is_empty() {
+            let parts = response_parts(message.role, &message.content);
+            if parts.is_empty() {
                 return None;
             }
-            let (role, part) = match message.role {
-                ModelRole::Assistant => ("assistant", "output_text"),
-                _ => ("user", "input_text"),
-            };
             let role = match message.role {
                 ModelRole::System => "system",
-                ModelRole::Assistant => role,
-                _ => role,
+                ModelRole::Assistant => "assistant",
+                _ => "user",
             };
             Some(json!({
                 "type": "message",
                 "role": role,
-                "content": [{ "type": part, "text": text }],
+                "content": parts,
             }))
         }
     }
+}
+
+/// Builds Responses content parts; text keeps the dialect's part names and
+/// image payloads become `input_image` items.
+fn response_parts(role: ModelRole, content: &[ModelContent]) -> Vec<Value> {
+    let text_part = if role == ModelRole::Assistant { "output_text" } else { "input_text" };
+    let mut parts = Vec::new();
+    for block in content {
+        match block {
+            ModelContent::Text(text) => push_response_text(&mut parts, text_part, text),
+            ModelContent::ToolResult { result, .. } => {
+                push_response_text(&mut parts, text_part, &result.summary_text())
+            }
+            ModelContent::FileReference { path } => {
+                push_response_text(&mut parts, text_part, &format!("[file:{path}]"))
+            }
+            ModelContent::TerminalReference { terminal_id } => {
+                push_response_text(&mut parts, text_part, &format!("[terminal:{terminal_id}]"))
+            }
+            ModelContent::Image { data, mime_type, .. } => {
+                parts.push(input_image(data, mime_type));
+            }
+            ModelContent::Audio { mime_type, .. } => {
+                push_response_text(&mut parts, text_part, &format!("[audio:{mime_type}]"))
+            }
+            ModelContent::EmbeddedResource { uri, mime_type, text, blob } => match (text, blob) {
+                (Some(text), _) => {
+                    let rendered = format!("[resource:{uri}]\n{text}");
+                    push_response_text(&mut parts, text_part, &rendered)
+                }
+                (None, Some(blob)) => match mime_type.as_deref() {
+                    Some(mime) if mime.starts_with("image/") => {
+                        parts.push(input_image(blob, mime));
+                    }
+                    mime => push_response_text(
+                        &mut parts,
+                        text_part,
+                        &format!("[resource:{uri}:{}]", mime.unwrap_or("application/octet-stream")),
+                    ),
+                },
+                (None, None) => {
+                    push_response_text(&mut parts, text_part, &format!("[resource:{uri}]"))
+                }
+            },
+            _ => {} // future content kinds stay out of the request
+        }
+    }
+    parts
+}
+
+fn push_response_text(parts: &mut Vec<Value>, part_type: &str, text: &str) {
+    if !text.is_empty() {
+        parts.push(json!({ "type": part_type, "text": text }));
+    }
+}
+
+fn input_image(data: &str, mime_type: &str) -> Value {
+    json!({
+        "type": "input_image",
+        "image_url": format!("data:{mime_type};base64,{data}"),
+    })
 }
 
 /// Decodes a buffered Responses payload into a normalized response.

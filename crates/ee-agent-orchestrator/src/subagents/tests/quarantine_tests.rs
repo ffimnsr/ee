@@ -3,12 +3,10 @@ use super::*;
 
 #[tokio::test]
 async fn failed_child_output_is_quarantined_not_merged() {
-    // The child loop rejects subagent intents — a provider error that
-    // fails the child.  Failed output must be quarantined by default and
-    // never reach parent memory.
-    let model = FakeModel::new(vec![
-        ModelResponse::new().subagent_intents(vec![SubagentIntent::new("break")]),
-    ]);
+    // The child returns a malformed handoff, which fails the child.
+    // Failed output must be quarantined by default and never reach parent
+    // memory.
+    let model = FakeModel::new(vec![ModelResponse::new().text("not a handoff").completed()]);
     let harness = manager_harness(OrchestratorConfig::default(), Arc::new(model.clone()));
     let root = harness.tasks.lock().expect("task graph poisoned").create_root("parent", "p");
     let request = DelegationRequest {

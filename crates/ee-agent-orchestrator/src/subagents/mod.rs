@@ -106,22 +106,6 @@ impl fmt::Display for SubagentId {
     }
 }
 
-/// A model request to delegate work to a subagent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct SubagentIntent {
-    /// What the subagent should accomplish.
-    pub task_description: String,
-}
-
-impl SubagentIntent {
-    /// Creates a delegation intent.
-    #[must_use]
-    pub fn new(task_description: impl Into<String>) -> Self {
-        Self { task_description: task_description.into() }
-    }
-}
-
 /// Scoped worker configuration for one subagent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

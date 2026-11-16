@@ -689,7 +689,8 @@ mod tests {
             },
         );
 
-        // Agents mode off: no trust prompt, no store access.
+        // Agents mode explicitly off: no trust prompt, no store access.
+        config.agents.enabled = false;
         assert!(!config.agents.enabled);
         assert!(ensure_workspace_secret_trust(&config, &root).is_ok());
 

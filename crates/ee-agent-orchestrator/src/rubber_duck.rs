@@ -577,7 +577,7 @@ impl RubberDuckRunner {
             }
             Ok(Ok(response)) => response,
         };
-        if !response.tool_intents.is_empty() || !response.subagent_intents.is_empty() {
+        if !response.tool_intents.is_empty() {
             let reason = "rubber-duck response requested tool execution or delegation".to_string();
             self.finish_task(&child.id, TaskStatus::Failed, Some(&reason), false);
             self.emit_critic(CriticEvent::Quarantined {

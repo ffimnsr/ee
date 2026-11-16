@@ -5,7 +5,6 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Reusable ACP v1 agent-side server framework: stdio/memory transports, framing, IDs, config, and errors for provider binaries."
 categories = ["development-tools"]
-homepage = "https://github.com/ffimnsr/ee"
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true

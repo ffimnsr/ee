@@ -1020,8 +1020,8 @@ mod e2e {
     #[test]
     fn repository_config_trust_fields_never_grant_authority() {
         // A repository ee.toml carrying trust-looking fields is rejected by
-        // the strict config parser; agents mode never activates and the
-        // host-local trust store stays empty.
+        // the strict config parser; it cannot grant authority even though
+        // agents mode defaults on. The host-local trust store stays empty.
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join(".ee.toml"),
@@ -1038,9 +1038,10 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
 
-        // The pane reports agents unavailable (config rejected), so no
+        // The pane reports agents unavailable (no configured server), so no
         // operation can even reach the policy engine.
-        assert!(!app.config.agents.enabled, "config with trust fields must not enable agents");
+        assert!(app.config.agents.enabled, "agents mode defaults on");
+        assert!(app.config.agents.servers.is_empty(), "rejected config adds no server");
         assert_eq!(
             TrustStore::at(&state_dir, temp.path()).unwrap().load().unwrap().rules.len(),
             0,

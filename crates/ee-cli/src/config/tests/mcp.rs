@@ -240,10 +240,19 @@ fn mcp_proxy_explicit_opt_out_wins_over_default() {
     assert!(!settings.mcp.proxy.enabled);
 }
 #[test]
-fn mcp_proxy_stays_off_without_agents() {
+fn mcp_proxy_defaults_on_with_default_agents() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(&env.cwd).unwrap();
+    let settings = load_config_with_env(None, &env);
+    assert!(settings.mcp.proxy.enabled, "agents mode is on by default");
+}
+#[test]
+fn mcp_proxy_stays_off_when_agents_opted_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(&env.cwd).unwrap();
+    write_config_layer(&env, ConfigLayerKind::Ancestor, "[agents]\nenabled = false\n");
     let settings = load_config_with_env(None, &env);
     assert!(!settings.mcp.proxy.enabled);
 }

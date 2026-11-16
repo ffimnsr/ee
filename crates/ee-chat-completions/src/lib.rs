@@ -46,7 +46,8 @@ pub use transport::{
 };
 pub use wire::{
     AssistantTurn, StreamDelta, ToolCall, Usage, classify_http_error, classify_status_error,
-    content_text, decode_message, emit_finished_deltas, http_error_message, is_retryable,
-    messages_from_transcript, parse_retry_after, request_body, response_from_turn, retry_after_of,
-    retry_delay, tool_call_id_of, tools_from_definitions, usage_from_tokens,
+    content_has_media, content_parts, content_text, decode_message, emit_finished_deltas,
+    http_error_message, is_retryable, messages_from_transcript, parse_retry_after, request_body,
+    response_from_turn, retry_after_of, retry_delay, tool_call_id_of, tools_from_definitions,
+    usage_from_tokens,
 };

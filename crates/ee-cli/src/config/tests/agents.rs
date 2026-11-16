@@ -5,10 +5,10 @@ use super::super::*;
 use super::common::*;
 // The process cwd is process-global; lock it while mutating.
 #[test]
-fn agents_settings_disabled_by_default() {
+fn agents_settings_enabled_by_default() {
     let settings = EditorSettings::default();
 
-    assert!(!settings.agents.enabled);
+    assert!(settings.agents.enabled, "agents mode defaults on; servers decide whether it can run");
     assert!(settings.agents.default_agent.is_none());
     assert_eq!(settings.agents.max_concurrent_prompts, 4);
     assert_eq!(
@@ -375,7 +375,7 @@ fn config_show_preserves_secret_reference_text() {
     assert!(!document.contains("sk-live"), "no resolved plaintext in show output");
 }
 #[test]
-fn project_config_enables_agents_while_defaults_stay_disabled() {
+fn project_config_refines_enabled_agents_while_defaults_stay_unconfigured() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     let project = env.cwd.join("project");
@@ -383,9 +383,9 @@ fn project_config_enables_agents_while_defaults_stay_disabled() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
 
-    // Built-in defaults keep agents disabled even with no config layers.
+    // Built-in defaults keep agents enabled but configure no server.
     let defaults = load_config_with_env(Some(&file), &env);
-    assert!(!defaults.agents.enabled);
+    assert!(defaults.agents.enabled);
     assert!(defaults.agents.servers.is_empty());
 
     // User layer defines an agent server but never enables agents mode.
@@ -427,15 +427,15 @@ fn validate_config_file_rejects_empty_agent_command() {
 // Serialize back through the full document shape: the resolved
 // document carries the proxy flag.
 #[test]
-fn merged_config_document_keeps_agents_disabled_without_config() {
+fn merged_config_document_keeps_agents_enabled_without_config() {
     let temp = tempfile::tempdir().unwrap();
     let env = test_config_environment(temp.path());
     std::fs::create_dir_all(env.cwd.as_path()).unwrap();
 
     let text = toml::to_string_pretty(&resolved_config_with_env(None, &env)).unwrap();
 
-    assert!(text.contains("enabled = false"));
-    assert!(!text.contains("[mcp]"));
+    assert!(text.contains("enabled = true"));
+    assert!(text.contains("[mcp.proxy]"), "proxy defaults on with agents mode: {text}");
 }
 #[test]
 fn rubber_duck_config_rejects_ambiguous_backend_and_roundtrips_limits() {

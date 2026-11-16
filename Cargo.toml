@@ -162,8 +162,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 ee-agent-acp-server = { package = "ee-agent-acp-server", path = "crates/ee-agent-acp-server", version = "0.11.12" }
 ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", version = "0.11.12" }
 ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.12" }
-ee-agent-opencode = { package = "ee-agent-opencode", path = "crates/ee-agent-opencode", version = "0.11.12" }
-ee-agent-openrouter = { package = "ee-agent-openrouter", path = "crates/ee-agent-openrouter", version = "0.11.12" }
 ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.12" }
 ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.12" }
 ee-chat-completions = { package = "ee-chat-completions", path = "crates/ee-chat-completions", version = "0.11.12" }

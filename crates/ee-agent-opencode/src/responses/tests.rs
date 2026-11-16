@@ -1,4 +1,4 @@
-use ee_agent_orchestrator::{ModelRole, SideEffectClass, ToolDefinition, ToolResult};
+use ee_agent_orchestrator::{ModelContent, ModelRole, SideEffectClass, ToolDefinition, ToolResult};
 use ee_chat_completions::{ChunkFuture, ChunkSource, StreamDelta, drive_sse};
 use serde_json::{Value, json};
 
@@ -129,6 +129,33 @@ fn request_body_never_carries_a_credential() {
     assert!(!body.contains("api_key"), "{body}");
     assert!(!body.contains("authorization"), "{body}");
     assert!(!body.contains("Bearer"), "{body}");
+}
+
+#[test]
+fn request_body_encodes_image_inputs_as_input_image_parts() {
+    let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
+        ModelContent::Text("look".into()),
+        ModelContent::Image { data: "aW1n".into(), mime_type: "image/png".into(), uri: None },
+        ModelContent::EmbeddedResource {
+            uri: "file:///scan.png".into(),
+            mime_type: Some("image/png".into()),
+            text: None,
+            blob: Some("YmxvYg==".into()),
+        },
+    ])];
+
+    let body = request_body("m", "system", &transcript, &[], false, None);
+
+    let parts = body["input"][0]["content"].as_array().expect("content parts");
+    assert_eq!(parts[0], json!({ "type": "input_text", "text": "look" }));
+    assert_eq!(
+        parts[1],
+        json!({ "type": "input_image", "image_url": "data:image/png;base64,aW1n" })
+    );
+    assert_eq!(
+        parts[2],
+        json!({ "type": "input_image", "image_url": "data:image/png;base64,YmxvYg==" })
+    );
 }
 
 #[test]

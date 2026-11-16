@@ -136,6 +136,8 @@ pub fn messages_from_transcript(system_prompt: &str, transcript: &[ModelMessage]
                 "tool_call_id": tool_call_id_of(&message.content),
                 "content": content,
             })
+        } else if content_has_media(&message.content) {
+            json!({ "role": role, "content": content_parts(&message.content) })
         } else {
             json!({ "role": role, "content": content })
         };
@@ -393,8 +395,8 @@ fn tool_call_of(value: &Value) -> Option<ToolCall> {
 
 /// Renders one message's content blocks as text.
 ///
-/// Shared by every dialect's transcript conversion; unordered or unknown content
-/// kinds stay out of the text view.
+/// Shared by every dialect's transcript conversion; multimodal payloads become
+/// stable placeholders so text-only summaries never carry raw base64.
 #[must_use]
 pub fn content_text(content: &[ModelContent]) -> String {
     let mut parts = Vec::new();
@@ -406,10 +408,110 @@ pub fn content_text(content: &[ModelContent]) -> String {
             ModelContent::TerminalReference { terminal_id } => {
                 parts.push(format!("[terminal:{terminal_id}]"))
             }
+            ModelContent::Image { mime_type, uri, .. } => {
+                parts.push(match uri {
+                    Some(uri) => format!("[image:{mime_type}:{uri}]"),
+                    None => format!("[image:{mime_type}]"),
+                });
+            }
+            ModelContent::Audio { mime_type, .. } => parts.push(format!("[audio:{mime_type}]")),
+            ModelContent::EmbeddedResource { uri, mime_type, text, blob } => match (text, blob) {
+                (Some(text), _) => parts.push(format!("[resource:{uri}]\n{text}")),
+                (None, Some(_)) => {
+                    let mime = mime_type.as_deref().unwrap_or("application/octet-stream");
+                    parts.push(format!("[resource:{uri}:{mime}]"));
+                }
+                (None, None) => parts.push(format!("[resource:{uri}]")),
+            },
             _ => {} // future content kinds stay out of the text view
         }
     }
     parts.join("\n")
+}
+
+/// Whether any block needs the multimodal parts array instead of plain text.
+#[must_use]
+pub fn content_has_media(content: &[ModelContent]) -> bool {
+    content.iter().any(|block| {
+        matches!(
+            block,
+            ModelContent::Image { .. }
+                | ModelContent::Audio { .. }
+                | ModelContent::EmbeddedResource { blob: Some(_), text: None, .. }
+        )
+    })
+}
+
+/// Converts content blocks into OpenAI-compatible chat content parts.
+#[must_use]
+pub fn content_parts(content: &[ModelContent]) -> Vec<Value> {
+    let mut parts = Vec::new();
+    for block in content {
+        match block {
+            ModelContent::Text(text) => push_text_part(&mut parts, text),
+            ModelContent::ToolResult { result, .. } => {
+                push_text_part(&mut parts, &result.summary_text())
+            }
+            ModelContent::FileReference { path } => {
+                push_text_part(&mut parts, &format!("[file:{path}]"))
+            }
+            ModelContent::TerminalReference { terminal_id } => {
+                push_text_part(&mut parts, &format!("[terminal:{terminal_id}]"))
+            }
+            ModelContent::Image { data, mime_type, .. } => {
+                parts.push(image_part(data, mime_type));
+            }
+            ModelContent::Audio { data, mime_type } => {
+                parts.push(audio_part(data, mime_type));
+            }
+            ModelContent::EmbeddedResource { uri, mime_type, text, blob } => match (text, blob) {
+                (Some(text), _) => push_text_part(&mut parts, &format!("[resource:{uri}]\n{text}")),
+                (None, Some(blob)) => match mime_type.as_deref() {
+                    Some(mime) if mime.starts_with("image/") => {
+                        parts.push(image_part(blob, mime));
+                    }
+                    Some(mime) if mime.starts_with("audio/") => {
+                        parts.push(audio_part(blob, mime));
+                    }
+                    mime => push_text_part(
+                        &mut parts,
+                        &format!("[resource:{uri}:{}]", mime.unwrap_or("application/octet-stream")),
+                    ),
+                },
+                (None, None) => push_text_part(&mut parts, &format!("[resource:{uri}]")),
+            },
+            _ => {} // future content kinds stay out of the request
+        }
+    }
+    parts
+}
+
+fn push_text_part(parts: &mut Vec<Value>, text: &str) {
+    if !text.is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+}
+
+fn image_part(data: &str, mime_type: &str) -> Value {
+    json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+    })
+}
+
+fn audio_part(data: &str, mime_type: &str) -> Value {
+    json!({
+        "type": "input_audio",
+        "input_audio": { "data": data, "format": audio_format(mime_type) },
+    })
+}
+
+fn audio_format(mime_type: &str) -> &str {
+    match mime_type.rsplit('/').next().unwrap_or(mime_type) {
+        "mpeg" => "mp3",
+        "x-wav" | "wave" => "wav",
+        other => other,
+    }
 }
 
 /// Stable tool-call id of a tool observation message.

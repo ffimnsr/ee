@@ -485,27 +485,27 @@ fn repair_safe_follow_up(reason: RepairStopReason) -> &'static str {
 }
 
 fn prompt_text(ctx: &PromptContext) -> String {
-    ctx.prompt
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text.clone()),
+    ctx.prompt.iter().filter_map(prompt_block_text).collect::<Vec<_>>().join("\n")
+}
+
+/// Text carried by one prompt block; embedded text resources keep their body.
+fn prompt_block_text(block: &ContentBlock) -> Option<String> {
+    match block {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        ContentBlock::Resource(resource) => match &resource.resource {
+            ee_agent_protocol::EmbeddedResourceResource::TextResourceContents(text) => {
+                Some(text.text.clone())
+            }
             _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        },
+        _ => None,
+    }
 }
 
 /// Derives the bounded root-task title and description from the prompt's
 /// text blocks.
 fn task_summary(ctx: &PromptContext) -> (String, String) {
-    let texts: Vec<String> = ctx
-        .prompt
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect();
+    let texts: Vec<String> = ctx.prompt.iter().filter_map(prompt_block_text).collect();
     let description = texts.join(" ");
     let title = texts.first().cloned().unwrap_or_default();
     let title = if title.trim().is_empty() {

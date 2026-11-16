@@ -51,9 +51,4 @@ fn subagent_types_roundtrip_through_json() {
     let restored: SubagentResult = serde_json::from_str(&json).expect("parses");
     assert_eq!(restored, result);
     assert_eq!(restored.handoff.claimed_citations, result.handoff.claimed_citations);
-
-    let intent = SubagentIntent::new("summarize the findings");
-    let json = serde_json::to_string(&intent).expect("serializes");
-    let restored: SubagentIntent = serde_json::from_str(&json).expect("parses");
-    assert_eq!(restored, intent);
 }

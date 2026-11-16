@@ -551,12 +551,6 @@ impl LoopEngine {
             if self.options.mode == LoopMode::SimpleAnswer {
                 return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
             }
-            if !response.subagent_intents.is_empty() {
-                return Err(OrchestratorError::ModelFailure(
-                    "model returned subagent intents, but subagent execution is not supported yet"
-                        .into(),
-                ));
-            }
             if response.is_empty() {
                 empty_responses += 1;
                 if empty_responses >= 2 {

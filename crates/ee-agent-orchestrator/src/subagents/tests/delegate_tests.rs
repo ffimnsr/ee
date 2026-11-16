@@ -336,9 +336,9 @@ async fn delegate_task_nested_spawns_stop_at_depth_limit() {
 async fn delegate_task_child_failure_returns_error_summary() {
     let model = FakeModel::new(vec![
         ModelResponse::new().tool_intents(vec![delegate_intent(json!({ "prompt": "deep" }))]),
-        // The child returns a subagent intent, which the loop rejects as
-        // unsupported — a provider error that fails the child.
-        ModelResponse::new().subagent_intents(vec![SubagentIntent::new("break")]),
+        // The child returns a malformed handoff, which fails the child and
+        // surfaces a backend error to the parent.
+        ModelResponse::new().text("not a handoff").completed(),
         ModelResponse::new().text("parent done").completed(),
     ]);
     let (sink, client, _rx) = plumbing();
@@ -363,7 +363,7 @@ async fn delegate_task_child_failure_returns_error_summary() {
     };
     assert!(!result.success);
     assert_eq!(result.error_kind, Some(crate::tools::ToolErrorKind::Backend));
-    assert!(result.text_output.contains("subagent intents"));
+    assert!(result.text_output.contains("handoff rejected"));
 }
 
 #[tokio::test]
