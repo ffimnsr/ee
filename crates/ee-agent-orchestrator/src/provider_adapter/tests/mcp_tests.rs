@@ -1,5 +1,6 @@
 //! Provider-adapter tests: mcp.
 use super::conversation::record_agent_message;
+use super::conversation::record_model_transcript;
 use super::conversation::record_user_message;
 use super::*;
 
@@ -536,6 +537,21 @@ async fn provider_adapter_compact_prompt_skips_mcp_discovery_and_tools() {
         .clone();
     record_user_message(&conversation, "recent user goal");
     record_agent_message(&conversation, "recent agent result");
+    let transcript = probe
+        .sessions
+        .lock()
+        .expect("sessions")
+        .get(&session_id)
+        .expect("session")
+        .model_transcript
+        .clone();
+    record_model_transcript(
+        &transcript,
+        vec![
+            ModelMessage::text(ModelRole::User, "recent user goal"),
+            ModelMessage::text(ModelRole::Assistant, "recent agent result"),
+        ],
+    );
 
     handle.send(request(2, "session/prompt", prompt_params(&session_id, "/compact")));
     // No MCP diagnostics and no plan update: the compaction path bypasses

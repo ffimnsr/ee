@@ -149,6 +149,32 @@ impl CheckpointStore {
         Ok(Some((self.id(session_id, seq), checkpoint)))
     }
 
+    /// Checkpoint stored under `seq` for `session_id`, when one exists and has
+    /// not expired. The checksum is verified before the payload is trusted.
+    pub fn load_at(
+        &self,
+        session_id: &str,
+        seq: u64,
+    ) -> Result<Option<(String, OrchestratorCheckpoint)>, OrchestratorError> {
+        self.refresh(session_id)?;
+        let entries = self.entries.lock().expect("checkpoint entries poisoned");
+        let Some(stored) = entries.get(session_id).and_then(|per_session| per_session.get(&seq))
+        else {
+            return Ok(None);
+        };
+        let checkpoint = self.verify_and_take(session_id, seq, stored)?;
+        Ok(Some((self.id(session_id, seq), checkpoint)))
+    }
+
+    /// Newest stored sequence for `session_id`, when any checkpoint exists.
+    pub fn latest_seq(&self, session_id: &str) -> Result<Option<u64>, OrchestratorError> {
+        self.refresh(session_id)?;
+        let entries = self.entries.lock().expect("checkpoint entries poisoned");
+        Ok(entries
+            .get(session_id)
+            .and_then(|per_session| per_session.last_key_value().map(|(&seq, _)| seq)))
+    }
+
     /// Metadata for every non-expired checkpoint of `session_id`, oldest
     /// first.
     pub fn list(&self, session_id: &str) -> Result<Vec<CheckpointMeta>, OrchestratorError> {

@@ -9,9 +9,11 @@ use super::conversation::normalize_workspace_roots;
 use super::conversation::persist_session_snapshot;
 use super::conversation::record_agent_message;
 use super::conversation::record_final_response;
+use super::conversation::record_model_transcript;
 use super::conversation::record_user_message;
 use super::conversation::replay_conversation;
 use super::conversation::restore_runtime_from_checkpoint;
+use super::conversation::session_compaction_history;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
 use super::conversation::{PromptBundleInputs, prompt_bundle};
@@ -90,6 +92,7 @@ impl AgentProvider for OrchestratorProvider {
                 mode: mode.clone(),
                 mcp_servers,
                 conversation: Arc::new(Mutex::new(Vec::new())),
+                model_transcript: Arc::new(Mutex::new(Vec::new())),
             };
             session_store
                 .save(
@@ -221,6 +224,7 @@ impl AgentProvider for OrchestratorProvider {
                     mode: mode.clone(),
                     mcp_servers,
                     conversation: Arc::new(Mutex::new(Vec::new())),
+                    model_transcript: Arc::new(Mutex::new(Vec::new())),
                 },
             );
             Ok(SessionInit::new(session_id)
@@ -306,6 +310,7 @@ impl AgentProvider for OrchestratorProvider {
                         mode: mode.clone(),
                         mcp_servers,
                         conversation: Arc::new(Mutex::new(Vec::new())),
+                        model_transcript: Arc::new(Mutex::new(Vec::new())),
                     },
                 );
                 mode
@@ -334,6 +339,8 @@ impl AgentProvider for OrchestratorProvider {
         let telemetry_attribution = self.config.telemetry_attribution.clone();
         let next_telemetry_turn = self.next_telemetry_turn.clone();
         let plugins = self.plugins.clone();
+        let models = self.models.clone();
+        let base_policy = self.policy.clone();
         Box::pin(async move {
             let session = {
                 let sessions = sessions.lock().expect("adapter sessions poisoned");
@@ -347,6 +354,7 @@ impl AgentProvider for OrchestratorProvider {
                         session.mode.clone(),
                         session.mcp_servers.clone(),
                         session.conversation.clone(),
+                        session.model_transcript.clone(),
                     )
                 })
             };
@@ -359,6 +367,7 @@ impl AgentProvider for OrchestratorProvider {
                 mode,
                 mcp_servers,
                 conversation,
+                model_transcript,
             )) = session
             else {
                 return Err(ProviderError::BackendFailure(format!(
@@ -411,7 +420,11 @@ impl AgentProvider for OrchestratorProvider {
             let compact_command = parse_slash_command(&prompt_text)
                 .filter(|command| command.name == COMPACT_COMMAND_NAME);
             if let Some(command) = compact_command {
-                let history = model_history(&conversation);
+                let history = session_compaction_history(
+                    &runtime,
+                    &session_id.to_string(),
+                    &model_transcript,
+                );
                 let result = runtime
                     .run_compact_turn_with_history(
                         ctx,
@@ -452,7 +465,7 @@ impl AgentProvider for OrchestratorProvider {
             if let Some(command) = parse_slash_command(&prompt_text)
                 && command.name == RUBBER_DUCK_COMMAND_NAME
             {
-                let history = model_history(&conversation);
+                let history = model_history(&model_transcript);
                 record_user_message(&conversation, prompt_text.clone());
                 let turn = runtime
                     .run_manual_rubber_duck(
@@ -487,6 +500,114 @@ impl AgentProvider for OrchestratorProvider {
                 )?;
                 return Ok(turn.prompt_result);
             }
+            // `/branch` forks the current session from a stored checkpoint.
+            // It runs before discard/resume handling so a paused turn can be
+            // branched instead of continued. Missing checkpoints fail closed
+            // without touching the active session.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == BRANCH_COMMAND_NAME
+            {
+                let requested_seq = parse_checkpoint_sequence(command.instructions.as_deref())?;
+                let source_id = session_id.to_string();
+                let checkpoint_store = runtime.checkpoint_store();
+                let checkpoint_seq = match requested_seq {
+                    Some(seq) => seq,
+                    None => checkpoint_store.latest_seq(&source_id)?.ok_or_else(|| {
+                        ProviderError::InvalidRequest(format!(
+                            "session {source_id} has no checkpoints to branch from"
+                        ))
+                    })?,
+                };
+                let outcome = runtime
+                    .branch_from_checkpoint(&source_id, checkpoint_seq)
+                    .map_err(ProviderError::from)?;
+                let checkpoint = checkpoint_store
+                    .load_at(&source_id, checkpoint_seq)?
+                    .map(|(_, checkpoint)| checkpoint)
+                    .ok_or_else(|| {
+                        ProviderError::InvalidRequest(format!(
+                            "checkpoint {checkpoint_seq} for session {source_id} was not found"
+                        ))
+                    })?;
+                let branch_policy = plugins.gate_policy(mode_policy(&base_policy, &mode)?);
+                let branch_runtime = Arc::new(
+                    OrchestratorRuntime::from_checkpoint_with_model_registry(
+                        &checkpoint,
+                        models.clone(),
+                        branch_policy,
+                    )?
+                    .with_plugin_observer(plugins.bridge().observer(outcome.session_id.clone())),
+                );
+                branch_runtime
+                    .register_builtins(&SessionId::new(outcome.session_id.clone()))
+                    .map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to register built-in tools: {error}"
+                        ))
+                    })?;
+                plugins.session_scope(&outcome.session_id).map_err(ProviderError::from)?;
+                let replayed = if outcome.conversation_replayed {
+                    runtime
+                        .replay_session_messages(&outcome.session_id)
+                        .map_err(ProviderError::from)?
+                } else {
+                    Vec::new()
+                };
+                let branch_transcript: Vec<ModelMessage> =
+                    replayed.into_iter().map(|(_, message)| message).collect();
+                let mut branch_conversation = messages_to_conversation(&branch_transcript);
+                if !outcome.conversation_replayed {
+                    branch_conversation.push(ConversationMessage {
+                        role: ConversationRole::Agent,
+                        text: String::from(
+                            "conversation_unreplayed: no session log was available for this checkpoint; task, memory, and budget state were adopted",
+                        ),
+                    });
+                }
+                let entry = SessionRuntime {
+                    runtime: branch_runtime,
+                    workspace: workspace.clone(),
+                    workspace_roots: workspace_roots.clone(),
+                    provider_label: provider_label.clone(),
+                    model_label: model_label.clone(),
+                    mode: mode.clone(),
+                    mcp_servers: mcp_servers.clone(),
+                    conversation: Arc::new(Mutex::new(branch_conversation)),
+                    model_transcript: Arc::new(Mutex::new(branch_transcript)),
+                };
+                session_store
+                    .save(
+                        &implementation_name,
+                        &workspace,
+                        &outcome.session_id,
+                        &session_snapshot(&entry),
+                    )
+                    .map_err(ProviderError::from)?;
+                sessions
+                    .lock()
+                    .expect("adapter sessions poisoned")
+                    .insert(outcome.session_id.clone(), entry);
+                let summary = serde_json::json!({
+                    "command": BRANCH_COMMAND_NAME,
+                    "session_id": outcome.session_id,
+                    "source_session_id": outcome.source_session_id,
+                    "checkpoint_seq": outcome.checkpoint_seq,
+                    "conversation_replayed": outcome.conversation_replayed,
+                    "conversation_unreplayed": !outcome.conversation_replayed,
+                    "replayed_messages": outcome.replayed_messages,
+                });
+                let _ = sink.agent_message_chunk("branch", summary.to_string());
+                finish_provider_telemetry(
+                    &telemetry,
+                    &telemetry_turn,
+                    telemetry_started_at,
+                    &runtime.event_snapshot()[telemetry_event_start..],
+                    TelemetryTurnOutcome::Succeeded,
+                    None,
+                    Vec::new(),
+                );
+                return Ok(PromptResult::new(StopReason::EndTurn));
+            }
             // `/discard` rejects a paused turn's pending checkpoint: the
             // interrupted work is dropped instead of resumed.  Only valid
             // when recovery is enabled; otherwise it is an ordinary prompt.
@@ -520,13 +641,22 @@ impl AgentProvider for OrchestratorProvider {
             // lives in orchestrator memory; the provider retains only a recent
             // verbatim tail.
             if !has_pending && !resume_command {
-                let history_for_compaction = model_history(&conversation);
+                let history_for_compaction = session_compaction_history(
+                    &runtime,
+                    &session_id.to_string(),
+                    &model_transcript,
+                );
                 let estimated = super::auto_compact::estimated_tokens(&history_for_compaction);
-                if super::auto_compact::should_compact(
-                    estimated,
-                    runtime.config().context_window_tokens,
-                    runtime.config().compaction.auto_threshold_percent,
-                ) {
+                let transcript_at_capacity =
+                    model_transcript.lock().expect("model transcript poisoned").len()
+                        >= CONVERSATION_MAX_MESSAGES;
+                if transcript_at_capacity
+                    || super::auto_compact::should_compact(
+                        estimated,
+                        runtime.config().context_window_tokens,
+                        runtime.config().compaction.auto_threshold_percent,
+                    )
+                {
                     let compaction = runtime
                         .run_compact_turn_with_history(
                             ctx.clone(),
@@ -540,14 +670,13 @@ impl AgentProvider for OrchestratorProvider {
                     if let Err(error) = compaction {
                         tracing::warn!(%error, "automatic context compaction failed; continuing with full history");
                     } else {
-                        super::auto_compact::trim_conversation(
-                            &conversation,
-                            runtime.config().compaction.auto_retained_messages,
-                        );
+                        let retained = runtime.config().compaction.auto_retained_messages;
+                        super::auto_compact::trim_conversation(&conversation, retained);
+                        super::auto_compact::trim_model_transcript(&model_transcript, retained);
                     }
                 }
             }
-            let history = if has_pending { Vec::new() } else { model_history(&conversation) };
+            let history = if has_pending { Vec::new() } else { model_history(&model_transcript) };
             if !has_pending {
                 record_user_message(&conversation, prompt_text);
                 // Persist prompt receipt before model work so an abrupt host
@@ -736,6 +865,9 @@ impl AgentProvider for OrchestratorProvider {
                 }
                 Err(error) => Err(ProviderError::from(error)),
             };
+            if result.is_ok() {
+                record_model_transcript(&model_transcript, runtime.last_turn_transcript());
+            }
             let telemetry_completion = result.as_ref().ok().map(|turn| {
                 (
                     turn.final_response.completion.state,
@@ -909,4 +1041,35 @@ impl AgentProvider for OrchestratorProvider {
                 .map_err(ProviderError::from)
         })
     }
+}
+
+/// Parses the optional `/branch <checkpoint_seq>` argument. Absence means "use
+/// the newest checkpoint"; anything else must be a non-zero sequence number.
+fn parse_checkpoint_sequence(instructions: Option<&str>) -> Result<Option<u64>, ProviderError> {
+    let Some(text) = instructions.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let seq = text.parse::<u64>().map_err(|_| {
+        ProviderError::InvalidRequest(format!(
+            "invalid checkpoint sequence {text:?}; expected a non-negative integer"
+        ))
+    })?;
+    Ok(Some(seq))
+}
+
+/// Projects normalized model messages onto the ACP replay conversation. Tool,
+/// system, and subagent-only records have no client-visible text counterpart.
+fn messages_to_conversation(messages: &[ModelMessage]) -> Vec<ConversationMessage> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                ModelRole::User => ConversationRole::User,
+                ModelRole::Assistant => ConversationRole::Agent,
+                _ => return None,
+            };
+            let text = message.text_content();
+            (!text.is_empty()).then_some(ConversationMessage { role, text })
+        })
+        .collect()
 }

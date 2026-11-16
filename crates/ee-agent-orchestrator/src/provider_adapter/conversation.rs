@@ -126,23 +126,49 @@ pub(super) fn record_agent_message(
     }
 }
 
-/// Converts client-visible live-session messages into normalized model history.
-/// Host-derived final reports stay excluded because they are not model output.
-pub(super) fn model_history(
-    conversation: &Arc<Mutex<Vec<ConversationMessage>>>,
+/// Converts the retained normalized transcript into the history handed to the
+/// next turn. Tool calls and tool results are preserved; host-derived final
+/// reports never enter the model transcript. The transcript is kept bounded by
+/// [`record_model_transcript`].
+pub(super) fn model_history(transcript: &Arc<Mutex<Vec<ModelMessage>>>) -> Vec<ModelMessage> {
+    transcript.lock().expect("model transcript poisoned").clone()
+}
+
+/// Replaces the retained transcript with the latest normalized turn transcript,
+/// dropping rebuilt prompt planes and bounding the result to
+/// [`CONVERSATION_MAX_MESSAGES`].
+pub(super) fn record_model_transcript(
+    transcript: &Arc<Mutex<Vec<ModelMessage>>>,
+    messages: Vec<ModelMessage>,
+) {
+    let mut normalized = normalize_model_messages(messages);
+    if normalized.len() > CONVERSATION_MAX_MESSAGES {
+        let overflow = normalized.len() - CONVERSATION_MAX_MESSAGES;
+        normalized.drain(..overflow);
+    }
+    *transcript.lock().expect("model transcript poisoned") = normalized;
+}
+
+/// History used for compaction: the append-only session log carries every
+/// model-visible message, including turns that already aged out of the bounded
+/// transcript. Falls back to the retained transcript when the log is empty.
+pub(super) fn session_compaction_history(
+    runtime: &OrchestratorRuntime,
+    session_id: &str,
+    transcript: &Arc<Mutex<Vec<ModelMessage>>>,
 ) -> Vec<ModelMessage> {
-    conversation
-        .lock()
-        .expect("conversation poisoned")
-        .iter()
-        .filter_map(|message| match message.role {
-            ConversationRole::User => {
-                Some(ModelMessage::text(ModelRole::User, message.text.clone()))
-            }
-            ConversationRole::Agent => {
-                Some(ModelMessage::text(ModelRole::Assistant, message.text.clone()))
-            }
-            ConversationRole::FinalResponse => None,
+    let logged = runtime
+        .replay_session_messages(session_id)
+        .map(|records| normalize_model_messages(records.into_iter().map(|(_, message)| message)))
+        .unwrap_or_default();
+    if logged.is_empty() { model_history(transcript) } else { logged }
+}
+
+fn normalize_model_messages(messages: impl IntoIterator<Item = ModelMessage>) -> Vec<ModelMessage> {
+    messages
+        .into_iter()
+        .filter(|message| {
+            message.role != ModelRole::System && !message.metadata.contains_key("ee_prompt")
         })
         .collect()
 }
@@ -228,7 +254,11 @@ pub(super) fn restore_runtime_from_checkpoint(
 /// advertised because this provider owns the verified critic flow; a registry
 /// without contrast still returns a typed unavailable reason.
 pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableCommand> {
-    let mut commands = vec![compact_available_command(), rubber_duck_available_command()];
+    let mut commands = vec![
+        compact_available_command(),
+        rubber_duck_available_command(),
+        branch_available_command(),
+    ];
     if recovery_enabled {
         commands.push(discard_available_command());
         commands.push(resume_available_command());
@@ -427,6 +457,41 @@ mod tests {
             !bundle.stable.contains("workspace rule"),
             "workspace text never joins stable prompt"
         );
+    }
+
+    #[test]
+    fn model_transcript_preserves_tool_provenance_and_drops_prompt_planes() {
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let messages = vec![
+            ModelMessage::text(ModelRole::System, "stable prompt"),
+            ModelMessage::text(ModelRole::User, "hello")
+                .with_metadata([(String::from("ee_prompt"), String::from("runtime_context"))]),
+            ModelMessage::text(ModelRole::User, "fix it"),
+            ModelMessage::text(ModelRole::Assistant, "checking"),
+            ModelMessage::tool_result("call-1", crate::tools::ToolResult::success("file body")),
+        ];
+
+        record_model_transcript(&transcript, messages);
+        let history = model_history(&transcript);
+
+        assert_eq!(history.len(), 3, "system and rebuilt prompt planes are dropped");
+        assert_eq!(history[0].text_content(), "fix it");
+        assert_eq!(history[1].role, ModelRole::Assistant);
+        assert_eq!(history[2].role, ModelRole::Tool, "tool provenance is retained");
+    }
+
+    #[test]
+    fn model_transcript_remains_bounded() {
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let messages = (0..CONVERSATION_MAX_MESSAGES + 10)
+            .map(|index| ModelMessage::text(ModelRole::User, format!("message {index}")))
+            .collect();
+
+        record_model_transcript(&transcript, messages);
+        let history = model_history(&transcript);
+
+        assert_eq!(history.len(), CONVERSATION_MAX_MESSAGES);
+        assert_eq!(history[0].text_content(), "message 10", "oldest messages age out first");
     }
 
     #[test]

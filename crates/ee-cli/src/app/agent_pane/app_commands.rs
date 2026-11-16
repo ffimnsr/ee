@@ -29,6 +29,10 @@ impl App {
                 self.discard_paused_turn();
                 true
             }
+            "agents_branch" => {
+                self.agents_branch_checkpoint(tail);
+                true
+            }
             "agents_reconnect" => {
                 self.agents_reconnect();
                 true
@@ -90,6 +94,33 @@ impl App {
                 false
             }
         }
+    }
+
+    /// `:agents_branch [checkpoint_seq]` — dispatches the provider's `/branch`
+    /// slash command for the active session, bypassing the pane-local `/branch`
+    /// alias (which starts a client-side seeded fork).
+    pub(super) fn agents_branch_checkpoint(&mut self, args: &str) {
+        let args = args.trim();
+        if !args.is_empty() && args.parse::<u64>().is_err() {
+            self.backend.status_message =
+                Some(String::from("usage: :agents_branch [checkpoint_seq]"));
+            return;
+        }
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session to branch"));
+            return;
+        };
+        if self.agents.threads[active].state != ThreadUiState::Ready {
+            self.backend.status_message =
+                Some(String::from("agent session must be idle before branching from a checkpoint"));
+            return;
+        }
+        let prompt =
+            if args.is_empty() { String::from("/branch") } else { format!("/branch {args}") };
+        self.send_ready_agent_prompt(active, prompt);
+        self.backend.status_message = Some(String::from(
+            "branching current session from checkpoint; the provider reports the new session id",
+        ));
     }
 
     /// `:agents` — open the pane and start the default agent lazily.

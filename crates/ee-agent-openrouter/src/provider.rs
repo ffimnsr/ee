@@ -522,6 +522,8 @@ mod tests {
                 crate::config::DEFAULT_RETRY_MAX_DELAY_MS,
             ),
             checkpoint_dir: None,
+            session_log_dir: None,
+            session_log_durable: false,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
             max_iterations: None,
         }

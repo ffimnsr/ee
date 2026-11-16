@@ -39,9 +39,39 @@ fn test_config() -> Config {
             crate::config::DEFAULT_RETRY_MAX_DELAY_MS,
         ),
         checkpoint_dir: None,
+        session_log_dir: None,
+        session_log_durable: false,
         context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
         max_iterations: None,
     }
+}
+
+#[test]
+fn durable_session_log_dir_is_opt_in_and_propagates() {
+    let mut config = test_config();
+    let state_dir = PathBuf::from("/tmp/ee-openrouter-session-log-test");
+
+    let in_memory = openrouter_orchestrator_config(&config, state_dir.clone());
+    assert!(in_memory.session_log_dir.is_none());
+    assert!(in_memory.orchestrator.session_log.dir.is_none());
+
+    let log_root = PathBuf::from("/tmp/ee-openrouter-session-log-root");
+    config.session_log_dir = Some(log_root.clone());
+    let durable = openrouter_orchestrator_config(&config, state_dir.clone());
+    assert_eq!(durable.session_log_dir.as_ref(), Some(&log_root));
+    assert_eq!(
+        durable.orchestrator.session_log.dir.as_deref(),
+        Some(log_root.join("session-log").as_path())
+    );
+
+    config.session_log_dir = None;
+    config.session_log_durable = true;
+    let defaulted = openrouter_orchestrator_config(&config, state_dir.clone());
+    assert_eq!(defaulted.session_log_dir.as_ref(), Some(&state_dir));
+    assert_eq!(
+        defaulted.orchestrator.session_log.dir.as_deref(),
+        Some(state_dir.join("session-log").as_path())
+    );
 }
 
 #[test]

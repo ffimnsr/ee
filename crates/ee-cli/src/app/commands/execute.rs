@@ -1431,6 +1431,7 @@ impl App {
             | "agents_stop"
             | "agents_resume"
             | "agents_discard"
+            | "agents_branch"
             | "agents_reconnect"
                 if self.dispatch_agents_command(head, tail) =>
             {
@@ -1463,6 +1464,7 @@ impl App {
             | "agents_stop"
             | "agents_resume"
             | "agents_discard"
+            | "agents_branch"
             | "agents_reconnect" => {}
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));

@@ -30,6 +30,11 @@ pub const DISCARD_COMMAND_NAME: &str = "discard";
 /// prompt.
 pub const RESUME_COMMAND_NAME: &str = "resume";
 
+/// The advertised slash-command name for forking the current session from a
+/// stored checkpoint. The optional argument is the checkpoint sequence; when
+/// omitted the newest checkpoint is used.
+pub const BRANCH_COMMAND_NAME: &str = "branch";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -134,6 +139,19 @@ pub fn resume_available_command() -> AvailableCommand {
     )
 }
 
+/// The `/branch` command advertised by providers with checkpoint branching:
+/// forks the session from a stored checkpoint sequence.
+#[must_use]
+pub fn branch_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        BRANCH_COMMAND_NAME,
+        "Fork the current session from a stored checkpoint, cloning task, memory, and budget state.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional checkpoint sequence (defaults to the newest checkpoint)",
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +253,24 @@ mod tests {
         assert!(!is_resume_command("/resumed"));
         assert!(!is_resume_command("/compact"));
         assert!(!is_resume_command("run /resume now"));
+    }
+
+    #[test]
+    fn advertised_branch_command_carries_name_description_and_sequence_hint() {
+        let command = branch_available_command();
+        assert_eq!(command.name, BRANCH_COMMAND_NAME);
+        assert!(!command.description.is_empty(), "description advertised");
+        let hint = match command.input.as_ref().expect("input advertised") {
+            AvailableCommandInput::Unstructured(input) => input.hint.clone(),
+            _ => panic!("expected unstructured input"),
+        };
+        assert!(hint.contains("checkpoint sequence"), "{hint}");
+        let json = serde_json::to_string(&command).expect("serializes");
+        assert!(json.contains("branch"), "{json}");
+        assert_eq!(
+            parse_slash_command("/branch 7").map(|parsed| parsed.name),
+            Some(BRANCH_COMMAND_NAME.into())
+        );
     }
 
     #[test]

@@ -66,6 +66,8 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
             max_delay: Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS),
         },
         checkpoint_dir: None,
+        session_log_dir: None,
+        session_log_durable: false,
     }
 }
 

@@ -25,7 +25,7 @@ pub mod pipeline;
 
 pub use pipeline::{
     CompactPlan, CompactionInput, CompactionStageCounts, CompactionStrategy,
-    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy,
+    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy, prune_redundant_readonly_tool_outputs,
 };
 
 static DEFAULT_STRATEGY: DefaultCompactionStrategy = DefaultCompactionStrategy;
@@ -275,11 +275,6 @@ pub fn build_compaction_context(
     let guard = SensitiveDataGuard::new();
     let mut message_lines = recent_messages
         .iter()
-        .rev()
-        .take(MAX_RECENT_MESSAGES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
         .map(|message| format!("- {:?}: {}", message.role, guard.redact(&message.text_content())))
         .collect::<Vec<_>>();
     if message_lines.is_empty() {

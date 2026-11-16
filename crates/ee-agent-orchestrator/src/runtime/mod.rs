@@ -214,6 +214,10 @@ pub struct OrchestratorRuntime {
     runtime_snapshots: Mutex<HashMap<String, RuntimeSnapshotState>>,
     /// Append-only model-visible session log; `None` when disabled.
     session_logs: Option<Arc<SessionLogStore>>,
+    /// Normalized model-visible transcript from the latest root turn. Provider
+    /// adapters use it to preserve full multi-turn history (including tool
+    /// calls and results) across prompts instead of a text-only tail.
+    last_turn_transcript: Arc<Mutex<Vec<ModelMessage>>>,
 }
 
 mod branch;

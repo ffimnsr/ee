@@ -23,7 +23,7 @@ impl OrchestratorRuntime {
         }
         let Some(store) = &self.session_logs else {
             return Ok(crate::session_log::BranchOutcome::conversation_unreplayed(
-                format!("{session_id}~branch{checkpoint_seq}"),
+                format!("{session_id}-branch-{checkpoint_seq}"),
                 session_id,
                 checkpoint_seq,
             ));

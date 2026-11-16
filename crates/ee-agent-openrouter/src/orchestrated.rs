@@ -45,7 +45,8 @@ pub fn openrouter_orchestrator_config(
     config: &Config,
     session_state_dir: PathBuf,
 ) -> OrchestratorProviderConfig {
-    OrchestratorProviderConfig {
+    let session_log_root = config.session_log_root(&session_state_dir);
+    let mut provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-agent-openrouter", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
         orchestrator: OrchestratorConfig {
@@ -70,8 +71,14 @@ pub fn openrouter_orchestrator_config(
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
+        session_log_dir: session_log_root.clone(),
         ..OrchestratorProviderConfig::default()
+    };
+    if let Some(root) = session_log_root {
+        provider_config.orchestrator.session_log =
+            ee_agent_orchestrator::SessionLogConfig::durable(root.join("session-log"));
     }
+    provider_config
 }
 
 /// Builds the production OpenRouter adapter and orchestrator policy combination.

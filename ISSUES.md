@@ -1348,3 +1348,202 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 - [x] Stable prompt is byte-identical across turns.
 - [x] No raw prompt or tool output enters telemetry/export paths.
 - [x] Phase 2, 3, and 4 checklists are complete before Phase 6 is marked done.
+---
+
+# Agent Harness Audit — Remaining Wiring Gaps & Next-Wave Improvements
+
+**Goal:** close remaining surface wiring gaps between `ee-agent-orchestrator` and the provider/ACP/CLI layers, and implement next-wave harness improvements for prompt cacheability, context efficiency, worktree isolation, async background jobs, skills loading, subagent continuity, and risk-tiered auto-approval.
+
+**Overview:** Phases 0–6 of the DeepSeek Harness Prompt Sections Plan and Phases 2, 3, 4a, 4b, and 6 of the Unified Harness Runtime Plan are implemented in `crates/ee-agent-orchestrator`. However, three capabilities in `ee-agent-orchestrator` are not yet wired through provider binaries or ACP/CLI surfaces, and nine high-impact harness capabilities remain open for next-wave parity and performance.
+
+---
+
+## Part 1 — Production Surface Wiring Gaps
+
+### Gap 1 — Durable `session_log_dir` Not Wired in Provider Binaries (`ee-agent-openrouter` & `ee-agent-opencode`)
+
+- [x] Wire opt-in durable `session_log_dir` in `ee-agent-openrouter` and `ee-agent-opencode`.
+  - [x] **Problem:**
+    - `OrchestratorProviderConfig::session_log_dir` (`crates/ee-agent-orchestrator/src/provider_adapter/mod.rs:102`) defaults to `None`, which keeps `SessionLogStore` in memory (`InMemorySessionLogSink`) for the process lifetime only.
+    - Both `openrouter_orchestrator_config` (`crates/ee-agent-openrouter/src/orchestrated.rs:44-75`) and `opencode_orchestrator_config` (`crates/ee-agent-opencode/src/adapter.rs:274-303`) wire `session_state_dir: Some(session_state_dir)` for normal session snapshots, but leave `session_log_dir: None` and provide no CLI flag or environment variable to enable `FileSessionLogSink`.
+    - As a result, append-only `ModelRequestRecord` entries and content-addressed `StoredMessageBody` blobs are lost on agent process exit, preventing post-crash request reconstruction and cross-restart log-backed checkpoint branching.
+  - [x] **Fix:**
+    - Add explicit opt-in configuration (`EE_SESSION_LOG_DIR` / `--session-log-dir`, or boolean opt-in `EE_SESSION_LOG_DURABLE=1` defaulting under `<session_state_dir>/session-log`) in `crates/ee-agent-openrouter/src/config.rs` and `crates/ee-agent-opencode/src/config.rs`.
+    - Populate `OrchestratorProviderConfig.session_log_dir` in `openrouter_orchestrator_config` and `opencode_orchestrator_config` when enabled so `apply_session_log_dir` (`crates/ee-agent-orchestrator/src/provider_adapter/builder.rs:161-166`) configures `SessionLogConfig::durable(dir)`.
+    - Keep `SensitiveDataGuard` redaction enforced on export and ensure file permissions are `0600` / `0700` on Unix.
+  - [x] **Acceptance criteria:**
+    - Setting `EE_SESSION_LOG_DIR` (or `EE_SESSION_LOG_DURABLE=1`) writes `session-log/` records and content-addressed message bodies to disk in both `ee-agent-openrouter` and `ee-agent-opencode`.
+    - Leaving the setting unset preserves default in-memory behavior with zero disk writes of raw message bodies.
+    - Unit tests in `ee-agent-openrouter` and `ee-agent-opencode` verify `provider_config.session_log_dir` and `provider_config.orchestrator.session_log.dir` propagation.
+
+### Gap 2 — Checkpoint Branching (`branch_from_checkpoint`) Has No ACP or CLI Surface
+
+- [x] Expose `OrchestratorRuntime::branch_from_checkpoint` through ACP slash command and host UI.
+  - [x] **Problem:**
+    - `OrchestratorRuntime::branch_from_checkpoint(session_id, checkpoint_sequence)` (`crates/ee-agent-orchestrator/src/runtime/branch.rs:12-54`) and `SessionLogStore::branch_from` (`crates/ee-agent-orchestrator/src/session_log.rs:413-453`) are implemented and tested in `crates/ee-agent-orchestrator/src/runtime/tests/branch_tests.rs`, but have zero callers in `provider_adapter`, `ee-agent-protocol`, `ee-agent-host`, or `ee-cli`.
+    - Unlike `/compact`, `/resume`, `/discard`, and `/rubber-duck` (`crates/ee-agent-orchestrator/src/provider_adapter/agent_impl.rs:130-237`), users cannot trigger a checkpoint branch from the agent pane or editor command palette.
+  - [x] **Fix:**
+    - Define `BRANCH_COMMAND_NAME` (`branch`) and `branch_available_command()` in `crates/ee-agent-protocol`.
+    - Advertise `/branch [checkpoint_seq]` in `OrchestratorProvider` available slash commands (`crates/ee-agent-orchestrator/src/provider_adapter/mod.rs`).
+    - Handle `/branch` in `OrchestratorProvider::prompt` (`crates/ee-agent-orchestrator/src/provider_adapter/agent_impl.rs`): resolve latest or specified `checkpoint_seq` for the current session, invoke `runtime.branch_from_checkpoint(&session_id, seq)`, register the newly branched `SessionRuntime` (with replayed conversation from `BranchOutcome` or `conversation_unreplayed` notice), and emit a structured summary chunk with the new session id and replay status.
+    - Wire `:agents_branch` / agent pane keybinding in `crates/ee-cli` to dispatch `/branch` or switch active pane session to the branched session id.
+  - [x] **Acceptance criteria:**
+    - `/branch` forks the current session from the target checkpoint sequence, clones task/memory/budget state, replays log prefix up to `checkpoint_seq` when `SessionLog` is available, and surfaces `conversation_unreplayed: true` when log is absent.
+    - Missing checkpoint or cross-session sequence mismatch fails closed with a clear diagnostic without mutating active session state.
+
+### Gap 3 — Live Session History Truncates to 16 Text Messages Before Compaction & Turn Loop
+
+- [x] Preserve richer multi-turn history and tool-call provenance into `DefaultCompactionStrategy` and `run_turn_strategic_recoverable_with_history`.
+  - [x] **Problem:**
+    - `OrchestratorProvider::prompt` (`crates/ee-agent-orchestrator/src/provider_adapter/agent_impl.rs:238`) constructs `history` via `recent_live_history(&session.conversation)` (`crates/ee-agent-orchestrator/src/provider_adapter/conversation.rs:23-62`), which caps at `MAX_RECENT_TURNS_MESSAGES = 16` and only stores `ConversationRole::{User, Agent, FinalResponse}` text messages (omitting prior turns' `ModelRole::Tool` outputs and `tool_calls`).
+    - Because `history` is already pre-sliced to 16 text-only messages before `auto_compact_before_prompt` (`crates/ee-agent-orchestrator/src/provider_adapter/auto_compact.rs:33-106`) runs:
+      1. `prune_redundant_readonly_tool_outputs` (`crates/ee-agent-orchestrator/src/compaction/pipeline.rs:334-398`) has no `ModelRole::Tool` entries to deduplicate across turns at the provider boundary.
+      2. `auto_compact_before_prompt` evaluates token pressure only on the 16-message tail (capped at 64 KiB) rather than the full accumulated session transcript, delaying automatic compaction until memory/prompt overhead alone crosses `trigger_tokens` or messages silently drop off the 16-message sliding window without being summarized into `SESSION_SUMMARY_KEY`.
+  - [x] **Fix:**
+    - Retain a bounded session-level normalized `Vec<ModelMessage>` transcript (up to `CONVERSATION_MAX_MESSAGES = 256`, including compact tool-call/tool-result records or log-backed message references) alongside the ACP replay `conversation` log in `SessionRuntime`.
+    - When the session transcript exceeds the sliding window or crosses `CompactionConfig::trigger_tokens`, run `DefaultCompactionStrategy` over the full uncompacted message slice so dropped older turns are folded into `SESSION_SUMMARY_KEY` (`session.compacted_summary`) before slicing the post-compaction tail for `run_turn_strategic_recoverable_with_history`.
+    - Also invoke `prune_redundant_readonly_tool_outputs` inside `LoopEngine` intra-turn transcript assembly before each model step so repeated `read_file`/`search_text` calls within a long multi-step turn are deduplicated before hitting the model context window.
+  - [x] **Acceptance criteria:**
+    - Messages aging out beyond the active turn window are summarized into `session.compacted_summary` via `DefaultCompactionStrategy` rather than silently dropping off the 16-message tail.
+    - Intra-turn and cross-turn duplicate read-only tool outputs (`read_file`, `ee_search_text`, `ee_file_outline`, etc.) are pruned losslessly before model requests.
+
+---
+
+## Part 2 — Next-Wave Harness Improvements
+
+### Improvement 1 — Explicit Provider Prompt-Cache Breakpoints (`cache_control` & `prompt_cache_key`)
+
+- [ ] Emit provider-specific prompt cache markers on stable and pinned prefix planes.
+  - [ ] **Problem:**
+    - `PLAN-harness.md` §17 and Phase 2 split `PromptBundle.stable`, `PromptBundle.global`, `PromptBundle.workspace`, `PromptBundle.mcp`, and `RuntimeSnapshotMode::Delta` specifically to keep the leading prefix byte-identical across turns for LLM KV-cache reuse.
+    - However, `crates/ee-chat-completions`, `crates/ee-agent-opencode/src/messages.rs` (Anthropic Messages dialect), and `crates/ee-agent-opencode/src/responses.rs` (OpenAI Responses dialect) do not emit explicit `cache_control: {"type": "ephemeral"}` breakpoints or `prompt_cache_key` / session cache headers.
+    - Without explicit cache markers on Anthropic and OpenRouter Anthropic routes, providers re-tokenize and bill full input price on every tool step for the stable system prompt, tool definitions, and workspace instructions.
+  - [ ] **Fix:**
+    - Add a `CacheHint` / prefix-breakpoint marker on `ModelRequest` or `ModelMessage` metadata (`ee_cache_breakpoint=true`) for the stable system prompt, last tool definition, and last static instruction message (`global`/`workspace`).
+    - In `crates/ee-agent-opencode/src/messages.rs`, attach `cache_control: {"type": "ephemeral"}` to the system block, final tool schema entry, and last pinned instruction block (respecting Anthropic's 4-breakpoint limit).
+    - In `crates/ee-chat-completions`, support opt-in OpenRouter/Anthropic multipart content `cache_control` breakpoints when targeting Anthropic family models.
+    - In `crates/ee-agent-opencode/src/responses.rs`, pass deterministic session-scoped `prompt_cache_key` when supported by the route profile.
+    - Surface `cached_input_tokens` / `cache_creation_input_tokens` in `TokenUsage` and `OrchestratorMetrics`.
+  - [ ] **Acceptance criteria:**
+    - Anthropic Messages and OpenRouter Anthropic requests include deterministic `cache_control` breakpoints on stable prefix boundaries without mutating message text.
+    - `UsageUpdate` and `TelemetrySummary` report cache hit/write token counts when returned by the provider.
+
+### Improvement 2 — Dynamic Mid-Turn Subdirectory `AGENTS.md` Discovery
+
+- [ ] Discover nested `<subdir>/AGENTS.md` and `CLAUDE.md` dynamically when tools access files below `cwd`.
+  - [ ] **Problem:**
+    - `prompt::workspace::discover` (`crates/ee-agent-orchestrator/src/prompt/workspace.rs:85-162`) walks ancestor directories from the workspace root to `cwd` once at turn start (`OrchestratorProvider::prompt_bundle`).
+    - In monorepos where nested crates or packages (`crates/foo/AGENTS.md`, `packages/bar/CLAUDE.md`) define directory-specific rules below `cwd`, the agent never sees those instructions when reading or editing files inside `crates/foo/` during a turn.
+  - [ ] **Fix:**
+    - Track a per-session `HashSet<String>` of already-injected workspace instruction content hashes (`WorkspaceInstructionSource.content_hash`) initialized from turn-start `WorkspaceInstructions`.
+    - In `LoopEngine` after `read_file`, `write_file`, `ee_edit_apply`, or `ee_file_outline` succeeds on a workspace path `P`, walk directories between `cwd` and `P.parent()` for `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, and `CLAUDE.local.md`.
+    - If unseen instruction files are found (within the remaining 64 KiB `MAX_WORKSPACE_INSTRUCTION_BYTES` budget), sanitize `</system-reminder>` tags and inject a `TrustLevel::WorkspaceInstructionUntrusted` message before the next model call.
+  - [ ] **Acceptance criteria:**
+    - Touching `crates/sub/src/lib.rs` mid-turn injects `crates/sub/AGENTS.md` exactly once per session under `TrustLevel::WorkspaceInstructionUntrusted`.
+    - Already-seen instruction files (by SHA-256 content hash) and files outside workspace roots or above the 64 KiB cap are never re-injected.
+
+### Improvement 3 — Multimodal Compaction Offload Pass (`compaction-image-offload`)
+
+- [ ] Offload binary `Image`, `Audio`, and large `EmbeddedResource` blocks from older turns before LLM compaction.
+  - [ ] **Problem:**
+    - Multimodal ACP inputs (`ModelContent::{Image, Audio, EmbeddedResource}`) are now preserved across `ee-agent-orchestrator`, `ee-chat-completions`, and `ee-agent-opencode`.
+    - However, `DefaultCompactionStrategy` (`crates/ee-agent-orchestrator/src/compaction/pipeline.rs`) and `estimate_message_bytes` do not strip or offload base64 binary payloads in older turns before running LLM summarization or retaining the sliding window.
+    - Large base64 images or audio clips in historical turns consume massive context budget and can cause compaction requests themselves to exceed context limits.
+  - [ ] **Fix:**
+    - Add a deterministic stage in `DefaultCompactionStrategy` (between Stage 2 read-only pruning and Stage 3 windowing) that replaces `ModelContent::Image` and `ModelContent::Audio` blocks older than the most recent `N` user turns (e.g. `keep_recent_multimodal_turns = 2`) with a compact `ModelContent::Text` placeholder: `[image offloaded: mime=<mime_type>, size=<bytes>B, sha256=<short_hash>]`.
+    - Keep full binary payloads in the content-addressed `SessionLog` store so replay/audit remains lossless.
+  - [ ] **Acceptance criteria:**
+    - Historical multimodal blocks beyond the retention window are replaced with deterministic text placeholders before windowing and LLM summary calls.
+    - Active-turn and immediate prior-turn multimodal content remains intact for the model.
+
+### Improvement 4 — Git Worktree Isolation for Write Subagents & Parallel Sessions
+
+- [ ] Add optional `git worktree` isolation for `implementer` subagents and concurrent write sessions.
+  - [ ] **Problem:**
+    - Phase 5 (Worktree isolation) was excluded from the initial Unified Harness Runtime Plan (`ISSUES.md:1067`).
+    - Currently, parallel write sessions fail closed on overlapping buffer/path claims (`WriteConflict` in `docs/upgrades/parallel-agent-sessions.md`), and `implementer` subagents spawned via `delegate_task` mutate the shared working tree directly, making speculative or parallel subagent edits unsafe.
+  - [ ] **Fix:**
+    - Add an opt-in `WorkspaceIsolation::GitWorktree` mode on `SubagentSpawnSpec` and session configuration.
+    - When enabled in a git repository, create a temporary detached or branch-scoped worktree under `<session_state_dir>/worktrees/<session_or_child_id>` before executing `implementer` writes, scoping the child's `cwd`, `workspace_roots`, and `PolicyEngine` write roots to that worktree.
+    - On child completion, capture `git diff` / changed file inventory as verified handoff evidence, allow the root agent or host to apply/cherry-pick the patch cleanly into the primary workspace, and auto-prune the worktree on session close or `/discard`.
+  - [ ] **Acceptance criteria:**
+    - Worktree-isolated `implementer` subagents cannot mutate files in the primary checkout directly.
+    - Parallel isolated subagents can edit overlapping files in separate worktrees without `WriteConflict` until merge/apply time.
+    - Stale worktrees are cleaned up deterministically on cancellation, `/discard`, and `session/close`.
+
+### Improvement 5 — Async Background Terminals & Reactive Session Wakeup (`TOOL_JOBS` Parity)
+
+- [ ] Support background terminal jobs with runtime status projection and reactive completion notices.
+  - [ ] **Problem:**
+    - `ee_terminal_spawn` and `ee_terminal_wait` (`crates/ee-mcp`) require the model to block or poll `ee_terminal_output` / `ee_terminal_wait` synchronously within a turn.
+    - Long-running builds, dev servers, or test suites either block the turn loop until `tool_timeout` expires or require manual user re-prompting to check status.
+  - [ ] **Fix:**
+    - Extend terminal management in `ee-agent-host` / `ee-mcp` with a background job registry per session (`background: true` on `ee_terminal_spawn` or auto-background after `wait_ms_before_async`).
+    - Project active/completed background jobs into `RuntimeSnapshot` via a new `BACKGROUND_JOBS` runtime context section (ordered in `RUNTIME_CONTEXT_ORDER` and hashed for `RuntimeSnapshotMode::Delta`).
+    - Emit a bounded system-reminder notice at the next step boundary (or wake an idle session via ACP update) when a background terminal job exits.
+  - [ ] **Acceptance criteria:**
+    - Model can launch a build/test command with `wait_ms_before_async`, continue read/analysis steps while it runs, and receive exit status + tail output automatically on the step after completion.
+    - All background jobs are terminated cleanly on `session/cancel` and `session/close`.
+
+### Improvement 6 — Per-Tool Category Timeout Tiers
+
+- [ ] Replace flat global `tool_timeout` with per-category timeout tiers and bounded per-call override.
+  - [ ] **Problem:**
+    - `OrchestratorConfig::tool_timeout` (`crates/ee-agent-orchestrator/src/config.rs`) applies one flat `120s` timeout to every tool call.
+    - Fast local read/LSP tools (`read_file`, `ee_file_outline`, `ee_diagnostics`) should fail fast (15s–30s) when hung, whereas workspace test/build runs via `ee_terminal_wait` legitimately need up to 300s when explicitly requested.
+  - [ ] **Fix:**
+    - Add `ToolTimeoutPolicy` to `OrchestratorConfig` with category defaults:
+      - `fast_local_read`: `15s` (`read_file`, `list_files`, `ee_file_outline`, `ee_diagnostics`, `ee_workspace_roots`)
+      - `search_and_mcp`: `30s` (`search_text`, `ee_search_text`, external MCP reads)
+      - `write_and_edit`: `60s` (`write_file`, `ee_edit_apply`, `ee_format_buffer`, `ee_lsp_rename`)
+      - `terminal_default`: `120s` (`ee_terminal_wait`, validation commands)
+      - `terminal_max`: `300s` (opt-in via bounded `timeout_ms` argument on `ee_terminal_wait`)
+    - Enforce `timeout_ms.clamp(1_000, terminal_max)` inside `ToolExecutor`.
+  - [ ] **Acceptance criteria:**
+    - Hung read/search tools time out at their category ceiling (15s/30s) without waiting 120s.
+    - `ee_terminal_wait` respects an explicit `timeout_ms` parameter up to `terminal_max` (`300s`), clamped against `OrchestratorConfig`.
+
+### Improvement 7 — First-Class Skills Discovery & On-Demand `load_skill` Tool (`SKILLS` Parity)
+
+- [ ] Discover workspace/user `SKILL.md` frontmatter and provide a read-only `load_skill` tool.
+  - [ ] **Problem:**
+    - `SKILLS` is marked `IntentionallyOmitted` in `crates/ee-agent-orchestrator/src/prompt/sections.rs:656`, even though the `ee` repository itself stores agent skills under `.agents/skills/*/SKILL.md` and `skills/system/*/SKILL.md`.
+    - Without skill catalog discovery and an on-demand loader tool, the agent in `ee` agent mode either misses repo-specific skills entirely or must manually grep for `SKILL.md` files.
+  - [ ] **Fix:**
+    - Add `prompt/skills.rs` to scan `<workspace>/.agents/skills/*/SKILL.md`, `<workspace>/skills/**/SKILL.md`, and `$XDG_CONFIG_HOME/ee/skills/*/SKILL.md` for YAML frontmatter (`name`, `description`), bounded to 64 skills and 8 KiB total catalog text.
+    - Render a compact skill catalog block (name + 1-line description + path) into `WorkspaceInstructions` or a dedicated runtime/workspace section when skills are present, under `TrustLevel::WorkspaceInstructionUntrusted` for repo skills and `TrustLevel::UserInstructionTrusted` for user-global skills.
+    - Register a built-in read-only `load_skill` tool (and `ToolGuidance` entry in `prompt/tool_guidance.rs`) that reads and returns a requested skill's `SKILL.md` content within workspace/config boundaries.
+  - [ ] **Acceptance criteria:**
+    - Repositories with `.agents/skills/*/SKILL.md` surface available skill names and descriptions in the prompt catalog only when skills exist.
+    - Calling `load_skill` returns the validated `SKILL.md` body and rejects path traversal or symlinks escaping the skill root.
+
+### Improvement 8 — Conversational / Resumable Subagents (`agent_id` Resume & Context Fork)
+
+- [ ] Allow `delegate_task` subagents to be resumed by `agent_id` or forked from parent context.
+  - [ ] **Problem:**
+    - `DelegateTool` and `SubagentManager` (`crates/ee-agent-orchestrator/src/subagents/mod.rs`) only execute one-shot stateless subagent runs (`explorer`, `planner`, `implementer`, `verifier`, `reviewer`).
+    - If a root agent needs a follow-up question answered by an `explorer` that already read 15 files, spawning a new `delegate_task` starts from a blank transcript and re-reads the same files, wasting tokens and latency.
+  - [ ] **Fix:**
+    - Retain completed subagent transcripts in `ChildRegistry` / `SessionLogStore` keyed by `child_id` (bounded per session, e.g. up to 8 retained child transcripts).
+    - Add an optional `resume_child_id: Option<String>` parameter on `delegate_task` so the root agent can send a follow-up task to an existing subagent instance while preserving its prior message history and role policy.
+    - Add an optional `fork_context: bool` flag for `explorer` / `planner` subagents to inherit the parent's compacted summary and current runtime snapshot without re-discovering workspace basics.
+  - [ ] **Acceptance criteria:**
+    - Passing `resume_child_id` to `delegate_task` continues the target child's transcript and increments its bounded step/token accounting under the parent session budget.
+    - Cross-session or mismatched-role `resume_child_id` requests fail closed.
+
+### Improvement 9 — Opt-In Risk-Tiered Auto-Approval Classifier (`REVIEW_POLICY` Parity)
+
+- [ ] Add an opt-in structured risk classifier for medium-risk tool calls outside static `trusted-write` rules.
+  - [ ] **Problem:**
+    - `ee` currently combines static `PolicyEngine` rules (`crates/ee-agent-orchestrator/src/policy.rs`) with host-owned `TrustRule` persistence (`crates/ee-cli/src/policy/store.rs`).
+    - Any command or write outside pre-existing static `TrustRule` patterns immediately blocks on manual user approval in `trusted-write` mode, whereas `unrestricted` mode bypasses approval entirely. There is no middle tier that uses a fast/contrasting model to classify command risk (`low` / `medium` / `high`) before prompting the user.
+  - [ ] **Fix:**
+    - Add an opt-in `ApprovalClassifier` hook in `crates/ee-agent-orchestrator/src/policy.rs` / `crates/ee-agent-host` (disabled by default; enabled via `agents.approval_classifier = "auto"`).
+    - When a tool call requires `ApprovalRequirement::NeedsApproval` and is not covered by a persisted `TrustRule` allow/deny entry:
+      1. Hard-blocked patterns (secret files, `.git/hooks`, `.ee.toml`, credential env vars, destructive root commands, external network writes) immediately escalate or deny without calling the classifier.
+      2. Otherwise, run a single bounded, non-streaming classification call on the registered critic/fast model with a strict JSON schema `{ "risk": "low" | "medium" | "high", "reason": "<bounded string>" }` and `TrustLevel::UntrustedToolOutput` isolation.
+      3. Only `risk == "low"` auto-approves (logged in `DecisionLog` and `OrchestratorEvent`); `medium`, `high`, timeout, or schema failure falls back to the interactive host approval prompt.
+  - [ ] **Acceptance criteria:**
+    - Classifier is strictly opt-in and never overrides mandatory `PolicyEngine` denials or persisted `TrustRule` deny rules.
+    - Classifier timeout, parse error, or `medium`/`high` classification always fails safe to interactive host approval.
+    - Every auto-approved decision records an auditable `DecisionLog` entry with model id, tool name, and redacted reason.

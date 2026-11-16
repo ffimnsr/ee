@@ -56,6 +56,8 @@ fn test_config_with(
             ee_agent_openrouter::config::DEFAULT_RETRY_MAX_DELAY_MS,
         ),
         checkpoint_dir: None,
+        session_log_dir: None,
+        session_log_durable: false,
     }
 }
 

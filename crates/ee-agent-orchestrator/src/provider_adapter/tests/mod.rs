@@ -370,6 +370,7 @@ const PLAN_PAYLOAD: &str = r#"<!-- ee-plan
 ]
 -->"#;
 
+mod branch_tests;
 mod lifecycle_tests;
 mod mcp_tests;
 mod session_tests;

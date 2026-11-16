@@ -104,26 +104,29 @@ impl CompactionStrategy for DefaultCompactionStrategy {
     fn plan(&self, input: &CompactionInput<'_>) -> CompactPlan {
         let requested_messages = input.recent_messages.len();
         // Stage 1: request projection without mutating durable messages.
-        let projected = input
+        let projected: Vec<ModelMessage> = input
             .recent_messages
             .iter()
             .map(|message| message.with_pruned_tool_result().unwrap_or_else(|| message.clone()))
             .collect();
         // Stage 2: lossless pruning of read-only tool results.
         let (pruned, pruning) = prune_read_only_results(projected);
-        // Stage 3: deterministic window.
+        // Stage 3: deterministic window for the retained evidence tail.
         let dropped = pruned.len().saturating_sub(MAX_RECENT_MESSAGES);
         let windowed: Vec<ModelMessage> =
-            pruned.into_iter().skip(dropped).take(MAX_RECENT_MESSAGES).collect();
+            pruned.iter().skip(dropped).take(MAX_RECENT_MESSAGES).cloned().collect();
         let retained_messages = windowed.len();
         // Stage 4: deterministic memory compaction on a clone.
         let mut staged_memory = input.memory.clone();
         let deterministic = compact_memory(&mut staged_memory, input.memory_config);
-        // Stage 5: bounded evidence context and LLM instruction prompt.
+        // Stage 5: bounded evidence context and LLM instruction prompt. The
+        // context receives the full pruned slice so turns that fall outside the
+        // retained window are folded into the summary instead of silently
+        // disappearing; byte bounding drops the oldest lines first.
         let context = build_compaction_context(
             input.tasks,
             &staged_memory,
-            &windowed,
+            &pruned,
             input.recent_events,
             input.budget,
             input.max_input_bytes,
@@ -151,6 +154,18 @@ impl CompactionStrategy for DefaultCompactionStrategy {
 struct PruningCounts {
     pruned: usize,
     deduped: usize,
+}
+
+/// Losslessly elides duplicate or superseded read-only tool results from one
+/// request projection. The durable transcript is untouched; only the copy sent
+/// to the model is rewritten.
+#[must_use]
+pub fn prune_redundant_readonly_tool_outputs(messages: Vec<ModelMessage>) -> Vec<ModelMessage> {
+    let projected: Vec<ModelMessage> = messages
+        .into_iter()
+        .map(|message| message.with_pruned_tool_result().unwrap_or(message))
+        .collect();
+    prune_read_only_results(projected).0
 }
 
 /// Rewrites only read-only tool results that are exact duplicates or were
@@ -333,6 +348,43 @@ mod tests {
         assert!(matches!(
             &plan.messages[1].content[0],
             ModelContent::ToolResult { result, .. } if result.text_output == "new"
+        ));
+    }
+
+    #[test]
+    fn context_includes_messages_outside_the_retained_window() {
+        let memory = MemoryStore::new(4_096);
+        let messages: Vec<ModelMessage> = (0..MAX_RECENT_MESSAGES + 10)
+            .map(|index| ModelMessage::text(ModelRole::User, format!("turn {index}")))
+            .collect();
+
+        let plan = plan(&messages, &memory);
+
+        assert_eq!(plan.counts.dropped_messages, 10);
+        assert!(
+            plan.context.contains("turn 0") && plan.context.contains("turn 29"),
+            "older turns reach the summary context: {}",
+            plan.context
+        );
+    }
+
+    #[test]
+    fn public_pruning_helper_elides_duplicate_reads_losslessly() {
+        let messages = vec![
+            tool_message("tc-1", "read_file", "read", Some("a.rs"), "same"),
+            tool_message("tc-2", "read_file", "read", Some("b.rs"), "same"),
+        ];
+
+        let pruned = prune_redundant_readonly_tool_outputs(messages);
+
+        assert!(matches!(
+            &pruned[0].content[0],
+            ModelContent::ToolResult { result, .. }
+                if result.text_output == DUPLICATE_TOOL_RESULT_MARKER
+        ));
+        assert!(matches!(
+            &pruned[1].content[0],
+            ModelContent::ToolResult { result, .. } if result.text_output == "same"
         ));
     }
 

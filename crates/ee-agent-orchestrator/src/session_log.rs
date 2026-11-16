@@ -883,7 +883,7 @@ pub fn tool_call_id(message: &ModelMessage) -> Option<&str> {
 }
 
 fn branch_session_id(session_id: &str, checkpoint_seq: u64) -> String {
-    format!("{session_id}~branch{checkpoint_seq}")
+    format!("{session_id}-branch-{checkpoint_seq}")
 }
 
 /// Resolves the configured durable log root for a session log directory.

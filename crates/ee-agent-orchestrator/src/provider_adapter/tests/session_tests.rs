@@ -9,7 +9,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
     let commands = initial_commands(false);
     assert_eq!(
         commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
-        vec![COMPACT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME]
+        vec![COMPACT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, BRANCH_COMMAND_NAME]
     );
     let recovery_commands = initial_commands(true);
     assert_eq!(
@@ -17,6 +17,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
         vec![
             COMPACT_COMMAND_NAME,
             RUBBER_DUCK_COMMAND_NAME,
+            BRANCH_COMMAND_NAME,
             DISCARD_COMMAND_NAME,
             ee_agent_protocol::RESUME_COMMAND_NAME,
         ]

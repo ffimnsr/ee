@@ -330,6 +330,7 @@ impl OrchestratorRuntime {
         let mut options = options;
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         options.truncation_flag = Some(truncation_flag.clone());
+        options.transcript_out = Some(self.last_turn_transcript.clone());
         let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             options.session_log = Some(store.log_for(&session_id));

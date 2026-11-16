@@ -36,12 +36,13 @@ use ee_agent_acp_server::{
     PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
 };
 use ee_agent_protocol::{
-    AgentCapabilities, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk, DISCARD_COMMAND_NAME,
-    Implementation, McpCapabilities, MessageId, RUBBER_DUCK_COMMAND_NAME, SessionCapabilities,
-    SessionCloseCapabilities, SessionId, SessionListCapabilities, SessionMode, SessionModeId,
-    SessionModeState, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
-    compact_available_command, discard_available_command, is_resume_command, parse_slash_command,
-    resume_available_command, rubber_duck_available_command,
+    AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
+    DISCARD_COMMAND_NAME, Implementation, McpCapabilities, MessageId, RUBBER_DUCK_COMMAND_NAME,
+    SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities, SessionMode,
+    SessionModeId, SessionModeState, SessionResumeCapabilities, SessionUpdate, StopReason,
+    TextContent, branch_available_command, compact_available_command, discard_available_command,
+    is_resume_command, parse_slash_command, resume_available_command,
+    rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -152,6 +153,10 @@ struct SessionRuntime {
     /// the client saw them), persisted on close and replayed by
     /// `session/load` (ACP v1 conversation replay).
     conversation: Arc<Mutex<Vec<ConversationMessage>>>,
+    /// Bounded normalized model-visible transcript (user/assistant text, tool
+    /// calls, and tool results) retained across prompts so compaction and the
+    /// next turn see real provenance instead of a text-only tail.
+    model_transcript: Arc<Mutex<Vec<ModelMessage>>>,
 }
 
 /// One recorded conversation message for `session/load` replay.

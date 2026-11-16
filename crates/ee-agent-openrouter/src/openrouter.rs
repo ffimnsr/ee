@@ -162,6 +162,8 @@ mod tests {
             retry_base_delay: Duration::from_millis(500),
             retry_max_delay: Duration::from_secs(30),
             checkpoint_dir: None,
+            session_log_dir: None,
+            session_log_durable: false,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
             max_iterations: None,
         }

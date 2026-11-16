@@ -289,6 +289,34 @@ fn orchestrator_config_carries_opencode_identity_budgets_and_recovery() {
 }
 
 #[test]
+fn orchestrator_config_carries_durable_session_log_when_opted_in() {
+    let mut config = test_config(OpenCodeSurface::Zen, "gpt-5.5");
+    let session_state_dir = PathBuf::from("/tmp/ee-agent-opencode-session-log-test");
+
+    let in_memory = opencode_orchestrator_config(&config, session_state_dir.clone());
+    assert!(in_memory.session_log_dir.is_none());
+    assert!(in_memory.orchestrator.session_log.dir.is_none());
+
+    let log_root = PathBuf::from("/tmp/ee-agent-opencode-session-log-root");
+    config.session_log_dir = Some(log_root.clone());
+    let durable = opencode_orchestrator_config(&config, session_state_dir.clone());
+    assert_eq!(durable.session_log_dir.as_ref(), Some(&log_root));
+    assert_eq!(
+        durable.orchestrator.session_log.dir.as_deref(),
+        Some(log_root.join("session-log").as_path())
+    );
+
+    config.session_log_dir = None;
+    config.session_log_durable = true;
+    let defaulted = opencode_orchestrator_config(&config, session_state_dir.clone());
+    assert_eq!(defaulted.session_log_dir.as_ref(), Some(&session_state_dir));
+    assert_eq!(
+        defaulted.orchestrator.session_log.dir.as_deref(),
+        Some(session_state_dir.join("session-log").as_path())
+    );
+}
+
+#[test]
 fn reasoning_effort_shapes_only_the_dialect_that_documents_it() {
     let mut chat = test_config(OpenCodeSurface::Zen, "kimi-k3");
     chat.reasoning_effort = Some(crate::reasoning::ReasoningEffort::High);

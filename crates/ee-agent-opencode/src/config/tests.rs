@@ -41,6 +41,8 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
         retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
         checkpoint_dir: None,
+        session_log_dir: None,
+        session_log_durable: false,
     }
 }
 

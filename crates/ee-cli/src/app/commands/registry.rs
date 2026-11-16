@@ -227,6 +227,7 @@ impl App {
             | "agents_stop"
             | "agents_resume"
             | "agents_discard"
+            | "agents_branch"
             | "agents_reconnect" => "agents",
             _ => "editing",
         };
@@ -537,6 +538,10 @@ impl App {
             "agents_discard" => {
                 (Cow::Borrowed("discard a paused recoverable agent turn's checkpoint"), None)
             }
+            "agents_branch" => (
+                Cow::Borrowed("fork the active agent session from a stored checkpoint"),
+                Some("[checkpoint_seq]"),
+            ),
             "agents_reconnect" => (
                 Cow::Borrowed(
                     "reconnect the persisted agent session of this workspace (load or resume)",

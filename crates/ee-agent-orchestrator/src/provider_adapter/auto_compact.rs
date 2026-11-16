@@ -49,6 +49,17 @@ pub(super) fn trim_conversation(conversation: &Mutex<Vec<ConversationMessage>>, 
     }
 }
 
+/// Keeps only the newest `retained` normalized model messages, matching the
+/// conversation tail trimmed after a successful compaction.
+pub(super) fn trim_model_transcript(transcript: &Mutex<Vec<ModelMessage>>, retained: usize) {
+    let retained = retained.max(1);
+    let mut transcript = transcript.lock().expect("model transcript poisoned");
+    let excess = transcript.len().saturating_sub(retained);
+    if excess > 0 {
+        transcript.drain(..excess);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

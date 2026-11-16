@@ -110,6 +110,19 @@ impl OrchestratorProvider {
         let runtime = &sessions.get(session_id)?.runtime;
         Some((runtime.tasks(), runtime.memory()))
     }
+    /// The live runtime of one session, when it exists (tests).
+    #[cfg(test)]
+    pub(crate) fn session_runtime(&self, session_id: &str) -> Option<Arc<OrchestratorRuntime>> {
+        let sessions = self.sessions.lock().expect("adapter sessions poisoned");
+        sessions.get(session_id).map(|session| session.runtime.clone())
+    }
+    /// The bounded normalized transcript of one session (tests).
+    #[cfg(test)]
+    pub(crate) fn session_transcript(&self, session_id: &str) -> Option<Vec<ModelMessage>> {
+        let sessions = self.sessions.lock().expect("adapter sessions poisoned");
+        let session = sessions.get(session_id)?;
+        Some(session.model_transcript.lock().expect("model transcript poisoned").clone())
+    }
     /// Names of the tools currently registered for one session (tests).
     #[cfg(test)]
     pub(crate) fn session_tool_names(&self, session_id: &str) -> Vec<String> {

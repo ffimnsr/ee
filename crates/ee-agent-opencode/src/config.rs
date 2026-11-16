@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use ee_agent_acp_server::env_or_dotenv;
 use ee_agent_orchestrator::{RubberDuckConfig, RubberDuckMode};
 use ee_agent_protocol::setup::{
@@ -168,6 +168,12 @@ pub fn setup_manifest() -> SetupManifest {
                 default: None,
                 config: SetupInputConfig { env: String::from("EE_CHECKPOINT_DIR") },
             },
+            SetupInput {
+                key: String::from("session_log_dir"),
+                label: String::from("Durable session-log directory (optional)"),
+                default: None,
+                config: SetupInputConfig { env: String::from("EE_SESSION_LOG_DIR") },
+            },
         ],
     }
 }
@@ -261,6 +267,24 @@ pub struct Args {
     /// Durable checkpoint directory for recovery across processes.
     #[arg(long, env = "EE_CHECKPOINT_DIR")]
     checkpoint_dir: Option<PathBuf>,
+    /// Opt-in durable session-log root. Records and content-addressed message
+    /// bodies are written under `<dir>/session-log`; unset keeps the log in
+    /// memory for this process only.
+    #[arg(long, env = "EE_SESSION_LOG_DIR")]
+    session_log_dir: Option<PathBuf>,
+    /// Opt-in durable session log under `<session-state-dir>/session-log`.
+    /// Ignored when `EE_SESSION_LOG_DIR` is set.
+    #[arg(
+        long,
+        env = "EE_SESSION_LOG_DURABLE",
+        default_value_t = false,
+        action = ArgAction::Set,
+        value_parser = BoolishValueParser::new(),
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+    )]
+    session_log_durable: bool,
 }
 
 #[cfg(feature = "test-utils")]
@@ -291,6 +315,8 @@ impl Args {
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
             checkpoint_dir: None,
+            session_log_dir: None,
+            session_log_durable: false,
         }
     }
 }
@@ -323,6 +349,10 @@ pub struct Config {
     pub retry: RetryPolicy,
     /// Durable checkpoint directory, when configured.
     pub checkpoint_dir: Option<PathBuf>,
+    /// Opt-in durable session-log root; `None` keeps the log in memory.
+    pub session_log_dir: Option<PathBuf>,
+    /// Opt-in durable session log under the normal session-state directory.
+    pub session_log_durable: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -413,7 +443,21 @@ impl Config {
                 max_delay: Duration::from_millis(args.retry_max_delay_ms),
             },
             checkpoint_dir: args.checkpoint_dir,
+            session_log_dir: args.session_log_dir,
+            session_log_durable: args.session_log_durable,
         })
+    }
+
+    /// Resolves the durable session-log root for `session_state_dir`.
+    ///
+    /// An explicit `EE_SESSION_LOG_DIR` wins; `EE_SESSION_LOG_DURABLE=1`
+    /// defaults under the normal session-state directory. `None` keeps the log
+    /// in memory, so no raw message bodies reach disk implicitly.
+    #[must_use]
+    pub fn session_log_root(&self, session_state_dir: &std::path::Path) -> Option<PathBuf> {
+        self.session_log_dir
+            .clone()
+            .or_else(|| self.session_log_durable.then(|| session_state_dir.to_path_buf()))
     }
 
     /// Returns whether a usable API key is configured.

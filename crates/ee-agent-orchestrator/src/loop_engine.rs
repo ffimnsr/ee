@@ -32,7 +32,9 @@ use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
-use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
+use crate::model::{
+    ModelAdapter, ModelMessage, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage,
+};
 use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
 use crate::prompt::context::TurnSystemContext;
@@ -96,6 +98,9 @@ pub(crate) struct LoopOptions {
     pub stop_gate: Option<StopGateConfig>,
     /// Optional plugin/host stop veto; can only deny an allowed stop.
     pub stop_veto: Option<StopVeto>,
+    /// Receives the normalized transcript of this run after the loop ends, so
+    /// the provider boundary can retain full multi-turn history.
+    pub transcript_out: Option<Arc<Mutex<Vec<ModelMessage>>>>,
 }
 
 impl Default for LoopOptions {
@@ -116,6 +121,7 @@ impl Default for LoopOptions {
             session_log: None,
             stop_gate: None,
             stop_veto: None,
+            transcript_out: None,
         }
     }
 }
@@ -304,6 +310,11 @@ impl LoopEngine {
         {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // Hand the normalized transcript to the provider boundary even on a
+        // failed turn, so new messages are not lost before the next capture.
+        if let Some(out) = &self.options.transcript_out {
+            *out.lock().expect("transcript output poisoned") = transcript.messages().to_vec();
+        }
         outcome
     }
 
@@ -414,10 +425,15 @@ impl LoopEngine {
             // Keep the transcript inside the memory budget; oldest messages
             // are dropped first, the newest context always survives.
             transcript.enforce_memory_limit(self.config.memory_limit_bytes);
+            // Losslessly elide duplicate/superseded read-only tool results in
+            // the request projection before prompt-injection scanning and the
+            // model call. The durable transcript keeps the full outputs.
+            let request_messages = crate::compaction::prune_redundant_readonly_tool_outputs(
+                transcript.request_messages(),
+            );
             // Untrusted tool output and subagent summaries are labeled,
             // wrapped, and scanned for prompt-injection phrases before the
             // model sees them; suspicious text never changes policy.
-            let request_messages = transcript.request_messages();
             let prepared = crate::prompt_injection::prepare_request(&request_messages);
             for detection in &prepared.detections {
                 self.events.record(OrchestratorEvent::SuspiciousContentDetected {

@@ -193,6 +193,7 @@ impl OrchestratorRuntime {
             last_repair_stop: Mutex::new(None),
             runtime_snapshots: Mutex::new(HashMap::new()),
             session_logs,
+            last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
         }
     }
     /// Installs an observe-only observer on the runtime event recorder.
@@ -320,5 +321,23 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn tasks(&self) -> TaskGraph {
         self.tasks.lock().expect("task graph poisoned").clone()
+    }
+    /// Normalized model-visible messages from the latest root turn, including
+    /// tool calls and tool results. Empty before the first turn completes.
+    #[must_use]
+    pub fn last_turn_transcript(&self) -> Vec<ModelMessage> {
+        self.last_turn_transcript.lock().expect("last turn transcript poisoned").clone()
+    }
+    /// Replays the append-only session log for `session_id`, including a branch
+    /// session produced by [`Self::branch_from_checkpoint`]. Returns an empty
+    /// vector when the log is disabled.
+    pub fn replay_session_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(String, ModelMessage)>, OrchestratorError> {
+        let Some(store) = &self.session_logs else {
+            return Ok(Vec::new());
+        };
+        store.log_for(session_id).replay_messages()
     }
 }
