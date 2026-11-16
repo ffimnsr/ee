@@ -153,6 +153,7 @@ impl OrchestratorRuntime {
                 truncation_flag: Some(truncation_flag.clone()),
                 session_log: self.session_logs.as_ref().map(|store| store.log_for(&session_id)),
                 stop_gate: self.config.stop_gate.enabled.then(|| self.config.stop_gate.bounded()),
+                workspace_instructions: self.workspace_instruction_tracker(),
                 ..LoopOptions::default()
             },
         );
@@ -331,6 +332,9 @@ impl OrchestratorRuntime {
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         options.truncation_flag = Some(truncation_flag.clone());
         options.transcript_out = Some(self.last_turn_transcript.clone());
+        if options.workspace_instructions.is_none() {
+            options.workspace_instructions = self.workspace_instruction_tracker();
+        }
         let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             options.session_log = Some(store.log_for(&session_id));
@@ -370,5 +374,20 @@ impl OrchestratorRuntime {
             self.commit_runtime_plane(&session_id, &runtime);
         }
         result
+    }
+
+    /// Builds a per-turn tracker for nested workspace instruction discovery
+    /// when the provider adapter recorded the session scope.
+    pub(super) fn workspace_instruction_tracker(
+        &self,
+    ) -> Option<Arc<Mutex<crate::prompt::workspace::WorkspaceInstructionTracker>>> {
+        let (cwd, roots) = self.workspace_scope()?;
+        Some(Arc::new(Mutex::new(
+            crate::prompt::workspace::WorkspaceInstructionTracker::with_seen(
+                &cwd,
+                &roots,
+                self.workspace_instruction_seen.clone(),
+            ),
+        )))
     }
 }

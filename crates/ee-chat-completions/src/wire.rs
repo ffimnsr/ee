@@ -72,6 +72,10 @@ pub struct Usage {
     /// `usage.total_tokens`; may exceed `input + output` when cached tokens are
     /// billed separately.
     pub total_tokens: Option<u64>,
+    /// Prompt tokens served from the provider cache.
+    pub cached_input_tokens: Option<u64>,
+    /// Prompt tokens written to the provider cache.
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 /// One displayable streaming delta.
@@ -121,7 +125,31 @@ pub fn request_body(
 /// user content.
 #[must_use]
 pub fn messages_from_transcript(system_prompt: &str, transcript: &[ModelMessage]) -> Vec<Value> {
-    let mut messages = vec![json!({ "role": "system", "content": system_prompt })];
+    messages_from_transcript_with_cache(system_prompt, transcript, false)
+}
+
+/// Converts a normalized transcript into chat messages, optionally emitting
+/// Anthropic/OpenRouter `cache_control` breakpoints on the stable prefix planes.
+///
+/// The text is never rewritten: a breakpoint turns the message content into a
+/// single text part carrying `cache_control`, which providers that do not
+/// support prompt caching ignore. Breakpoints are only placed on the system
+/// prompt and on messages explicitly marked with `ee_cache_breakpoint`.
+#[must_use]
+pub fn messages_from_transcript_with_cache(
+    system_prompt: &str,
+    transcript: &[ModelMessage],
+    cache_breakpoints: bool,
+) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if cache_breakpoints && !system_prompt.is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": [{ "type": "text", "text": system_prompt, "cache_control": { "type": "ephemeral" } }],
+        }));
+    } else {
+        messages.push(json!({ "role": "system", "content": system_prompt }));
+    }
     for message in transcript {
         let role = match message.role {
             ModelRole::System => "system",
@@ -138,6 +166,11 @@ pub fn messages_from_transcript(system_prompt: &str, transcript: &[ModelMessage]
             })
         } else if content_has_media(&message.content) {
             json!({ "role": role, "content": content_parts(&message.content) })
+        } else if cache_breakpoints && message.is_cache_breakpoint() && !content.is_empty() {
+            json!({
+                "role": role,
+                "content": [{ "type": "text", "text": content, "cache_control": { "type": "ephemeral" } }],
+            })
         } else {
             json!({ "role": role, "content": content })
         };
@@ -180,6 +213,10 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
     let mut usage = ModelUsage::new();
     usage.input_tokens = reported.input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     usage.output_tokens = reported.output_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cached_input_tokens =
+        reported.cached_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cache_creation_input_tokens =
+        reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
     if !answer.reasoning.is_empty() {
@@ -317,10 +354,22 @@ pub fn usage_from_tokens(value: &Value) -> Option<Usage> {
     let usage = value.get("input_tokens").and_then(Value::as_u64);
     let output = value.get("output_tokens").and_then(Value::as_u64);
     let total = value.get("total_tokens").and_then(Value::as_u64);
-    if usage.is_none() && output.is_none() && total.is_none() {
+    let (cached_input_tokens, cache_creation_input_tokens) = cache_tokens_of(value);
+    if usage.is_none()
+        && output.is_none()
+        && total.is_none()
+        && cached_input_tokens.is_none()
+        && cache_creation_input_tokens.is_none()
+    {
         return None;
     }
-    Some(Usage { input_tokens: usage, output_tokens: output, total_tokens: total })
+    Some(Usage {
+        input_tokens: usage,
+        output_tokens: output,
+        total_tokens: total,
+        cached_input_tokens,
+        cache_creation_input_tokens,
+    })
 }
 
 /// Emits a finished response's reasoning and text as single deltas.
@@ -351,10 +400,34 @@ fn usage_of(value: &Value) -> Option<Usage> {
     let input_tokens = usage.get("prompt_tokens").and_then(Value::as_u64);
     let output_tokens = usage.get("completion_tokens").and_then(Value::as_u64);
     let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
-    if input_tokens.is_none() && output_tokens.is_none() && total_tokens.is_none() {
+    let (cached_input_tokens, cache_creation_input_tokens) = cache_tokens_of(usage);
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && total_tokens.is_none()
+        && cached_input_tokens.is_none()
+        && cache_creation_input_tokens.is_none()
+    {
         return None;
     }
-    Some(Usage { input_tokens, output_tokens, total_tokens })
+    Some(Usage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
+    })
+}
+
+/// Extracts prompt-cache counters from either the Anthropic names or the
+/// OpenAI/OpenRouter `prompt_tokens_details.cached_tokens` shape.
+fn cache_tokens_of(usage: &Value) -> (Option<u64>, Option<u64>) {
+    let cached = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64))
+        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_u64));
+    let creation = usage.get("cache_creation_input_tokens").and_then(Value::as_u64);
+    (cached, creation)
 }
 
 /// Extracts reasoning text from first present of `reasoning`,

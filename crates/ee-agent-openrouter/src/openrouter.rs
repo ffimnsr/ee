@@ -69,11 +69,20 @@ pub(crate) fn openrouter_profile(config: &Config, model: &str) -> Result<Endpoin
             base_delay: config.retry_base_delay,
             max_delay: config.retry_max_delay,
         })
+        .with_prompt_cache(supports_anthropic_prompt_cache(model))
         .with_headers(headers);
     if let Some(effort) = config.reasoning_effort.as_deref().filter(|effort| !effort.is_empty()) {
         profile = profile.with_extensions(json!({ "reasoning": { "effort": effort } }));
     }
     Ok(profile)
+}
+
+/// Whether an OpenRouter model id routes to an Anthropic-family model, whose
+/// API understands explicit `cache_control` breakpoints.
+#[must_use]
+pub(crate) fn supports_anthropic_prompt_cache(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.starts_with("anthropic/") || model.contains("claude")
 }
 
 /// Resolves the OpenRouter bearer token for each round trip.
@@ -215,6 +224,18 @@ mod tests {
         without.reasoning_effort = Some(String::new());
         let profile = openrouter_profile(&without, &without.model).expect("profile builds");
         assert!(profile.extensions.is_none(), "an empty effort is not sent");
+    }
+
+    #[test]
+    fn anthropic_routes_enable_prompt_cache_breakpoints() {
+        let mut config = test_config();
+        config.model = String::from("anthropic/claude-sonnet-4");
+        let profile = openrouter_profile(&config, &config.model).expect("profile builds");
+        assert!(profile.prompt_cache);
+
+        config.model = String::from("openai/gpt-5");
+        let profile = openrouter_profile(&config, &config.model).expect("profile builds");
+        assert!(!profile.prompt_cache);
     }
 
     #[test]

@@ -27,6 +27,7 @@ use ee_chat_completions::{
     tool_call_id_of, usage_from_tokens, with_buffered_retry, with_stream_retry,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::dialect::{codec_error, parse_arguments};
 
@@ -63,6 +64,11 @@ pub fn request_body(
     });
     if !system_prompt.is_empty() {
         body["instructions"] = Value::String(system_prompt.to_string());
+        // Deterministic, session-config-scoped cache key: stable across every
+        // turn of the session because it hashes only the model id and the
+        // stable system prompt. Routes that do not support the field ignore
+        // it; extensions may still override it last.
+        body["prompt_cache_key"] = Value::String(prompt_cache_key(model, system_prompt));
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(
@@ -87,6 +93,16 @@ pub fn request_body(
         }
     }
     body
+}
+
+/// Deterministic prompt-cache key for one route/session configuration.
+fn prompt_cache_key(model: &str, system_prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    hasher.update([0]);
+    hasher.update(system_prompt.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Converts one transcript message into an input item.

@@ -376,6 +376,9 @@ impl AgentProvider for OrchestratorProvider {
             };
             let telemetry_turn =
                 format!("turn-{}", next_telemetry_turn.fetch_add(1, Ordering::Relaxed));
+            // Mid-turn nested instruction discovery needs the session scope;
+            // the adapter owns it, so record it before the turn starts.
+            runtime.set_workspace_scope(workspace.clone(), workspace_roots.clone());
             let telemetry_started_at = Instant::now();
             let telemetry_event_start = runtime.event_snapshot().len();
             let _ = telemetry
@@ -439,16 +442,19 @@ impl AgentProvider for OrchestratorProvider {
                 let events = runtime.event_snapshot();
                 finish_provider_telemetry(
                     &telemetry,
-                    &telemetry_turn,
-                    telemetry_started_at,
-                    &events[telemetry_event_start..],
-                    if result.is_ok() {
-                        TelemetryTurnOutcome::Succeeded
-                    } else {
-                        TelemetryTurnOutcome::Failed
+                    ProviderTelemetryTurn {
+                        turn_id: &telemetry_turn,
+                        started_at: telemetry_started_at,
+                        events: &events[telemetry_event_start..],
+                        outcome: if result.is_ok() {
+                            TelemetryTurnOutcome::Succeeded
+                        } else {
+                            TelemetryTurnOutcome::Failed
+                        },
+                        terminal_state: None,
+                        evidence_ids: Vec::new(),
+                        usage: result.as_ref().ok().and_then(|result| result.usage.as_ref()),
                     },
-                    None,
-                    Vec::new(),
                 );
                 let result = result?;
                 persist_session_snapshot(
@@ -485,12 +491,15 @@ impl AgentProvider for OrchestratorProvider {
                 let events = runtime.event_snapshot();
                 finish_provider_telemetry(
                     &telemetry,
-                    &telemetry_turn,
-                    telemetry_started_at,
-                    &events[telemetry_event_start..],
-                    TelemetryTurnOutcome::Succeeded,
-                    None,
-                    Vec::new(),
+                    ProviderTelemetryTurn {
+                        turn_id: &telemetry_turn,
+                        started_at: telemetry_started_at,
+                        events: &events[telemetry_event_start..],
+                        outcome: TelemetryTurnOutcome::Succeeded,
+                        terminal_state: None,
+                        evidence_ids: Vec::new(),
+                        usage: None,
+                    },
                 );
                 persist_session_snapshot(
                     &session_store,
@@ -507,106 +516,30 @@ impl AgentProvider for OrchestratorProvider {
             if let Some(command) = parse_slash_command(&prompt_text)
                 && command.name == BRANCH_COMMAND_NAME
             {
-                let requested_seq = parse_checkpoint_sequence(command.instructions.as_deref())?;
-                let source_id = session_id.to_string();
-                let checkpoint_store = runtime.checkpoint_store();
-                let checkpoint_seq = match requested_seq {
-                    Some(seq) => seq,
-                    None => checkpoint_store.latest_seq(&source_id)?.ok_or_else(|| {
-                        ProviderError::InvalidRequest(format!(
-                            "session {source_id} has no checkpoints to branch from"
-                        ))
-                    })?,
-                };
-                let outcome = runtime
-                    .branch_from_checkpoint(&source_id, checkpoint_seq)
-                    .map_err(ProviderError::from)?;
-                let checkpoint = checkpoint_store
-                    .load_at(&source_id, checkpoint_seq)?
-                    .map(|(_, checkpoint)| checkpoint)
-                    .ok_or_else(|| {
-                        ProviderError::InvalidRequest(format!(
-                            "checkpoint {checkpoint_seq} for session {source_id} was not found"
-                        ))
-                    })?;
-                let branch_policy = plugins.gate_policy(mode_policy(&base_policy, &mode)?);
-                let branch_runtime = Arc::new(
-                    OrchestratorRuntime::from_checkpoint_with_model_registry(
-                        &checkpoint,
-                        models.clone(),
-                        branch_policy,
-                    )?
-                    .with_plugin_observer(plugins.bridge().observer(outcome.session_id.clone())),
+                return super::branch_command::handle_branch_command(
+                    super::branch_command::BranchCommand {
+                        runtime: &runtime,
+                        plugins: &plugins,
+                        models: &models,
+                        sessions: &sessions,
+                        session_store: &session_store,
+                        sink: &sink,
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        base_policy: &base_policy,
+                        mode: &mode,
+                        workspace: &workspace,
+                        workspace_roots: &workspace_roots,
+                        provider_label: &provider_label,
+                        model_label: &model_label,
+                        mcp_servers: &mcp_servers,
+                        implementation_name: &implementation_name,
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
                 );
-                branch_runtime
-                    .register_builtins(&SessionId::new(outcome.session_id.clone()))
-                    .map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to register built-in tools: {error}"
-                        ))
-                    })?;
-                plugins.session_scope(&outcome.session_id).map_err(ProviderError::from)?;
-                let replayed = if outcome.conversation_replayed {
-                    runtime
-                        .replay_session_messages(&outcome.session_id)
-                        .map_err(ProviderError::from)?
-                } else {
-                    Vec::new()
-                };
-                let branch_transcript: Vec<ModelMessage> =
-                    replayed.into_iter().map(|(_, message)| message).collect();
-                let mut branch_conversation = messages_to_conversation(&branch_transcript);
-                if !outcome.conversation_replayed {
-                    branch_conversation.push(ConversationMessage {
-                        role: ConversationRole::Agent,
-                        text: String::from(
-                            "conversation_unreplayed: no session log was available for this checkpoint; task, memory, and budget state were adopted",
-                        ),
-                    });
-                }
-                let entry = SessionRuntime {
-                    runtime: branch_runtime,
-                    workspace: workspace.clone(),
-                    workspace_roots: workspace_roots.clone(),
-                    provider_label: provider_label.clone(),
-                    model_label: model_label.clone(),
-                    mode: mode.clone(),
-                    mcp_servers: mcp_servers.clone(),
-                    conversation: Arc::new(Mutex::new(branch_conversation)),
-                    model_transcript: Arc::new(Mutex::new(branch_transcript)),
-                };
-                session_store
-                    .save(
-                        &implementation_name,
-                        &workspace,
-                        &outcome.session_id,
-                        &session_snapshot(&entry),
-                    )
-                    .map_err(ProviderError::from)?;
-                sessions
-                    .lock()
-                    .expect("adapter sessions poisoned")
-                    .insert(outcome.session_id.clone(), entry);
-                let summary = serde_json::json!({
-                    "command": BRANCH_COMMAND_NAME,
-                    "session_id": outcome.session_id,
-                    "source_session_id": outcome.source_session_id,
-                    "checkpoint_seq": outcome.checkpoint_seq,
-                    "conversation_replayed": outcome.conversation_replayed,
-                    "conversation_unreplayed": !outcome.conversation_replayed,
-                    "replayed_messages": outcome.replayed_messages,
-                });
-                let _ = sink.agent_message_chunk("branch", summary.to_string());
-                finish_provider_telemetry(
-                    &telemetry,
-                    &telemetry_turn,
-                    telemetry_started_at,
-                    &runtime.event_snapshot()[telemetry_event_start..],
-                    TelemetryTurnOutcome::Succeeded,
-                    None,
-                    Vec::new(),
-                );
-                return Ok(PromptResult::new(StopReason::EndTurn));
             }
             // `/discard` rejects a paused turn's pending checkpoint: the
             // interrupted work is dropped instead of resumed.  Only valid
@@ -622,12 +555,15 @@ impl AgentProvider for OrchestratorProvider {
                     .agent_message_chunk("discard", "paused turn discarded; checkpoint cleared");
                 finish_provider_telemetry(
                     &telemetry,
-                    &telemetry_turn,
-                    telemetry_started_at,
-                    &runtime.event_snapshot()[telemetry_event_start..],
-                    TelemetryTurnOutcome::Succeeded,
-                    None,
-                    Vec::new(),
+                    ProviderTelemetryTurn {
+                        turn_id: &telemetry_turn,
+                        started_at: telemetry_started_at,
+                        events: &runtime.event_snapshot()[telemetry_event_start..],
+                        outcome: TelemetryTurnOutcome::Succeeded,
+                        terminal_state: None,
+                        evidence_ids: Vec::new(),
+                        usage: None,
+                    },
                 );
                 return Ok(PromptResult::new(StopReason::EndTurn));
             }
@@ -925,14 +861,18 @@ impl AgentProvider for OrchestratorProvider {
             };
             let (terminal_state, evidence_ids) =
                 telemetry_completion.map_or((None, Vec::new()), |(state, ids)| (Some(state), ids));
+            let turn_usage = result.as_ref().ok().and_then(|result| result.usage.clone());
             finish_provider_telemetry(
                 &telemetry,
-                &telemetry_turn,
-                telemetry_started_at,
-                &events[telemetry_event_start..],
-                telemetry_outcome,
-                terminal_state,
-                evidence_ids,
+                ProviderTelemetryTurn {
+                    turn_id: &telemetry_turn,
+                    started_at: telemetry_started_at,
+                    events: &events[telemetry_event_start..],
+                    outcome: telemetry_outcome,
+                    terminal_state,
+                    evidence_ids,
+                    usage: turn_usage.as_ref(),
+                },
             );
             match result {
                 Ok(prompt_result) => {
@@ -1041,35 +981,4 @@ impl AgentProvider for OrchestratorProvider {
                 .map_err(ProviderError::from)
         })
     }
-}
-
-/// Parses the optional `/branch <checkpoint_seq>` argument. Absence means "use
-/// the newest checkpoint"; anything else must be a non-zero sequence number.
-fn parse_checkpoint_sequence(instructions: Option<&str>) -> Result<Option<u64>, ProviderError> {
-    let Some(text) = instructions.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(None);
-    };
-    let seq = text.parse::<u64>().map_err(|_| {
-        ProviderError::InvalidRequest(format!(
-            "invalid checkpoint sequence {text:?}; expected a non-negative integer"
-        ))
-    })?;
-    Ok(Some(seq))
-}
-
-/// Projects normalized model messages onto the ACP replay conversation. Tool,
-/// system, and subagent-only records have no client-visible text counterpart.
-fn messages_to_conversation(messages: &[ModelMessage]) -> Vec<ConversationMessage> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                ModelRole::User => ConversationRole::User,
-                ModelRole::Assistant => ConversationRole::Agent,
-                _ => return None,
-            };
-            let text = message.text_content();
-            (!text.is_empty()).then_some(ConversationMessage { role, text })
-        })
-        .collect()
 }

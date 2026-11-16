@@ -456,6 +456,9 @@ fn merge_openrouter_usage(target: &mut OpenRouterUsage, usage: Option<OpenRouter
     target.input_tokens = add_opt(target.input_tokens, usage.input_tokens);
     target.output_tokens = add_opt(target.output_tokens, usage.output_tokens);
     target.total_tokens = add_opt(target.total_tokens, usage.total_tokens);
+    target.cached_input_tokens = add_opt(target.cached_input_tokens, usage.cached_input_tokens);
+    target.cache_creation_input_tokens =
+        add_opt(target.cache_creation_input_tokens, usage.cache_creation_input_tokens);
 }
 
 fn add_opt(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -476,7 +479,14 @@ fn to_sdk_usage(usage: OpenRouterUsage) -> Option<Usage> {
     let output_tokens = usage.output_tokens?;
     let total_tokens =
         usage.total_tokens.unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
-    Some(Usage::new(total_tokens, input_tokens, output_tokens))
+    let mut sdk = Usage::new(total_tokens, input_tokens, output_tokens);
+    if let Some(tokens) = usage.cached_input_tokens {
+        sdk = sdk.cached_read_tokens(tokens);
+    }
+    if let Some(tokens) = usage.cache_creation_input_tokens {
+        sdk = sdk.cached_write_tokens(tokens);
+    }
+    Some(sdk)
 }
 
 /// Builds a prompt response, attaching reported token usage when known.
@@ -560,6 +570,7 @@ mod tests {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
                 total_tokens: Some(150),
+                ..Default::default()
             }),
         );
         merge_openrouter_usage(
@@ -568,6 +579,7 @@ mod tests {
                 input_tokens: None,
                 output_tokens: Some(25),
                 total_tokens: None,
+                ..Default::default()
             }),
         );
         assert_eq!(usage.input_tokens, Some(100));
@@ -578,8 +590,12 @@ mod tests {
     #[test]
     fn turn_usage_unknown_never_maps_to_zero_tokens() {
         assert_eq!(to_sdk_usage(OpenRouterUsage::default()), None);
-        let partial =
-            OpenRouterUsage { input_tokens: Some(10), output_tokens: None, total_tokens: None };
+        let partial = OpenRouterUsage {
+            input_tokens: Some(10),
+            output_tokens: None,
+            total_tokens: None,
+            ..Default::default()
+        };
         assert_eq!(to_sdk_usage(partial), None, "half-known usage stays unknown");
     }
 
@@ -589,6 +605,7 @@ mod tests {
             input_tokens: Some(6120),
             output_tokens: Some(2311),
             total_tokens: None,
+            ..Default::default()
         };
         let sdk = to_sdk_usage(usage).expect("fully known usage maps");
         assert_eq!(sdk.input_tokens, 6120);

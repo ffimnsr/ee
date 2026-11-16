@@ -1,4 +1,4 @@
-use ee_agent_orchestrator::{SideEffectClass, ToolResult};
+use ee_agent_orchestrator::{ModelMessage, ModelRole, SideEffectClass, ToolResult};
 use serde_json::json;
 
 use super::*;
@@ -73,6 +73,52 @@ fn extracts_usage_fields() {
     assert_eq!(usage.input_tokens, Some(6120));
     assert_eq!(usage.output_tokens, Some(2311));
     assert_eq!(usage.total_tokens, Some(8431));
+}
+
+#[test]
+fn cache_usage_is_parsed_from_both_provider_shapes() {
+    let anthropic = json!({
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 80,
+            "cache_creation_input_tokens": 10,
+        }
+    });
+    let usage = usage_from_tokens(&anthropic["usage"]).expect("usage parsed");
+    assert_eq!(usage.cached_input_tokens, Some(80));
+    assert_eq!(usage.cache_creation_input_tokens, Some(10));
+
+    let openai = json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": { "cached_tokens": 60 },
+        }
+    });
+    let usage = decode_message(&openai).unwrap().usage.expect("usage parsed");
+    assert_eq!(usage.cached_input_tokens, Some(60));
+    assert_eq!(usage.cache_creation_input_tokens, None);
+}
+
+#[test]
+fn cache_breakpoints_wrap_only_marked_messages_without_rewriting_text() {
+    let transcript = vec![
+        ModelMessage::text(ModelRole::User, "stable instructions").with_cache_breakpoint(),
+        ModelMessage::text(ModelRole::User, "hello"),
+    ];
+
+    let plain = messages_from_transcript("system", &transcript);
+    assert_eq!(plain[0]["content"], "system");
+    assert_eq!(plain[1]["content"], "stable instructions");
+
+    let cached = messages_from_transcript_with_cache("system", &transcript, true);
+    assert_eq!(cached[0]["content"][0]["text"], "system");
+    assert_eq!(cached[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(cached[1]["content"][0]["text"], "stable instructions");
+    assert_eq!(cached[1]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(cached[2]["content"], "hello", "unmarked messages stay plain text");
 }
 
 #[test]

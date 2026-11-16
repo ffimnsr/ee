@@ -32,6 +32,8 @@ pub struct OrchestratorMetrics {
     output_bytes: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cached_input_tokens: u64,
+    cache_creation_input_tokens: u64,
 }
 
 impl OrchestratorMetrics {
@@ -93,13 +95,21 @@ impl OrchestratorMetrics {
     }
 
     /// Accumulates token usage where the adapter reported it; unknown fields
-    /// (`None`) are skipped, never counted as zero.
+    /// (`None`) are skipped, never counted as zero. Prompt-cache read/write
+    /// counters are tracked separately so cache hits stay visible in telemetry.
     pub fn record_usage(&mut self, usage: &ModelUsage) {
         if let Some(tokens) = usage.input_tokens {
             self.input_tokens = self.input_tokens.saturating_add(tokens as u64);
         }
         if let Some(tokens) = usage.output_tokens {
             self.output_tokens = self.output_tokens.saturating_add(tokens as u64);
+        }
+        if let Some(tokens) = usage.cached_input_tokens {
+            self.cached_input_tokens = self.cached_input_tokens.saturating_add(tokens as u64);
+        }
+        if let Some(tokens) = usage.cache_creation_input_tokens {
+            self.cache_creation_input_tokens =
+                self.cache_creation_input_tokens.saturating_add(tokens as u64);
         }
     }
 
@@ -205,6 +215,18 @@ impl OrchestratorMetrics {
     pub fn output_tokens(&self) -> u64 {
         self.output_tokens
     }
+
+    /// Accumulated prompt-cache read tokens (reported usage only).
+    #[must_use]
+    pub fn cached_input_tokens(&self) -> u64 {
+        self.cached_input_tokens
+    }
+
+    /// Accumulated prompt-cache write tokens (reported usage only).
+    #[must_use]
+    pub fn cache_creation_input_tokens(&self) -> u64 {
+        self.cache_creation_input_tokens
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +291,22 @@ mod tests {
 
         assert_eq!(metrics.input_tokens(), 125);
         assert_eq!(metrics.output_tokens(), 50, "unknown usage is never counted as zero");
+    }
+
+    #[test]
+    fn cache_tokens_are_counted_only_where_known() {
+        let mut metrics = OrchestratorMetrics::new();
+        metrics.record_usage(
+            &ModelUsage::new()
+                .with_input_tokens(100)
+                .with_cached_input_tokens(80)
+                .with_cache_creation_input_tokens(20),
+        );
+        metrics.record_usage(&ModelUsage::new().with_cached_input_tokens(5));
+
+        assert_eq!(metrics.cached_input_tokens(), 85);
+        assert_eq!(metrics.cache_creation_input_tokens(), 20);
+        assert_eq!(metrics.input_tokens(), 100, "cache counters never inflate input tokens");
     }
 
     #[test]

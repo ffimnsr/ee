@@ -73,7 +73,12 @@ fn request_body_hoists_system_and_correlates_tool_results() {
     let body = request_body("kimi-k3", "system", &transcript(), &definitions(), false, None);
 
     assert_eq!(body["model"], "kimi-k3");
-    assert_eq!(body["system"], "system\n\nMemory facts:\ncwd: /work");
+    assert_eq!(body["system"][0]["text"], "system");
+    assert_eq!(body["system"][1]["text"], "Memory facts:\ncwd: /work");
+    assert_eq!(
+        body["system"][1]["cache_control"]["type"], "ephemeral",
+        "the final system block closes the stable prefix"
+    );
     assert_eq!(body["max_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
     assert_eq!(body["stream"], false);
     assert_eq!(body["tool_choice"]["type"], "auto");
@@ -90,6 +95,27 @@ fn request_body_hoists_system_and_correlates_tool_results() {
     assert_eq!(body["tools"][0]["name"], "read_file");
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "path");
     assert_eq!(body["tools"][0]["description"], "reads a file");
+    assert_eq!(
+        body["tools"][0]["cache_control"]["type"], "ephemeral",
+        "the last tool schema is a cache boundary"
+    );
+}
+
+#[test]
+fn cache_breakpoints_mark_only_the_last_pinned_instruction() {
+    let transcript = vec![
+        ModelMessage::text(ModelRole::User, "stable global").with_cache_breakpoint(),
+        ModelMessage::text(ModelRole::User, "workspace rules").with_cache_breakpoint(),
+        ModelMessage::text(ModelRole::User, "current request"),
+    ];
+
+    let body = request_body("claude", "system", &transcript, &[], false, None);
+
+    assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
+    let pinned = &body["messages"][1]["content"][0];
+    assert_eq!(pinned["text"], "workspace rules", "text is never rewritten");
+    assert_eq!(pinned["cache_control"]["type"], "ephemeral");
+    assert!(body["messages"][2]["content"][0].get("cache_control").is_none());
 }
 
 #[test]

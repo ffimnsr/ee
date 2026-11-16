@@ -210,11 +210,22 @@ impl TurnSystemContext {
         let mut messages = Vec::new();
         let mut ids: Vec<Option<String>> = Vec::new();
         if let Some(stable) = self.stable.filter(|text| !text.trim().is_empty()) {
-            messages.push(ModelMessage::text(ModelRole::System, stable));
+            // The stable system prompt is the first cacheable plane: providers
+            // reuse the KV prefix across every turn.
+            messages.push(ModelMessage::text(ModelRole::System, stable).with_cache_breakpoint());
             ids.push(None);
         }
-        for instruction in self.global {
-            messages.push(instruction.message);
+        // The last static instruction message closes the second cacheable
+        // plane (trusted global + workspace instructions).
+        let last_static_global = self.global.len().saturating_sub(1);
+        let has_workspace = !self.workspace.is_empty();
+        for (index, instruction) in self.global.into_iter().enumerate() {
+            let message = if !has_workspace && index == last_static_global {
+                instruction.message.with_cache_breakpoint()
+            } else {
+                instruction.message
+            };
+            messages.push(message);
             ids.push(None);
         }
         if let Some(facts) = self.memory.filter(|text| !text.trim().is_empty()) {
@@ -237,8 +248,14 @@ impl TurnSystemContext {
             messages.push(retained_runtime_message(&retained));
             ids.push(None);
         }
-        for workspace in self.workspace {
-            messages.push(workspace.message);
+        let last_workspace = self.workspace.len().saturating_sub(1);
+        for (index, workspace) in self.workspace.into_iter().enumerate() {
+            let message = if index == last_workspace {
+                workspace.message.with_cache_breakpoint()
+            } else {
+                workspace.message
+            };
+            messages.push(message);
             ids.push(None);
         }
         if let Some(runtime) = self.runtime.filter(|snapshot| !snapshot.text.trim().is_empty()) {
@@ -566,6 +583,44 @@ mod tests {
                 "current".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn cache_breakpoints_mark_stable_and_last_static_plane() {
+        let mut transcript = Transcript::new();
+        let context = TurnSystemContext {
+            stable: Some("stable".into()),
+            global: vec![WorkspaceMessage {
+                path: "(global) AGENTS.md".into(),
+                message: ModelMessage::text(ModelRole::User, "global"),
+            }],
+            workspace: vec![
+                WorkspaceMessage {
+                    path: "AGENTS.md".into(),
+                    message: ModelMessage::text(ModelRole::User, "root rules"),
+                },
+                WorkspaceMessage {
+                    path: "crates/foo/AGENTS.md".into(),
+                    message: ModelMessage::text(ModelRole::User, "nested rules"),
+                },
+            ],
+            ..TurnSystemContext::default()
+        };
+        context.apply_to_transcript(
+            &mut transcript,
+            vec![ModelMessage::text(ModelRole::User, "current")],
+        );
+
+        let marks: Vec<usize> = transcript
+            .messages()
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.is_cache_breakpoint())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(marks, vec![0, 3], "stable system and last static instruction");
+        assert_eq!(transcript.messages()[0].text_content(), "stable");
+        assert_eq!(transcript.messages()[3].text_content(), "nested rules");
     }
 
     #[test]

@@ -64,7 +64,12 @@ pub fn request_body(
     }
     let mut messages: Vec<Value> = Vec::new();
     let mut open_tool_results = false;
-    for message in transcript {
+    // Anthropic accepts at most four `cache_control` breakpoints per request.
+    // System and the final tool schema consume two; the last pinned
+    // instruction message consumes the third. Message text is never rewritten.
+    let last_breakpoint = transcript.iter().rposition(ModelMessage::is_cache_breakpoint);
+    for (index, message) in transcript.iter().enumerate() {
+        let pinned = last_breakpoint == Some(index);
         match message.role {
             ModelRole::System => {
                 let text = content_text(&message.content);
@@ -96,7 +101,7 @@ pub fn request_body(
                 if !text.is_empty() {
                     messages.push(json!({
                         "role": "user",
-                        "content": [{ "type": "text", "text": text }],
+                        "content": [text_block(&text, pinned)],
                     }));
                 }
             }
@@ -105,7 +110,7 @@ pub fn request_body(
                 if !text.is_empty() {
                     messages.push(json!({
                         "role": "assistant",
-                        "content": [{ "type": "text", "text": text }],
+                        "content": [text_block(&text, pinned)],
                     }));
                 }
             }
@@ -120,18 +125,31 @@ pub fn request_body(
         "tool_choice": { "type": "auto" },
     });
     if !system_parts.is_empty() {
-        body["system"] = Value::String(system_parts.join("\n\n"));
+        // The final system block closes the first cacheable prefix plane.
+        let blocks = system_parts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| text_block(text, index + 1 == system_parts.len()))
+            .collect::<Vec<_>>();
+        body["system"] = Value::Array(blocks);
     }
     if !tools.is_empty() {
+        let last = tools.len() - 1;
         body["tools"] = Value::Array(
             tools
                 .iter()
-                .map(|definition| {
-                    json!({
+                .enumerate()
+                .map(|(index, definition)| {
+                    let mut tool = json!({
                         "name": definition.name,
                         "description": definition.description,
                         "input_schema": definition.input_schema,
-                    })
+                    });
+                    // Anthropic caches the tool block up to the final schema.
+                    if index == last {
+                        tool["cache_control"] = json!({ "type": "ephemeral" });
+                    }
+                    tool
                 })
                 .collect(),
         );
@@ -181,6 +199,15 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
         finish_reason: Some(finish_reason(value.get("stop_reason").and_then(Value::as_str))),
         usage: usage_from_tokens(value.get("usage").unwrap_or(&Value::Null)),
     }))
+}
+
+/// Whether one message should carry an Anthropic cache breakpoint block.
+fn text_block(text: &str, cache: bool) -> Value {
+    let mut block = json!({ "type": "text", "text": text });
+    if cache {
+        block["cache_control"] = json!({ "type": "ephemeral" });
+    }
+    block
 }
 
 fn is_messages_payload(value: &Value) -> bool {
@@ -282,8 +309,12 @@ impl StreamDecoder {
                 let usage = value.pointer("/message/usage").unwrap_or(&Value::Null);
                 let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
                 if input_tokens.is_some() {
-                    self.usage =
-                        Some(Usage { input_tokens, output_tokens: None, total_tokens: None });
+                    self.usage = Some(Usage {
+                        input_tokens,
+                        output_tokens: None,
+                        total_tokens: None,
+                        ..Default::default()
+                    });
                 }
             }
             "content_block_start" => {

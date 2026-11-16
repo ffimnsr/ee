@@ -236,6 +236,12 @@ pub struct TelemetrySummary {
     pub validation_count: u64,
     pub tool_calls: u64,
     pub model_calls: u64,
+    /// Input tokens served from the provider prompt cache, when reported.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cached_input_tokens: u64,
+    /// Input tokens written to the provider prompt cache, when reported.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_input_tokens: u64,
     pub estimated_cost_microusd: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_failures: BTreeMap<ToolFailureReason, u64>,
@@ -247,6 +253,17 @@ impl TelemetrySummary {
         *self.tool_failures.entry(reason).or_default() += 1;
     }
 
+    /// Records provider-reported prompt-cache token counts.
+    pub fn record_cache_usage(&mut self, cached: Option<u64>, creation: Option<u64>) {
+        if let Some(tokens) = cached {
+            self.cached_input_tokens = self.cached_input_tokens.saturating_add(tokens);
+        }
+        if let Some(tokens) = creation {
+            self.cache_creation_input_tokens =
+                self.cache_creation_input_tokens.saturating_add(tokens);
+        }
+    }
+
     /// Validates bounded score input.
     pub fn validate(&self) -> Result<(), TelemetryError> {
         if self.quality_score.is_some_and(|score| score > 100) {
@@ -254,6 +271,12 @@ impl TelemetrySummary {
         }
         Ok(())
     }
+}
+
+/// Returns `true` when a counter is zero, so optional telemetry fields stay
+/// absent from the serialized record.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// A checked-in replay fixture that may reproduce a failed live turn. This is
@@ -801,6 +824,8 @@ mod tests {
                     validation_count: 1,
                     tool_calls: 1,
                     model_calls: 1,
+                    cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                     estimated_cost_microusd: 4,
                     tool_failures: BTreeMap::new(),
                 },

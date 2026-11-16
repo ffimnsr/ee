@@ -218,6 +218,12 @@ pub struct OrchestratorRuntime {
     /// adapters use it to preserve full multi-turn history (including tool
     /// calls and results) across prompts instead of a text-only tail.
     last_turn_transcript: Arc<Mutex<Vec<ModelMessage>>>,
+    /// Session working directory and workspace roots used for mid-turn nested
+    /// instruction discovery. Set by the provider adapter per session.
+    workspace_scope: Mutex<Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
+    /// Content digests of workspace instructions already injected this session,
+    /// shared by every per-turn tracker.
+    workspace_instruction_seen: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,
 }
 
 mod branch;

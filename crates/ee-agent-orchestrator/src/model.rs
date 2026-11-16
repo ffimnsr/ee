@@ -46,6 +46,14 @@ pub const TOOL_NAME_METADATA_KEY: &str = "tool_name";
 pub const TOOL_SIDE_EFFECT_METADATA_KEY: &str = "tool_side_effect";
 /// Message metadata key: the primary path argument of a read/write tool.
 pub const TOOL_PATH_METADATA_KEY: &str = "tool_path";
+/// Message metadata key marking a cacheable prompt-prefix boundary.
+///
+/// Providers that support explicit prompt caching (Anthropic `cache_control`,
+/// OpenAI `prompt_cache_key`) read this marker instead of guessing where the
+/// stable prefix ends. The marker never changes message text.
+pub const CACHE_BREAKPOINT_METADATA_KEY: &str = "ee_cache_breakpoint";
+/// Metadata value stored under [`CACHE_BREAKPOINT_METADATA_KEY`].
+pub const CACHE_BREAKPOINT_METADATA_VALUE: &str = "true";
 
 /// Boxed future returned by [`ModelAdapter`] methods.
 ///
@@ -195,6 +203,26 @@ impl ModelMessage {
         self
     }
 
+    /// Marks this message as the end of a cacheable prompt-prefix plane.
+    ///
+    /// The marker is metadata only: message text is never rewritten, and a
+    /// provider without prompt caching simply ignores it.
+    #[must_use]
+    pub fn with_cache_breakpoint(mut self) -> Self {
+        self.metadata.insert(
+            CACHE_BREAKPOINT_METADATA_KEY.to_string(),
+            CACHE_BREAKPOINT_METADATA_VALUE.to_string(),
+        );
+        self
+    }
+
+    /// Whether this message closes a cacheable prompt-prefix plane.
+    #[must_use]
+    pub fn is_cache_breakpoint(&self) -> bool {
+        self.metadata.get(CACHE_BREAKPOINT_METADATA_KEY).map(String::as_str)
+            == Some(CACHE_BREAKPOINT_METADATA_VALUE)
+    }
+
     /// Concatenated text content of this message (empty when the message has
     /// no text blocks).
     #[must_use]
@@ -305,6 +333,10 @@ pub struct ModelUsage {
     pub input_tokens: Option<usize>,
     /// Output tokens produced; `None` when the provider did not report them.
     pub output_tokens: Option<usize>,
+    /// Input tokens served from the provider's prompt cache (cache read).
+    pub cached_input_tokens: Option<usize>,
+    /// Input tokens written to the provider's prompt cache (cache write).
+    pub cache_creation_input_tokens: Option<usize>,
 }
 
 impl ModelUsage {
@@ -328,17 +360,64 @@ impl ModelUsage {
         self
     }
 
+    /// Sets the reported prompt-cache read token count.
+    #[must_use]
+    pub fn with_cached_input_tokens(mut self, tokens: usize) -> Self {
+        self.cached_input_tokens = Some(tokens);
+        self
+    }
+
+    /// Sets the reported prompt-cache write token count.
+    #[must_use]
+    pub fn with_cache_creation_input_tokens(mut self, tokens: usize) -> Self {
+        self.cache_creation_input_tokens = Some(tokens);
+        self
+    }
+
+    /// Adds another round's usage, skipping unknown fields instead of counting
+    /// them as zero.
+    #[must_use]
+    pub fn accumulate(&self, other: &Self) -> Self {
+        Self {
+            input_tokens: add_tokens(self.input_tokens, other.input_tokens),
+            output_tokens: add_tokens(self.output_tokens, other.output_tokens),
+            cached_input_tokens: add_tokens(self.cached_input_tokens, other.cached_input_tokens),
+            cache_creation_input_tokens: add_tokens(
+                self.cache_creation_input_tokens,
+                other.cache_creation_input_tokens,
+            ),
+        }
+    }
+
     /// Maps to the ACP per-turn usage when both input and output tokens are
     /// known; unknown stays unknown (never counted as zero).
     #[must_use]
     pub(crate) fn acp_usage(&self) -> Option<ee_agent_protocol::Usage> {
         let input_tokens = self.input_tokens?;
         let output_tokens = self.output_tokens?;
-        Some(ee_agent_protocol::Usage::new(
+        let usage = ee_agent_protocol::Usage::new(
             input_tokens.saturating_add(output_tokens) as u64,
             input_tokens as u64,
             output_tokens as u64,
-        ))
+        );
+        Some(usage)
+            .map(|usage| match self.cached_input_tokens {
+                Some(tokens) => usage.cached_read_tokens(tokens as u64),
+                None => usage,
+            })
+            .map(|usage| match self.cache_creation_input_tokens {
+                Some(tokens) => usage.cached_write_tokens(tokens as u64),
+                None => usage,
+            })
+    }
+}
+
+/// Adds two optional token counters; unknown stays unknown.
+fn add_tokens(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 
@@ -608,6 +687,13 @@ impl Transcript {
         self.messages
             .push(ModelMessage::tool_result(tool_call_id.clone(), result).with_metadata(entries));
         let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
+        self.log_ids.push(id);
+    }
+
+    /// Appends an already-built message and records it in the durable log.
+    pub(crate) fn push_message(&mut self, message: ModelMessage) {
+        self.messages.push(message);
+        let id = self.record_message_at(self.messages.len() - 1, None);
         self.log_ids.push(id);
     }
 
@@ -1117,6 +1203,23 @@ mod tests {
         assert_eq!(intent.tool_call_id, "tc-1");
         assert_eq!(intent.name, "read_file");
         assert_eq!(intent.arguments, json!({"path": "/a"}));
+    }
+
+    #[test]
+    fn usage_accumulates_and_reports_prompt_cache_tokens() {
+        let first = ModelUsage::new()
+            .with_input_tokens(100)
+            .with_output_tokens(20)
+            .with_cached_input_tokens(80);
+        let second = ModelUsage::new().with_cache_creation_input_tokens(5);
+        let total = first.accumulate(&second);
+        assert_eq!(total.input_tokens, Some(100), "unknown fields never zero a known count");
+        assert_eq!(total.cached_input_tokens, Some(80));
+        assert_eq!(total.cache_creation_input_tokens, Some(5));
+
+        let acp = total.acp_usage().expect("input and output are known");
+        assert_eq!(acp.cached_read_tokens, Some(80));
+        assert_eq!(acp.cached_write_tokens, Some(5));
     }
 
     #[tokio::test]

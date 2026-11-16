@@ -1413,46 +1413,46 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 
 ### Improvement 1 — Explicit Provider Prompt-Cache Breakpoints (`cache_control` & `prompt_cache_key`)
 
-- [ ] Emit provider-specific prompt cache markers on stable and pinned prefix planes.
-  - [ ] **Problem:**
+- [x] Emit provider-specific prompt cache markers on stable and pinned prefix planes.
+  - [x] **Problem:**
     - `PLAN-harness.md` §17 and Phase 2 split `PromptBundle.stable`, `PromptBundle.global`, `PromptBundle.workspace`, `PromptBundle.mcp`, and `RuntimeSnapshotMode::Delta` specifically to keep the leading prefix byte-identical across turns for LLM KV-cache reuse.
     - However, `crates/ee-chat-completions`, `crates/ee-agent-opencode/src/messages.rs` (Anthropic Messages dialect), and `crates/ee-agent-opencode/src/responses.rs` (OpenAI Responses dialect) do not emit explicit `cache_control: {"type": "ephemeral"}` breakpoints or `prompt_cache_key` / session cache headers.
     - Without explicit cache markers on Anthropic and OpenRouter Anthropic routes, providers re-tokenize and bill full input price on every tool step for the stable system prompt, tool definitions, and workspace instructions.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a `CacheHint` / prefix-breakpoint marker on `ModelRequest` or `ModelMessage` metadata (`ee_cache_breakpoint=true`) for the stable system prompt, last tool definition, and last static instruction message (`global`/`workspace`).
     - In `crates/ee-agent-opencode/src/messages.rs`, attach `cache_control: {"type": "ephemeral"}` to the system block, final tool schema entry, and last pinned instruction block (respecting Anthropic's 4-breakpoint limit).
     - In `crates/ee-chat-completions`, support opt-in OpenRouter/Anthropic multipart content `cache_control` breakpoints when targeting Anthropic family models.
     - In `crates/ee-agent-opencode/src/responses.rs`, pass deterministic session-scoped `prompt_cache_key` when supported by the route profile.
     - Surface `cached_input_tokens` / `cache_creation_input_tokens` in `TokenUsage` and `OrchestratorMetrics`.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Anthropic Messages and OpenRouter Anthropic requests include deterministic `cache_control` breakpoints on stable prefix boundaries without mutating message text.
     - `UsageUpdate` and `TelemetrySummary` report cache hit/write token counts when returned by the provider.
 
 ### Improvement 2 — Dynamic Mid-Turn Subdirectory `AGENTS.md` Discovery
 
-- [ ] Discover nested `<subdir>/AGENTS.md` and `CLAUDE.md` dynamically when tools access files below `cwd`.
-  - [ ] **Problem:**
+- [x] Discover nested `<subdir>/AGENTS.md` and `CLAUDE.md` dynamically when tools access files below `cwd`.
+  - [x] **Problem:**
     - `prompt::workspace::discover` (`crates/ee-agent-orchestrator/src/prompt/workspace.rs:85-162`) walks ancestor directories from the workspace root to `cwd` once at turn start (`OrchestratorProvider::prompt_bundle`).
     - In monorepos where nested crates or packages (`crates/foo/AGENTS.md`, `packages/bar/CLAUDE.md`) define directory-specific rules below `cwd`, the agent never sees those instructions when reading or editing files inside `crates/foo/` during a turn.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Track a per-session `HashSet<String>` of already-injected workspace instruction content hashes (`WorkspaceInstructionSource.content_hash`) initialized from turn-start `WorkspaceInstructions`.
     - In `LoopEngine` after `read_file`, `write_file`, `ee_edit_apply`, or `ee_file_outline` succeeds on a workspace path `P`, walk directories between `cwd` and `P.parent()` for `AGENTS.md`, `CLAUDE.md`, `AGENTS.local.md`, and `CLAUDE.local.md`.
     - If unseen instruction files are found (within the remaining 64 KiB `MAX_WORKSPACE_INSTRUCTION_BYTES` budget), sanitize `</system-reminder>` tags and inject a `TrustLevel::WorkspaceInstructionUntrusted` message before the next model call.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Touching `crates/sub/src/lib.rs` mid-turn injects `crates/sub/AGENTS.md` exactly once per session under `TrustLevel::WorkspaceInstructionUntrusted`.
     - Already-seen instruction files (by SHA-256 content hash) and files outside workspace roots or above the 64 KiB cap are never re-injected.
 
 ### Improvement 3 — Multimodal Compaction Offload Pass (`compaction-image-offload`)
 
-- [ ] Offload binary `Image`, `Audio`, and large `EmbeddedResource` blocks from older turns before LLM compaction.
-  - [ ] **Problem:**
+- [x] Offload binary `Image`, `Audio`, and large `EmbeddedResource` blocks from older turns before LLM compaction.
+  - [x] **Problem:**
     - Multimodal ACP inputs (`ModelContent::{Image, Audio, EmbeddedResource}`) are now preserved across `ee-agent-orchestrator`, `ee-chat-completions`, and `ee-agent-opencode`.
     - However, `DefaultCompactionStrategy` (`crates/ee-agent-orchestrator/src/compaction/pipeline.rs`) and `estimate_message_bytes` do not strip or offload base64 binary payloads in older turns before running LLM summarization or retaining the sliding window.
     - Large base64 images or audio clips in historical turns consume massive context budget and can cause compaction requests themselves to exceed context limits.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a deterministic stage in `DefaultCompactionStrategy` (between Stage 2 read-only pruning and Stage 3 windowing) that replaces `ModelContent::Image` and `ModelContent::Audio` blocks older than the most recent `N` user turns (e.g. `keep_recent_multimodal_turns = 2`) with a compact `ModelContent::Text` placeholder: `[image offloaded: mime=<mime_type>, size=<bytes>B, sha256=<short_hash>]`.
     - Keep full binary payloads in the content-addressed `SessionLog` store so replay/audit remains lossless.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Historical multimodal blocks beyond the retention window are replaced with deterministic text placeholders before windowing and LLM summary calls.
     - Active-turn and immediate prior-turn multimodal content remains intact for the model.
 

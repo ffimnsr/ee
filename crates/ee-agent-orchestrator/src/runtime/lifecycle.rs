@@ -194,8 +194,23 @@ impl OrchestratorRuntime {
             runtime_snapshots: Mutex::new(HashMap::new()),
             session_logs,
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
+            workspace_scope: Mutex::new(None),
+            workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
+    /// Records the session working directory and workspace roots for mid-turn
+    /// nested `AGENTS.md`/`CLAUDE.md` discovery. Called once per prompt by the
+    /// provider adapter before the turn starts.
+    pub fn set_workspace_scope(&self, cwd: std::path::PathBuf, roots: Vec<std::path::PathBuf>) {
+        *self.workspace_scope.lock().expect("workspace scope poisoned") = Some((cwd, roots));
+    }
+
+    /// Snapshot of the session workspace scope, when one was recorded.
+    #[must_use]
+    pub(crate) fn workspace_scope(&self) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+        self.workspace_scope.lock().expect("workspace scope poisoned").clone()
+    }
+
     /// Installs an observe-only observer on the runtime event recorder.
     ///
     /// The recorder keeps the same event buffer, so early events are not lost.

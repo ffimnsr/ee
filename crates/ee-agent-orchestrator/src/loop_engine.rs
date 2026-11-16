@@ -14,6 +14,7 @@
 
 use std::{
     collections::HashSet,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -101,6 +102,11 @@ pub(crate) struct LoopOptions {
     /// Receives the normalized transcript of this run after the loop ends, so
     /// the provider boundary can retain full multi-turn history.
     pub transcript_out: Option<Arc<Mutex<Vec<ModelMessage>>>>,
+    /// Mid-turn nested workspace instruction discovery. `None` disables it;
+    /// when set, tool access below `cwd` injects unseen nested `AGENTS.md` and
+    /// `CLAUDE.md` files once per session.
+    pub workspace_instructions:
+        Option<Arc<Mutex<crate::prompt::workspace::WorkspaceInstructionTracker>>>,
 }
 
 impl Default for LoopOptions {
@@ -122,6 +128,7 @@ impl Default for LoopOptions {
             stop_gate: None,
             stop_veto: None,
             transcript_out: None,
+            workspace_instructions: None,
         }
     }
 }
@@ -494,14 +501,7 @@ impl LoopEngine {
                 )?;
                 budget.emit(&self.events);
             }
-            if let Some(tokens) = response.usage.input_tokens {
-                turn_usage.input_tokens =
-                    Some(turn_usage.input_tokens.unwrap_or_default().saturating_add(tokens));
-            }
-            if let Some(tokens) = response.usage.output_tokens {
-                turn_usage.output_tokens =
-                    Some(turn_usage.output_tokens.unwrap_or_default().saturating_add(tokens));
-            }
+            turn_usage = turn_usage.accumulate(&response.usage);
             // Report the context-window usage: the model call's input tokens
             // are the full context sent this round; the window size comes
             // from the configuration.  Unknown usage emits nothing.
@@ -619,6 +619,7 @@ impl LoopEngine {
                     }
                     let result =
                         compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
+                    let succeeded = result.success;
                     track.lock().expect("recovery track poisoned").completed_tools.push(
                         CompletedToolCall {
                             tool_call_id: intent.tool_call_id.clone(),
@@ -644,6 +645,9 @@ impl LoopEngine {
                         SideEffectClass::Read.as_str(),
                         path.as_deref(),
                     );
+                    if succeeded {
+                        self.inject_nested_instructions(transcript, &intent.name, path.as_deref());
+                    }
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
                 }
@@ -714,6 +718,7 @@ impl LoopEngine {
                     }
                     let result =
                         compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
+                    let succeeded = result.success;
                     if !reused {
                         track.lock().expect("recovery track poisoned").completed_tools.push(
                             CompletedToolCall {
@@ -733,9 +738,9 @@ impl LoopEngine {
                     if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
+                    let path = crate::tool_cache::path_argument(&intent.arguments);
                     match class {
                         Some(class) => {
-                            let path = crate::tool_cache::path_argument(&intent.arguments);
                             transcript.push_tool_result_classified(
                                 intent.tool_call_id.clone(),
                                 result,
@@ -745,6 +750,9 @@ impl LoopEngine {
                             );
                         }
                         None => transcript.push_tool_result(intent.tool_call_id.clone(), result),
+                    }
+                    if succeeded {
+                        self.inject_nested_instructions(transcript, &intent.name, path.as_deref());
                     }
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
@@ -756,6 +764,31 @@ impl LoopEngine {
             if let Some(reason) = detector.observe_iteration(graph.as_ref()) {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
             }
+        }
+    }
+
+    /// Injects nested workspace instructions discovered under a touched path.
+    ///
+    /// The tracker deduplicates by content digest and enforces the remaining
+    /// 64 KiB budget, so a long turn cannot replay the same nested file or
+    /// grow the prompt without bound.
+    fn inject_nested_instructions(
+        &self,
+        transcript: &mut Transcript,
+        tool_name: &str,
+        path: Option<&str>,
+    ) {
+        if !touches_workspace_instructions(tool_name) {
+            return;
+        }
+        let Some(path) = path else { return };
+        let Some(tracker) = &self.options.workspace_instructions else { return };
+        let messages = tracker
+            .lock()
+            .expect("workspace instruction tracker poisoned")
+            .discover_for_path(Path::new(path));
+        for message in messages {
+            transcript.push_message(message);
         }
     }
 
@@ -888,6 +921,17 @@ impl LoopEngine {
 /// Replaces a repeated successful web fetch with compact source metadata. The
 /// first matching source remains in the transcript; later observations retain
 /// citation evidence without injecting the same untrusted body again.
+/// Tools whose file access may reveal nested workspace instructions.
+fn touches_workspace_instructions(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file" | "write_file" | "edit_file" | "ee_edit_apply" | "ee_file_outline"
+    ) || tool_name.ends_with("_edit_apply")
+        || tool_name.ends_with("_file_outline")
+        || tool_name.ends_with("_read_file")
+        || tool_name.ends_with("_write_file")
+}
+
 fn compact_repeated_web_fetch(
     intent: &ToolIntent,
     result: ToolResult,

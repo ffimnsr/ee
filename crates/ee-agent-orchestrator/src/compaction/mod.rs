@@ -25,7 +25,8 @@ pub mod pipeline;
 
 pub use pipeline::{
     CompactPlan, CompactionInput, CompactionStageCounts, CompactionStrategy,
-    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy, prune_redundant_readonly_tool_outputs,
+    DEFAULT_KEEP_RECENT_MULTIMODAL_TURNS, DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy,
+    offload_stale_multimodal, prune_redundant_readonly_tool_outputs,
 };
 
 static DEFAULT_STRATEGY: DefaultCompactionStrategy = DefaultCompactionStrategy;
@@ -60,6 +61,10 @@ pub struct CompactionConfig {
     /// summary retains older context in the session memory store.
     #[serde(default = "default_auto_compact_retained_messages")]
     pub auto_retained_messages: usize,
+    /// Most recent user turns whose multimodal blocks stay intact during
+    /// compaction; older binary payloads are replaced with text placeholders.
+    #[serde(default = "default_keep_recent_multimodal_turns")]
+    pub keep_recent_multimodal_turns: usize,
 }
 
 /// Default strategy name for configuration and serde defaults.
@@ -81,6 +86,10 @@ fn default_auto_compact_retained_messages() -> usize {
     DEFAULT_AUTO_COMPACT_RETAINED_MESSAGES
 }
 
+fn default_keep_recent_multimodal_turns() -> usize {
+    DEFAULT_KEEP_RECENT_MULTIMODAL_TURNS
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -89,6 +98,7 @@ impl Default for CompactionConfig {
             strategy: default_compaction_strategy(),
             auto_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             auto_retained_messages: DEFAULT_AUTO_COMPACT_RETAINED_MESSAGES,
+            keep_recent_multimodal_turns: DEFAULT_KEEP_RECENT_MULTIMODAL_TURNS,
         }
     }
 }
@@ -140,6 +150,8 @@ pub struct CompactTurnReport {
     pub pruned_tool_results: usize,
     /// Rewrites caused by byte-identical duplicate read results.
     pub deduped_messages: usize,
+    /// Binary multimodal blocks replaced by deterministic text placeholders.
+    pub offloaded_multimodal: usize,
     /// Oldest messages dropped by the compaction window.
     pub dropped_messages: usize,
 }
@@ -149,12 +161,13 @@ impl CompactTurnReport {
     #[must_use]
     pub fn to_status_text(&self) -> String {
         SensitiveDataGuard::new().redact(&format!(
-            "Session compacted: merged {} duplicate facts, decayed {} low-value observations, preserved {} protected items; pruned {} read-only results ({} exact duplicates); dropped {} old messages; stored {} summary bytes; retained {} context bytes",
+            "Session compacted: merged {} duplicate facts, decayed {} low-value observations, preserved {} protected items; pruned {} read-only results ({} exact duplicates); offloaded {} multimodal blocks; dropped {} old messages; stored {} summary bytes; retained {} context bytes",
             self.merged_duplicates,
             self.decayed_observations,
             self.preserved_protected,
             self.pruned_tool_results,
             self.deduped_messages,
+            self.offloaded_multimodal,
             self.dropped_messages,
             self.summary_bytes,
             self.retained_context_bytes,
@@ -511,6 +524,7 @@ mod tests {
             retained_context_bytes: 4_000,
             pruned_tool_results: 2,
             deduped_messages: 1,
+            offloaded_multimodal: 3,
             dropped_messages: 4,
         };
         let text = report.to_status_text();
@@ -518,6 +532,7 @@ mod tests {
         assert!(text.contains("decayed 1 low-value observations"), "{text}");
         assert!(text.contains("preserved 3 protected items"), "{text}");
         assert!(text.contains("pruned 2 read-only results (1 exact duplicates)"), "{text}");
+        assert!(text.contains("offloaded 3 multimodal blocks"), "{text}");
         assert!(text.contains("dropped 4 old messages"), "{text}");
         assert!(text.contains("stored 120 summary bytes"), "{text}");
         assert!(text.contains("retained 4000 context bytes"), "{text}");

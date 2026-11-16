@@ -90,6 +90,10 @@ pub struct EndpointProfile {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     /// Extension body fields merged into every request, e.g. reasoning shaping.
     pub extensions: Option<Value>,
+    /// Emit Anthropic-style `cache_control` breakpoints on stable prompt
+    /// planes. Opt-in because only Anthropic-compatible routes understand the
+    /// marker; text is never rewritten.
+    pub prompt_cache: bool,
 }
 
 impl EndpointProfile {
@@ -112,6 +116,7 @@ impl EndpointProfile {
             retry: RetryPolicy::none(),
             headers: Vec::new(),
             extensions: None,
+            prompt_cache: false,
         }
     }
 
@@ -147,6 +152,13 @@ impl EndpointProfile {
     #[must_use]
     pub fn with_extensions(mut self, extensions: Value) -> Self {
         self.extensions = Some(extensions);
+        self
+    }
+
+    /// Enables Anthropic-style prompt-cache breakpoints for this route.
+    #[must_use]
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.prompt_cache = enabled;
         self
     }
 }

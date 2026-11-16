@@ -218,15 +218,31 @@ fn emit_final_response(
     )
 }
 
-fn finish_provider_telemetry(
-    recorder: &Arc<Mutex<TelemetryRecorder>>,
-    turn_id: &str,
+/// One turn's telemetry inputs, grouped so the recorder call stays readable.
+struct ProviderTelemetryTurn<'a> {
+    turn_id: &'a str,
     started_at: Instant,
-    events: &[crate::events::OrchestratorEvent],
+    events: &'a [crate::events::OrchestratorEvent],
     outcome: TelemetryTurnOutcome,
     terminal_state: Option<crate::completion::CompletionState>,
     evidence_ids: Vec<String>,
+    /// Provider-reported turn usage, when the ACP result carried it.
+    usage: Option<&'a ee_agent_protocol::Usage>,
+}
+
+fn finish_provider_telemetry(
+    recorder: &Arc<Mutex<TelemetryRecorder>>,
+    turn: ProviderTelemetryTurn<'_>,
 ) {
+    let ProviderTelemetryTurn {
+        turn_id,
+        started_at,
+        events,
+        outcome,
+        terminal_state,
+        evidence_ids,
+        usage,
+    } = turn;
     let mut recorder = recorder.lock().expect("telemetry recorder poisoned");
     let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     let mut operation_id = 1_u64;
@@ -392,6 +408,10 @@ fn finish_provider_telemetry(
             validation_count,
             tool_calls,
             model_calls,
+            cached_input_tokens: usage.and_then(|usage| usage.cached_read_tokens).unwrap_or(0),
+            cache_creation_input_tokens: usage
+                .and_then(|usage| usage.cached_write_tokens)
+                .unwrap_or(0),
             estimated_cost_microusd: 0,
             ..TelemetrySummary::default()
         },
@@ -511,6 +531,7 @@ impl Clone for OrchestratorProvider {
 }
 
 mod agent_impl;
+mod branch_command;
 mod builder;
 mod conversation;
 

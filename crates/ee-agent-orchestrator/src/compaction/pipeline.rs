@@ -11,10 +11,12 @@
 
 use std::collections::HashMap;
 
+use sha2::{Digest, Sha256};
+
 use crate::memory::MemoryStore;
 use crate::memory_compaction::{CompactionReport, MemoryCompactionConfig, compact_memory};
 use crate::model::{
-    ModelContent, ModelMessage, TOOL_PATH_METADATA_KEY, TOOL_SIDE_EFFECT_METADATA_KEY,
+    ModelContent, ModelMessage, ModelRole, TOOL_PATH_METADATA_KEY, TOOL_SIDE_EFFECT_METADATA_KEY,
 };
 use crate::tasks::TaskGraph;
 
@@ -22,6 +24,10 @@ use super::{MAX_RECENT_MESSAGES, build_compaction_context, build_compaction_prom
 
 /// Marker substituted for a duplicate or superseded read-only tool result.
 pub const DUPLICATE_TOOL_RESULT_MARKER: &str = "[... duplicate tool result elided ...]";
+
+/// Default number of most recent user turns whose multimodal payloads stay
+/// intact before compaction offloads older binary blocks.
+pub const DEFAULT_KEEP_RECENT_MULTIMODAL_TURNS: usize = 2;
 
 /// Inputs for one synchronous compaction plan.
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +48,8 @@ pub struct CompactionInput<'a> {
     pub max_input_bytes: usize,
     /// Optional user instructions appended to the compaction prompt.
     pub instructions: Option<&'a str>,
+    /// Number of most recent user turns whose multimodal blocks stay intact.
+    pub keep_recent_multimodal_turns: usize,
 }
 
 /// Per-stage accounting for one compaction plan.
@@ -53,6 +61,8 @@ pub struct CompactionStageCounts {
     pub pruned_tool_results: usize,
     /// Rewrites caused by byte-identical duplicate results.
     pub deduped_messages: usize,
+    /// Binary multimodal blocks replaced by deterministic text placeholders.
+    pub offloaded_multimodal: usize,
     /// Oldest messages dropped by the window stage.
     pub dropped_messages: usize,
     /// Messages retained for the compaction context.
@@ -111,10 +121,15 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             .collect();
         // Stage 2: lossless pruning of read-only tool results.
         let (pruned, pruning) = prune_read_only_results(projected);
+        // Stage 2b: offload stale binary multimodal payloads so the summary
+        // request and retained window keep their context budget. The durable
+        // session log still holds the original bytes for replay and audit.
+        let (offloaded, offloaded_count) =
+            offload_stale_multimodal(pruned, input.keep_recent_multimodal_turns);
         // Stage 3: deterministic window for the retained evidence tail.
-        let dropped = pruned.len().saturating_sub(MAX_RECENT_MESSAGES);
+        let dropped = offloaded.len().saturating_sub(MAX_RECENT_MESSAGES);
         let windowed: Vec<ModelMessage> =
-            pruned.iter().skip(dropped).take(MAX_RECENT_MESSAGES).cloned().collect();
+            offloaded.iter().skip(dropped).take(MAX_RECENT_MESSAGES).cloned().collect();
         let retained_messages = windowed.len();
         // Stage 4: deterministic memory compaction on a clone.
         let mut staged_memory = input.memory.clone();
@@ -126,7 +141,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         let context = build_compaction_context(
             input.tasks,
             &staged_memory,
-            &pruned,
+            &offloaded,
             input.recent_events,
             input.budget,
             input.max_input_bytes,
@@ -140,6 +155,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
                 requested_messages,
                 pruned_tool_results: pruning.pruned,
                 deduped_messages: pruning.deduped,
+                offloaded_multimodal: offloaded_count,
                 dropped_messages: dropped,
                 retained_messages,
                 retained_context_bytes: context.len(),
@@ -166,6 +182,110 @@ pub fn prune_redundant_readonly_tool_outputs(messages: Vec<ModelMessage>) -> Vec
         .map(|message| message.with_pruned_tool_result().unwrap_or(message))
         .collect();
     prune_read_only_results(projected).0
+}
+
+/// Replaces binary multimodal blocks older than the most recent
+/// `keep_recent_user_turns` user turns with deterministic text placeholders.
+///
+/// The durable session log keeps the original bytes, so replay and audit stay
+/// lossless; only the compaction request projection is rewritten. Size is the
+/// decoded payload length, and the short hash is the first 8 SHA-256 bytes of
+/// the encoded payload.
+#[must_use]
+pub fn offload_stale_multimodal(
+    messages: Vec<ModelMessage>,
+    keep_recent_user_turns: usize,
+) -> (Vec<ModelMessage>, usize) {
+    let cutoff = multimodal_retention_start(&messages, keep_recent_user_turns);
+    let mut offloaded = 0usize;
+    let rewritten = messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut message)| {
+            if index >= cutoff {
+                return message;
+            }
+            let content = std::mem::take(&mut message.content);
+            message.content = content
+                .into_iter()
+                .map(|block| match offload_block(&block) {
+                    Some(placeholder) => {
+                        offloaded += 1;
+                        ModelContent::Text(placeholder)
+                    }
+                    None => block,
+                })
+                .collect();
+            message
+        })
+        .collect();
+    (rewritten, offloaded)
+}
+
+/// Index of the first message belonging to the most recent `keep` user turns.
+///
+/// Messages before it are candidates for multimodal offload. Zero retention
+/// keeps nothing intact; a transcript with fewer user turns keeps everything.
+fn multimodal_retention_start(messages: &[ModelMessage], keep: usize) -> usize {
+    if keep == 0 {
+        return messages.len();
+    }
+    let mut seen = 0usize;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if is_user_turn(message) {
+            seen += 1;
+            if seen == keep {
+                return index;
+            }
+        }
+    }
+    0
+}
+
+/// A user turn opens with a user/subagent message that carries text (the
+/// prompt). Standalone media blocks do not open a new turn on their own.
+fn is_user_turn(message: &ModelMessage) -> bool {
+    matches!(message.role, ModelRole::User | ModelRole::Subagent)
+        && message.content.iter().any(|block| matches!(block, ModelContent::Text(_)))
+}
+
+/// Returns a deterministic placeholder for one binary block, or `None` for
+/// blocks that never carry a binary payload.
+fn offload_block(block: &ModelContent) -> Option<String> {
+    match block {
+        ModelContent::Image { data, mime_type, .. } => {
+            Some(multimodal_placeholder("image", mime_type, decoded_base64_len(data), data))
+        }
+        ModelContent::Audio { data, mime_type } => {
+            Some(multimodal_placeholder("audio", mime_type, decoded_base64_len(data), data))
+        }
+        ModelContent::EmbeddedResource { uri, mime_type, blob: Some(blob), .. } => Some(format!(
+            "[resource offloaded: uri={uri}, mime={}, size={}B, sha256={}]",
+            mime_type.as_deref().unwrap_or("application/octet-stream"),
+            decoded_base64_len(blob),
+            short_sha256(blob),
+        )),
+        _ => None,
+    }
+}
+
+fn multimodal_placeholder(kind: &str, mime: &str, size: usize, payload: &str) -> String {
+    format!("[{kind} offloaded: mime={mime}, size={size}B, sha256={}]", short_sha256(payload))
+}
+
+/// First 8 SHA-256 bytes rendered as lowercase hex.
+fn short_sha256(payload: &str) -> String {
+    let digest = Sha256::digest(payload.as_bytes());
+    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Decoded byte length of a base64 payload without allocating.
+fn decoded_base64_len(encoded: &str) -> usize {
+    if encoded.is_empty() {
+        return 0;
+    }
+    let padding = encoded.bytes().rev().take_while(|byte| *byte == b'=').count().min(2);
+    (encoded.len() / 4).saturating_mul(3).saturating_sub(padding)
 }
 
 /// Rewrites only read-only tool results that are exact duplicates or were
@@ -298,6 +418,7 @@ mod tests {
             budget: &budget(),
             max_input_bytes: 64 * 1024,
             instructions: None,
+            keep_recent_multimodal_turns: 2,
         })
     }
 
@@ -389,6 +510,57 @@ mod tests {
     }
 
     #[test]
+    fn stale_multimodal_blocks_are_offloaded_with_deterministic_placeholders() {
+        let memory = MemoryStore::new(4_096);
+        let image = |id: &str, payload: &str| {
+            ModelMessage::new(ModelRole::User).with_content(vec![ModelContent::Image {
+                data: payload.into(),
+                mime_type: "image/png".into(),
+                uri: Some(id.into()),
+            }])
+        };
+        let messages = vec![
+            image("old-1", "AAAA"),
+            ModelMessage::text(ModelRole::Assistant, "looked at it"),
+            image("old-2", "BBBB"),
+            ModelMessage::text(ModelRole::User, "second request"),
+            image("recent-1", "CCCC"),
+            ModelMessage::text(ModelRole::User, "latest request"),
+            image("recent-2", "DDDD"),
+        ];
+
+        let plan = plan(&messages, &memory);
+
+        assert_eq!(plan.counts.offloaded_multimodal, 2, "only stale turns are offloaded");
+        let placeholder = |message: &ModelMessage| match &message.content[0] {
+            ModelContent::Text(text) => text.clone(),
+            other => panic!("expected text placeholder, got {other:?}"),
+        };
+        let first = placeholder(&plan.messages[0]);
+        assert_eq!(first, "[image offloaded: mime=image/png, size=3B, sha256=63c1dd951ffedf6f]");
+        assert!(matches!(plan.messages[4].content[0], ModelContent::Image { .. }));
+        assert!(matches!(plan.messages[6].content[0], ModelContent::Image { .. }));
+    }
+
+    #[test]
+    fn zero_multimodal_retention_offloads_every_binary_block() {
+        let messages = vec![
+            ModelMessage::new(ModelRole::User).with_content(vec![ModelContent::Audio {
+                data: "QUJD".into(),
+                mime_type: "audio/wav".into(),
+            }]),
+            ModelMessage::text(ModelRole::User, "latest"),
+        ];
+
+        let (offloaded, count) = offload_stale_multimodal(messages, 0);
+
+        assert_eq!(count, 1);
+        assert!(
+            matches!(&offloaded[0].content[0], ModelContent::Text(text) if text.starts_with("[audio offloaded: mime=audio/wav, size=3B"))
+        );
+    }
+
+    #[test]
     fn write_execute_and_delegate_results_are_never_pruned() {
         let memory = MemoryStore::new(4_096);
         let messages = vec![
@@ -459,6 +631,7 @@ mod tests {
             budget: &budget(),
             max_input_bytes: 4_096,
             instructions: None,
+            keep_recent_multimodal_turns: 2,
         });
         assert_eq!(plan.counts.pruned_tool_results, 0);
         assert_eq!(plan.counts.deduped_messages, 0);

@@ -79,6 +79,15 @@ fn request_body_carries_instructions_input_items_and_tools() {
 
     assert_eq!(body["model"], "gpt-5.5");
     assert_eq!(body["instructions"], "system");
+    assert!(
+        body["prompt_cache_key"].as_str().is_some_and(|key| key.len() == 32),
+        "deterministic cache key is present"
+    );
+    assert_eq!(
+        body["prompt_cache_key"],
+        request_body("gpt-5.5", "system", &transcript(), &definitions(), false, None)["prompt_cache_key"],
+        "same session configuration yields the same key"
+    );
     assert_eq!(body["stream"], false);
     assert_eq!(body["store"], false);
     assert_eq!(body["tool_choice"], "auto");

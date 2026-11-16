@@ -230,6 +230,7 @@ impl OrchestratorRuntime {
             budget: &budget_snapshot,
             max_input_bytes: self.config.compaction.max_input_bytes,
             instructions: instructions.as_deref(),
+            keep_recent_multimodal_turns: self.config.compaction.keep_recent_multimodal_turns,
         });
         let deterministic = plan.deterministic;
         let counts = plan.counts;
@@ -374,6 +375,7 @@ impl OrchestratorRuntime {
             retained_context_bytes,
             pruned_tool_results: counts.pruned_tool_results,
             deduped_messages: counts.deduped_messages,
+            offloaded_multimodal: counts.offloaded_multimodal,
             dropped_messages: counts.dropped_messages,
         };
         let _ = sink.agent_message_chunk("compact-report", report.to_status_text());

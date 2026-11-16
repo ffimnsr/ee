@@ -135,6 +135,8 @@ fn test_config() -> Config {
         retry_base_delay: Duration::from_millis(1),
         retry_max_delay: Duration::from_millis(10),
         checkpoint_dir: None,
+        session_log_dir: None,
+        session_log_durable: false,
     }
 }
 

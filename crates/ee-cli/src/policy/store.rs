@@ -901,12 +901,9 @@ fn scope_valid(rule: &TrustRule, now: SystemTime) -> bool {
         Some(_) => {}
         None => {}
     }
-    if rule.effect() == super::TrustEffect::Allow
-        && scope.max_uses.is_some_and(|uses| uses > super::rules::MAX_RULE_MAX_USES)
-    {
-        return false;
-    }
-    true
+    // An allow rule above the maximum use count must not be honored.
+    !(rule.effect() == super::TrustEffect::Allow
+        && scope.max_uses.is_some_and(|uses| uses > super::rules::MAX_RULE_MAX_USES))
 }
 
 fn rule_entries<'a>(

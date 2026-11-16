@@ -10,9 +10,10 @@
 //! policy, and every `</system-reminder>` in file content is escaped so a
 //! repository file cannot close the orchestrator-owned frame.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
@@ -86,6 +87,31 @@ struct Budgeted {
 /// and over-budget sources are skipped or truncated instead of failing the
 /// turn: a broken repository file must never block the model call.
 pub(crate) fn discover(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<WorkspaceMessage> {
+    let loaded = discover_files(cwd, workspace_roots);
+    if loaded.is_empty() {
+        return Vec::new();
+    }
+
+    let budgeted = budget(loaded);
+    let path = budgeted
+        .included
+        .iter()
+        .map(|file| file.display_path.clone())
+        .chain(budgeted.omitted.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = ModelMessage::text(ModelRole::User, render(&budgeted))
+        .with_trust(TrustLevel::WorkspaceInstructionUntrusted)
+        .with_metadata([(PROMPT_METADATA_KEY.to_string(), PROMPT_METADATA_VALUE.to_string())]);
+    vec![WorkspaceMessage { path, message }]
+}
+
+/// Loads every turn-start instruction candidate in broad-to-specific order,
+/// deduplicated by trimmed content.
+///
+/// Mid-turn discovery reuses this so both scopes agree on candidates,
+/// canonicalization, and the source byte cap.
+pub(crate) fn discover_files(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<InstructionFile> {
     let mut loaded = Vec::new();
     let mut seen = BTreeSet::new();
     for directory in directory_chain(cwd, workspace_roots) {
@@ -109,22 +135,130 @@ pub(crate) fn discover(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<Workspace
             }
         }
     }
-    if loaded.is_empty() {
-        return Vec::new();
+    loaded
+}
+
+/// Tracks mid-turn instructions discovered beneath `cwd`.
+///
+/// Turn-start discovery walks only the ancestor chain down to `cwd`; in a
+/// monorepo the rules that matter live in nested packages. The tracker is
+/// seeded with every turn-start source digest and the remaining 64 KiB budget,
+/// then injects unseen nested files when a tool touches a path below `cwd`.
+#[derive(Debug)]
+pub(crate) struct WorkspaceInstructionTracker {
+    cwd: PathBuf,
+    roots: Vec<PathBuf>,
+    /// Session-scoped content digests. Shared across turns so a nested file is
+    /// injected exactly once for the whole session, not once per turn.
+    seen: Arc<Mutex<HashSet<[u8; 32]>>>,
+    remaining_bytes: usize,
+}
+
+impl WorkspaceInstructionTracker {
+    /// Builds a tracker with a fresh session-scoped digest set (tests).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new(cwd: &Path, workspace_roots: &[PathBuf]) -> Self {
+        Self::with_seen(cwd, workspace_roots, Arc::new(Mutex::new(HashSet::new())))
     }
 
-    let budgeted = budget(loaded);
-    let path = budgeted
-        .included
-        .iter()
-        .map(|file| file.display_path.clone())
-        .chain(budgeted.omitted.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let message = ModelMessage::text(ModelRole::User, render(&budgeted))
-        .with_trust(TrustLevel::WorkspaceInstructionUntrusted)
-        .with_metadata([(PROMPT_METADATA_KEY.to_string(), PROMPT_METADATA_VALUE.to_string())]);
-    vec![WorkspaceMessage { path, message }]
+    /// Builds a tracker sharing the session's already-injected digest set.
+    #[must_use]
+    pub(crate) fn with_seen(
+        cwd: &Path,
+        workspace_roots: &[PathBuf],
+        seen: Arc<Mutex<HashSet<[u8; 32]>>>,
+    ) -> Self {
+        let loaded = discover_files(cwd, workspace_roots);
+        let used: usize = loaded.iter().map(section_bytes).sum();
+        {
+            let mut seen = seen.lock().expect("workspace instruction digests poisoned");
+            for file in loaded {
+                seen.insert(file.digest);
+            }
+        }
+        let mut roots: Vec<PathBuf> = if workspace_roots.is_empty() {
+            vec![canonical_or_owned(cwd)]
+        } else {
+            workspace_roots.iter().map(|root| canonical_or_owned(root)).collect()
+        };
+        roots.sort();
+        roots.dedup();
+        Self {
+            cwd: canonical_or_owned(cwd),
+            roots,
+            seen,
+            remaining_bytes: INSTRUCTION_TOTAL_BYTES.saturating_sub(used),
+        }
+    }
+
+    /// Discovers instruction files under `path`'s parent that were not part of
+    /// the turn-start snapshot, returning at most one bounded message.
+    ///
+    /// Paths outside every workspace root, at or above `cwd`, and content
+    /// digests already injected are skipped. The returned message is marked as
+    /// a refreshable workspace snapshot so a later turn never replays it.
+    pub(crate) fn discover_for_path(&mut self, path: &Path) -> Vec<ModelMessage> {
+        if self.remaining_bytes <= NOTICE_RESERVE_BYTES + 64 {
+            return Vec::new();
+        }
+        let candidate = if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) };
+        let Ok(candidate) = std::fs::canonicalize(candidate) else { return Vec::new() };
+        let Some(parent) = candidate.parent() else { return Vec::new() };
+        if !parent.starts_with(&self.cwd) || parent == self.cwd {
+            return Vec::new();
+        }
+        let Some(root) = self.roots.iter().find(|root| candidate.starts_with(root)).cloned() else {
+            return Vec::new();
+        };
+
+        let mut directories = Vec::new();
+        let mut current = parent.to_path_buf();
+        while current.starts_with(&self.cwd) && current != self.cwd {
+            directories.push(current.clone());
+            let Some(next) = current.parent() else { break };
+            current = next.to_path_buf();
+        }
+        directories.reverse();
+
+        let mut fresh = Vec::new();
+        for directory in directories {
+            if skipped_path(&directory) {
+                continue;
+            }
+            for name in INSTRUCTION_CANDIDATES {
+                let path = directory.join(name);
+                if let Some(file) = load(&path, &root, false) {
+                    let unseen = self
+                        .seen
+                        .lock()
+                        .expect("workspace instruction digests poisoned")
+                        .insert(file.digest);
+                    if unseen {
+                        fresh.push(file);
+                    }
+                }
+            }
+        }
+        if fresh.is_empty() {
+            return Vec::new();
+        }
+
+        let budgeted = budget_with_limit(fresh, self.remaining_bytes);
+        let used: usize = budgeted.included.iter().map(section_bytes).sum();
+        self.remaining_bytes = self.remaining_bytes.saturating_sub(used);
+        if budgeted.included.is_empty() {
+            return Vec::new();
+        }
+        vec![
+            ModelMessage::text(ModelRole::User, render(&budgeted))
+                .with_trust(TrustLevel::WorkspaceInstructionUntrusted)
+                .with_metadata([(
+                    PROMPT_METADATA_KEY.to_string(),
+                    PROMPT_METADATA_VALUE.to_string(),
+                )]),
+        ]
+    }
 }
 
 /// Builds the broad-to-specific directory chain for every workspace root.
@@ -246,7 +380,15 @@ fn sanitize_config(content: &str) -> String {
 
 /// Keeps the most specific sources that fit, dropping broader files first.
 fn budget(files: Vec<InstructionFile>) -> Budgeted {
-    let mut remaining = INSTRUCTION_TOTAL_BYTES.saturating_sub(NOTICE_RESERVE_BYTES);
+    budget_with_limit(files, INSTRUCTION_TOTAL_BYTES)
+}
+
+/// Keeps the most specific sources that fit inside `total_bytes`.
+///
+/// Mid-turn discovery passes the remaining session budget so injected
+/// instructions never exceed the same 64 KiB contract as turn start.
+fn budget_with_limit(files: Vec<InstructionFile>, total_bytes: usize) -> Budgeted {
+    let mut remaining = total_bytes.saturating_sub(NOTICE_RESERVE_BYTES);
     let mut budgeted = Budgeted::default();
     let mut selected: Vec<InstructionFile> = Vec::new();
 
@@ -420,6 +562,67 @@ mod tests {
         let text = discover_text(root, &cwd);
         assert!(text.contains("Instructions from: RULE.md"));
         assert!(!text.contains("nested/RULE.md"));
+    }
+
+    #[test]
+    fn mid_turn_discovers_nested_instructions_once_per_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let file = root.join("crates/sub/src/lib.rs");
+        write(&file, "fn main() {}");
+        write(&root.join("crates/sub/AGENTS.md"), "nested sub rule");
+
+        let mut tracker = WorkspaceInstructionTracker::new(root, &[root.to_path_buf()]);
+        let first = tracker.discover_for_path(&file);
+        assert_eq!(first.len(), 1);
+        let message = &first[0];
+        assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert_eq!(
+            message.metadata.get("ee_prompt").map(String::as_str),
+            Some("workspace_instructions"),
+            "refreshable marker so a later turn drops the stale snapshot"
+        );
+        let text = message.text_content();
+        assert!(text.contains("Instructions from: crates/sub/AGENTS.md"), "{text}");
+        assert!(text.contains("nested sub rule"), "{text}");
+
+        assert!(
+            tracker.discover_for_path(&file).is_empty(),
+            "the same content hash is never injected twice"
+        );
+
+        // A new turn builds a new tracker but shares the session digest set.
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let mut first =
+            WorkspaceInstructionTracker::with_seen(root, &[root.to_path_buf()], seen.clone());
+        assert_eq!(first.discover_for_path(&file).len(), 1);
+        let mut second = WorkspaceInstructionTracker::with_seen(root, &[root.to_path_buf()], seen);
+        assert!(
+            second.discover_for_path(&file).is_empty(),
+            "nested instructions are injected once per session, not per turn"
+        );
+    }
+
+    #[test]
+    fn mid_turn_ignores_paths_at_or_above_cwd_and_outside_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let cwd = root.join("packages/app");
+        write(&cwd.join("src/main.rs"), "fn main() {}");
+        write(&root.join("packages/AGENTS.md"), "above cwd");
+        let mut tracker = WorkspaceInstructionTracker::new(&cwd, &[root.to_path_buf()]);
+
+        let above = root.join("packages/other.rs");
+        write(&above, "x");
+        assert!(tracker.discover_for_path(&above).is_empty(), "never walks above cwd");
+
+        let outside = tempfile::tempdir().expect("second tempdir");
+        let outside_file = outside.path().join("src/lib.rs");
+        write(&outside_file, "x");
+        assert!(
+            tracker.discover_for_path(&outside_file).is_empty(),
+            "outside every workspace root"
+        );
     }
 
     #[test]

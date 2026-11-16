@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use crate::profile::{EndpointProfile, TokenSource};
 use crate::transport::ChatCompletionsClient;
 use crate::wire::{
-    AssistantTurn, StreamDelta, messages_from_transcript, response_from_turn,
+    AssistantTurn, StreamDelta, messages_from_transcript_with_cache, response_from_turn,
     tools_from_definitions,
 };
 
@@ -136,7 +136,11 @@ impl ModelAdapter for ChatCompletionsAdapter {
             // The credential is checked before any request body exists, and the
             // message names the provider's own environment variable.
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript(&profile.system_prompt, &request.transcript);
+            let messages = messages_from_transcript_with_cache(
+                &profile.system_prompt,
+                &request.transcript,
+                profile.prompt_cache,
+            );
             let tools = tools_from_definitions(&request.tools);
             let answer = tokio::select! {
                 answer = completion(&messages, &tools) => {
@@ -176,7 +180,11 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 return Err(ModelError::Cancelled);
             }
             token().map_err(ModelError::Adapter)?;
-            let messages = messages_from_transcript(&profile.system_prompt, &request.transcript);
+            let messages = messages_from_transcript_with_cache(
+                &profile.system_prompt,
+                &request.transcript,
+                profile.prompt_cache,
+            );
             let tools = tools_from_definitions(&request.tools);
             let answer = tokio::select! {
                 answer = streaming(&messages, &tools, events) => {
@@ -276,6 +284,7 @@ mod tests {
                         input_tokens: Some(7),
                         output_tokens: Some(3),
                         total_tokens: None,
+                        ..Default::default()
                     }),
                 })
             })
