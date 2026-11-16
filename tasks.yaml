@@ -56,10 +56,9 @@ tasks:
     description: Remove ee binaries, plugins, runtime assets, user config, logs, sessions, cached workspace memory, and shell completion hooks. Deletes the secrets vault too.
   install-githooks:
     commands:
-      - rm -rf .git/hooks
-      - mkdir -p .git/hooks
-      - cp -r .githooks/* .git/hooks/
-    description: Install git hooks from the .githooks directory.
+      - git config --local core.hooksPath .githooks
+      - chmod +x .githooks/pre-commit .githooks/record-tests-pass
+    description: Point this clone's local core.hooksPath at the .githooks directory.
   logs:
     commands:
       - |
@@ -141,8 +140,8 @@ tasks:
     description: Open nearest workspace config, or user config fallback, in ee.
   uninstall-githooks:
     commands:
-      - rm -rf .git/hooks
-    description: Uninstall git hooks by removing the .git/hooks directory.
+      - git config --local --unset core.hooksPath || true
+    description: Unset core.hooksPath so this clone stops using the .githooks directory.
   lf:
     commands:
       - |

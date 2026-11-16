@@ -1,0 +1,10 @@
+#!/bin/sh
+# atlas-hook start
+# atlas-hook version: 1
+
+# Installed by atlas. Remove these lines to disable atlas graph updates.
+if command -v atlas >/dev/null 2>&1; then
+    atlas update || true
+    atlas detect-changes || true
+fi
+# atlas-hook end

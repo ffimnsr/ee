@@ -609,7 +609,7 @@ cargo test --quiet -p ee-cli agent_bridge
 
 ### Git hooks
 
-Hooks live in `.githooks/` and install with `mk install-githooks`. Every run, the pre-commit hook compares its installed copy (`.git/hooks/`) against `.githooks/` and warns when they drift apart, so a stale install is always called out with a reinstall hint. The hook runs on every staged Rust change:
+Hooks live in `.githooks/` and install with `mk install-githooks`, which sets the local `core.hooksPath` to `.githooks`. Nothing is copied, so edits and pulls take effect on the next commit; `mk uninstall-githooks` unsets the config again. The hook runs on every staged Rust change:
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the stable toolchain is the default, so no separate `+stable` pass is needed)

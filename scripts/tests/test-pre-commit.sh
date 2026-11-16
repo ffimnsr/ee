@@ -56,40 +56,6 @@ docs_output="$(capture_docs_check_call)"
     [[ "$second" != *"CALL: test"* ]]
 )
 
-# Drift check: silent when installed hooks are missing/synced, warning when
-# the installed copy is out of date.
-(
-    set -euo pipefail
-    source "$hook_path"
-
-    fake_installed="$(mktemp -d)"
-    trap 'rm -rf "$fake_installed"' EXIT
-
-    # No installed-hooks dir at all: silent.
-    installed_dir="$fake_installed/none"
-    export EE_GITHOOKS_INSTALLED_DIR="$installed_dir"
-    [[ -z "$(check_hooks_drift)" ]]
-
-    # Empty installed dir: every hook file missing → warnings + hint.
-    mkdir -p "$installed_dir"
-    drift_out="$(check_hooks_drift)"
-    [[ "$drift_out" == *"warning: installed .git/hooks/pre-commit is out of date"* ]]
-    [[ "$drift_out" == *"warning: installed .git/hooks/lib/githooks.sh is out of date"* ]]
-    [[ "$drift_out" == *"hint: reinstall hooks with: mk install-githooks"* ]]
-
-    # Synced copy: silent.
-    cp "$repo_root/.githooks/pre-commit" "$installed_dir/pre-commit"
-    mkdir -p "$installed_dir/lib"
-    cp "$repo_root/.githooks/lib/githooks.sh" "$installed_dir/lib/githooks.sh"
-    cp "$repo_root/.githooks/record-tests-pass" "$installed_dir/record-tests-pass"
-    [[ -z "$(check_hooks_drift)" ]]
-
-    # One stale file after sync: warning again.
-    printf 'stale\n' >"$installed_dir/pre-commit"
-    drift_out="$(check_hooks_drift)"
-    [[ "$drift_out" == *"warning: installed .git/hooks/pre-commit is out of date"* ]]
-    [[ "$drift_out" != *"lib/githooks.sh is out of date"* ]]
-)
 
 (
     set -euo pipefail

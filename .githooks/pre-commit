@@ -27,32 +27,6 @@ collect_check_scope() {
     done < <(git diff --cached --name-only --diff-filter=ACMR)
 }
 
-githooks_installed_dir() {
-    if [ -n "${EE_GITHOOKS_INSTALLED_DIR:-}" ]; then
-        printf '%s\n' "${EE_GITHOOKS_INSTALLED_DIR}"
-        return 0
-    fi
-    printf '%s\n' "$repo_root/.git/hooks"
-}
-
-# Warn (never block) when the installed hook copy is older than the repo's
-# .githooks/: hooks install by copying, so pulls and edits leave .git/hooks
-# stale until `mk install-githooks` is re-run.
-check_hooks_drift() {
-    local installed_dir file drifted=0
-    installed_dir="$(githooks_installed_dir)"
-    [[ -d "$installed_dir" ]] || return 0
-    for file in pre-commit lib/githooks.sh record-tests-pass; do
-        if ! cmp -s "$repo_root/.githooks/$file" "$installed_dir/$file" 2>/dev/null; then
-            drifted=1
-            echo "[pre-commit] warning: installed .git/hooks/$file is out of date"
-        fi
-    done
-    if [[ "$drifted" -eq 1 ]]; then
-        echo "[pre-commit] hint: reinstall hooks with: mk install-githooks"
-    fi
-}
-
 run_docs_check() {
     # Full workspace, exactly the CI docs job: a scoped run would miss broken
     # links in untouched crates until CI documents the whole workspace.
@@ -61,7 +35,6 @@ run_docs_check() {
 }
 
 main() {
-    check_hooks_drift
     collect_check_scope
 
     if [[ "$needs_rust_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; then
