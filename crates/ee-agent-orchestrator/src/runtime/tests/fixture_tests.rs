@@ -151,12 +151,12 @@ async fn fixture_endless_tool_loop_stops_via_iteration_budget() {
     let events = EventRecorder::new();
     let (_cancel_tx, cancel_rx) = watch::channel(false);
 
-    let error = runtime
+    let result = runtime
         .run_turn_recording(prompt("loop forever"), sink, client, cancel_rx, events.clone())
         .await
-        .expect_err("iteration budget stops the loop");
-    assert!(matches!(error, OrchestratorError::BudgetExceeded(_)));
-    assert_eq!(model.call_count(), 3, "exactly the allowed iterations ran");
+        .expect("the cap produces a summary instead of an error");
+    assert_eq!(result.stop_reason, ee_agent_protocol::StopReason::MaxTurnRequests);
+    assert_eq!(model.call_count(), 4, "three steps plus one summary call");
     let recorded = events.events();
     assert_eq!(
         recorded[0],
@@ -166,23 +166,14 @@ async fn fixture_endless_tool_loop_stops_via_iteration_budget() {
     // Every iteration reserves, calls the model, and executes the tool.
     assert_eq!(
         recorded.iter().filter(|e| matches!(e, OrchestratorEvent::ModelRequested { .. })).count(),
-        3
+        4
     );
     assert_eq!(
         recorded.iter().filter(|e| matches!(e, OrchestratorEvent::ToolStarted { .. })).count(),
         3
     );
-    assert_eq!(recorded[recorded.len() - 3], budget_event(3, 3, 3, 0, 0));
     assert_eq!(
-        recorded[recorded.len() - 2],
-        OrchestratorEvent::ToolFinished {
-            tool_call_id: "tc-2".into(),
-            tool_name: "read_file".into(),
-            success: true,
-        }
-    );
-    assert_eq!(
-        recorded[recorded.len() - 1],
-        OrchestratorEvent::TurnStopped { stop_reason: "budget_exceeded".into() }
+        recorded.last(),
+        Some(&OrchestratorEvent::TurnStopped { stop_reason: "max_iterations".into() })
     );
 }

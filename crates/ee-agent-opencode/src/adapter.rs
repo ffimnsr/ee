@@ -372,6 +372,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 ee_chat_completions::CallOptions {
                     generation: request.generation.as_ref(),
                     session: request.session.as_ref(),
+                    continuation: request.continuation.as_ref(),
                 },
             );
             tokio::select! {
@@ -403,6 +404,19 @@ impl ModelAdapter for OpenCodeModelAdapter {
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(forward_error),
+                StreamDelta::ToolInputStart { id, name } => {
+                    events.tool_input_start(id, name).map_err(forward_error)
+                }
+                StreamDelta::ToolInputDelta { id, text, parsed } => {
+                    events.tool_input_delta(id, text, parsed).map_err(forward_error)
+                }
+                StreamDelta::ToolInputEnd { id } => {
+                    events.tool_input_end(id).map_err(forward_error)
+                }
+                StreamDelta::Usage(usage) => {
+                    events.usage(ee_chat_completions::model_usage_of(usage)).map_err(forward_error)
+                }
+                StreamDelta::Raw { frame } => events.raw(frame).map_err(forward_error),
             };
             let completion = codec.complete_streaming_with_prompt(
                 &request.transcript,
@@ -413,6 +427,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 ee_chat_completions::CallOptions {
                     generation: request.generation.as_ref(),
                     session: request.session.as_ref(),
+                    continuation: request.continuation.as_ref(),
                 },
             );
             tokio::select! {

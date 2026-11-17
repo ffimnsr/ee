@@ -32,6 +32,7 @@ use crate::checkpoint_store::CheckpointHandle;
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
+use crate::loop_control::{MAX_STEPS_PROMPT, validate_finish_reason};
 use crate::memory::MemoryStore;
 use crate::model::{
     ModelAdapter, ModelMessage, ModelRequest, ModelResponse, ModelRole, ModelUsage, Transcript,
@@ -188,6 +189,18 @@ pub(crate) struct LoopEngine {
     memory: Option<Arc<Mutex<MemoryStore>>>,
     checkpoint: Option<CheckpointHandle>,
     resume_state: Option<ResumeState>,
+}
+
+/// Borrowed state for the final text-only call at the iteration cap.
+struct MaxStepsCall<'a> {
+    transcript: &'a mut Transcript,
+    sink: &'a UpdateSink,
+    cancel: &'a watch::Receiver<bool>,
+    task: &'a TaskNode,
+    session: &'a SessionContext,
+    turn_usage: ModelUsage,
+    session_id: &'a str,
+    max_iterations: usize,
 }
 
 impl LoopEngine {
@@ -398,7 +411,13 @@ impl LoopEngine {
             .run_loop_inner(transcript, &track, &sink, &client, cancel, &task, &session_id)
             .await;
         let stop_reason = match &outcome {
-            Ok(_) => "end_turn",
+            Ok(result) => {
+                if result.stop_reason == StopReason::MaxTurnRequests {
+                    "max_iterations"
+                } else {
+                    "end_turn"
+                }
+            }
             Err(OrchestratorError::Cancellation) => "cancelled",
             Err(OrchestratorError::BudgetExceeded(_)) => "budget_exceeded",
             Err(OrchestratorError::DeadlineExceeded(_)) => "deadline_exceeded",
@@ -455,10 +474,34 @@ impl LoopEngine {
                 context
             })
             .unwrap_or_else(|| SessionContext::new(session_id.to_string()));
+        // Provider-side continuation anchor for stateful Responses routes. A
+        // route that does not advertise store support ignores it in the codec.
+        let mut continuation: Option<crate::model::Continuation> = None;
 
         loop {
             if *cancel.borrow() {
                 return Err(OrchestratorError::Cancellation);
+            }
+            // The iteration cap is a budget stop, but the reference agent turns
+            // it into one final text-only call so the user still gets a summary
+            // of completed and remaining work instead of an error.
+            let iteration_cap = {
+                let budget = self.budget.lock().expect("budget tracker poisoned");
+                budget.iteration_cap_reached()
+            };
+            if let Some(max) = iteration_cap {
+                return self
+                    .finish_at_max_steps(MaxStepsCall {
+                        transcript,
+                        sink,
+                        cancel: &cancel,
+                        task,
+                        session: &session,
+                        turn_usage,
+                        session_id,
+                        max_iterations: max,
+                    })
+                    .await;
             }
             // Surface exited background terminal jobs before the next model
             // call so their status and output tail arrive as a bounded notice
@@ -545,7 +588,17 @@ impl LoopEngine {
                     .with_model_id(self.options.model_id.clone())
                     .with_prompt_tokens(measured_prompt_tokens)
                     .with_response_format(self.options.response_format.clone())
-                    .with_session(Some(session.clone()));
+                    .with_session(Some(session.clone()))
+                    .with_continuation(continuation.clone());
+            // A continuation only carries valid indexes when projection did not
+            // drop messages; otherwise the codec would send the wrong delta.
+            if request.continuation.as_ref().is_some_and(|anchor| {
+                request.transcript.len() != transcript.messages().len()
+                    || request.transcript.len() < anchor.input_from
+            }) {
+                request.continuation = None;
+            }
+            let mut sent_messages = request.transcript.len();
             // Structured output is protocol-independent: a hidden tool carries
             // the schema and the forced choice makes the model call it.
             crate::structured_output::prepare(&mut request)
@@ -603,9 +656,11 @@ impl LoopEngine {
                         .with_model_id(self.options.model_id.clone())
                         .with_prompt_tokens(None)
                         .with_response_format(self.options.response_format.clone())
-                        .with_session(Some(session.clone()));
+                        .with_session(Some(session.clone()))
+                        .with_continuation(None);
                         crate::structured_output::prepare(&mut request)
                             .map_err(OrchestratorError::ModelFailure)?;
+                        sent_messages = request.transcript.len();
                     }
                     Err(error) => {
                         self.events.record(OrchestratorEvent::Error { error: error.to_string() });
@@ -621,6 +676,12 @@ impl LoopEngine {
             let mut response = response;
             crate::structured_output::take_object(&request, &mut response)
                 .map_err(OrchestratorError::ModelFailure)?;
+            // An explicit stop reason the loop cannot interpret is a provider
+            // contract violation, never a successful completion.
+            validate_finish_reason(
+                self.options.model_id.as_deref(),
+                response.finish_reason.as_deref(),
+            )?;
             if let Some(reason) = detector.observe_model_response(&response) {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
             }
@@ -659,6 +720,19 @@ impl LoopEngine {
             }
 
             transcript.push_assistant(&response);
+            // The response may be resumable: keep its id plus the first message
+            // the provider has not seen. A route that does not store responses
+            // never emits an id, which clears the anchor and falls back to a
+            // full send on the next step.
+            let next_input_from = if transcript.messages().len() > sent_messages {
+                sent_messages + 1
+            } else {
+                sent_messages
+            };
+            continuation = response
+                .response_id
+                .clone()
+                .map(|id| crate::model::Continuation::new(id, next_input_from));
             // Model response before tools: persist the assistant turn so an
             // interruption after tools leaves a durable transcript tail.
             self.capture_checkpoint(transcript, track, task, false).await;
@@ -761,6 +835,32 @@ impl LoopEngine {
             } else {
                 response.tool_intents
             };
+            // Provider-executed tools (hosted search, code interpreter, MCP) are
+            // recorded once from the provider's own result and never reach the
+            // local executor.
+            let (provider_intents, local_intents): (Vec<ToolIntent>, Vec<ToolIntent>) =
+                intents.into_iter().partition(|intent| intent.provider_executed);
+            for intent in provider_intents {
+                let result = match intent.provider_result.clone() {
+                    Some(value) => {
+                        let text = serde_json::to_string(&value).unwrap_or_default();
+                        ToolResult::success_structured(text, value)
+                    }
+                    None => ToolResult::success("provider executed this tool"),
+                };
+                self.events.record(OrchestratorEvent::ToolStarted {
+                    tool_call_id: intent.tool_call_id.clone(),
+                    tool_name: intent.name.clone(),
+                });
+                self.events.record(OrchestratorEvent::ToolFinished {
+                    tool_call_id: intent.tool_call_id.clone(),
+                    tool_name: intent.name.clone(),
+                    success: result.success,
+                });
+                transcript.push_provider_tool_result(intent.tool_call_id.clone(), result);
+                self.capture_checkpoint(transcript, track, task, false).await;
+            }
+            let intents = local_intents;
             // Read-only batches are independent regardless of which strategy
             // selected the turn; write/execute waves still serialize inside the
             // runner. `read_first` now only controls ordering.
@@ -943,6 +1043,113 @@ impl LoopEngine {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
             }
         }
+    }
+
+    /// Final text-only call once the iteration budget is spent.
+    ///
+    /// Tools are disabled and the summary instruction is appended as an
+    /// assistant message, matching the reference runner: the provider's cached
+    /// tool prefix stays intact and the model can only answer in prose.
+    async fn finish_at_max_steps(
+        &self,
+        input: MaxStepsCall<'_>,
+    ) -> Result<PromptResult, OrchestratorError> {
+        let MaxStepsCall {
+            transcript,
+            sink,
+            cancel,
+            task,
+            session,
+            mut turn_usage,
+            session_id,
+            max_iterations,
+        } = input;
+        if *cancel.borrow() {
+            return Err(OrchestratorError::Cancellation);
+        }
+        let tools: Vec<ToolDefinition> = self
+            .tools
+            .lock()
+            .expect("tool registry poisoned")
+            .definitions()
+            .into_iter()
+            .filter(|tool| {
+                self.options
+                    .visible_tool_names
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&tool.name))
+            })
+            .collect();
+        transcript.push_message(ModelMessage::text(ModelRole::Assistant, MAX_STEPS_PROMPT));
+        let request_messages =
+            crate::compaction::prune_redundant_readonly_tool_outputs(transcript.request_messages());
+        let prepared = crate::prompt_injection::prepare_request(&request_messages);
+        let budget_snapshot = {
+            let mut budget = self.budget.lock().expect("budget tracker poisoned");
+            // The summary is the point of the cap; when the model-call budget is
+            // already spent, stop with the accumulated answer rather than error.
+            if budget.try_reserve_model_call().is_err() {
+                return Ok(prompt_result_with_usage(StopReason::MaxTurnRequests, turn_usage));
+            }
+            budget.snapshot()
+        };
+        let request = ModelRequest::new(prepared.messages, tools, budget_snapshot, task.clone())
+            .with_available_models(self.options.available_models.clone())
+            .with_model_id(self.options.model_id.clone())
+            .with_session(Some(session.clone()))
+            .with_tool_control(crate::model_options::ToolCallControl {
+                choice: crate::model_options::ToolChoice::None,
+                parallel: None,
+            });
+        if let Err(error) = transcript.record_model_request(&request) {
+            self.events.record(OrchestratorEvent::Error { error: error.to_string() });
+            return Err(error);
+        }
+        self.events.record(OrchestratorEvent::ModelRequested { iteration: max_iterations });
+        let message_id = format!("max-steps-{max_iterations}");
+        let response = run_streaming_response(
+            |events| self.model.complete_streaming(request, cancel.clone(), events),
+            Some(sink),
+            cancel,
+            &message_id,
+        )
+        .await?;
+        self.events.record(OrchestratorEvent::ModelResponded { iteration: max_iterations });
+        turn_usage = turn_usage.accumulate(&response.usage);
+        // The summary is recorded like any other round so usage reporting and
+        // the output-byte accounting stay consistent; a budget breach here does
+        // not turn the terminal summary into an error.
+        {
+            let mut budget = self.budget.lock().expect("budget tracker poisoned");
+            let output_bytes =
+                response.text.len() + response.reasoning.as_deref().map_or(0, str::len);
+            let _ = budget.record_model_usage(
+                output_bytes,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            );
+            budget.emit(&self.events);
+        }
+        if let Some(input_tokens) = response.usage.input_tokens {
+            let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
+                input_tokens as u64,
+                self.config.context_window_tokens,
+            )));
+        }
+        if let Some(metrics) = &self.options.metrics {
+            metrics.lock().expect("orchestrator metrics poisoned").record_usage_for_model(
+                self.options.model_id.as_deref().unwrap_or("unknown"),
+                &response.usage,
+            );
+        }
+        transcript.push_assistant(&response);
+        self.events.record(OrchestratorEvent::StepStarted {
+            session_id: session_id.to_string(),
+            task_id: task.id.as_str().to_string(),
+            iteration: max_iterations,
+            advertised_tool_count: 0,
+        });
+        Ok(prompt_result_with_usage(StopReason::MaxTurnRequests, turn_usage))
     }
 
     /// Injects nested workspace instructions discovered under a touched path.
@@ -1604,23 +1811,83 @@ mod tests {
             ModelResponse::new().text("still working"),
             ModelResponse::new().text("still working"),
             ModelResponse::new().text("still working"),
+            ModelResponse::new().text("summary of work"),
         ]);
         let (sink, client, _rx) = plumbing();
         let events = EventRecorder::new();
         let engine = engine_with(config, Arc::new(model.clone()), echo_tool(), events.clone());
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let error = engine.run(prompt("hello world"), sink, client, cancel_rx, task(), None).await;
-        let error = error.expect_err("iteration budget is spent");
-        assert!(
-            matches!(error, OrchestratorError::BudgetExceeded(ref reason) if reason.contains("max loop iterations"))
+        let result = engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("the cap produces a summary, not an error");
+        assert_eq!(result.stop_reason, StopReason::MaxTurnRequests);
+        assert_eq!(model.call_count(), 4, "three steps plus one summary call");
+        let summary = &model.requests()[3];
+        assert_eq!(summary.tool_control.choice, crate::model_options::ToolChoice::None);
+        assert_eq!(
+            summary.transcript.last().map(|message| message.text_content()),
+            Some(crate::loop_control::MAX_STEPS_PROMPT.to_string())
         );
-        assert_eq!(model.call_count(), 3, "never runs past the iteration cap");
         assert!(
-            events.events().contains(&OrchestratorEvent::TurnStopped {
-                stop_reason: "budget_exceeded".into(),
-            })
+            events
+                .events()
+                .contains(&OrchestratorEvent::TurnStopped { stop_reason: "max_iterations".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_finish_reason_is_a_typed_error() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new().text("done").with_finish_reason(Some("bogus".into())),
+        ]);
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model),
+            echo_tool(),
+            EventRecorder::new(),
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect_err("unknown finish reason is rejected");
+        assert!(matches!(error, OrchestratorError::InvalidProviderOutput(_)));
+        assert!(error.to_string().contains("bogus"));
+    }
+
+    #[tokio::test]
+    async fn provider_executed_tool_is_recorded_without_local_dispatch() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new().tool_intents(vec![
+                ToolIntent::new("hosted-1", "web_search", json!({ "query": "rust" }))
+                    .with_provider_executed(true)
+                    .with_provider_result(json!({ "answer": "Rust is a language" })),
+            ]),
+            ModelResponse::new().text("final answer").completed(),
+        ]);
+        let tool = echo_tool();
+        let (sink, client, _rx) = plumbing();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            tool.clone(),
+            EventRecorder::new(),
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("search"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn succeeds");
+
+        assert_eq!(tool.call_count(), 0, "hosted calls never reach the local executor");
+        let second = &model.requests()[1];
+        let tool_messages: Vec<_> =
+            second.transcript.iter().filter(|message| message.role == ModelRole::Tool).collect();
+        assert_eq!(tool_messages.len(), 1, "the provider result appears exactly once");
+        assert!(tool_messages[0].metadata.contains_key(crate::model::PROVIDER_EXECUTED_RESULT_KEY));
     }
 
     #[tokio::test]

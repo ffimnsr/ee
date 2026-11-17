@@ -20,7 +20,7 @@ use ee_agent_opencode::critic::opencode_multi_model_provider_with_codecs;
 use ee_agent_opencode::routes::{
     OpenCodeDialect, OpenCodeRoute, OpenCodeSurface, catalog, resolve_route,
 };
-use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, OrchestratorProvider};
+use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, ModelRole, OrchestratorProvider};
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -966,6 +966,39 @@ async fn sampling_and_phase_budgets_reach_the_routed_profile() {
 
     assert_eq!(result["stopReason"], "end_turn");
     assert_eq!(codec.requests().len(), 1, "the turn still runs one model round");
+
+    harness.shutdown(task).await;
+}
+
+#[tokio::test]
+async fn provider_executed_tool_result_reaches_the_next_request() {
+    let dirs = TestDirs::new();
+    let (codec, harness, task) = spawn_agent(
+        OpenCodeSurface::Zen,
+        OpenCodeDialect::OpenAiResponses,
+        vec![
+            ScriptedAnswer::hosted_tool_call("hosted-1", "web_search", json!({ "answer": "ok" })),
+            ScriptedAnswer::text("done"),
+        ],
+        &dirs,
+    );
+    initialize(&harness).await;
+    let session_id = new_session(&harness, 2).await;
+    harness.send(request(3, "session/prompt", prompt_params(&session_id, "search")));
+    drain_prompt_start(&harness).await;
+    let (_updates, result) = harness.collect_until_response(3).await;
+
+    assert_eq!(result["stopReason"], "end_turn");
+    let requests = codec.requests();
+    assert_eq!(requests.len(), 2, "the hosted call still asks the model for a final answer");
+    let provider_results: Vec<_> =
+        requests[1].transcript.iter().filter(|message| message.role == ModelRole::Tool).collect();
+    assert_eq!(provider_results.len(), 1, "the provider result appears exactly once");
+    assert!(
+        provider_results[0]
+            .metadata
+            .contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
+    );
 
     harness.shutdown(task).await;
 }

@@ -149,15 +149,13 @@ async fn runtime_stops_when_loop_iteration_budget_exhausted() {
     runtime.register_tool(tool).expect("registers echo");
 
     let (_cancel_tx, cancel_rx) = watch::channel(false);
-    let error = runtime
+    let result = runtime
         .run_turn(prompt("hello world"), sink, client, cancel_rx)
         .await
-        .expect_err("iteration budget must stop the loop");
-    assert!(
-        matches!(error, OrchestratorError::BudgetExceeded(ref reason) if reason.contains("max loop iterations"))
-    );
-    // Two iterations ran (both model calls happened); the third was denied.
-    assert_eq!(model.requests().len(), 2);
+        .expect("the cap produces a summary instead of an error");
+    assert_eq!(result.stop_reason, ee_agent_protocol::StopReason::MaxTurnRequests);
+    // Two iterations ran, then one final text-only summary call.
+    assert_eq!(model.requests().len(), 3);
 }
 
 #[tokio::test]

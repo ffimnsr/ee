@@ -13,6 +13,7 @@
 //! it was cancelled.
 
 use ee_agent_acp_server::UpdateSink;
+use ee_agent_protocol::{SessionUpdate, ToolCallUpdate, ToolCallUpdateFields, ToolKind};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
@@ -27,6 +28,34 @@ pub enum StreamEvent {
     TextChunk(String),
     /// A partial reasoning chunk.
     ReasoningChunk(String),
+    /// A tool call started streaming its arguments.
+    ToolInputStart {
+        /// Provider-assigned call id.
+        id: String,
+        /// Requested function name.
+        name: String,
+    },
+    /// One partial tool-argument chunk.
+    ToolInputDelta {
+        /// Provider-assigned call id.
+        id: String,
+        /// Raw JSON text appended by this chunk.
+        text: String,
+        /// Best-effort preview of the arguments so far; display-only.
+        parsed: Option<serde_json::Value>,
+    },
+    /// A tool call finished streaming its arguments.
+    ToolInputEnd {
+        /// Provider-assigned call id.
+        id: String,
+    },
+    /// Token usage reported mid-stream.
+    Usage(crate::model::ModelUsage),
+    /// One raw provider frame, emitted only when the profile opts in.
+    Raw {
+        /// Verbatim frame text.
+        frame: String,
+    },
 }
 
 /// Boxed future returned by [`StreamingModelAdapter::complete_streaming`].
@@ -66,6 +95,40 @@ impl StreamSink {
     /// Emits one partial reasoning chunk.
     pub fn reasoning(&self, chunk: impl Into<String>) -> Result<(), ModelError> {
         self.send(StreamEvent::ReasoningChunk(chunk.into()))
+    }
+
+    /// Announces a tool call whose arguments are streaming.
+    pub fn tool_input_start(
+        &self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<(), ModelError> {
+        self.send(StreamEvent::ToolInputStart { id: id.into(), name: name.into() })
+    }
+
+    /// Emits one partial tool-argument chunk with its display-only preview.
+    pub fn tool_input_delta(
+        &self,
+        id: impl Into<String>,
+        text: impl Into<String>,
+        parsed: Option<serde_json::Value>,
+    ) -> Result<(), ModelError> {
+        self.send(StreamEvent::ToolInputDelta { id: id.into(), text: text.into(), parsed })
+    }
+
+    /// Closes a streamed tool call's arguments.
+    pub fn tool_input_end(&self, id: impl Into<String>) -> Result<(), ModelError> {
+        self.send(StreamEvent::ToolInputEnd { id: id.into() })
+    }
+
+    /// Reports token usage observed mid-stream.
+    pub fn usage(&self, usage: crate::model::ModelUsage) -> Result<(), ModelError> {
+        self.send(StreamEvent::Usage(usage))
+    }
+
+    /// Emits one raw provider frame; callers gate this to debug profiles.
+    pub fn raw(&self, frame: impl Into<String>) -> Result<(), ModelError> {
+        self.send(StreamEvent::Raw { frame: frame.into() })
     }
 
     fn send(&self, event: StreamEvent) -> Result<(), ModelError> {
@@ -116,6 +179,8 @@ pub struct StreamedTurn {
     pub reasoning_chunks: usize,
     /// Whether consumption stopped early on cancellation.
     pub cancelled: bool,
+    /// Latest usage observed mid-stream, when the provider reported one.
+    pub usage: Option<crate::model::ModelUsage>,
 }
 
 impl StreamedTurn {
@@ -151,6 +216,7 @@ impl StreamConsumer {
             text_chunks: 0,
             reasoning_chunks: 0,
             cancelled: false,
+            usage: None,
         };
         loop {
             if *cancel.borrow() {
@@ -190,6 +256,36 @@ impl StreamConsumer {
                     }
                     turn.reasoning.push_str(&chunk);
                     turn.reasoning_chunks += 1;
+                }
+                StreamEvent::ToolInputStart { id, name } => {
+                    let delivered = updates.is_none_or(|updates| {
+                        updates.tool_call_pending(id.clone(), name.clone(), ToolKind::Other).is_ok()
+                    });
+                    if !delivered {
+                        turn.cancelled = true;
+                        break;
+                    }
+                }
+                StreamEvent::ToolInputDelta { id, text, parsed } => {
+                    let delivered = updates.is_none_or(|updates| {
+                        let raw = parsed.unwrap_or(serde_json::Value::String(text));
+                        let update = ToolCallUpdate::new(
+                            id.clone(),
+                            ToolCallUpdateFields::new().raw_input(raw),
+                        );
+                        updates.raw_update(SessionUpdate::ToolCallUpdate(update)).is_ok()
+                    });
+                    if !delivered {
+                        turn.cancelled = true;
+                        break;
+                    }
+                }
+                StreamEvent::ToolInputEnd { .. } => {}
+                StreamEvent::Usage(usage) => turn.usage = Some(usage),
+                StreamEvent::Raw { frame } => {
+                    // Raw frames may carry user data; apply the same redaction
+                    // rules as error text even though nothing consumes them yet.
+                    let _ = crate::sensitive_data::SensitiveDataGuard::new().redact(&frame);
                 }
             }
         }
@@ -297,6 +393,7 @@ mod tests {
             allow_tool_list_updates: false,
             generation: None,
             session: None,
+            continuation: None,
         }
     }
 
@@ -331,6 +428,15 @@ mod tests {
                     match &chunk {
                         StreamEvent::TextChunk(text) => events.text(text)?,
                         StreamEvent::ReasoningChunk(reasoning) => events.reasoning(reasoning)?,
+                        StreamEvent::ToolInputStart { id, name } => {
+                            events.tool_input_start(id.clone(), name.clone())?
+                        }
+                        StreamEvent::ToolInputDelta { id, text, parsed } => {
+                            events.tool_input_delta(id.clone(), text.clone(), parsed.clone())?
+                        }
+                        StreamEvent::ToolInputEnd { id } => events.tool_input_end(id.clone())?,
+                        StreamEvent::Usage(usage) => events.usage(*usage)?,
+                        StreamEvent::Raw { frame } => events.raw(frame.clone())?,
                     }
                 }
                 Ok(final_response)
@@ -508,6 +614,7 @@ mod tests {
             text_chunks: 1,
             reasoning_chunks: 1,
             cancelled: false,
+            usage: None,
         };
         let response = turn.into_model_response();
         assert_eq!(response.text, "answer");
@@ -518,6 +625,7 @@ mod tests {
             text_chunks: 0,
             reasoning_chunks: 0,
             cancelled: false,
+            usage: None,
         };
         let response = empty.into_model_response();
         assert_eq!(response.text, "");

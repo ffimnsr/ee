@@ -216,6 +216,15 @@ async fn run_prompt(
                     ))
                 })
             }
+            // Tool arguments are preview-only on this path: the completed
+            // response carries the authoritative call, so these add no UI by
+            // themselves. Usage, raw frames, and tool-input boundaries are
+            // consumed by the orchestrator adapter, not this standalone loop.
+            OpenRouterStreamDelta::ToolInputStart { .. }
+            | OpenRouterStreamDelta::ToolInputDelta { .. }
+            | OpenRouterStreamDelta::ToolInputEnd { .. }
+            | OpenRouterStreamDelta::Usage(_)
+            | OpenRouterStreamDelta::Raw { .. } => Ok(()),
         };
         let answer =
             turn.client.complete_streaming(&messages, &openrouter_tools(), &mut on_delta).await?;

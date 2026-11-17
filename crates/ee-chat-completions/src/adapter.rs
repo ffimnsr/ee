@@ -20,7 +20,8 @@ use crate::profile::{EndpointProfile, TokenSource};
 use crate::responses::ResponsesCodec;
 use crate::transport::{ChatCompletionsClient, ChatRequest, EndpointTransport};
 use crate::wire::{
-    AssistantTurn, ChatRequestParts, StreamDelta, chat_request_parts, response_from_turn,
+    AssistantTurn, ChatRequestParts, StreamDelta, chat_request_parts, model_usage_of,
+    response_from_turn,
 };
 
 /// Boxed future returned by an injected completion client.
@@ -86,7 +87,6 @@ impl ChatCompletionsAdapter {
         token: TokenSource,
         client: ChatCompletionsClient,
     ) -> Self {
-        let label = profile.label.clone();
         let buffered = client.clone();
         let completion: Arc<CompletionClient> = Arc::new(move |request| {
             let client = buffered.clone();
@@ -95,20 +95,8 @@ impl ChatCompletionsAdapter {
         let forwarding = client;
         let streaming: Arc<StreamingClient> = Arc::new(move |request, events| {
             let client = forwarding.clone();
-            let label = label.clone();
             Box::pin(async move {
-                let mut sink = |delta: StreamDelta| match delta {
-                    StreamDelta::Text(text) => events.text(text).map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to forward {label} text stream: {error}"
-                        ))
-                    }),
-                    StreamDelta::Reasoning(text) => events.reasoning(text).map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to forward {label} reasoning stream: {error}"
-                        ))
-                    }),
-                };
+                let mut sink = |delta: StreamDelta| forward_delta(delta, &events);
                 client.complete_streaming_request(&request, &mut sink).await
             })
         });
@@ -275,21 +263,46 @@ impl ModelAdapter for ResponsesAdapter {
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let profile = codec.profile();
             let generation = merged_generation(profile, &request)?;
-            let mut sink = |delta: StreamDelta| match delta {
-                StreamDelta::Text(text) => events.text(text).map_err(sink_error),
-                StreamDelta::Reasoning(text) => events.reasoning(text).map_err(sink_error),
+            let mut sink = |delta: StreamDelta| forward_delta(delta, &events);
+            let completion = async move {
+                let mut request = request;
+                let first = codec
+                    .complete_streaming_controlled(
+                        &request.transcript,
+                        &request.tools,
+                        &request.tool_control,
+                        &mut sink,
+                        request.prompt_tokens,
+                        crate::CallOptions {
+                            generation: (!generation.is_empty()).then_some(&generation),
+                            session: request.session.as_ref(),
+                            continuation: request.continuation.as_ref(),
+                        },
+                    )
+                    .await;
+                match first {
+                    // A stale anchor is retried once with the full transcript;
+                    // the failure is typed, never string-matched.
+                    Err(ProviderError::StaleContinuation(_)) if request.continuation.is_some() => {
+                        request.continuation = None;
+                        codec
+                            .complete_streaming_controlled(
+                                &request.transcript,
+                                &request.tools,
+                                &request.tool_control,
+                                &mut sink,
+                                request.prompt_tokens,
+                                crate::CallOptions {
+                                    generation: (!generation.is_empty()).then_some(&generation),
+                                    session: request.session.as_ref(),
+                                    continuation: None,
+                                },
+                            )
+                            .await
+                    }
+                    other => other,
+                }
             };
-            let completion = codec.complete_streaming_controlled(
-                &request.transcript,
-                &request.tools,
-                &request.tool_control,
-                &mut sink,
-                request.prompt_tokens,
-                crate::CallOptions {
-                    generation: (!generation.is_empty()).then_some(&generation),
-                    session: request.session.as_ref(),
-                },
-            );
             tokio::select! {
                 response = completion => response.map_err(response_error),
                 () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
@@ -302,6 +315,25 @@ impl ModelAdapter for ResponsesAdapter {
 /// leaking the dropped channel's contents.
 fn sink_error(error: ModelError) -> ProviderError {
     ProviderError::BackendFailure(format!("streamed update was rejected: {error}"))
+}
+
+/// Forwards one wire delta onto the orchestrator's stream sink.
+///
+/// Tool-input deltas are display-only: the final parsed arguments still arrive
+/// with the completed response, so a preview can never be executed.
+fn forward_delta(delta: StreamDelta, events: &StreamSink) -> Result<(), ProviderError> {
+    let result = match delta {
+        StreamDelta::Text(text) => events.text(text),
+        StreamDelta::Reasoning(text) => events.reasoning(text),
+        StreamDelta::ToolInputStart { id, name } => events.tool_input_start(id, name),
+        StreamDelta::ToolInputDelta { id, text, parsed } => {
+            events.tool_input_delta(id, text, parsed)
+        }
+        StreamDelta::ToolInputEnd { id } => events.tool_input_end(id),
+        StreamDelta::Usage(usage) => events.usage(model_usage_of(usage)),
+        StreamDelta::Raw { frame } => events.raw(frame),
+    };
+    result.map_err(sink_error)
 }
 
 /// Maps a Responses codec failure onto the orchestrator's error type.
@@ -456,6 +488,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: None,
+                    response_id: None,
                 })
             })
         });
@@ -506,6 +539,7 @@ mod tests {
                         total_tokens: None,
                         ..Default::default()
                     }),
+                    response_id: None,
                 })
             })
         });
@@ -544,6 +578,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: None,
+                    response_id: None,
                 })
             })
         });
@@ -583,6 +618,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     finish_reason: Some(String::from("stop")),
                     usage: None,
+                    response_id: None,
                 })
             })
         });

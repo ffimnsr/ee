@@ -51,6 +51,15 @@ pub const TOOL_RESULT_PRUNE_MARKER: &str = "\n\n[... tool result middle pruned .
 
 /// Message metadata key: the tool name that produced a result.
 pub const TOOL_NAME_METADATA_KEY: &str = "tool_name";
+
+/// Metadata key prefix marking an assistant tool call as provider-executed.
+///
+/// The suffix is the tool-call id, so one assistant message can carry several
+/// provider-executed calls without a delimiter scheme.
+pub const PROVIDER_EXECUTED_METADATA_PREFIX: &str = "provider_executed:";
+
+/// Metadata key marking a tool-result message as provider-produced.
+pub const PROVIDER_EXECUTED_RESULT_KEY: &str = "provider_executed";
 /// Message metadata key: the tool's side-effect class label.
 pub const TOOL_SIDE_EFFECT_METADATA_KEY: &str = "tool_side_effect";
 /// Message metadata key: the primary path argument of a read/write tool.
@@ -366,6 +375,9 @@ pub struct ModelRequest {
     /// `None` emits no session headers and falls back to the profile cache key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<crate::session_context::SessionContext>,
+    /// Provider-side response continuation for stateful routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
 }
 
 impl ModelRequest {
@@ -391,6 +403,7 @@ impl ModelRequest {
             allow_tool_list_updates: false,
             generation: None,
             session: None,
+            continuation: None,
         }
     }
 
@@ -454,8 +467,16 @@ impl ModelRequest {
         self.session = session;
         self
     }
+
+    /// Sets the provider-side continuation anchor for this request.
+    #[must_use]
+    pub fn with_continuation(mut self, continuation: Option<Continuation>) -> Self {
+        self.continuation = continuation;
+        self
+    }
 }
 
+pub use crate::continuation::Continuation;
 pub use crate::usage::ModelUsage;
 
 /// Builds an ACP prompt result, attaching reported token usage when known.
@@ -492,6 +513,10 @@ pub struct ModelResponse {
     /// Decoded structured-output object, when the request asked for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<serde_json::Value>,
+    /// Provider response id usable as a continuation anchor, when the route
+    /// stores responses server-side. `None` for stateless routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
     /// Reported token usage; unknown fields stay `None`.
     pub usage: ModelUsage,
 }
@@ -508,6 +533,7 @@ impl ModelResponse {
             finish_reason: None,
             native: None,
             structured_output: None,
+            response_id: None,
             usage: ModelUsage::new(),
         }
     }
@@ -516,6 +542,13 @@ impl ModelResponse {
     #[must_use]
     pub fn with_native(mut self, native: Option<OpaqueProviderState>) -> Self {
         self.native = native;
+        self
+    }
+
+    /// Sets the provider response id used for continuation.
+    #[must_use]
+    pub fn with_response_id(mut self, response_id: Option<String>) -> Self {
+        self.response_id = response_id;
         self
     }
 
@@ -731,6 +764,20 @@ impl Transcript {
             return;
         }
         let mut message = ModelMessage::new(ModelRole::Assistant).with_content(content);
+        let provider_ids: Vec<(String, String)> = response
+            .tool_intents
+            .iter()
+            .filter(|intent| intent.provider_executed)
+            .map(|intent| {
+                (
+                    format!("{PROVIDER_EXECUTED_METADATA_PREFIX}{}", intent.tool_call_id),
+                    String::from("true"),
+                )
+            })
+            .collect();
+        if !provider_ids.is_empty() {
+            message = message.with_metadata(provider_ids);
+        }
         if let Some(reasoning) = response.reasoning.as_deref() {
             message = message.with_reasoning_summary(reasoning);
         }
@@ -775,6 +822,25 @@ impl Transcript {
         let tool_call_id = tool_call_id.into();
         self.messages
             .push(ModelMessage::tool_result(tool_call_id.clone(), result).with_metadata(entries));
+        let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
+        self.log_ids.push(id);
+    }
+
+    /// Appends a provider-executed tool's result.
+    ///
+    /// The message is marked so a re-encoded request never synthesizes a local
+    /// `function_call_output` for a call the provider already ran.
+    pub fn push_provider_tool_result(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        mut result: ToolResult,
+    ) {
+        crate::tool_output::apply_to_result(&mut result, self.tool_output, self.log.as_deref());
+        let tool_call_id = tool_call_id.into();
+        self.messages.push(
+            ModelMessage::tool_result(tool_call_id.clone(), result)
+                .with_metadata([(PROVIDER_EXECUTED_RESULT_KEY.to_string(), String::from("true"))]),
+        );
         let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
         self.log_ids.push(id);
     }
@@ -1047,6 +1113,7 @@ mod tests {
             allow_tool_list_updates: false,
             generation: None,
             session: None,
+            continuation: None,
         }
     }
 

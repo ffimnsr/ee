@@ -104,6 +104,7 @@ fn turn(text: &str) -> AssistantTurn {
         tool_calls: Vec::new(),
         finish_reason: Some(String::from("stop")),
         usage: None,
+        response_id: None,
     }
 }
 

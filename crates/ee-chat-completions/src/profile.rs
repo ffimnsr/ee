@@ -245,6 +245,8 @@ pub struct CallOptions<'a> {
     pub generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     /// Session affinity for headers and the prompt-cache key.
     pub session: Option<&'a ee_agent_orchestrator::SessionContext>,
+    /// Provider-side continuation anchor for stateful Responses routes.
+    pub continuation: Option<&'a ee_agent_orchestrator::Continuation>,
 }
 
 /// Everything a provider must supply for its Chat Completions endpoint.
@@ -310,6 +312,13 @@ pub struct EndpointProfile {
     pub session_header_style: SessionHeaderStyle,
     /// `User-Agent` sent with every request; binary name and version only.
     pub user_agent: String,
+    /// Whether the route stores responses server-side, enabling
+    /// `previous_response_id` continuation. Off by default: a route that does
+    /// not advertise state must never receive a continuation anchor.
+    pub store_responses: bool,
+    /// Emit raw SSE frames as `StreamDelta::Raw`. Debug-only: frames may carry
+    /// user data, so this stays off unless a caller opts in.
+    pub raw_stream_events: bool,
 }
 
 /// How provider-specific session header names are spelled.
@@ -364,7 +373,23 @@ impl EndpointProfile {
             session_headers: true,
             session_header_style: SessionHeaderStyle::default(),
             user_agent: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            store_responses: false,
+            raw_stream_events: false,
         }
+    }
+
+    /// Declares whether the route stores responses for continuation.
+    #[must_use]
+    pub fn with_store_responses(mut self, store: bool) -> Self {
+        self.store_responses = store;
+        self
+    }
+
+    /// Enables raw stream-frame emission for debugging.
+    #[must_use]
+    pub fn with_raw_stream_events(mut self, enabled: bool) -> Self {
+        self.raw_stream_events = enabled;
+        self
     }
 
     /// Enables or disables session affinity headers.

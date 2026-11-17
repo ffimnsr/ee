@@ -121,6 +121,9 @@ pub enum ProviderError {
     },
     /// The provider rejected the request on content-policy grounds.
     ContentPolicy(String),
+    /// A provider-side response continuation id is no longer known (expired or
+    /// already consumed). The caller replays the full request once.
+    StaleContinuation(String),
     /// A failure before or while the request crossed the network.
     Transport {
         /// Whether the provider received and ran the request.
@@ -246,7 +249,8 @@ impl ProviderError {
             Self::InvalidRequest(_)
             | Self::ContextOverflow(_)
             | Self::PayloadTooLarge(_)
-            | Self::ContentPolicy(_) => -32600,
+            | Self::ContentPolicy(_)
+            | Self::StaleContinuation(_) => -32600,
             Self::BackendFailure(_) | Self::ClientRequestFailure(_) => -32603,
             Self::Cancellation => CODE_REQUEST_CANCELLED,
             Self::PermissionDenied(_) => CODE_PERMISSION_DENIED,
@@ -276,6 +280,9 @@ impl ProviderError {
             Self::PayloadTooLarge(detail) => format!("request payload too large: {detail}"),
             Self::QuotaExceeded { detail, .. } => format!("provider quota exhausted: {detail}"),
             Self::ContentPolicy(detail) => format!("content policy rejection: {detail}"),
+            Self::StaleContinuation(detail) => {
+                format!("stale response continuation: {detail}")
+            }
             Self::Transport { delivery, detail, .. } => {
                 format!("transport failure ({delivery:?}): {detail}")
             }
@@ -373,6 +380,9 @@ impl fmt::Display for ProviderError {
             Self::PayloadTooLarge(detail) => write!(f, "request payload too large: {detail}"),
             Self::QuotaExceeded { detail, .. } => write!(f, "provider quota exhausted: {detail}"),
             Self::ContentPolicy(detail) => write!(f, "content policy rejection: {detail}"),
+            Self::StaleContinuation(detail) => {
+                write!(f, "stale response continuation: {detail}")
+            }
             Self::Transport { delivery, detail, .. } => {
                 write!(f, "transport failure ({delivery:?}): {detail}")
             }

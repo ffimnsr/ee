@@ -35,11 +35,13 @@ mod error_classification;
 pub mod generation;
 pub mod merge;
 pub mod native;
+pub mod partial_json;
 pub mod profile;
 pub mod provider_options;
 mod reasoning_replay;
 mod request;
 pub mod responses;
+mod responses_wire;
 pub mod session;
 pub mod transport;
 pub mod wire;
@@ -60,6 +62,7 @@ pub use generation::{
 };
 pub use merge::{MAX_MERGE_DEPTH, MAX_MERGE_NODES, deep_merge};
 pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
+pub use partial_json::{MAX_PARTIAL_JSON_BYTES, parse_partial};
 pub use profile::{
     BearerToken, CallOptions, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy,
     SessionHeaderStyle, Timeouts, TokenSource,
@@ -80,7 +83,8 @@ pub use wire::{
     chat_request_parts, classify_http_error, classify_status_error, content_has_media,
     content_parts, content_text, decode_message, emit_finished_deltas, http_error_message,
     is_retryable, messages_from_transcript, messages_from_transcript_replaying,
-    messages_from_transcript_with_cache, parse_retry_after, request_body, response_from_turn,
-    retry_after_of, retry_delay, timeout_phase, tool_call_id_of, tool_choice_value,
-    tools_from_definitions, tools_from_definitions_with, usage_from_tokens,
+    messages_from_transcript_with_cache, model_usage_of, parse_arguments_checked,
+    parse_retry_after, request_body, response_from_turn, retry_after_of, retry_delay,
+    timeout_phase, tool_call_id_of, tool_choice_value, tools_from_definitions,
+    tools_from_definitions_with, usage_from_tokens,
 };

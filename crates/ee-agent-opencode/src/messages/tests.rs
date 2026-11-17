@@ -368,13 +368,14 @@ async fn stream_lifecycle_maps_deltas_usage_and_stop_reason() {
     let (response, deltas) = decode_stream(stream).await.expect("decodes");
 
     assert_eq!(
-        deltas,
-        vec![
+        deltas[..3],
+        [
             StreamDelta::Reasoning(String::from("hmm ")),
             StreamDelta::Text(String::from("ans")),
             StreamDelta::Text(String::from("wer")),
         ]
     );
+    assert!(matches!(deltas.last(), Some(StreamDelta::Usage(_))));
     assert_eq!(response.text, "answer");
     assert_eq!(response.reasoning.as_deref(), Some("hmm "));
     assert!(response.completed);
@@ -411,7 +412,15 @@ async fn stream_fragmented_tool_input_is_reassembled_across_byte_boundaries() {
 
     let (response, deltas) = decode_stream(stream).await.expect("decodes");
 
-    assert!(deltas.is_empty(), "tool input never reaches the sink before the call is complete");
+    assert!(
+        deltas.iter().all(|delta| matches!(
+            delta,
+            StreamDelta::ToolInputStart { .. }
+                | StreamDelta::ToolInputDelta { .. }
+                | StreamDelta::ToolInputEnd { .. }
+        )),
+        "only display-only tool-input events stream before the call completes: {deltas:?}"
+    );
     assert_eq!(response.tool_intents.len(), 1);
     assert_eq!(response.tool_intents[0].tool_call_id, "toolu_1");
     assert_eq!(response.tool_intents[0].arguments["path"], "café.txt");

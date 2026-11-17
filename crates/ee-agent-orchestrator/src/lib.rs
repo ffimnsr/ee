@@ -183,6 +183,7 @@ pub mod config;
 pub mod context_budget;
 pub mod context_pack;
 pub mod context_planner;
+pub mod continuation;
 pub mod critic_observability;
 pub mod critique;
 pub mod decision_log;
@@ -198,6 +199,7 @@ pub mod fanout_fanin;
 pub mod final_response;
 pub mod generation;
 pub mod issue_integration;
+pub mod loop_control;
 pub mod loop_engine;
 pub mod loop_hooks;
 pub mod mcp;
@@ -381,6 +383,9 @@ pub use issue_integration::{
     CRITERIA_KEY_MARKER, ChecklistEdit, ChecklistItem, IssueChecklist, IssueChecklistConfig,
     is_configured,
 };
+pub use loop_control::{
+    MAX_STEPS_PROMPT, RetryKind, StepOutcome, is_known_finish_reason, validate_finish_reason,
+};
 pub use loop_hooks::{UntilFn, UntilPredicate};
 pub use mcp::{McpToolClassSpec, McpToolPolicy};
 pub use memory::{MemoryItem, MemoryStore};
@@ -395,9 +400,10 @@ pub use milestones::{
     MilestoneObservation, MilestoneSummary, MilestoneTracker, store_observation,
 };
 pub use model::{
-    ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage, ModelRequest,
-    ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
-    OUTPUT_LIMIT_MIN, OpaqueProviderState, ResponseFormat, ToolCallControl, ToolChoice, Transcript,
+    Continuation, ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage,
+    ModelRequest, ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
+    OUTPUT_LIMIT_MIN, OpaqueProviderState, PROVIDER_EXECUTED_METADATA_PREFIX,
+    PROVIDER_EXECUTED_RESULT_KEY, ResponseFormat, ToolCallControl, ToolChoice, Transcript,
     TranscriptTruncation, compaction_threshold_tokens, estimate_json_prompt_tokens,
     estimate_prompt_tokens, fit_output_limit, validate_tool_names,
 };

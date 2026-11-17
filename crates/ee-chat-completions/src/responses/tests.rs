@@ -340,13 +340,14 @@ async fn stream_text_and_reasoning_deltas_reach_the_sink_in_order() {
     let (response, deltas) = decode_stream(stream).await.expect("decodes");
 
     assert_eq!(
-        deltas,
-        vec![
+        deltas[..3],
+        [
             StreamDelta::Reasoning(String::from("think ")),
             StreamDelta::Text(String::from("ans")),
             StreamDelta::Text(String::from("wer")),
         ]
     );
+    assert!(matches!(deltas.last(), Some(StreamDelta::Usage(_))));
     assert_eq!(response.text, "answer");
     assert_eq!(response.reasoning.as_deref(), Some("think "));
     assert!(response.completed);
@@ -368,7 +369,15 @@ async fn stream_fragmented_call_is_reassembled_across_byte_boundaries() {
 
     let (response, deltas) = decode_stream(stream).await.expect("decodes");
 
-    assert!(deltas.is_empty(), "argument deltas never reach the sink before the call is complete");
+    assert!(
+        deltas.iter().all(|delta| matches!(
+            delta,
+            StreamDelta::ToolInputStart { .. }
+                | StreamDelta::ToolInputDelta { .. }
+                | StreamDelta::ToolInputEnd { .. }
+        )),
+        "only display-only tool-input events stream before the call completes: {deltas:?}"
+    );
     assert_eq!(response.tool_intents.len(), 1);
     assert_eq!(response.tool_intents[0].tool_call_id, "call_1");
     assert_eq!(response.tool_intents[0].arguments["path"], "café.txt");
@@ -581,6 +590,8 @@ fn body_with(control: &ee_agent_orchestrator::ToolCallControl, cache: &CacheDire
         tool_control: control,
         cache,
         session: None,
+        previous_response_id: None,
+        input_from: 0,
     })
 }
 
@@ -635,6 +646,8 @@ fn generated_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Valu
         tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
         cache: &cache,
         session: None,
+        previous_response_id: None,
+        input_from: 0,
     })
 }
 
@@ -665,4 +678,88 @@ fn responses_writes_only_its_own_sampling_subset() {
     for key in ["top_k", "frequency_penalty", "presence_penalty", "stop"] {
         assert!(body.get(key).is_none(), "Responses does not document {key}");
     }
+}
+
+#[test]
+fn continuation_sends_only_the_delta_and_sets_store() {
+    let cache = CacheDirective::disabled();
+    let transcript = vec![
+        ModelMessage::text(ModelRole::User, "search"),
+        ModelMessage::text(ModelRole::Assistant, "calling"),
+        ModelMessage::tool_result("call_1", ToolResult::success("result")),
+    ];
+    let body = responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &[],
+        stream: true,
+        max_output_tokens: None,
+        extensions: None,
+        generation: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        session: None,
+        previous_response_id: Some("resp_1"),
+        input_from: 2,
+    });
+    assert_eq!(body["store"], true);
+    assert_eq!(body["previous_response_id"], "resp_1");
+    assert_eq!(body["input"].as_array().expect("input items").len(), 1);
+    assert_eq!(body["input"][0]["type"], "function_call_output");
+}
+
+#[test]
+fn stateless_routes_never_send_a_continuation() {
+    let cache = CacheDirective::disabled();
+    let body = responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        system_prompt: "system",
+        transcript: &transcript(),
+        tools: &[],
+        stream: false,
+        max_output_tokens: None,
+        extensions: None,
+        generation: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        session: None,
+        previous_response_id: None,
+        input_from: 0,
+    });
+    assert_eq!(body["store"], false);
+    assert!(body.get("previous_response_id").is_none());
+}
+
+#[test]
+fn hosted_tool_items_become_provider_executed_calls() {
+    let value = serde_json::json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": { "type": "search", "query": "rust" }
+        }]
+    });
+    let response = super::response_from_buffered("test", &value).expect("decodes");
+    assert_eq!(response.tool_intents.len(), 1);
+    let intent = &response.tool_intents[0];
+    assert!(intent.provider_executed);
+    assert_eq!(intent.name, "web_search");
+    assert!(intent.provider_result.is_some());
+    assert_eq!(response.response_id.as_deref(), Some("resp_1"));
+}
+
+#[test]
+fn stale_continuation_is_classified_not_string_matched() {
+    let mut decoder = super::StreamDecoder::new("test");
+    let error = decoder
+        .apply(
+            r#"{"type":"error","code":"previous_response_not_found","message":"gone"}"#,
+            &mut |_delta| Ok(()),
+        )
+        .expect_err("stale anchor fails");
+    assert!(matches!(error, ee_agent_acp_server::ProviderError::StaleContinuation(_)));
 }

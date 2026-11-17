@@ -184,6 +184,16 @@ impl BudgetTracker {
         });
     }
 
+    /// Returns the iteration cap when the budget is already spent.
+    ///
+    /// The loop uses this to make its final text-only summary call instead of
+    /// failing the turn: the cap itself is not an error once the agent can still
+    /// report what it completed.
+    #[must_use]
+    pub fn iteration_cap_reached(&self) -> Option<usize> {
+        self.max_iterations.filter(|max| self.iterations_used >= *max)
+    }
+
     /// Reserves one loop iteration; fails when the iteration budget is spent
     /// or the wall-clock deadline has passed.
     pub fn try_reserve_iteration(&mut self) -> Result<(), OrchestratorError> {

@@ -115,6 +115,19 @@ impl ScriptedAnswer {
             ModelResponse::new().tool_intents(vec![ToolIntent::new(id, name, arguments)]),
         ))
     }
+
+    /// Answers with one provider-executed tool intent and its result.
+    ///
+    /// The orchestrator records the call and the provider's result without
+    /// dispatching anything locally, then continues the turn.
+    #[must_use]
+    pub fn hosted_tool_call(id: &str, name: &str, result: Value) -> Self {
+        Self::Complete(Box::new(ModelResponse::new().tool_intents(vec![
+                ToolIntent::new(id, name, json!({}))
+                    .with_provider_executed(true)
+                    .with_provider_result(result),
+            ])))
+    }
 }
 
 /// One codec request, recorded before its scripted answer was chosen.

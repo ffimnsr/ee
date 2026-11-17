@@ -453,7 +453,11 @@ pub fn endless_loop_replay(calls: usize) -> ReplayScript {
             success: true,
         });
     }
-    events.push(OrchestratorEvent::TurnStopped { stop_reason: "budget_exceeded".into() });
+    events.push(OrchestratorEvent::ModelRequested { iteration: 3 });
+    events.push(OrchestratorEvent::ModelResponded { iteration: 3 });
+    events.push(budget_event(3, 4, 3, 0, 0));
+    events.push(step_event(3, 0));
+    events.push(OrchestratorEvent::TurnStopped { stop_reason: "max_iterations".into() });
     ReplayScript::new("loop forever", "s-1")
         .with_config(OrchestratorConfig {
             max_loop_iterations: Some(3),
@@ -514,10 +518,10 @@ mod tests {
     async fn replay_endless_loop_stops_via_iteration_budget() {
         let outcome = run_replay(endless_loop_replay(6)).await;
         assert!(
-            matches!(outcome.prompt_result, Err(OrchestratorError::BudgetExceeded(_))),
-            "loop must terminate via the iteration budget"
+            matches!(outcome.prompt_result, Ok(ref result) if result.stop_reason == ee_agent_protocol::StopReason::MaxTurnRequests),
+            "loop must terminate with the max-steps summary"
         );
-        assert_eq!(outcome.model_requests.len(), 3, "exactly the allowed iterations ran");
+        assert_eq!(outcome.model_requests.len(), 4, "three steps plus one summary call");
         assert_eq!(
             outcome.tool_calls.get("read_file").map(Vec::len),
             Some(3),

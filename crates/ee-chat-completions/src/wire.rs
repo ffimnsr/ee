@@ -57,6 +57,8 @@ pub struct AssistantTurn {
     pub finish_reason: Option<String>,
     /// Token usage reported for this round trip, when present.
     pub usage: Option<Usage>,
+    /// Provider response id usable for continuation, when the route stores state.
+    pub response_id: Option<String>,
 }
 
 /// One tool call requested by the model.
@@ -68,6 +70,50 @@ pub struct ToolCall {
     pub name: String,
     /// Parsed tool arguments object.
     pub arguments: Value,
+    /// Whether the provider executed this tool itself (hosted search, code
+    /// interpreter, MCP). Provider-executed calls are never dispatched locally.
+    pub provider_executed: bool,
+    /// Provider-supplied result for a provider-executed call, verbatim.
+    pub provider_result: Option<Value>,
+    /// Bounded parse failure when `arguments` is `Null` because the model emitted
+    /// malformed JSON. The loop feeds this text back so the model can retry.
+    pub argument_error: Option<String>,
+}
+
+impl ToolCall {
+    /// Creates a locally executed call with parsed arguments.
+    #[must_use]
+    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            provider_executed: false,
+            provider_result: None,
+            argument_error: None,
+        }
+    }
+
+    /// Marks the call as executed by the provider.
+    #[must_use]
+    pub fn provider_executed(mut self) -> Self {
+        self.provider_executed = true;
+        self
+    }
+
+    /// Attaches the provider's result payload.
+    #[must_use]
+    pub fn with_provider_result(mut self, result: Value) -> Self {
+        self.provider_result = Some(result);
+        self
+    }
+
+    /// Attaches the bounded parse failure that explains `Null` arguments.
+    #[must_use]
+    pub fn with_argument_error(mut self, error: impl Into<String>) -> Self {
+        self.argument_error = Some(error.into());
+        self
+    }
 }
 
 /// Token usage reported for one round trip.
@@ -102,6 +148,34 @@ pub enum StreamDelta {
     Text(String),
     /// Partial model reasoning.
     Reasoning(String),
+    /// A tool call started streaming its arguments.
+    ToolInputStart {
+        /// Provider-assigned call id.
+        id: String,
+        /// Requested function name.
+        name: String,
+    },
+    /// One partial tool-argument chunk.
+    ToolInputDelta {
+        /// Provider-assigned call id.
+        id: String,
+        /// Raw JSON text appended by this chunk.
+        text: String,
+        /// Best-effort preview of the arguments so far; display-only.
+        parsed: Option<Value>,
+    },
+    /// A tool call finished streaming its arguments.
+    ToolInputEnd {
+        /// Provider-assigned call id.
+        id: String,
+    },
+    /// Token usage reported by a streamed chunk.
+    Usage(Usage),
+    /// One raw SSE frame, emitted only when the profile opts in.
+    Raw {
+        /// Verbatim event data.
+        frame: String,
+    },
 }
 
 /// Builds a codec failure whose text names the routed endpoint, never a
@@ -121,14 +195,51 @@ pub fn codec_error(label: &str, detail: impl std::fmt::Display) -> ProviderError
 /// before any tool side effect.
 #[must_use]
 pub fn parse_arguments(raw: &str) -> Value {
+    parse_arguments_checked(raw).0
+}
+
+/// Parses tool arguments and reports why an invalid payload was rejected.
+///
+/// Returns `(Null, Some(message))` for malformed JSON or a non-object, and
+/// `(json!({}), None)` for empty arguments. The message carries a bounded raw
+/// excerpt so the model can correct itself without the loop logging the whole
+/// payload.
+#[must_use]
+pub fn parse_arguments_checked(raw: &str) -> (Value, Option<String>) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return json!({});
+        return (json!({}), None);
     }
     match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) if value.is_object() => value,
-        _ => Value::Null,
+        Ok(value) if value.is_object() => (value, None),
+        Ok(_) => (Value::Null, Some(String::from("tool arguments must be a JSON object"))),
+        Err(error) => {
+            let excerpt: String = trimmed.chars().take(256).collect();
+            (
+                Value::Null,
+                Some(format!("tool arguments were not valid JSON: {error}; raw: {excerpt}")),
+            )
+        }
     }
+}
+
+/// Converts reported wire usage into the orchestrator's usage record.
+///
+/// A field the provider omitted stays `None`; it is never counted as zero.
+#[must_use]
+pub fn model_usage_of(reported: Usage) -> ModelUsage {
+    let mut usage = ModelUsage::new();
+    usage.input_tokens = reported.input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.output_tokens = reported.output_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cached_input_tokens =
+        reported.cached_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cache_creation_input_tokens =
+        reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.reasoning_tokens =
+        reported.reasoning_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.context_tokens = reported.context_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.cost_micros = reported.cost_micros;
+    usage
 }
 
 /// Converts a decoded assistant turn into a normalized [`ModelResponse`]:
@@ -141,23 +252,24 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
     let intents = answer
         .tool_calls
         .into_iter()
-        .map(|call| ToolIntent::new(call.id, tool_name(&call.name), call.arguments))
+        .map(|call| {
+            let mut intent = ToolIntent::new(call.id, tool_name(&call.name), call.arguments)
+                .with_provider_executed(call.provider_executed);
+            if let Some(result) = call.provider_result {
+                intent = intent.with_provider_result(result);
+            }
+            if let Some(error) = call.argument_error {
+                intent = intent.with_argument_error(error);
+            }
+            intent
+        })
         .collect();
     let reported = answer.usage.unwrap_or_default();
-    let mut usage = ModelUsage::new();
-    usage.input_tokens = reported.input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.output_tokens = reported.output_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.cached_input_tokens =
-        reported.cached_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.cache_creation_input_tokens =
-        reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.reasoning_tokens =
-        reported.reasoning_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.context_tokens = reported.context_tokens.and_then(|tokens| usize::try_from(tokens).ok());
-    usage.cost_micros = reported.cost_micros;
+    let usage = model_usage_of(reported);
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
     response = response.with_finish_reason(answer.finish_reason);
+    response = response.with_response_id(answer.response_id);
     response = response.with_native(
         answer.native_reasoning.and_then(ee_agent_orchestrator::OpaqueProviderState::new),
     );
@@ -193,6 +305,7 @@ pub fn decode_message(value: &Value) -> Option<AssistantTurn> {
         tool_calls,
         finish_reason,
         usage: usage_of(value),
+        response_id: None,
     })
 }
 
@@ -374,11 +487,15 @@ fn tool_call_of(value: &Value) -> Option<ToolCall> {
     let id = value.get("id").and_then(Value::as_str)?.to_string();
     let function = value.get("function")?;
     let name = function.get("name").and_then(Value::as_str)?.to_string();
-    let arguments = match function.get("arguments")? {
-        Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| json!({})),
-        value => value.clone(),
+    let (arguments, argument_error) = match function.get("arguments")? {
+        Value::String(text) => parse_arguments_checked(text),
+        value => (value.clone(), None),
     };
-    Some(ToolCall { id, name, arguments })
+    let mut call = ToolCall::new(id, name, arguments);
+    if let Some(error) = argument_error {
+        call = call.with_argument_error(error);
+    }
+    Some(call)
 }
 
 /// Renders one message's content blocks as text.
@@ -616,6 +733,8 @@ struct PendingToolCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    started: bool,
+    ended: bool,
 }
 
 impl StreamAccumulator {
@@ -643,16 +762,17 @@ impl StreamAccumulator {
         let Some(choice) = value.pointer("/choices/0") else {
             return Ok(Vec::new());
         };
+        let mut output = Vec::new();
         if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = Some(finish_reason.to_string());
         }
         if let Some(usage) = usage_of(value) {
             self.usage = Some(usage);
+            output.push(StreamDelta::Usage(usage));
         }
         let Some(delta) = choice.get("delta") else {
-            return Ok(Vec::new());
+            return Ok(output);
         };
-        let mut output = Vec::new();
         if let Some(content) =
             delta.get("content").and_then(Value::as_str).filter(|text| !text.is_empty())
         {
@@ -667,8 +787,22 @@ impl StreamAccumulator {
         self.absorb_native_reasoning(delta);
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in tool_calls {
-                self.apply_tool_call_delta(call)?;
+                output.extend(self.apply_tool_call_delta(call)?);
             }
+        }
+        // Chat Completions has no per-call stop event: the terminal
+        // `finish_reason` closes every pending call.
+        if self.finish_reason.is_some() {
+            let ids: Vec<String> = self
+                .tool_calls
+                .values_mut()
+                .filter(|call| !call.ended)
+                .filter_map(|call| {
+                    call.ended = true;
+                    call.id.clone()
+                })
+                .collect();
+            output.extend(ids.into_iter().map(|id| StreamDelta::ToolInputEnd { id }));
         }
         Ok(output)
     }
@@ -721,10 +855,11 @@ impl StreamAccumulator {
         (!object.is_empty()).then_some(Value::Object(object))
     }
 
-    fn apply_tool_call_delta(&mut self, value: &Value) -> Result<(), ProviderError> {
+    fn apply_tool_call_delta(&mut self, value: &Value) -> Result<Vec<StreamDelta>, ProviderError> {
         let index = value.get("index").and_then(Value::as_u64).ok_or_else(|| {
             ProviderError::BackendFailure(format!("{} stream tool call missing index", self.label))
         })? as usize;
+        let mut output = Vec::new();
         let call = self.tool_calls.entry(index).or_default();
         if let Some(id) = value.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
             call.id = Some(id.to_string());
@@ -737,9 +872,26 @@ impl StreamAccumulator {
             }
             if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
                 call.arguments.push_str(arguments);
+                // Identity may arrive on the first delta for this index, so the
+                // start event is emitted as soon as both halves are known.
+                if !call.started
+                    && let (Some(id), Some(name)) = (call.id.clone(), call.name.clone())
+                {
+                    call.started = true;
+                    output.push(StreamDelta::ToolInputStart { id, name });
+                }
+                if !arguments.is_empty()
+                    && let Some(id) = call.id.clone()
+                {
+                    output.push(StreamDelta::ToolInputDelta {
+                        id,
+                        text: arguments.to_string(),
+                        parsed: crate::partial_json::parse_partial(&call.arguments),
+                    });
+                }
             }
         }
-        Ok(())
+        Ok(output)
     }
 
     pub(crate) fn finish(self) -> Result<AssistantTurn, ProviderError> {
@@ -758,8 +910,12 @@ impl StreamAccumulator {
             // Keep the call identity so the tool loop can feed an invalid-input
             // observation back to the model. `Null` is never a valid tool
             // argument object, so validation fails before any tool side effect.
-            let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
-            tool_calls.push(ToolCall { id, name, arguments });
+            let (arguments, argument_error) = parse_arguments_checked(&call.arguments);
+            let mut tool_call = ToolCall::new(id, name, arguments);
+            if let Some(error) = argument_error {
+                tool_call = tool_call.with_argument_error(error);
+            }
+            tool_calls.push(tool_call);
         }
         let raw_tool_calls: Vec<Value> = tool_calls
             .iter()
@@ -799,6 +955,7 @@ impl StreamAccumulator {
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
+            response_id: None,
         })
     }
 }

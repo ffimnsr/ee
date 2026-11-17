@@ -31,13 +31,16 @@ use crate::{
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
     GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, SessionContext,
-    ToolCallControl, ToolChoice, ToolDefinition, estimate_prompt_tokens,
+    ToolCallControl, ToolDefinition, estimate_prompt_tokens,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::merge::deep_merge;
-use crate::wire::{codec_error, parse_arguments};
+use crate::responses_wire::{
+    continuation_or_codec_error, error_detail, finish_reason, hosted_tool_call, hosted_tool_name,
+    output_index, prompt_cache_key, responses_tool_choice, started_tool,
+};
+use crate::wire::codec_error;
 
 /// Applies the catalog modality gate and media-size budget before a request
 /// body exists.
@@ -83,6 +86,10 @@ pub struct ResponsesBody<'a> {
     pub cache: &'a CacheDirective,
     /// Session affinity; the cache key derives from it when present.
     pub session: Option<&'a SessionContext>,
+    /// Provider response id to continue from, when the route stores state.
+    pub previous_response_id: Option<&'a str>,
+    /// First transcript message not yet delivered on a continuation.
+    pub input_from: usize,
 }
 
 /// Builds an OpenAI Responses request body.
@@ -114,6 +121,8 @@ pub fn request_body(
         tool_control: &auto,
         cache: &cache,
         session: None,
+        previous_response_id: None,
+        input_from: 0,
     })
 }
 
@@ -125,7 +134,12 @@ pub fn request_body(
 #[must_use]
 pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
     let mut items = Vec::new();
-    for message in input.transcript {
+    for (index, message) in input.transcript.iter().enumerate() {
+        // A continuation only sends the delta: everything before `input_from` was
+        // already delivered by the response named in `previous_response_id`.
+        if index < input.input_from {
+            continue;
+        }
         // Reasoning items precede the assistant item they belong to: the
         // protocol replays them as their own input items, in generation order.
         if message.role == ModelRole::Assistant {
@@ -142,12 +156,16 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         "model": input.model,
         "input": items,
         "stream": input.stream,
-        // EE never asks the provider to keep the response for later retrieval.
-        "store": false,
+        // EE never asks the provider to keep the response unless the route
+        // advertises state and the caller supplied a continuation anchor.
+        "store": input.previous_response_id.is_some(),
         // Encrypted reasoning travels back in the transcript, so a stateless
         // multi-step loop keeps its reasoning without server-side storage.
         "include": ["reasoning.encrypted_content"],
     });
+    if let Some(previous) = input.previous_response_id {
+        body["previous_response_id"] = Value::String(previous.to_string());
+    }
     if let Some(max_output_tokens) = input.max_output_tokens {
         body["max_output_tokens"] = Value::from(max_output_tokens);
     }
@@ -200,31 +218,19 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
     body
 }
 
-/// Lowers a tool choice into the Responses field value.
-fn responses_tool_choice(choice: &ToolChoice) -> Value {
-    match choice {
-        ToolChoice::Auto => json!("auto"),
-        ToolChoice::None => json!("none"),
-        ToolChoice::Required => json!("required"),
-        ToolChoice::Tool { name } => json!({ "type": "function", "name": name }),
-    }
-}
-
-/// Deterministic prompt-cache key for one route/session configuration.
-fn prompt_cache_key(model: &str, system_prompt: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(model.as_bytes());
-    hasher.update([0]);
-    hasher.update(system_prompt.as_bytes());
-    let digest = hasher.finalize();
-    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// Converts one transcript message into an input item.
 ///
 /// Messages whose rendered text is empty are omitted: Responses rejects empty
 /// text parts.
 fn input_item(message: &ModelMessage) -> Option<Value> {
+    // A provider-executed result is already part of the provider's response; a
+    // synthetic `function_call_output` would reference a call it never saw as a
+    // local function.
+    if message.role == ModelRole::Tool
+        && message.metadata.contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
+    {
+        return None;
+    }
     let text = content_text(&message.content);
     match message.role {
         ModelRole::Tool => Some(json!({
@@ -322,12 +328,22 @@ fn function_call_items(message: &ModelMessage) -> Vec<Value> {
         .content
         .iter()
         .filter_map(|block| match block {
-            ModelContent::ToolCall { tool_call_id, name, arguments } => Some(json!({
-                "type": "function_call",
-                "call_id": tool_call_id,
-                "name": name,
-                "arguments": arguments.to_string(),
-            })),
+            ModelContent::ToolCall { tool_call_id, name, arguments } => {
+                // Hosted calls are replayed by the provider that ran them, not as
+                // local function calls.
+                if message.metadata.contains_key(&format!(
+                    "{}{tool_call_id}",
+                    ee_agent_orchestrator::PROVIDER_EXECUTED_METADATA_PREFIX
+                )) {
+                    return None;
+                }
+                Some(json!({
+                    "type": "function_call",
+                    "call_id": tool_call_id,
+                    "name": name,
+                    "arguments": arguments.to_string(),
+                }))
+            }
             _ => None,
         })
         .collect()
@@ -405,6 +421,9 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
                 reasoning_items.push(item.clone());
             }
             Some("function_call") => tool_calls.push(function_call_of(label, item)?),
+            Some(kind) if hosted_tool_name(kind).is_some() => {
+                tool_calls.push(hosted_tool_call(item));
+            }
             _ => {}
         }
     }
@@ -418,6 +437,7 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
         tool_calls,
         finish_reason: Some(finish_reason(status, value)),
         usage: usage_from_tokens(value.get("usage").unwrap_or(&Value::Null)),
+        response_id: value.get("id").and_then(Value::as_str).map(str::to_string),
     }))
 }
 
@@ -480,44 +500,22 @@ fn function_call_of(label: &str, item: &Value) -> Result<ToolCall, ProviderError
         .get("call_id")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| codec_error(label, "function call is missing its call id"))?;
+        .ok_or_else(|| codec_error(label, "function call is missing its call_id"))?;
     let name = item
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| codec_error(label, "function call is missing its name"))?;
-    let arguments = match item.get("arguments") {
-        Some(Value::String(raw)) => parse_arguments(raw),
-        Some(object @ Value::Object(_)) => object.clone(),
-        _ => Value::Null,
+    let (arguments, argument_error) = match item.get("arguments") {
+        Some(Value::String(raw)) => crate::wire::parse_arguments_checked(raw),
+        Some(value) => (value.clone(), None),
+        None => (json!({}), None),
     };
-    Ok(ToolCall { id: id.to_string(), name: name.to_string(), arguments })
-}
-
-/// Canonical stop signal for a buffered payload.
-fn finish_reason(status: Option<&str>, value: &Value) -> String {
-    match status {
-        Some("completed") | None => String::from("stop"),
-        Some("incomplete") => {
-            let reason = value
-                .pointer("/incomplete_details/reason")
-                .and_then(Value::as_str)
-                .unwrap_or("incomplete");
-            match reason {
-                "max_output_tokens" => String::from("length"),
-                other => other.to_string(),
-            }
-        }
-        Some(other) => other.to_string(),
+    let mut call = ToolCall::new(id, name, arguments);
+    if let Some(error) = argument_error {
+        call = call.with_argument_error(error);
     }
-}
-
-/// Renders a nested error object as one diagnostic line.
-fn error_detail(error: &Value) -> String {
-    match error.get("message").and_then(Value::as_str) {
-        Some(message) => message.to_string(),
-        None => error.to_string(),
-    }
+    Ok(call)
 }
 
 /// Incremental decoder for Responses SSE events.
@@ -530,6 +528,7 @@ pub struct StreamDecoder {
     calls: BTreeMap<u64, PendingCall>,
     finish_reason: Option<String>,
     usage: Option<Usage>,
+    response_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -537,6 +536,8 @@ struct PendingCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    provider_executed: bool,
+    provider_result: Option<Value>,
 }
 
 impl StreamDecoder {
@@ -551,6 +552,7 @@ impl StreamDecoder {
             calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
+            response_id: None,
         }
     }
 
@@ -592,14 +594,34 @@ impl StreamDecoder {
             }
             "response.output_item.added" => {
                 self.apply_output_item(&value);
+                if let Some(item) = value.get("item")
+                    && let Some((id, name)) = started_tool(item)
+                {
+                    sink(StreamDelta::ToolInputStart { id, name })?;
+                }
             }
             "response.output_item.done" => {
                 self.apply_output_item(&value);
+                if let Some(item) = value.get("item")
+                    && let Some((id, _)) = started_tool(item)
+                {
+                    sink(StreamDelta::ToolInputEnd { id })?;
+                }
             }
             "response.function_call_arguments.delta" => {
                 let index = output_index(&value, &self.label)?;
                 let delta = value.get("delta").and_then(Value::as_str).unwrap_or_default();
-                self.calls.entry(index).or_default().arguments.push_str(delta);
+                if !delta.is_empty() {
+                    let call = self.calls.entry(index).or_default();
+                    call.arguments.push_str(delta);
+                    if let Some(id) = call.id.clone() {
+                        sink(StreamDelta::ToolInputDelta {
+                            id,
+                            text: delta.to_string(),
+                            parsed: crate::partial_json::parse_partial(&call.arguments),
+                        })?;
+                    }
+                }
             }
             "response.function_call_arguments.done" => {
                 let index = output_index(&value, &self.label)?;
@@ -620,7 +642,9 @@ impl StreamDecoder {
                     usage_from_tokens(response.get("usage").unwrap_or(&Value::Null))
                 {
                     self.usage = Some(usage);
+                    sink(StreamDelta::Usage(usage))?;
                 }
+                self.response_id = response.get("id").and_then(Value::as_str).map(str::to_string);
                 return Ok(SseControl::Stop);
             }
             "response.failed" => {
@@ -629,9 +653,11 @@ impl StreamDecoder {
                     .get("error")
                     .map(error_detail)
                     .unwrap_or_else(|| String::from("response failed"));
-                return Err(codec_error(&self.label, detail));
+                return Err(continuation_or_codec_error(&self.label, response, detail));
             }
-            "error" => return Err(codec_error(&self.label, error_detail(&value))),
+            "error" => {
+                return Err(continuation_or_codec_error(&self.label, &value, error_detail(&value)));
+            }
             _ => {}
         }
         Ok(SseControl::Continue)
@@ -670,6 +696,15 @@ impl StreamDecoder {
                     call.arguments = arguments.to_string();
                 }
             }
+            Some(kind) if hosted_tool_name(kind).is_some() => {
+                let hosted = hosted_tool_call(item);
+                let call = self.calls.entry(index).or_default();
+                call.id = Some(hosted.id);
+                call.name = Some(hosted.name);
+                call.provider_executed = true;
+                // `done` is authoritative; `added` carries a partial item.
+                call.provider_result = Some(item.clone());
+            }
             _ => {}
         }
     }
@@ -689,7 +724,20 @@ impl StreamDecoder {
             let name = call.name.ok_or_else(|| {
                 codec_error(&self.label, "streamed function call is missing its name")
             })?;
-            tool_calls.push(ToolCall { id, name, arguments: parse_arguments(&call.arguments) });
+            if call.provider_executed {
+                let mut executed = ToolCall::new(id, name, json!({})).provider_executed();
+                if let Some(result) = call.provider_result {
+                    executed = executed.with_provider_result(result);
+                }
+                tool_calls.push(executed);
+                continue;
+            }
+            let (arguments, argument_error) = crate::wire::parse_arguments_checked(&call.arguments);
+            let mut tool_call = ToolCall::new(id, name, arguments);
+            if let Some(error) = argument_error {
+                tool_call = tool_call.with_argument_error(error);
+            }
+            tool_calls.push(tool_call);
         }
         let native_reasoning = (!self.reasoning_items.is_empty()).then(
             || json!({ REASONING_ITEMS: self.reasoning_items.into_values().collect::<Vec<_>>() }),
@@ -702,15 +750,9 @@ impl StreamDecoder {
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
+            response_id: self.response_id,
         }))
     }
-}
-
-fn output_index(value: &Value, label: &str) -> Result<u64, ProviderError> {
-    value
-        .get("output_index")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| codec_error(label, "streamed function call event is missing output_index"))
 }
 
 /// One streaming Responses round trip over an authorized endpoint.
@@ -795,6 +837,8 @@ impl ResponsesCodec {
             tool_control,
             cache: &profile.cache,
             session,
+            previous_response_id: None,
+            input_from: 0,
         });
         let transport = &transport;
         let label = profile.label.as_str();
@@ -867,6 +911,15 @@ impl ResponsesCodec {
             prompt,
             options.generation.and_then(|generation| generation.max_output_tokens),
         );
+        // Continuation is a capability: a route that does not store responses
+        // never receives a previous response id.
+        let (previous_response_id, input_from) = options
+            .continuation
+            .filter(|_| profile.store_responses)
+            .map(|continuation| {
+                (Some(continuation.previous_response_id.as_str()), continuation.input_from)
+            })
+            .unwrap_or((None, 0));
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
@@ -879,6 +932,8 @@ impl ResponsesCodec {
             tool_control,
             cache: &profile.cache,
             session: options.session,
+            previous_response_id,
+            input_from,
         });
         let mut attempt = ResponsesStreamAttempt { transport: &transport, body: &body };
         with_stream_retry(&transport.profile().retry, sink, &mut attempt)
@@ -907,11 +962,17 @@ impl crate::StreamAttempt<ModelResponse> for ResponsesStreamAttempt<'_> {
                 return Ok(seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
+            let raw = transport.profile().raw_stream_events;
             drive_sse_with_chunk_timeout(
                 &label,
                 &mut response,
                 Some(transport.profile().timeouts.chunk),
-                |event| decoder.apply(event, sink),
+                |event| {
+                    if raw {
+                        sink(StreamDelta::Raw { frame: event.to_string() })?;
+                    }
+                    decoder.apply(event, sink)
+                },
             )
             .await?;
             decoder.finish().map(|response| seal_response(response, &model))

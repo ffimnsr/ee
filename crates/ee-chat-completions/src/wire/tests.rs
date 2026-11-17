@@ -60,14 +60,17 @@ fn decodes_tool_call_arguments() {
 }
 
 #[test]
-fn malformed_tool_call_arguments_decode_to_empty_object() {
+fn malformed_tool_call_arguments_carry_a_parse_error() {
     let value = json!({
         "choices": [{ "message": { "tool_calls": [{
             "id": "call_1", "type": "function",
             "function": { "name": "tool_read_file", "arguments": "{not json" }
         }] } }]
     });
-    assert_eq!(decode_message(&value).unwrap().tool_calls[0].arguments, json!({}));
+    let call = &decode_message(&value).unwrap().tool_calls[0];
+    assert_eq!(call.arguments, Value::Null);
+    let error = call.argument_error.as_deref().expect("parse failure recorded");
+    assert!(error.contains("not valid JSON"), "{error}");
 }
 
 #[test]
@@ -565,8 +568,15 @@ fn accumulator_emits_deltas_and_reassembles_tool_calls() {
             "tool_calls": [{ "index": 0, "function": { "arguments": "Cargo.toml\"}" } }]
         }, "finish_reason": "tool_calls" }] }))
         .unwrap();
-    assert_eq!(first, vec![StreamDelta::Reasoning(String::from("check "))]);
-    assert_eq!(second, vec![StreamDelta::Text(String::from("working"))]);
+    assert_eq!(first[0], StreamDelta::Reasoning(String::from("check ")));
+    assert!(matches!(first[1], StreamDelta::ToolInputStart { .. }));
+    assert!(matches!(first[2], StreamDelta::ToolInputDelta { .. }));
+    assert_eq!(second[0], StreamDelta::Text(String::from("working")));
+    assert!(
+        second
+            .iter()
+            .any(|delta| matches!(delta, StreamDelta::ToolInputEnd { id } if id == "call_1"))
+    );
     let message = accumulator.finish().unwrap();
     assert_eq!(message.content, "working");
     assert_eq!(message.reasoning, "check ");
@@ -1156,4 +1166,95 @@ fn nested_extension_keeps_a_sibling_key_written_by_the_provider() {
     let mut extensions = json!({ "reasoning": { "effort": "high" } });
     crate::deep_merge(&mut extensions, &json!({ "reasoning": { "summary": "auto" } }));
     assert_eq!(extensions, json!({ "reasoning": { "effort": "high", "summary": "auto" } }));
+}
+
+#[test]
+fn streamed_tool_arguments_emit_start_delta_and_end() {
+    let mut accumulator = StreamAccumulator::new("test");
+    let first = accumulator
+        .apply(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": { "name": "echo", "arguments": "{\"text\":" }
+                    }]
+                }
+            }]
+        }))
+        .expect("first chunk decodes");
+    assert!(matches!(first[0], StreamDelta::ToolInputStart { .. }));
+    let StreamDelta::ToolInputDelta { text, parsed, .. } = &first[1] else {
+        panic!("expected a tool input delta, got {first:?}");
+    };
+    assert_eq!(text, "{\"text\":");
+    assert_eq!(parsed.as_ref(), Some(&json!({ "text": null })));
+
+    let second = accumulator
+        .apply(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "\"hi\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .expect("second chunk decodes");
+    assert!(
+        second
+            .iter()
+            .any(|delta| matches!(delta, StreamDelta::ToolInputEnd { id } if id == "call_1"))
+    );
+    let turn = accumulator.finish().expect("finishes");
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].arguments, json!({ "text": "hi" }));
+    assert!(turn.tool_calls[0].argument_error.is_none());
+}
+
+#[test]
+fn malformed_tool_arguments_carry_a_bounded_error() {
+    let mut accumulator = StreamAccumulator::new("test");
+    accumulator
+        .apply(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": { "name": "echo", "arguments": "{oops" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+        .expect("chunk decodes");
+    let turn = accumulator.finish().expect("finishes with the call identity");
+    assert_eq!(turn.tool_calls[0].arguments, serde_json::Value::Null);
+    let error = turn.tool_calls[0].argument_error.as_deref().expect("parse failure recorded");
+    assert!(error.contains("not valid JSON"), "{error}");
+    assert!(error.contains("{oops"), "{error}");
+}
+
+#[test]
+fn usage_chunk_emits_a_usage_delta() {
+    let mut accumulator = StreamAccumulator::new("test");
+    let deltas = accumulator
+        .apply(&json!({
+            "choices": [{ "delta": {} }],
+            "usage": { "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10 }
+        }))
+        .expect("usage chunk decodes");
+    assert_eq!(
+        deltas,
+        vec![StreamDelta::Usage(Usage {
+            input_tokens: Some(7),
+            output_tokens: Some(3),
+            total_tokens: Some(10),
+            ..Default::default()
+        })]
+    );
 }

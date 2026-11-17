@@ -383,6 +383,7 @@ pub fn response_from_buffered(label: &str, value: &Value) -> Result<ModelRespons
         tool_calls,
         finish_reason: Some(finish_reason(value.get("stop_reason").and_then(Value::as_str))),
         usage: usage_from_tokens(value.get("usage").unwrap_or(&Value::Null)),
+        response_id: None,
     }))
 }
 
@@ -485,7 +486,7 @@ fn tool_use_of(label: &str, block: &Value) -> Result<ToolCall, ProviderError> {
         Some(object @ Value::Object(_)) => object.clone(),
         _ => Value::Null,
     };
-    Ok(ToolCall { id: id.to_string(), name: name.to_string(), arguments })
+    Ok(ToolCall::new(id.to_string(), name.to_string(), arguments))
 }
 
 /// Canonical stop signal for a Messages `stop_reason`.
@@ -595,6 +596,9 @@ impl StreamDecoder {
                         let call = self.calls.entry(index).or_default();
                         call.id = block.get("id").and_then(Value::as_str).map(str::to_string);
                         call.name = block.get("name").and_then(Value::as_str).map(str::to_string);
+                        if let (Some(id), Some(name)) = (call.id.clone(), call.name.clone()) {
+                            sink(StreamDelta::ToolInputStart { id, name })?;
+                        }
                     }
                     Some("thinking") => {
                         let entry = self.thinking.entry(index).or_default();
@@ -646,7 +650,19 @@ impl StreamDecoder {
                         let index = block_index(&value, &self.label)?;
                         let partial =
                             delta.get("partial_json").and_then(Value::as_str).unwrap_or_default();
-                        self.calls.entry(index).or_default().arguments.push_str(partial);
+                        let call = self.calls.entry(index).or_default();
+                        call.arguments.push_str(partial);
+                        if !partial.is_empty()
+                            && let Some(id) = call.id.clone()
+                        {
+                            sink(StreamDelta::ToolInputDelta {
+                                id,
+                                text: partial.to_string(),
+                                parsed: ee_chat_completions::partial_json::parse_partial(
+                                    &call.arguments,
+                                ),
+                            })?;
+                        }
                     }
                     _ => {}
                 }
@@ -655,6 +671,9 @@ impl StreamDecoder {
                 let index = block_index(&value, &self.label)?;
                 if let Some(call) = self.calls.get(&index) {
                     require_tool_identity(&self.label, call)?;
+                    if let Some(id) = call.id.clone() {
+                        sink(StreamDelta::ToolInputEnd { id })?;
+                    }
                 }
             }
             "message_delta" => {
@@ -676,6 +695,11 @@ impl StreamDecoder {
                     let usage = self.usage.get_or_insert(Usage::default());
                     usage.reasoning_tokens = Some(reasoning);
                 }
+                if let Some(usage) = self.usage
+                    && usage.output_tokens.is_some()
+                {
+                    sink(StreamDelta::Usage(usage))?;
+                }
             }
             "message_stop" => return Ok(SseControl::Stop),
             "error" => return Err(codec_error(&self.label, error_detail(&value))),
@@ -696,7 +720,7 @@ impl StreamDecoder {
             require_tool_identity(&self.label, &call)?;
             let id = call.id.unwrap_or_default();
             let name = call.name.unwrap_or_default();
-            tool_calls.push(ToolCall { id, name, arguments: parse_arguments(&call.arguments) });
+            tool_calls.push(ToolCall::new(id, name, parse_arguments(&call.arguments)));
         }
         let mut thinking_blocks = Vec::new();
         for (_index, block) in self.thinking {
@@ -720,6 +744,7 @@ impl StreamDecoder {
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
+            response_id: None,
         }))
     }
 }
@@ -934,11 +959,17 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for MessagesStreamAttempt
                 return Ok(ee_chat_completions::seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
+            let raw = transport.profile().raw_stream_events;
             drive_sse_with_chunk_timeout(
                 &label,
                 &mut response,
                 Some(transport.profile().timeouts.chunk),
-                |event| decoder.apply(event, sink),
+                |event| {
+                    if raw {
+                        sink(StreamDelta::Raw { frame: event.to_string() })?;
+                    }
+                    decoder.apply(event, sink)
+                },
             )
             .await?;
             decoder.finish().map(|response| ee_chat_completions::seal_response(response, &model))

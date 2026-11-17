@@ -43,6 +43,9 @@ pub enum OrchestratorError {
     /// The provider rejected the request because it exceeded the model's context
     /// window. The loop compacts the transcript once and retries before giving up.
     ContextOverflow(String),
+    /// The provider returned output the loop cannot interpret (for example an
+    /// unknown stop reason). Never treated as a successful completion.
+    InvalidProviderOutput(String),
 }
 
 impl OrchestratorError {
@@ -70,6 +73,9 @@ impl fmt::Display for OrchestratorError {
             }
             Self::Stuck(reason) => write!(f, "stuck: {reason}"),
             Self::ContextOverflow(reason) => write!(f, "context window exceeded: {reason}"),
+            Self::InvalidProviderOutput(reason) => {
+                write!(f, "invalid provider output: {reason}")
+            }
         }
     }
 }
@@ -125,6 +131,9 @@ impl From<OrchestratorError> for ProviderError {
                 ProviderError::BackendFailure(format!("stuck: {reason}"))
             }
             OrchestratorError::ContextOverflow(reason) => ProviderError::ContextOverflow(reason),
+            OrchestratorError::InvalidProviderOutput(reason) => {
+                ProviderError::BackendFailure(format!("invalid provider output: {reason}"))
+            }
         }
     }
 }

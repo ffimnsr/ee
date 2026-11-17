@@ -307,6 +307,19 @@ pub struct ToolIntent {
     pub name: String,
     /// The tool arguments as JSON.
     pub arguments: serde_json::Value,
+    /// Whether the provider executed this tool itself. Provider-executed calls
+    /// are recorded in the transcript but never dispatched to the local
+    /// executor.
+    #[serde(default)]
+    pub provider_executed: bool,
+    /// Provider-supplied result for a provider-executed call, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_result: Option<serde_json::Value>,
+    /// Bounded parse failure when the model emitted malformed tool arguments.
+    /// The executor returns this text as the tool observation so the model can
+    /// correct itself instead of seeing a generic schema error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_error: Option<String>,
 }
 
 impl ToolIntent {
@@ -317,7 +330,35 @@ impl ToolIntent {
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
-        Self { tool_call_id: tool_call_id.into(), name: name.into(), arguments }
+        Self {
+            tool_call_id: tool_call_id.into(),
+            name: name.into(),
+            arguments,
+            provider_executed: false,
+            provider_result: None,
+            argument_error: None,
+        }
+    }
+
+    /// Marks the call as provider-executed.
+    #[must_use]
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = provider_executed;
+        self
+    }
+
+    /// Attaches the provider's result payload.
+    #[must_use]
+    pub fn with_provider_result(mut self, result: serde_json::Value) -> Self {
+        self.provider_result = Some(result);
+        self
+    }
+
+    /// Attaches the bounded parse failure that explains `Null` arguments.
+    #[must_use]
+    pub fn with_argument_error(mut self, error: impl Into<String>) -> Self {
+        self.argument_error = Some(error.into());
+        self
     }
 }
 
@@ -1101,6 +1142,7 @@ fn bridge_error(error: ProviderError) -> ToolResult {
         | ProviderError::ContextOverflow(_)
         | ProviderError::PayloadTooLarge(_) => ToolErrorKind::Backend,
         ProviderError::ContentPolicy(_) => ToolErrorKind::InvalidArguments,
+        ProviderError::StaleContinuation(_) => ToolErrorKind::Backend,
     };
     ToolResult::failure(kind, error.to_string())
 }
@@ -1241,6 +1283,14 @@ impl ToolExecutor {
             return Ok(result);
         };
         let definition = tool.definition();
+
+        if let Some(reason) = &intent.argument_error {
+            // The model's own malformed JSON is a replayable tool error: return
+            // the parse failure so it can correct the call on the next step.
+            let result = ToolResult::failure(ToolErrorKind::InvalidArguments, reason.clone());
+            emit_failed_tool(sink, intent, &result)?;
+            return Ok(result);
+        }
 
         if let Err(reason) = definition.validate_arguments(&intent.arguments) {
             let result = ToolResult::failure(ToolErrorKind::InvalidArguments, reason);

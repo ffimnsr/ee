@@ -753,6 +753,9 @@ impl ChatCompletionsClient {
         }
         let mut accumulator = StreamAccumulator::new(label);
         drive_sse_with_chunk_timeout(label, &mut response, Some(profile.timeouts.chunk), |event| {
+            if profile.raw_stream_events {
+                sink(StreamDelta::Raw { frame: event.to_string() })?;
+            }
             let value: Value = serde_json::from_str(event).map_err(|error| {
                 ProviderError::BackendFailure(format!("{label} stream event was not JSON: {error}"))
             })?;

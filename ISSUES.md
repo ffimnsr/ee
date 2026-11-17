@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–16 implemented and tested (2026-11-17). Gap 17 and later (Part 5 second-pass findings) remain open.
+**Status:** Gaps 1–19 implemented and tested (2026-11-17). Gaps 20–24 (Part 5 second-pass findings) remain open.
 
 ## Execution Overview
 
@@ -2039,17 +2039,18 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 17 — Loop Termination and Recovery Semantics
 
-- [ ] End a long turn with a summary instead of a budget error, and recover from overflow.
-  - [ ] **Problem:**
+- [x] End a long turn with a summary instead of a budget error, and recover from overflow.
+  - [x] **Problem:**
     - The reference injects `MAX_STEPS_PROMPT`, which disables tools and requires a text summary listing completed and remaining work (`packages/core/src/session/runner/max-steps.ts`).
     - Step outcomes distinguish `OutputLimit` (continue after a length finish), `Compacted` (overflow → compaction → retry), `RecoverFull` (`retry-full` / `rotate-and-retry-full` while no output started), and `Retry` with `freshAssistant` (`packages/core/src/session/runner/step.ts:23-40, 198-253`).
     - Our budget returns `OrchestratorError::BudgetExceeded` when the iteration cap is hit (`crates/ee-agent-orchestrator/src/budget.rs:191-198`), so the user gets an error rather than a summary; there is no overflow-triggered recovery and no distinction between a retry that can reuse partial output and one that cannot.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - On iteration-cap exhaustion, make one final text-only model call (tools disabled via Gap 7's `tool_choice: none`) with the summary instruction, emit its text as the turn's final response, and mark the stop reason `max_iterations` (already an event field).
     - Add `finish_reason` to `ModelResponse` (Gap 3) and handle `length` per Gap 3, then treat overflow classification (Gap 5) as: compact once, rebuild the request, retry once; if it overflows again, surface a bounded diagnostic.
     - Represent retry kinds explicitly in the loop (`RetryKind::{Fresh, Resume, Rotate}`) so adapters can report whether a request never started; keep `rotate` unimplemented until a model registry exposes alternates.
     - Reject unknown finish reasons with a typed `InvalidProviderOutput` error instead of treating them as success.
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 17):** new `ee-agent-orchestrator/src/loop_control.rs` (`MAX_STEPS_PROMPT`, `RetryKind::{Fresh,Resume,Rotate}`, `StepOutcome`, `validate_finish_reason`). `BudgetTracker::iteration_cap_reached` lets `loop_engine` run one final summary call (`finish_at_max_steps`) with a `null` tool choice and the instruction appended as an assistant message; the turn ends with `StopReason::MaxTurnRequests` and `TurnStopped { stop_reason: "max_iterations" }` instead of `BudgetExceeded`. `OrchestratorError::InvalidProviderOutput` is returned for an unrecognized explicit stop reason before the step is counted as complete. The existing single compaction/retry on `ContextOverflow` is unchanged, and `RetryKind::Rotate` stays reserved because no registry exposes alternate credentials yet.
+  - [x] **Acceptance criteria:**
     - Hitting the iteration cap produces a final text answer containing the stop notice and does not call tools afterwards.
     - Overflow triggers exactly one compaction and one retry; a second overflow ends the turn without a loop.
     - `freshAssistant` retries do not duplicate the partially streamed assistant message.
@@ -2057,17 +2058,18 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 18 — Streaming Event Surface
 
-- [ ] Stream tool-call progress, usage, and step boundaries instead of only text and reasoning.
-  - [ ] **Problem:**
+- [x] Stream tool-call progress, usage, and step boundaries instead of only text and reasoning.
+  - [x] **Problem:**
     - The reference emits `step-start`, `step-finish`, `tool-input-start`, `tool-input-delta`, `tool-input-end`, `tool-input-error`, `raw`, checkpoint, and `finish` events, with partial JSON decoding for tool arguments (`packages/ai/src/schema/events.ts`, `packages/ai/src/protocols/utils/tool-stream.ts`, `.../partial-json.ts`).
     - Its loop treats an invalid-JSON tool input as a replayable call that returns the parse error to the model (`packages/ai/src/loop.ts:15-35`).
     - Our `StreamDelta` is only `Text` and `Reasoning` (`crates/ee-chat-completions/src/wire.rs:83-88`); tool calls become visible only after the whole argument string decodes, and malformed JSON is collapsed to `Value::Null` so the orchestrator returns the generic "tool arguments must be a JSON object" error (`crates/ee-agent-orchestrator/src/tools.rs:162-164`, test at `:1905`). There is no incremental argument stream and no raw excerpt naming the invalid JSON.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend `StreamDelta` with additive variants: `ToolInputStart { id, name }`, `ToolInputDelta { id, text, parsed: Option<Value> }`, `ToolInputEnd { id }`, `Usage(ModelUsage)`, and `Raw { frame }` (debug-only, gated).
     - Accumulate partial JSON with a bounded parser and expose the current best-effort object for UI preview; never execute from partial arguments.
     - Map `ToolInputError` into a tool result carrying the parse error text so the model can retry, matching the reference loop.
     - Update the ACP event mapping in `ee-agent-orchestrator` to forward the new deltas without breaking existing consumers (unknown variants ignored by older hosts).
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 18):** `ee-chat-completions/src/wire.rs` gained `StreamDelta::{ToolInputStart,ToolInputDelta,ToolInputEnd,Usage,Raw}` and `parse_arguments_checked`; new `partial_json.rs` provides bounded best-effort parsing (`MAX_PARTIAL_JSON_BYTES`, depth cap) used only for previews. Chat, Responses, and Anthropic Messages decoders emit start/delta/end around streamed arguments; `Usage` deltas carry the parsed counters. `StreamEvent` and `StreamSink` in `ee-agent-orchestrator/src/streaming.rs` forward these to ACP as `ToolCall`/`ToolCallUpdate` `raw_input` updates (display-only), and raw frames are redacted and only emitted when `EndpointProfile::with_raw_stream_events(true)` is set. Malformed final JSON now attaches `ToolCall::argument_error`, which `ToolIntent` carries to `ToolExecutor::execute` so the model receives the bounded parse error as a replayable tool result.
+  - [x] **Acceptance criteria:**
     - Streamed tool arguments reach the sink incrementally and the final parsed object matches the buffered decode.
     - Malformed JSON yields a tool error result whose text names the failure and includes a bounded raw excerpt.
     - `Raw` frames are emitted only when explicitly enabled and are redacted by the same rules as errors.
@@ -2075,16 +2077,17 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 19 — Hosted Tools and Response Continuation
 
-- [ ] Support provider-executed tools and incremental response continuation.
-  - [ ] **Problem:**
+- [x] Support provider-executed tools and incremental response continuation.
+  - [x] **Problem:**
     - The reference marks hosted tool calls `providerExecuted` and never dispatches them locally; their results arrive from the provider stream and are folded back into the transcript (`packages/ai/src/protocols/utils/responses-hosted-tools.ts`, `packages/ai/src/loop.ts` pending-call filtering).
     - It also supports `previous_response_id` continuation with a full-send fallback when the id is stale (`packages/ai/src/protocols/open-responses-continuation.ts`), which is what makes `store`-based routes economical.
     - Our loop executes **every** tool intent locally, and our Responses codec always sends the full input with `store: false` (`crates/ee-agent-opencode/src/responses.rs::request_body`), so web-search or hosted-code tools cannot be used and repeated turns resend the whole transcript.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `provider_executed: bool` to `ToolIntent`; the loop skips dispatch for those ids and appends the provider's result message verbatim.
     - Add optional continuation: when the catalog advertises store support and the previous response id is known, send `previous_response_id` plus the delta; retry the full request once on a stale-id error (classified, not string-matched).
     - Keep `store: false` as the default for routes that do not advertise state.
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 19):** `ToolIntent` carries `provider_executed`, `provider_result`, and `argument_error`; `ModelResponse` carries `response_id`, and `ModelRequest` carries `Continuation { previous_response_id, input_from }`. The loop partitions provider-executed intents, records their provider result once through `Transcript::push_provider_tool_result`, and never calls the local executor. Responses decoding maps `web_search_call` / `file_search_call` / `code_interpreter_call` / `mcp_call` items to provider-executed calls with their item payload as the result, and `function_call_items`/`input_item` skip provider-executed calls/results on re-encode. `ResponsesBody` sends `store: true` and `previous_response_id` only when `EndpointProfile::store_responses` is enabled and a continuation anchor exists; `input_from` slices the delta. A `previous_response_not_found` provider code becomes the typed `ProviderError::StaleContinuation`, and `ResponsesAdapter` retries once with the full transcript. Routes without store support never send a previous response id.
+  - [x] **Acceptance criteria:**
     - A provider-executed tool call never reaches the local executor and its result appears in the transcript exactly once.
     - Continuation sends only the delta after the first turn; a stale-id failure falls back to a full send exactly once.
     - Routes without store capability never send a previous response id.
