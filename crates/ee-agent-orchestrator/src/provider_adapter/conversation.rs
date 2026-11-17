@@ -362,6 +362,8 @@ pub(super) struct PromptBundleInputs<'a> {
     pub(super) global_config_root: Option<&'a std::path::Path>,
     /// Rendered background terminal job status, when any job is tracked.
     pub(super) background_jobs: Option<&'a str>,
+    /// Configured remote instructions, already fetched for this session.
+    pub(super) remote_instructions: &'a [crate::prompt::WorkspaceMessage],
 }
 
 /// Builds the stable prompt and runtime snapshot for one session mode.
@@ -404,6 +406,9 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
         None => Vec::new(),
     };
     bundle.workspace = crate::prompt::workspace::discover(inputs.cwd, inputs.workspace_roots);
+    // Configured remote sources are explicit operator requests and ride the
+    // same untrusted workspace plane; they are fetched once per session.
+    bundle.workspace.extend(inputs.remote_instructions.iter().cloned());
     // Skill catalogs ride in the workspace plane: repository skills are
     // untrusted, user-global skills are trusted relative to workspace text.
     bundle.workspace.extend(crate::prompt::skills::catalog_messages(
@@ -436,6 +441,7 @@ mod tests {
             mcp_servers: &[],
             global_config_root: None,
             background_jobs: None,
+            remote_instructions: &[],
         })
         .expect("bundle");
 
@@ -466,6 +472,7 @@ mod tests {
             mcp_servers: &[],
             global_config_root: Some(&global),
             background_jobs: None,
+            remote_instructions: &[],
         })
         .expect("bundle");
 
@@ -533,6 +540,7 @@ mod tests {
             mcp_servers: &[],
             global_config_root: None,
             background_jobs: None,
+            remote_instructions: &[],
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");
@@ -558,6 +566,7 @@ mod tests {
             mcp_servers: &[],
             global_config_root: None,
             background_jobs: Some("- terminal term-1 [running]: cargo build"),
+            remote_instructions: &[],
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");

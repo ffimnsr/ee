@@ -39,8 +39,9 @@ use crate::routes::{OpenCodeDialect, OpenCodeSurface, UnsupportedDialect};
 /// computation, and modality gates live in
 /// [`ee_agent_orchestrator::model_metadata`].
 pub use ee_agent_orchestrator::{
-    Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningProtocol, ReasoningSupport,
-    ReasoningVariant, SamplingSupport, find_variant, reasoning_variants, variant_ids,
+    CacheCapability, CacheFormatId, CachePlacement, CacheTargets, Modalities, ModelCapabilities,
+    ModelCost, ModelKind, ModelRoutes, ReasoningProtocol, ReasoningSupport, ReasoningVariant,
+    SamplingSupport, find_variant, reasoning_variants, variant_ids,
 };
 
 /// One routable `(surface, model)` entry.
@@ -60,8 +61,12 @@ pub struct CatalogModel {
     pub status: &'static str,
     /// Protocol dialect the model speaks on this surface.
     pub dialect: OpenCodeDialect,
-    /// Upstream-declared model family slug; empty for legacy rows.
+    /// Upstream model family slug; empty for legacy rows.
     pub family: &'static str,
+    /// Upstream release date (`YYYY-MM-DD`); empty when the snapshot omits it.
+    pub release_date: &'static str,
+    /// Capability matrix that replaces per-provider heuristics.
+    pub capabilities: ModelCapabilities,
     /// Trusted base URL for this surface; paths are appended by the route.
     pub base_url: &'static str,
     /// Upstream provider package id (`@opencode/ai/providers/...`); empty for legacy rows.
@@ -284,6 +289,31 @@ mod tests {
         assert!(gpt.supports_compaction(), "OpenAI Responses rows advertise /compact");
         let claude = find(OpenCodeSurface::Zen, "claude-sonnet-5").expect("claude-sonnet-5");
         assert!(!claude.supports_compaction(), "Messages rows never advertise /compact");
+    }
+
+    #[test]
+    fn capability_matrix_replaces_provider_heuristics() {
+        let gpt = find(OpenCodeSurface::Zen, "gpt-5.5").expect("gpt-5.5");
+        assert!(gpt.capabilities.store, "Responses rows expose provider state");
+        assert!(gpt.capabilities.prompt_cache_key);
+        assert!(gpt.capabilities.cache.implicit, "OpenAI caches prefixes implicitly");
+        assert!(!gpt.capabilities.cache.explicit);
+        assert_eq!(gpt.release_date.len(), 10, "release date is recorded");
+
+        let claude = find(OpenCodeSurface::Zen, "claude-sonnet-5").expect("claude-sonnet-5");
+        assert!(claude.capabilities.cache.explicit);
+        assert_eq!(claude.capabilities.cache.format, crate::catalog::CacheFormatId::Anthropic);
+        assert_eq!(claude.capabilities.cache.placement, crate::catalog::CachePlacement::Auto);
+        assert!(claude.capabilities.cache.max_breakpoints > 0);
+        assert!(claude.capabilities.tool_choices.contains(&"tool"));
+    }
+
+    #[test]
+    fn every_non_legacy_row_declares_a_capability_matrix() {
+        for entry in models().filter(|entry| !entry.legacy) {
+            assert_eq!(entry.release_date.len(), 10, "{entry}");
+            assert!(!entry.capabilities.service_tiers.iter().any(|tier| tier.is_empty()));
+        }
     }
 
     #[test]

@@ -841,44 +841,23 @@ impl Config {
 
     /// Resolves the prompt-cache directive for the routed dialect.
     ///
-    /// Anthropic Messages routes are Anthropic-compatible by construction, so
-    /// they default to automatic placement. Responses routes only support
-    /// provider-managed caching (a request-level lifetime, no markers). Chat
-    /// Completions routes go through an OpenAI-compatible gateway, so only the
-    /// Anthropic and Qwen families get breakpoints unless an operator overrides
-    /// the policy.
+    /// The catalog row owns every decision: whether the route accepts inline
+    /// markers, the marker format, the breakpoint cap, and the planes that
+    /// accept them. Anthropic Messages rows advertise explicit caching and
+    /// Responses rows advertise provider-managed caching; a Chat Completions
+    /// row that declares implicit-only caching gets no markers. An operator
+    /// override still wins over the catalog's default placement.
     #[must_use]
     pub fn cache_directive(&self) -> ee_chat_completions::CacheDirective {
         use ee_chat_completions::{CacheDirective, CacheFormat, CachePolicy, CacheSupport};
-        let (support, format) = match self.route.dialect {
-            crate::routes::OpenCodeDialect::OpenAiResponses => {
-                (CacheSupport::IMPLICIT, CacheFormat::Anthropic)
-            }
-            crate::routes::OpenCodeDialect::AnthropicMessages => {
-                (CacheSupport::ANTHROPIC, CacheFormat::Anthropic)
-            }
-            crate::routes::OpenCodeDialect::OpenAiChatCompletions => {
-                if self.route.model_id.to_ascii_lowercase().contains("qwen") {
-                    (
-                        CacheSupport {
-                            targets: ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES,
-                            ..CacheSupport::ANTHROPIC
-                        },
-                        CacheFormat::Alibaba,
-                    )
-                } else {
-                    (CacheSupport::ANTHROPIC, CacheFormat::Anthropic)
-                }
-            }
-        };
-        let policy = self.cache_policy.clone().unwrap_or_else(|| match self.route.dialect {
-            crate::routes::OpenCodeDialect::OpenAiResponses => CachePolicy::None,
-            crate::routes::OpenCodeDialect::AnthropicMessages => CachePolicy::Auto,
-            crate::routes::OpenCodeDialect::OpenAiChatCompletions => {
-                ee_chat_completions::gateway_policy(self.route.model_id)
-            }
-        });
-        CacheDirective { policy: policy.with_ttl(self.cache_ttl.clone()), support, format }
+        let capability = self.route.entry.capabilities.cache;
+        let policy =
+            self.cache_policy.clone().unwrap_or_else(|| CachePolicy::from(capability.placement));
+        CacheDirective {
+            policy: policy.with_ttl(self.cache_ttl.clone()),
+            support: CacheSupport::from(capability),
+            format: CacheFormat::from(capability.format),
+        }
     }
 
     /// Bounded operator note when a configured reasoning effort cannot reach the

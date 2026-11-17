@@ -51,65 +51,28 @@ KEPT_MODEL_FIELDS = ("id", "type", "capabilities", "limit", "cost", "api")
 
 
 def compact_model(model: dict) -> dict:
-    capabilities = model.get("capabilities") or {}
-    reasoning = capabilities.get("reasoning") or {}
-    tools = capabilities.get("tools") or {}
-    limit = model.get("limit") or {}
-    cost = ((model.get("cost") or {}).get("text")) or {}
-    input_cost = cost.get("input") or {}
-    output_cost = cost.get("output") or {}
-    cache = input_cost.get("cache") or {}
     return {
         "id": model.get("id"),
         "type": model.get("type", "chat"),
         "status": model.get("status") or "",
         "family": model.get("family") or "",
-        "capabilities": {
-            "tools": {
-                "supported": bool(tools.get("supported")),
-                "strict": bool(tools.get("strict")),
-                "freeform": list(tools.get("freeform") or []),
-            },
-            "reasoning": {
-                key: reasoning[key]
-                for key in ("supported", "toggle", "effort", "budget")
-                if key in reasoning
-            },
-            "structured_output": bool(capabilities.get("structured_output")),
-            "sampling": {
-                key: capabilities[key]
-                for key in ("temperature", "topP", "topK")
-                if key in capabilities
-            },
-        },
+        "release_date": model.get("release_date") or "",
+        "capabilities": model.get("capabilities") or {},
         "modalities": {
             "input": list((model.get("modalities") or {}).get("input") or []),
             "output": list((model.get("modalities") or {}).get("output") or []),
         },
         "limit": {
-            "context": int(limit.get("context") or 0),
-            "output": int(limit.get("output") or 0),
+            "context": int((model.get("limit") or {}).get("context") or 0),
+            "output": int((model.get("limit") or {}).get("output") or 0),
         },
-        "cost": {
-            "text": {
-                "input": {
-                    "price": input_cost.get("price"),
-                    "cache": {
-                        key: cache[key] for key in ("read", "write") if key in cache
-                    },
-                    "overrides": list(input_cost.get("overrides") or []),
-                },
-                "output": {
-                    "price": output_cost.get("price"),
-                    "overrides": list(output_cost.get("overrides") or []),
-                },
-            }
-        },
+        "cost": model.get("cost"),
         "api": {
             kind: {
                 "sdk": (entry.get("sdk") or {}).get("opencodeai", ""),
                 "base_url": entry.get("base_url", ""),
                 "compatibility": entry.get("compatibility") or {},
+                "capabilities": entry.get("capabilities") or {},
             }
             for kind, entry in sorted((model.get("api") or {}).items())
         },
@@ -250,6 +213,151 @@ def routes_literal(model: dict) -> str:
     )
 
 
+API_KINDS = (
+    "chat-completions",
+    "responses",
+    "messages",
+    "images",
+    "systemone",
+    "generate-content",
+)
+CACHE_FORMATS = ("anthropic", "alibaba")
+TOOL_CHOICES = ("auto", "none", "tool", "required")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+STATUSES = ("", "alpha", "beta", "preview", "deprecated", "retired")
+SERVICE_TIERS = ("auto", "default", "flex", "priority", "scale")
+COMPATIBILITY_KEYS = (
+    "reasoning_field",
+    "require_reasoning",
+    "max_tokens_field",
+    "require_finish_reason",
+    "require_assistant_after_tool",
+    "supports_prompt_cache_key",
+    "stream_usage",
+    "cache_format",
+    "supports_thinking_block_binding",
+    "supports_effort_updates",
+    "media_input",
+)
+
+
+def validate_model(model_id: str, model: dict) -> None:
+    """Fails loudly on an unknown enum instead of silently skipping it."""
+    kind = model.get("type", "chat")
+    if kind not in ("chat", "decision", "image", "embedding"):
+        raise SystemExit(f"{model_id}: unsupported catalog type {kind!r}")
+    status = model.get("status") or ""
+    if status not in STATUSES:
+        raise SystemExit(f"{model_id}: unknown status {status!r}")
+    capabilities = model.get("capabilities") or {}
+    for effort in (capabilities.get("reasoning") or {}).get("effort") or []:
+        if str(effort) not in REASONING_EFFORTS:
+            raise SystemExit(f"{model_id}: unknown reasoning effort {effort!r}")
+    for key in capabilities.get("cache") or {}:
+        if key not in ("implicit", "explicit"):
+            raise SystemExit(f"{model_id}: unknown cache key {key!r}")
+    for tier in capabilities.get("service_tier") or []:
+        if str(tier) not in SERVICE_TIERS:
+            raise SystemExit(f"{model_id}: unknown service tier {tier!r}")
+    for api_kind, entry in (model.get("api") or {}).items():
+        if api_kind not in API_KINDS:
+            raise SystemExit(f"{model_id}: unknown api kind {api_kind!r}")
+        for key, value in (entry.get("compatibility") or {}).items():
+            if key not in COMPATIBILITY_KEYS:
+                raise SystemExit(f"{model_id}: unknown compatibility key {key!r}")
+            if key == "cache_format" and value not in CACHE_FORMATS:
+                raise SystemExit(f"{model_id}: unknown cache format {value!r}")
+        tools = ((entry.get("capabilities") or {}).get("tools")) or {}
+        for choice in tools.get("choice") or []:
+            if str(choice) not in TOOL_CHOICES:
+                raise SystemExit(f"{model_id}: unknown tool choice {choice!r}")
+
+
+def _cache_format(model_id: str, compatibility: dict, kind: str) -> str:
+    declared = compatibility.get("cache_format")
+    if declared:
+        return declared
+    if kind == "messages":
+        return "anthropic"
+    vendor = model_id.split("/")[0].lower()
+    return "alibaba" if "qwen" in vendor else "anthropic"
+
+
+def cache_literal(model_id: str, model: dict, kind: str, compatibility: dict) -> str:
+    cache = (model.get("capabilities") or {}).get("cache") or {}
+    explicit = cache.get("explicit")
+    implicit = cache.get("implicit")
+    # Anthropic Messages and OpenAI Responses cache implicitly even when the
+    # snapshot omits the flag; both routes are served by their native provider.
+    if kind == "messages":
+        implicit = implicit if implicit is not None else True
+    if kind == "responses":
+        implicit = implicit if implicit is not None else True
+    if explicit is None and implicit is None:
+        return "CacheCapability::NONE"
+    explicit_settings = explicit if isinstance(explicit, dict) else {}
+    implicit_settings = implicit if isinstance(implicit, dict) else {}
+    format_id = _cache_format(model_id, compatibility, kind)
+    targets = explicit_settings.get("targets")
+    if targets is None:
+        targets = (
+            ["system", "messages"]
+            if format_id == "alibaba"
+            else ["tools", "system", "messages"]
+        )
+    ttl = list(explicit_settings.get("ttl") or implicit_settings.get("ttl") or [])
+    min_tokens = explicit_settings.get("min_tokens", implicit_settings.get("min_tokens"))
+    placement = "None"
+    if explicit is not None:
+        placement = "SystemAndTail" if format_id == "alibaba" else "Auto"
+    rendered_ttl = ", ".join(rust(str(item)) for item in ttl)
+    return (
+        "CacheCapability { implicit: "
+        f"{'true' if implicit is not None else 'false'}, "
+        f"explicit: {'true' if explicit is not None else 'false'}, "
+        f"max_breakpoints: {int(explicit_settings.get('max_breakpoints') or 0)}, "
+        "targets: CacheTargets { "
+        f"tools: {'true' if 'tools' in targets else 'false'}, "
+        f"system: {'true' if 'system' in targets else 'false'}, "
+        f"messages: {'true' if 'messages' in targets else 'false'} }}, "
+        f"min_tokens: {'None' if min_tokens is None else f'Some({int(min_tokens)})'}, "
+        f"ttl: &[{rendered_ttl}], "
+        f"format: CacheFormatId::{format_id.capitalize()}, "
+        f"placement: CachePlacement::{placement} }}"
+    )
+
+
+def capabilities_literal(model: dict, kind: str) -> str:
+    capabilities = model.get("capabilities") or {}
+    api = (model.get("api") or {}).get(kind) or {}
+    compatibility = api.get("compatibility") or {}
+    api_capabilities = api.get("capabilities") or {}
+    tools = api_capabilities.get("tools") or {}
+    choices = ", ".join(rust(str(item)) for item in tools.get("choice") or [])
+    tiers = ", ".join(rust(str(item)) for item in capabilities.get("service_tier") or [])
+    system_updates = api_capabilities.get(
+        "system_updates", capabilities.get("system_updates")
+    )
+    reasoning_updates = api_capabilities.get(
+        "effort_updates", capabilities.get("effort_updates")
+    )
+    return (
+        "ModelCapabilities { tool_choices: &["
+        f"{choices}], tool_search: {'true' if tools.get('search') else 'false'}, "
+        f"tool_updates: {'true' if tools.get('updates') else 'false'}, "
+        f"cache: {cache_literal(model['id'], model, kind, compatibility)}, "
+        f"store: {'true' if kind == 'responses' else 'false'}, "
+        f"stream_usage: {'true' if kind in ('chat-completions', 'responses') else 'false'}, "
+        f"prompt_cache_key: {'true' if kind == 'responses' else 'false'}, "
+        f"service_tiers: &[{tiers}], "
+        f"system_updates: {'true' if system_updates else 'false'}, "
+        f"reasoning_updates: {'true' if reasoning_updates else 'false'}, "
+        f"require_reasoning: {'true' if compatibility.get('require_reasoning') else 'false'}, "
+        f"require_finish_reason: {'true' if compatibility.get('require_finish_reason') else 'false'}, "
+        f"require_assistant_after_tool: {'true' if compatibility.get('require_assistant_after_tool') else 'false'} }}"
+    )
+
+
 def route_kind(model: dict) -> str | None:
     api = model.get("api") or {}
     for kind in SUPPORTED_APIS:
@@ -324,6 +432,8 @@ def model_literal(surface: str, model: dict, kind: str, compaction_allow: set) -
         f"kind: ModelKind::Chat, dialect: {DIALECTS[kind]}, "
         f"routes: {routes_literal(model)}, status: {rust(model.get('status') or '')}, "
         f"family: {rust(model.get('family') or '')}, "
+        f"release_date: {rust(model.get('release_date') or '')}, "
+        f"capabilities: {capabilities_literal(model, kind)}, "
         f"base_url: {SURFACES[surface]}.api_root(), "
         f"sdk: {rust(api.get('sdk') or '')}, "
         f"limits: Some(ModelLimits::new({context}, {output})), "
@@ -347,6 +457,7 @@ def legacy_literal(surface: str, model_id: str, kind: str) -> str:
         f"{SURFACES[surface]}, id: {rust(model_id)}, api_id: {rust(model_id)}, "
         f"kind: ModelKind::Chat, dialect: {DIALECTS[kind]}, "
         f"routes: ModelRoutes::CHAT_ONLY, status: \"\", family: \"\", "
+        "release_date: \"\", capabilities: ModelCapabilities::UNKNOWN, "
         f"base_url: {SURFACES[surface]}.api_root(), sdk: \"\", limits: None, "
         "modalities: Modalities::UNKNOWN, "
         "reasoning: ReasoningSupport::UNSUPPORTED, cost: None, "
@@ -380,6 +491,7 @@ def generate() -> str:
             if key in retired or key in unsupported:
                 continue
             model = models[model_id]
+            validate_model(model_id, model)
             if model.get("type", "chat") != "chat":
                 continue
             kind = route_kind(model)
@@ -431,10 +543,11 @@ def generate() -> str:
 //! Regenerate from `crates/ee-agent-opencode`:
 //! `python3 scripts/gen_catalog.py`; verify with `--check`.
 
-use ee_agent_orchestrator::ModelLimits;
+use ee_agent_orchestrator::{{CostTier, ModelLimits}};
 
 use crate::catalog::{{
-    CatalogModel, Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningSupport, RetiredModel,
+    CacheCapability, CacheFormatId, CachePlacement, CacheTargets, CatalogModel, Modalities,
+    ModelCapabilities, ModelCost, ModelKind, ModelRoutes, ReasoningSupport, RetiredModel,
     SamplingSupport, UnsupportedModel,
 }};
 use crate::routes::{{OpenCodeDialect as D, OpenCodeSurface as S, UnsupportedDialect}};

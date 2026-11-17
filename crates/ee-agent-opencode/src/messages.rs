@@ -821,7 +821,7 @@ impl MessagesCodec {
     ) -> Result<ModelResponse, ProviderError> {
         let transport = self.transport.with_session(session)?;
         let profile = transport.profile();
-        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let transcript = crate::dialect::guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
@@ -906,7 +906,7 @@ impl MessagesCodec {
     ) -> Result<ModelResponse, ProviderError> {
         let transport = self.transport.with_session(options.session)?;
         let profile = transport.profile();
-        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let transcript = crate::dialect::guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });

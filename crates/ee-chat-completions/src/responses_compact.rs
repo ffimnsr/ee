@@ -71,7 +71,7 @@ impl ResponsesCodec {
     ) -> Result<CompactionOutcome, ProviderError> {
         let session_transport = self.transport.with_session(session)?;
         let profile = session_transport.profile();
-        let transcript = guarded_transcript(profile, transcript)?;
+        let transcript = guarded_transcript(profile, transcript);
         let endpoint = TrustedEndpoint::parse(&compact_endpoint(profile.endpoint.as_str()))
             .map_err(|error| {
                 codec_error(&profile.label, format!("compaction endpoint is not usable: {error}"))

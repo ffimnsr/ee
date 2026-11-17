@@ -45,16 +45,15 @@ use crate::responses_wire::{
 };
 use crate::wire::codec_error;
 
-/// Applies the catalog modality gate and media-size budget before a request
+/// Applies the catalog modality filter and media-size budget before a request
 /// body exists.
 pub(crate) fn guarded_transcript<'a>(
     profile: &EndpointProfile,
     transcript: &'a [ModelMessage],
-) -> Result<Cow<'a, [ModelMessage]>, ProviderError> {
+) -> Cow<'a, [ModelMessage]> {
     match ee_agent_orchestrator::guard_transcript(profile.modalities, &profile.model, transcript) {
-        Ok(None) => Ok(Cow::Borrowed(transcript)),
-        Ok(Some(bounded)) => Ok(Cow::Owned(bounded)),
-        Err(detail) => Err(codec_error(&profile.label, detail)),
+        None => Cow::Borrowed(transcript),
+        Some(guarded) => Cow::Owned(guarded),
     }
 }
 
@@ -646,7 +645,7 @@ impl ResponsesCodec {
     ) -> Result<ModelResponse, ProviderError> {
         let transport = self.transport.with_session(session)?;
         let profile = transport.profile();
-        let transcript = guarded_transcript(profile, transcript)?;
+        let transcript = guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
@@ -732,7 +731,7 @@ impl ResponsesCodec {
     ) -> Result<ModelResponse, ProviderError> {
         let transport = self.transport.with_session(options.session)?;
         let profile = transport.profile();
-        let transcript = guarded_transcript(profile, transcript)?;
+        let transcript = guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });

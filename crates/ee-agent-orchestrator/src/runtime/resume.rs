@@ -408,6 +408,7 @@ impl OrchestratorRuntime {
                 &cwd,
                 &roots,
                 self.workspace_instruction_seen.clone(),
+                self.workspace_instruction_known.clone(),
             ),
         )))
     }

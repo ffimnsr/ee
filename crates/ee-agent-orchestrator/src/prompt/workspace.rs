@@ -10,7 +10,7 @@
 //! policy, and every `</system-reminder>` in file content is escaped so a
 //! repository file cannot close the orchestrator-owned frame.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,11 @@ const PROMPT_METADATA_KEY: &str = "ee_prompt";
 /// Metadata value for the workspace instruction snapshot.
 const PROMPT_METADATA_VALUE: &str = "workspace_instructions";
 
+/// Bytes retained per instruction path for diff rendering.
+pub(crate) const KNOWN_CONTENT_BYTES: usize = 64 * 1024;
+/// Ceiling for one rendered instruction diff.
+const MAX_DIFF_BYTES: usize = 8 * 1024;
+
 #[derive(Debug)]
 struct ChainDirectory {
     path: PathBuf,
@@ -65,6 +70,35 @@ pub(crate) struct InstructionFile {
     pub(crate) digest: [u8; 32],
     pub(crate) original_bytes: usize,
     pub(crate) source_truncated: bool,
+    /// Canonical path used as the session-diff identity.
+    pub(crate) canonical_path: PathBuf,
+}
+
+/// Last injected content for one instruction path.
+///
+/// Content is truncated to [`KNOWN_CONTENT_BYTES`] so a session-wide diff ledger
+/// stays bounded even in a repository with many instruction files.
+#[derive(Debug, Clone)]
+pub(crate) struct KnownInstruction {
+    /// Digest of the content last reported to the model.
+    pub(crate) digest: [u8; 32],
+    /// Content last reported to the model, truncated for diffing.
+    pub(crate) content: String,
+}
+
+impl KnownInstruction {
+    fn of(file: &InstructionFile) -> Self {
+        Self {
+            digest: file.digest,
+            content: truncate_utf8(&file.content, KNOWN_CONTENT_BYTES).to_string(),
+        }
+    }
+}
+
+/// One changed instruction file rendered as a bounded diff.
+#[derive(Debug)]
+struct InstructionDiff {
+    body: String,
 }
 
 #[derive(Debug)]
@@ -79,6 +113,7 @@ struct Budgeted {
     included: Vec<InstructionFile>,
     omitted: Vec<String>,
     truncated: Vec<TruncatedInstruction>,
+    diffs: Vec<InstructionDiff>,
 }
 
 /// Discovers, budgets, and renders workspace instructions.
@@ -151,6 +186,9 @@ pub(crate) struct WorkspaceInstructionTracker {
     /// Session-scoped content digests. Shared across turns so a nested file is
     /// injected exactly once for the whole session, not once per turn.
     seen: Arc<Mutex<HashSet<[u8; 32]>>>,
+    /// Session-scoped last-injected content per canonical path, used to emit a
+    /// bounded diff when an already-injected file changes mid-session.
+    known: Arc<Mutex<HashMap<PathBuf, KnownInstruction>>>,
     remaining_bytes: usize,
 }
 
@@ -159,22 +197,31 @@ impl WorkspaceInstructionTracker {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn new(cwd: &Path, workspace_roots: &[PathBuf]) -> Self {
-        Self::with_seen(cwd, workspace_roots, Arc::new(Mutex::new(HashSet::new())))
+        Self::with_seen(
+            cwd,
+            workspace_roots,
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
     }
 
-    /// Builds a tracker sharing the session's already-injected digest set.
+    /// Builds a tracker sharing the session's already-injected digest and
+    /// content ledgers.
     #[must_use]
     pub(crate) fn with_seen(
         cwd: &Path,
         workspace_roots: &[PathBuf],
         seen: Arc<Mutex<HashSet<[u8; 32]>>>,
+        known: Arc<Mutex<HashMap<PathBuf, KnownInstruction>>>,
     ) -> Self {
         let loaded = discover_files(cwd, workspace_roots);
         let used: usize = loaded.iter().map(section_bytes).sum();
         {
             let mut seen = seen.lock().expect("workspace instruction digests poisoned");
+            let mut known = known.lock().expect("workspace instruction ledger poisoned");
             for file in loaded {
                 seen.insert(file.digest);
+                known.insert(file.canonical_path.clone(), KnownInstruction::of(&file));
             }
         }
         let mut roots: Vec<PathBuf> = if workspace_roots.is_empty() {
@@ -188,6 +235,7 @@ impl WorkspaceInstructionTracker {
             cwd: canonical_or_owned(cwd),
             roots,
             seen,
+            known,
             remaining_bytes: INSTRUCTION_TOTAL_BYTES.saturating_sub(used),
         }
     }
@@ -222,32 +270,62 @@ impl WorkspaceInstructionTracker {
         directories.reverse();
 
         let mut fresh = Vec::new();
+        let mut changed = Vec::new();
         for directory in directories {
             if skipped_path(&directory) {
                 continue;
             }
             for name in INSTRUCTION_CANDIDATES {
                 let path = directory.join(name);
-                if let Some(file) = load(&path, &root, false) {
-                    let unseen = self
-                        .seen
-                        .lock()
-                        .expect("workspace instruction digests poisoned")
-                        .insert(file.digest);
-                    if unseen {
-                        fresh.push(file);
+                let Some(file) = load(&path, &root, false) else { continue };
+                let previous = self
+                    .known
+                    .lock()
+                    .expect("workspace instruction ledger poisoned")
+                    .get(&file.canonical_path)
+                    .cloned();
+                match previous {
+                    Some(known) if known.digest == file.digest => {}
+                    Some(known) => {
+                        // A changed file is re-emitted as a bounded diff exactly
+                        // once per distinct content revision.
+                        let body = bounded_diff(&file.display_path, &known.content, &file.content);
+                        self.remember(&file);
+                        if !body.trim().is_empty() {
+                            changed.push(InstructionDiff { body });
+                        }
+                    }
+                    None => {
+                        let unseen = self
+                            .seen
+                            .lock()
+                            .expect("workspace instruction digests poisoned")
+                            .insert(file.digest);
+                        self.remember(&file);
+                        if unseen {
+                            fresh.push(file);
+                        }
                     }
                 }
             }
         }
-        if fresh.is_empty() {
+        if fresh.is_empty() && changed.is_empty() {
             return Vec::new();
         }
 
-        let budgeted = budget_with_limit(fresh, self.remaining_bytes);
+        let mut budgeted = budget_with_limit(fresh, self.remaining_bytes);
         let used: usize = budgeted.included.iter().map(section_bytes).sum();
-        self.remaining_bytes = self.remaining_bytes.saturating_sub(used);
-        if budgeted.included.is_empty() {
+        let mut remaining = self.remaining_bytes.saturating_sub(used);
+        for diff in changed {
+            if remaining <= NOTICE_RESERVE_BYTES + 64 {
+                break;
+            }
+            let body = bounded_fit(&diff.body, remaining);
+            remaining = remaining.saturating_sub(body.len() + 2);
+            budgeted.diffs.push(InstructionDiff { body });
+        }
+        self.remaining_bytes = remaining;
+        if budgeted.included.is_empty() && budgeted.diffs.is_empty() {
             return Vec::new();
         }
         vec![
@@ -258,6 +336,15 @@ impl WorkspaceInstructionTracker {
                     PROMPT_METADATA_VALUE.to_string(),
                 )]),
         ]
+    }
+
+    /// Records the content just reported to the model for `file`.
+    fn remember(&self, file: &InstructionFile) {
+        self.known
+            .lock()
+            .expect("workspace instruction ledger poisoned")
+            .insert(file.canonical_path.clone(), KnownInstruction::of(file));
+        self.seen.lock().expect("workspace instruction digests poisoned").insert(file.digest);
     }
 }
 
@@ -349,6 +436,7 @@ pub(crate) fn load(path: &Path, root: &Path, sanitize: bool) -> Option<Instructi
         digest,
         original_bytes,
         source_truncated,
+        canonical_path: canonical,
     })
 }
 
@@ -437,6 +525,59 @@ fn section_bytes(file: &InstructionFile) -> usize {
     "Instructions from: \n\n".len() + file.display_path.len() + file.content.len() + 2
 }
 
+/// Renders a bounded line diff for one changed instruction file.
+///
+/// The common prefix and suffix are trimmed so only the edited hunk reaches the
+/// model, and the result is capped at [`MAX_DIFF_BYTES`]. An empty string means
+/// the file changed only in whitespace the line splitter normalized away.
+fn bounded_diff(display_path: &str, previous: &str, current: &str) -> String {
+    let before: Vec<&str> = previous.lines().collect();
+    let after: Vec<&str> = current.lines().collect();
+    let mut prefix = 0;
+    while prefix < before.len() && prefix < after.len() && before[prefix] == after[prefix] {
+        prefix += 1;
+    }
+    let max_suffix = before.len().saturating_sub(prefix).min(after.len().saturating_sub(prefix));
+    let mut suffix = 0;
+    while suffix < max_suffix
+        && before[before.len() - 1 - suffix] == after[after.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = &before[prefix..before.len().saturating_sub(suffix)];
+    let added = &after[prefix..after.len().saturating_sub(suffix)];
+    if removed.is_empty() && added.is_empty() {
+        return String::new();
+    }
+    let mut body = format!(
+        "The instructions from {display_path} changed. Here is the diff:\n```diff\n@@ lines {}..{} -> {}..{} @@",
+        prefix + 1,
+        before.len().saturating_sub(suffix),
+        prefix + 1,
+        after.len().saturating_sub(suffix)
+    );
+    for line in removed {
+        body.push_str("\n-");
+        body.push_str(line);
+    }
+    for line in added {
+        body.push_str("\n+");
+        body.push_str(line);
+    }
+    body.push_str("\n```");
+    bounded_fit(&body, MAX_DIFF_BYTES)
+}
+
+/// Truncates rendered text to `budget` bytes with an explicit marker.
+fn bounded_fit(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut body = truncate_utf8(text, budget.saturating_sub(64)).to_string();
+    body.push_str("\n[diff truncated at the instruction budget]");
+    body
+}
+
 pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(text.len());
     while end > 0 && !text.is_char_boundary(end) {
@@ -454,6 +595,9 @@ fn render(budgeted: &Budgeted) -> String {
     blocks.push(INSTRUCTION_HEADER.to_string());
     for file in &budgeted.included {
         blocks.push(format!("Instructions from: {}\n\n{}", file.display_path, file.content));
+    }
+    for diff in &budgeted.diffs {
+        blocks.push(diff.body.clone());
     }
     let body = blocks.join("\n\n").replace("</system-reminder>", "<\\/system-reminder>");
     format!("<system-reminder>\n{body}\n</system-reminder>")
@@ -591,15 +735,49 @@ mod tests {
             "the same content hash is never injected twice"
         );
 
-        // A new turn builds a new tracker but shares the session digest set.
+        // A new turn builds a new tracker but shares the session digest and
+        // content ledgers.
         let seen = Arc::new(Mutex::new(HashSet::new()));
-        let mut first =
-            WorkspaceInstructionTracker::with_seen(root, &[root.to_path_buf()], seen.clone());
+        let known = Arc::new(Mutex::new(HashMap::new()));
+        let mut first = WorkspaceInstructionTracker::with_seen(
+            root,
+            &[root.to_path_buf()],
+            seen.clone(),
+            known.clone(),
+        );
         assert_eq!(first.discover_for_path(&file).len(), 1);
-        let mut second = WorkspaceInstructionTracker::with_seen(root, &[root.to_path_buf()], seen);
+        let mut second =
+            WorkspaceInstructionTracker::with_seen(root, &[root.to_path_buf()], seen, known);
         assert!(
             second.discover_for_path(&file).is_empty(),
             "nested instructions are injected once per session, not per turn"
+        );
+    }
+
+    #[test]
+    fn changed_instruction_file_emits_one_bounded_diff() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let file = root.join("crates/sub/src/lib.rs");
+        write(&file, "fn main() {}");
+        let agents = root.join("crates/sub/AGENTS.md");
+        write(&agents, "first rule\nshared tail");
+
+        let mut tracker = WorkspaceInstructionTracker::new(root, &[root.to_path_buf()]);
+        assert_eq!(tracker.discover_for_path(&file).len(), 1, "initial full snapshot");
+
+        write(&agents, "second rule\nshared tail");
+        let update = tracker.discover_for_path(&file);
+        assert_eq!(update.len(), 1, "one diff notice per change");
+        let text = update[0].text_content();
+        assert!(text.contains("changed"), "{text}");
+        assert!(text.contains("-first rule"), "{text}");
+        assert!(text.contains("+second rule"), "{text}");
+        assert!(!text.contains("shared tail"), "common suffix is trimmed: {text}");
+
+        assert!(
+            tracker.discover_for_path(&file).is_empty(),
+            "the same revision is never re-emitted"
         );
     }
 

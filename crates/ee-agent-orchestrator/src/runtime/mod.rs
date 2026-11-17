@@ -225,6 +225,16 @@ pub struct OrchestratorRuntime {
     /// Content digests of workspace instructions already injected this session,
     /// shared by every per-turn tracker.
     workspace_instruction_seen: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,
+    /// Last injected content per instruction path, used to emit a bounded diff
+    /// when an already-injected file changes mid-session.
+    workspace_instruction_known: Arc<
+        Mutex<
+            std::collections::HashMap<
+                std::path::PathBuf,
+                crate::prompt::workspace::KnownInstruction,
+            >,
+        >,
+    >,
     /// Background terminal jobs polled between model steps.
     background_jobs: SharedBackgroundJobs,
     /// Retained isolated worktrees awaiting host apply; pruned on session

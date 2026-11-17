@@ -51,6 +51,35 @@ fn provider_compaction_is_never_advertised() {
 }
 
 #[test]
+fn capability_matrix_replaces_provider_heuristics() {
+    let claude = find("anthropic/claude-sonnet-5").expect("claude row");
+    assert!(claude.capabilities.cache.explicit);
+    assert_eq!(claude.capabilities.cache.format, CacheFormatId::Anthropic);
+    assert_eq!(claude.capabilities.cache.placement, CachePlacement::Auto);
+    assert_eq!(claude.capabilities.cache.max_breakpoints, 4);
+    assert!(claude.capabilities.tool_choices.contains(&"tool"));
+
+    let gpt = find("openai/gpt-5.5").expect("gpt row");
+    assert!(gpt.capabilities.cache.implicit);
+    assert!(!gpt.capabilities.cache.explicit);
+    assert!(gpt.routes.responses);
+    assert!(gpt.capabilities.store);
+    assert!(gpt.capabilities.prompt_cache_key);
+
+    let qwen = find("qwen/qwen3-coder").expect("qwen row");
+    assert!(!qwen.capabilities.cache.explicit, "undeclared caches place no markers");
+}
+
+#[test]
+fn every_chat_row_records_release_and_capabilities() {
+    for entry in models().filter(|entry| entry.kind == ModelKind::Chat) {
+        assert!(!entry.release_date.is_empty(), "{entry}");
+        assert!(entry.release_date.len() >= 7, "{entry} release date is partial");
+        assert!(!entry.capabilities.service_tiers.iter().any(|tier| tier.is_empty()), "{entry}");
+    }
+}
+
+#[test]
 fn unknown_models_have_no_catalog_row() {
     assert!(find("vendor/not-a-catalog-model").is_none());
 }

@@ -266,6 +266,165 @@ impl Default for SamplingSupport {
     }
 }
 
+/// Prompt planes a provider honours cache markers on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheTargets {
+    /// Tool definitions.
+    pub tools: bool,
+    /// System prompt parts.
+    pub system: bool,
+    /// Conversation messages.
+    pub messages: bool,
+}
+
+impl CacheTargets {
+    /// Every plane.
+    pub const ALL: Self = Self { tools: true, system: true, messages: true };
+    /// No plane.
+    pub const NONE: Self = Self { tools: false, system: false, messages: false };
+    /// System and conversation messages, without tool definitions.
+    pub const SYSTEM_AND_MESSAGES: Self = Self { tools: false, system: true, messages: true };
+}
+
+/// Cache marker syntax a route accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheFormatId {
+    /// No marker syntax is declared.
+    #[default]
+    None,
+    /// `cache_control: { type: "ephemeral" }` inline markers.
+    Anthropic,
+    /// Alibaba: tools cache with the system prompt, so tool breakpoints are
+    /// skipped.
+    Alibaba,
+}
+
+impl CacheFormatId {
+    /// Parses the catalog's `cache_format` compatibility value.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Some(Self::Anthropic),
+            "alibaba" => Some(Self::Alibaba),
+            _ => None,
+        }
+    }
+}
+
+/// Default automatic cache placement a provider family expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CachePlacement {
+    /// Do not place automatic breakpoints.
+    #[default]
+    None,
+    /// Last tool, first and last system part, and the conversation tail.
+    Auto,
+    /// System and conversation tail only; never tool definitions.
+    SystemAndTail,
+}
+
+/// Prompt-cache capability declared by one catalog row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheCapability {
+    /// The provider caches prefixes without any marker.
+    pub implicit: bool,
+    /// The provider honours inline cache markers.
+    pub explicit: bool,
+    /// Breakpoints accepted per request; `0` means the protocol default.
+    pub max_breakpoints: usize,
+    /// Planes that accept markers.
+    pub targets: CacheTargets,
+    /// Cacheable-prefix floor, when documented.
+    pub min_tokens: Option<u64>,
+    /// Accepted cache lifetimes in models.dev duration form (`5m`, `1h`, `24h`).
+    pub ttl: &'static [&'static str],
+    /// Marker syntax the route accepts.
+    pub format: CacheFormatId,
+    /// Automatic placement the provider family expects.
+    pub placement: CachePlacement,
+}
+
+impl CacheCapability {
+    /// No caching is declared.
+    pub const NONE: Self = Self {
+        implicit: false,
+        explicit: false,
+        max_breakpoints: 0,
+        targets: CacheTargets::NONE,
+        min_tokens: None,
+        ttl: &[],
+        format: CacheFormatId::None,
+        placement: CachePlacement::None,
+    };
+
+    /// Whether the route can carry inline markers.
+    #[must_use]
+    pub const fn accepts_markers(&self) -> bool {
+        self.explicit && (self.targets.tools || self.targets.system || self.targets.messages)
+    }
+}
+
+/// Capability matrix declared by one catalog row.
+///
+/// Tool support, strict schemas, free-form formats, structured output, sampling,
+/// limits, and cost stay on the provider row because they predate this matrix;
+/// this struct carries the flags that replaced per-provider heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    /// `tool_choice` values the route honours; empty means the protocol default.
+    pub tool_choices: &'static [&'static str],
+    /// The route offers provider-executed search tools.
+    pub tool_search: bool,
+    /// The tool list may change between steps in one conversation.
+    pub tool_updates: bool,
+    /// Prompt-cache capability.
+    pub cache: CacheCapability,
+    /// Provider-side response state (`store` / `previous_response_id`).
+    pub store: bool,
+    /// Usage is reported in a streamed response.
+    pub stream_usage: bool,
+    /// The route accepts a request-level prompt cache key.
+    pub prompt_cache_key: bool,
+    /// Service tiers the route accepts; empty means none are declared.
+    pub service_tiers: &'static [&'static str],
+    /// The system prompt may change mid-session.
+    pub system_updates: bool,
+    /// Reasoning effort may be updated mid-session.
+    pub reasoning_updates: bool,
+    /// Every assistant turn must carry the reasoning field.
+    pub require_reasoning: bool,
+    /// A stream that ends without a finish reason is a failure.
+    pub require_finish_reason: bool,
+    /// An assistant message is required between a tool result and the next
+    /// user message.
+    pub require_assistant_after_tool: bool,
+}
+
+impl ModelCapabilities {
+    /// Nothing is declared; callers fall back to protocol defaults.
+    pub const UNKNOWN: Self = Self {
+        tool_choices: &[],
+        tool_search: false,
+        tool_updates: false,
+        cache: CacheCapability::NONE,
+        store: false,
+        stream_usage: false,
+        prompt_cache_key: false,
+        service_tiers: &[],
+        system_updates: false,
+        reasoning_updates: false,
+        require_reasoning: false,
+        require_finish_reason: false,
+        require_assistant_after_tool: false,
+    };
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self::UNKNOWN
+    }
+}
+
 /// Reasoning controls a model documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReasoningSupport {
@@ -514,51 +673,63 @@ fn bounded_media_with(
     Some(rewritten)
 }
 
-/// Returns the first modality the model does not declare, if any.
+/// Replaces media the model does not declare with deterministic text.
 ///
 /// Only content with a known MIME type is checked; an unknown MIME type is not
-/// guessed at. An empty declaration means "no metadata", so the gate is skipped
-/// for legacy catalog rows.
+/// guessed at. An empty declaration means "no metadata", so the pass is skipped
+/// for legacy catalog rows. The placeholder keeps the request shape stable and
+/// names the MIME type, its decoded size, and the model, so the model knows an
+/// attachment was dropped instead of silently losing it.
 #[must_use]
-pub fn modality_violation(
+pub fn sanitize_modalities(
     modalities: Modalities,
     model_id: &str,
     transcript: &[ModelMessage],
-) -> Option<String> {
-    for message in transcript {
-        for block in &message.content {
+) -> Option<Vec<ModelMessage>> {
+    if modalities.input.is_empty() {
+        return None;
+    }
+    let mut rewritten: Option<Vec<ModelMessage>> = None;
+    for (message_index, message) in transcript.iter().enumerate() {
+        for (block_index, block) in message.content.iter().enumerate() {
             let Some(mime) = media_mime(block) else {
                 continue;
             };
             if modalities.accepts(&mime) {
                 continue;
             }
-            return Some(format!(
-                "model {model_id:?} does not declare {mime} input (declared: {}): remove the \
-                 attachment or select a model whose catalog lists {mime}",
-                modalities.describe()
-            ));
+            let bytes = media_block_bytes(block);
+            let copy = rewritten.get_or_insert_with(|| transcript.to_vec());
+            if let Some(slot) = copy[message_index].content.get_mut(block_index) {
+                *slot = ModelContent::Text(format!(
+                    "[{mime} omitted: {bytes}-byte payload not declared by model {model_id} \
+                     (declared: {})]",
+                    modalities.describe()
+                ));
+            }
         }
     }
-    None
+    rewritten
 }
 
-/// One request-level media guard: modality gate plus size offload.
+/// One request-level media guard: modality filter plus size offload.
 ///
-/// Returns `Ok(None)` when the transcript can be used unchanged, `Ok(Some(_))`
-/// with a rewritten transcript when oversized media had to be offloaded, and
-/// `Err(_)` with actionable guidance when the model does not declare a MIME
-/// type the transcript carries. The modality gate runs before offload so an
-/// undeclared type fails even when it would also have been offloaded.
+/// Returns `None` when the transcript can be used unchanged, and `Some(_)` with
+/// a rewritten transcript when an undeclared MIME type was replaced by a
+/// placeholder or oversized media had to be offloaded. The modality pass runs
+/// before offload so a placeholder never counts against the media budget.
 pub fn guard_transcript(
     modalities: Modalities,
     model_id: &str,
     transcript: &[ModelMessage],
-) -> Result<Option<Vec<ModelMessage>>, String> {
-    if let Some(violation) = modality_violation(modalities, model_id, transcript) {
-        return Err(violation);
+) -> Option<Vec<ModelMessage>> {
+    match sanitize_modalities(modalities, model_id, transcript) {
+        Some(sanitized) => {
+            let bounded = bounded_media(&sanitized);
+            Some(bounded.unwrap_or(sanitized))
+        }
+        None => bounded_media(transcript),
     }
-    Ok(bounded_media(transcript))
 }
 
 /// Formats a price in integer micro-dollars as dollars per million tokens.

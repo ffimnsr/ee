@@ -167,17 +167,43 @@ fn modalities_accept_exact_types_and_whole_families() {
 }
 
 #[test]
-fn modality_gate_names_the_unsupported_type_and_the_declaration() {
+fn undeclared_modalities_become_a_named_placeholder() {
     let modalities = Modalities { input: &["text", "image/png"], output: &["text"] };
     let transcript =
         vec![ModelMessage::new(ModelRole::User).with_content(vec![image("AAAA", "image/webp")])];
-    let violation = modality_violation(modalities, "vendor/model", &transcript).expect("violation");
-    assert!(violation.contains("image/webp"), "{violation}");
-    assert!(violation.contains("text, image/png"), "{violation}");
+    let sanitized = sanitize_modalities(modalities, "vendor/model", &transcript).expect("replaced");
+    let ModelContent::Text(placeholder) = &sanitized[0].content[0] else {
+        panic!("placeholder expected");
+    };
+    assert!(placeholder.contains("image/webp"), "{placeholder}");
+    assert!(placeholder.contains("3-byte"), "{placeholder}");
+    assert!(placeholder.contains("vendor/model"), "{placeholder}");
 
     let accepted =
         vec![ModelMessage::new(ModelRole::User).with_content(vec![image("AAAA", "image/png")])];
-    assert!(modality_violation(modalities, "vendor/model", &accepted).is_none());
+    assert!(sanitize_modalities(modalities, "vendor/model", &accepted).is_none());
+
+    let audio = vec![ModelMessage::new(ModelRole::User).with_content(vec![ModelContent::Audio {
+        data: String::from("AAAAAAAA"),
+        mime_type: String::from("audio/wav"),
+    }])];
+    let sanitized = sanitize_modalities(modalities, "vendor/model", &audio).expect("replaced");
+    let ModelContent::Text(placeholder) = &sanitized[0].content[0] else {
+        panic!("audio placeholder expected");
+    };
+    assert!(placeholder.contains("audio/wav"), "{placeholder}");
+    assert!(placeholder.contains("6-byte"), "{placeholder}");
+}
+
+#[test]
+fn guard_transcript_replaces_undeclared_media_and_bounds_the_rest() {
+    let modalities = Modalities { input: &["text", "image/png"], output: &["text"] };
+    let transcript =
+        vec![ModelMessage::new(ModelRole::User).with_content(vec![image("AAAA", "audio/wav")])];
+    let guarded = guard_transcript(modalities, "vendor/model", &transcript).expect("rewritten");
+    assert!(
+        matches!(&guarded[0].content[0], ModelContent::Text(text) if text.contains("audio/wav"))
+    );
 }
 
 #[test]

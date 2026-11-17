@@ -13,12 +13,12 @@
 
 pub(crate) mod generated;
 
-use std::fmt;
-
-use ee_agent_orchestrator::{
-    Modalities, ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningProtocol,
-    ReasoningSupport, ReasoningVariant, SamplingSupport, reasoning_variants,
+pub use ee_agent_orchestrator::{
+    CacheCapability, CacheFormatId, CachePlacement, CacheTargets, Modalities, ModelCapabilities,
+    ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningProtocol, ReasoningSupport,
+    ReasoningVariant, SamplingSupport, reasoning_variants,
 };
+use std::fmt;
 
 /// One catalog row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,10 @@ pub struct CatalogModel {
     pub status: &'static str,
     /// Upstream model family slug.
     pub family: &'static str,
+    /// Upstream release date (`YYYY-MM-DD`); empty when the snapshot omits it.
+    pub release_date: &'static str,
+    /// Capability matrix that replaces per-provider heuristics.
+    pub capabilities: ModelCapabilities,
     /// Base URL the catalog declares; empty for non-chat rows.
     pub base_url: &'static str,
     /// Context and output limits, when both are declared.

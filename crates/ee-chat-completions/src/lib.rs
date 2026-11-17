@@ -40,6 +40,7 @@ pub mod partial_json;
 pub mod profile;
 pub mod provider_options;
 mod reasoning_replay;
+pub mod remote_instructions;
 mod request;
 pub mod responses;
 pub mod responses_compact;
@@ -57,8 +58,7 @@ pub use adapter::{
 pub use cache_policy::{
     BREAKPOINT_CAP, CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective,
     CacheFormat, CacheMessageStrategy, CachePlan, CachePolicy, CachePolicyObject, CacheSupport,
-    CacheTargets, cache_control, gateway_policy, openai_request_ttl, parse_policy, parse_ttl, plan,
-    warn_dropped,
+    CacheTargets, cache_control, openai_request_ttl, parse_policy, parse_ttl, plan, warn_dropped,
 };
 pub use config_file::{MAX_CONFIG_BYTES, interpolate, read_document};
 pub use endpoint::{EndpointError, TrustedEndpoint};
@@ -75,6 +75,10 @@ pub use profile::{
 pub use provider_options::{
     MAX_METADATA_ENTRIES, MAX_PROVIDER_OPTIONS_BYTES, ProviderOptions, REASONING_SUMMARY_VALUES,
     TEXT_VERBOSITY_VALUES, TRUNCATION_VALUES,
+};
+pub use remote_instructions::{
+    REMOTE_INSTRUCTION_MAX_BYTES, REMOTE_INSTRUCTION_MAX_REDIRECTS, REMOTE_INSTRUCTION_TIMEOUT,
+    http_instruction_fetcher,
 };
 pub use responses_compact::{COMPACT_PATH_SUFFIX, CompactBody, compact_body, decode_compaction};
 pub use session::{MAX_SESSION_HEADER_VALUE_BYTES, prompt_cache_key, session_headers};

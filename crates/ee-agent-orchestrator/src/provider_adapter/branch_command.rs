@@ -116,6 +116,7 @@ pub(super) fn handle_branch_command(ctx: BranchCommand<'_>) -> Result<PromptResu
         mcp_servers: ctx.mcp_servers.to_vec(),
         conversation: Arc::new(Mutex::new(branch_conversation)),
         model_transcript: Arc::new(Mutex::new(branch_transcript)),
+        remote_instructions: Arc::new(Mutex::new(None)),
     };
     ctx.session_store
         .save(

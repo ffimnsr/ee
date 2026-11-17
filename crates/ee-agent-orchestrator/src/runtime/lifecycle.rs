@@ -201,6 +201,7 @@ impl OrchestratorRuntime {
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
             workspace_scope: Mutex::new(None),
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            workspace_instruction_known: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
             worktrees,
             transcripts,

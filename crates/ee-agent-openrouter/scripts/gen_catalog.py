@@ -36,66 +36,30 @@ PROVIDER_ID = "openrouter"
 
 
 def compact_model(model: dict) -> dict:
-    capabilities = model.get("capabilities") or {}
-    reasoning = capabilities.get("reasoning") or {}
-    tools = capabilities.get("tools") or {}
-    limit = model.get("limit") or {}
-    cost = ((model.get("cost") or {}).get("text")) or {}
-    input_cost = cost.get("input") or {}
-    output_cost = cost.get("output") or {}
-    cache = input_cost.get("cache") or {}
     api = model.get("api") or {}
-    compatibility = (api.get("chat-completions") or {}).get("compatibility") or {}
     return {
         "id": model.get("id"),
         "type": model.get("type", "chat"),
         "status": model.get("status") or "",
         "family": model.get("family") or "",
-        "capabilities": {
-            "tools": {
-                "supported": bool(tools.get("supported")),
-                "strict": bool(tools.get("strict")),
-                "freeform": list(tools.get("freeform") or []),
-            },
-            "reasoning": {
-                key: reasoning[key]
-                for key in ("supported", "toggle", "effort", "budget")
-                if key in reasoning
-            },
-            "structured_output": bool(capabilities.get("structured_output")),
-            "sampling": {
-                key: capabilities[key]
-                for key in ("temperature", "topP", "topK")
-                if key in capabilities
-            },
-        },
+        "release_date": model.get("release_date") or "",
+        "capabilities": model.get("capabilities") or {},
         "modalities": {
             "input": list((model.get("modalities") or {}).get("input") or []),
             "output": list((model.get("modalities") or {}).get("output") or []),
         },
         "limit": {
-            "context": int(limit.get("context") or 0),
-            "output": int(limit.get("output") or 0),
+            "context": int((model.get("limit") or {}).get("context") or 0),
+            "output": int((model.get("limit") or {}).get("output") or 0),
         },
-        "cost": {
-            "text": {
-                "input": {
-                    "price": input_cost.get("price"),
-                    "cache": {key: cache[key] for key in ("read", "write") if key in cache},
-                    "overrides": list(input_cost.get("overrides") or []),
-                },
-                "output": {
-                    "price": output_cost.get("price"),
-                    "overrides": list(output_cost.get("overrides") or []),
-                },
-            }
-        }
-        if cost
-        else None,
+        "cost": model.get("cost"),
         "api": {
-            "kinds": sorted(api),
-            "base_url": (api.get("chat-completions") or {}).get("base_url", ""),
-            "compatibility": compatibility,
+            kind: {
+                "base_url": entry.get("base_url", ""),
+                "compatibility": entry.get("compatibility") or {},
+                "capabilities": entry.get("capabilities") or {},
+            }
+            for kind, entry in sorted(api.items())
         },
     }
 
@@ -216,7 +180,7 @@ def reasoning_literal(model: dict) -> str:
 
 
 def routes_literal(model: dict) -> str:
-    kinds = set((model.get("api") or {}).get("kinds") or [])
+    kinds = set((model.get("api") or {}).keys())
     return (
         "ModelRoutes { chat: "
         f"{'true' if 'chat-completions' in kinds else 'false'}, "
@@ -224,6 +188,140 @@ def routes_literal(model: dict) -> str:
         f"messages: {'true' if 'messages' in kinds else 'false'}, "
         f"images: {'true' if 'images' in kinds else 'false'}, "
         f"systemone: {'true' if 'systemone' in kinds else 'false'} }}"
+    )
+
+
+CACHE_FORMATS = ("anthropic", "alibaba")
+TOOL_CHOICES = ("auto", "none", "tool", "required")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+STATUSES = ("", "alpha", "beta", "preview", "deprecated", "retired")
+SERVICE_TIERS = ("auto", "default", "flex", "priority", "scale")
+COMPATIBILITY_KEYS = (
+    "reasoning_field",
+    "require_reasoning",
+    "max_tokens_field",
+    "require_finish_reason",
+    "require_assistant_after_tool",
+    "supports_prompt_cache_key",
+    "stream_usage",
+    "cache_format",
+    "supports_thinking_block_binding",
+    "supports_effort_updates",
+    "media_input",
+)
+
+
+def validate_model(model_id: str, model: dict) -> None:
+    """Fails loudly on an unknown enum instead of silently skipping it."""
+    kind = model.get("type", "chat")
+    if kind not in ("chat", "decision", "image", "embedding"):
+        raise SystemExit(f"{model_id}: unsupported catalog type {kind!r}")
+    status = model.get("status") or ""
+    if status not in STATUSES:
+        raise SystemExit(f"{model_id}: unknown status {status!r}")
+    capabilities = model.get("capabilities") or {}
+    for effort in (capabilities.get("reasoning") or {}).get("effort") or []:
+        if str(effort) not in REASONING_EFFORTS:
+            raise SystemExit(f"{model_id}: unknown reasoning effort {effort!r}")
+    cache = capabilities.get("cache") or {}
+    for key in cache:
+        if key not in ("implicit", "explicit"):
+            raise SystemExit(f"{model_id}: unknown cache key {key!r}")
+    for tier in capabilities.get("service_tier") or []:
+        if str(tier) not in SERVICE_TIERS:
+            raise SystemExit(f"{model_id}: unknown service tier {tier!r}")
+    for entry in (model.get("api") or {}).values():
+        for key, value in (entry.get("compatibility") or {}).items():
+            if key not in COMPATIBILITY_KEYS:
+                raise SystemExit(f"{model_id}: unknown compatibility key {key!r}")
+            if key == "cache_format" and value not in CACHE_FORMATS:
+                raise SystemExit(f"{model_id}: unknown cache format {value!r}")
+        tools = ((entry.get("capabilities") or {}).get("tools")) or {}
+        for choice in tools.get("choice") or []:
+            if str(choice) not in TOOL_CHOICES:
+                raise SystemExit(f"{model_id}: unknown tool choice {choice!r}")
+
+
+def _cache_format(model_id: str, compatibility: dict) -> str:
+    declared = compatibility.get("cache_format")
+    if declared:
+        return declared
+    vendor = model_id.lstrip("~").split("/")[0].lower()
+    return "alibaba" if "qwen" in vendor else "anthropic"
+
+
+def cache_literal(model_id: str, cache: dict, compatibility: dict) -> str:
+    if not cache:
+        return "CacheCapability::NONE"
+    explicit = cache.get("explicit")
+    implicit = cache.get("implicit")
+    explicit_settings = explicit if isinstance(explicit, dict) else {}
+    implicit_settings = implicit if isinstance(implicit, dict) else {}
+    format_id = _cache_format(model_id, compatibility)
+    targets = explicit_settings.get("targets")
+    if targets is None:
+        targets = (
+            ["system", "messages"]
+            if format_id == "alibaba"
+            else ["tools", "system", "messages"]
+        )
+    ttl = list(explicit_settings.get("ttl") or implicit_settings.get("ttl") or [])
+    min_tokens = explicit_settings.get("min_tokens", implicit_settings.get("min_tokens"))
+    placement = "None"
+    if explicit is not None:
+        placement = "SystemAndTail" if format_id == "alibaba" else "Auto"
+    rendered_ttl = ", ".join(rust(str(item)) for item in ttl)
+    return (
+        "CacheCapability { implicit: "
+        f"{'true' if implicit is not None else 'false'}, "
+        f"explicit: {'true' if explicit is not None else 'false'}, "
+        f"max_breakpoints: {int(explicit_settings.get('max_breakpoints') or 0)}, "
+        "targets: CacheTargets { "
+        f"tools: {'true' if 'tools' in targets else 'false'}, "
+        f"system: {'true' if 'system' in targets else 'false'}, "
+        f"messages: {'true' if 'messages' in targets else 'false'} }}, "
+        f"min_tokens: {'None' if min_tokens is None else f'Some({int(min_tokens)})'}, "
+        f"ttl: &[{rendered_ttl}], "
+        f"format: CacheFormatId::{format_id.capitalize()}, "
+        f"placement: CachePlacement::{placement} }}"
+    )
+
+
+def capabilities_literal(model: dict) -> str:
+    capabilities = model.get("capabilities") or {}
+    api = model.get("api") or {}
+    # The chat-completions entry describes the tool plane the request path uses;
+    # fall back to the first declared kind when a model has no chat route.
+    entry = api.get("chat-completions") or next(iter(api.values()), {})
+    compatibility = entry.get("compatibility") or {}
+    api_capabilities = entry.get("capabilities") or {}
+    tools = api_capabilities.get("tools") or {}
+    choices = ", ".join(rust(str(item)) for item in tools.get("choice") or [])
+    cache = capabilities.get("cache") or {}
+    tiers = ", ".join(rust(str(item)) for item in capabilities.get("service_tier") or [])
+    system_updates = api_capabilities.get(
+        "system_updates", capabilities.get("system_updates")
+    )
+    reasoning_updates = api_capabilities.get(
+        "effort_updates", capabilities.get("effort_updates")
+    )
+    return (
+        "ModelCapabilities { tool_choices: &["
+        f"{choices}], tool_search: {'true' if tools.get('search') else 'false'}, "
+        f"tool_updates: {'true' if tools.get('updates') else 'false'}, "
+        f"cache: {cache_literal(model['id'], cache, compatibility)}, "
+        # The snapshot declares no provider state for this provider, so the
+        # declared routes decide: chat/responses stream usage and responses
+        # exposes store/prompt_cache_key.
+        f"store: {'true' if 'responses' in api else 'false'}, "
+        f"stream_usage: {'true' if 'chat-completions' in api or 'responses' in api else 'false'}, "
+        f"prompt_cache_key: {'true' if 'responses' in api else 'false'}, "
+        f"service_tiers: &[{tiers}], "
+        f"system_updates: {'true' if system_updates else 'false'}, "
+        f"reasoning_updates: {'true' if reasoning_updates else 'false'}, "
+        f"require_reasoning: {'true' if compatibility.get('require_reasoning') else 'false'}, "
+        f"require_finish_reason: {'true' if compatibility.get('require_finish_reason') else 'false'}, "
+        f"require_assistant_after_tool: {'true' if compatibility.get('require_assistant_after_tool') else 'false'} }}"
     )
 
 
@@ -246,6 +344,28 @@ def sampling_literal(model: dict) -> str:
     )
 
 
+def _default_max_tokens_field(model_id: str) -> str:
+    """Vendors whose OpenAI-compatible surface still requires `max_tokens`.
+
+    This mapping lives in the generator so the request path reads data instead
+    of matching model-id substrings at runtime.
+    """
+    vendor = model_id.lstrip("~").split("/")[0].lower()
+    requires = (
+        "deepseek",
+        "moonshotai",
+        "togetherai",
+        "zai",
+        "z-ai",
+        "zhipuai",
+        "nvidia",
+        "cerebras",
+        "chutes",
+        "cloudflare",
+    )
+    return "max_tokens" if any(vendor.startswith(name) for name in requires) else "max_completion_tokens"
+
+
 def model_literal(model: dict) -> str:
     kind = model.get("type", "chat")
     limit = model.get("limit") or {}
@@ -264,12 +384,21 @@ def model_literal(model: dict) -> str:
     inputs = ", ".join(rust(str(item)) for item in (modalities.get("input") or []))
     outputs = ", ".join(rust(str(item)) for item in (modalities.get("output") or []))
     reasoning_field = compatibility.get("reasoning_field")
+    api = model.get("api") or {}
+    base_url = (api.get("chat-completions") or {}).get("base_url", "")
+    max_tokens_field = compatibility.get("max_tokens_field") or (
+        _default_max_tokens_field(model["id"])
+        if "chat-completions" in api
+        else ""
+    )
     return (
         "CatalogModel { id: "
         f"{rust(model['id'])}, kind: {kind_literal(kind)}, "
         f"routes: {routes_literal(model)}, status: {rust(model.get('status') or '')}, "
         f"family: {rust(model.get('family') or '')}, "
-        f"base_url: {rust((model.get('api') or {}).get('base_url') or '')}, "
+        f"release_date: {rust(model.get('release_date') or '')}, "
+        f"capabilities: {capabilities_literal(model)}, "
+        f"base_url: {rust(base_url)}, "
         f"limits: {limits}, "
         f"modalities: Modalities {{ input: &[{inputs}], output: &[{outputs}] }}, "
         f"reasoning: {reasoning_literal(model)}, cost: {cost_literal(model)}, "
@@ -278,7 +407,7 @@ def model_literal(model: dict) -> str:
         f"tools_strict: {'true' if tools.get('strict') else 'false'}, "
         f"freeform: &[{freeform}], "
         f"sampling: {sampling_literal(model)}, "
-        f"max_tokens_field: {rust(compatibility.get('max_tokens_field') or '')}, "
+        f"max_tokens_field: {rust(max_tokens_field)}, "
         f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'}, "
         "compaction: false },"
     )
@@ -303,6 +432,8 @@ def generate() -> str:
     digest = hashlib.sha256(subset_bytes).hexdigest()
     subset = json.loads(subset_bytes)
     models = subset.get("providers", {}).get(PROVIDER_ID, {}).get("models", {})
+    for model_id in sorted(models):
+        validate_model(model_id, models[model_id])
     rows = [model_literal(models[model_id]) for model_id in sorted(models)]
     source = subset.get("source", "https://models.dev/api.json")
     return f"""//! @generated by `scripts/gen_catalog.py` -- do not edit by hand.
@@ -316,7 +447,8 @@ def generate() -> str:
 //! `python3 scripts/gen_catalog.py`; verify with `--check`.
 
 use ee_agent_orchestrator::{{
-    CostTier, Modalities, ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningSupport,
+    CacheCapability, CacheFormatId, CachePlacement, CacheTargets, CostTier, Modalities,
+    ModelCapabilities, ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningSupport,
     SamplingSupport,
 }};
 

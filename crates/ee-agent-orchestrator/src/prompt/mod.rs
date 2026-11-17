@@ -10,6 +10,7 @@ pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod global;
 pub(crate) mod mcp;
+pub(crate) mod remote;
 pub(crate) mod render;
 pub(crate) mod repeat_guard;
 pub(crate) mod runtime_context;
@@ -26,6 +27,7 @@ use ee_agent_protocol::SessionModeId;
 pub use crate::prompt::context::{RuntimeSnapshot, WorkspaceMessage};
 use crate::prompt::error::PromptError;
 pub use crate::prompt::mcp::McpInstructionMessage;
+pub use crate::prompt::remote::{FetchFuture, RemoteInstructionBody, RemoteInstructionFetcher};
 use crate::prompt::render::{Section, render_sections};
 use crate::prompt::sections::{
     DEPLOYMENT_PERSONA_PREFIX, DEPLOYMENT_PERSONA_SUFFIX, HARNESS_IDENTITY, PLAN_POLICY,

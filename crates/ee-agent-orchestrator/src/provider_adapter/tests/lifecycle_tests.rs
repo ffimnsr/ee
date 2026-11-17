@@ -562,3 +562,58 @@ async fn provider_adapter_load_session_restores_persisted_state() {
 
     handle.shutdown(task).await;
 }
+
+#[tokio::test]
+async fn configured_remote_instructions_reach_the_model_once_per_session() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::prompt::{RemoteInstructionBody, RemoteInstructionFetcher};
+
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = fetches.clone();
+    let mut config = OrchestratorProviderConfig::default();
+    config.orchestrator.instructions = crate::config::InstructionSourceConfig {
+        remote_urls: vec![String::from("https://example.com/AGENTS.md")],
+        offline: false,
+    };
+    config.remote_instruction_fetcher = Some(RemoteInstructionFetcher::new(move |_url| {
+        let counter = counter.clone();
+        Box::pin(async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(RemoteInstructionBody {
+                content: String::from("remote authority rule"),
+                truncated: false,
+            })
+        })
+    }));
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().text("first").completed(),
+        ModelResponse::new().text("second").completed(),
+    ]));
+    let provider = OrchestratorProvider::new(config, model.clone());
+    let (handle, task) = spawn_server(provider);
+    let session_id = new_session(&handle, 1).await;
+
+    for (id, text) in [(2, "one"), (3, "two")] {
+        handle.send(request(id, "session/prompt", prompt_params(&session_id, text)));
+        let (frame, _) = next_response_with_updates(&handle).await;
+        assert_eq!(request_result(frame)["stopReason"], "end_turn");
+    }
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "one model call per prompt");
+    assert!(
+        requests[0]
+            .transcript
+            .iter()
+            .any(|message| message.text_content().contains("remote authority rule")),
+        "remote instruction reaches the prompt payload"
+    );
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        1,
+        "a configured URL is fetched once per session, not once per turn"
+    );
+
+    handle.shutdown(task).await;
+}

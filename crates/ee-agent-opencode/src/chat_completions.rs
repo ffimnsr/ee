@@ -72,7 +72,7 @@ impl ChatCompletionsCodec {
         session: Option<&ee_agent_orchestrator::SessionContext>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
-        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let transcript = crate::dialect::guarded_transcript(profile, transcript);
         let (messages, tools) = chat_request_parts(&ChatRequestParts {
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
@@ -146,7 +146,7 @@ impl ChatCompletionsCodec {
         options: ee_chat_completions::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
-        let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
+        let transcript = crate::dialect::guarded_transcript(profile, transcript);
         let (messages, tools) = chat_request_parts(&ChatRequestParts {
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),

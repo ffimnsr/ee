@@ -25,24 +25,7 @@ impl AgentProvider for OrchestratorProvider {
     }
 
     fn capabilities(&self) -> AgentCapabilities {
-        // Load is supported (restores persisted state); session listing and
-        // closing are handled by the framework.  Recovery-enabled providers
-        // also advertise `session/resume` (checkpoint restore without
-        // replay).  The provider hosts MCP-over-ACP for every session (the
-        // `ClientBridge` mcp/* path), so `mcp_capabilities.acp` is
-        // advertised; hosts then append the ee proxy as `McpServer::Acp`
-        // instead of the stdio fallback.  Prompt/image capabilities stay at
-        // their defaults.
-        let mut session_capabilities = SessionCapabilities::new()
-            .list(SessionListCapabilities::new())
-            .close(SessionCloseCapabilities::new());
-        if self.config.orchestrator.recovery.is_durable() {
-            session_capabilities = session_capabilities.resume(SessionResumeCapabilities::new());
-        }
-        AgentCapabilities::default()
-            .load_session(true)
-            .mcp_capabilities(McpCapabilities::new().acp(true))
-            .session_capabilities(session_capabilities)
+        bootstrap::capabilities(&self.config)
     }
 
     fn new_session(
@@ -93,6 +76,7 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers,
                 conversation: Arc::new(Mutex::new(Vec::new())),
                 model_transcript: Arc::new(Mutex::new(Vec::new())),
+                remote_instructions: Arc::new(Mutex::new(None)),
             };
             session_store
                 .save(
@@ -225,6 +209,7 @@ impl AgentProvider for OrchestratorProvider {
                     mcp_servers,
                     conversation: Arc::new(Mutex::new(Vec::new())),
                     model_transcript: Arc::new(Mutex::new(Vec::new())),
+                    remote_instructions: Arc::new(Mutex::new(None)),
                 },
             );
             Ok(SessionInit::new(session_id)
@@ -311,6 +296,7 @@ impl AgentProvider for OrchestratorProvider {
                         mcp_servers,
                         conversation: Arc::new(Mutex::new(Vec::new())),
                         model_transcript: Arc::new(Mutex::new(Vec::new())),
+                        remote_instructions: Arc::new(Mutex::new(None)),
                     },
                 );
                 mode
@@ -340,6 +326,8 @@ impl AgentProvider for OrchestratorProvider {
         let next_telemetry_turn = self.next_telemetry_turn.clone();
         let plugins = self.plugins.clone();
         let models = self.models.clone();
+        let (instruction_sources, instruction_fetcher) =
+            bootstrap::remote_instruction_inputs(&self.config);
         let base_policy = self.policy.clone();
         Box::pin(async move {
             let session = {
@@ -355,6 +343,7 @@ impl AgentProvider for OrchestratorProvider {
                         session.mcp_servers.clone(),
                         session.conversation.clone(),
                         session.model_transcript.clone(),
+                        session.remote_instructions.clone(),
                     )
                 })
             };
@@ -368,6 +357,7 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers,
                 conversation,
                 model_transcript,
+                remote_cache,
             )) = session
             else {
                 return Err(ProviderError::BackendFailure(format!(
@@ -390,6 +380,12 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
             let background_jobs = runtime.background_jobs_snapshot();
             let global_config_root = crate::prompt::skills::user_config_root_from_env();
+            let remote = bootstrap::remote_instructions(
+                &instruction_sources,
+                instruction_fetcher.as_ref(),
+                &remote_cache,
+            )
+            .await;
             let bundle = prompt_bundle(PromptBundleInputs {
                 cwd: &workspace,
                 workspace_roots: &workspace_roots,
@@ -401,6 +397,7 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers: &mcp_server_names,
                 global_config_root: global_config_root.as_deref(),
                 background_jobs: background_jobs.as_deref(),
+                remote_instructions: &remote,
             })?;
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
@@ -727,6 +724,7 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers: &mcp_server_names,
                 global_config_root: global_config_root.as_deref(),
                 background_jobs: background_jobs.as_deref(),
+                remote_instructions: &remote,
             })?;
             bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
             let cleanup =

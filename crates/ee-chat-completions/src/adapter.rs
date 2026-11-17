@@ -394,8 +394,7 @@ fn wire_request(
         profile.modalities,
         &profile.model,
         &request.transcript,
-    )
-    .map_err(ModelError::Adapter)?;
+    );
     let transcript = guarded.as_deref().unwrap_or(&request.transcript);
     let generation = merged_generation(profile, request)?;
     let (messages, tools) = chat_request_parts(&ChatRequestParts {
@@ -508,13 +507,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn undeclared_media_fails_before_the_client_runs() {
-        let calls = Arc::new(Mutex::new(0usize));
-        let counter = calls.clone();
+    async fn undeclared_media_becomes_a_placeholder_before_the_client_runs() {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = seen.clone();
         let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
-            let counter = counter.clone();
+            let recorder = recorder.clone();
             Box::pin(async move {
-                *counter.lock().expect("calls") += 1;
+                recorder.lock().expect("seen").push(json!({
+                    "messages": _request.messages,
+                }));
                 Ok(AssistantTurn {
                     content: String::new(),
                     reasoning: String::new(),
@@ -542,12 +543,12 @@ mod tests {
         ];
         let (_cancel_tx, cancel) = watch::channel(false);
 
-        let error = adapter.complete(request, cancel).await.expect_err("media gate fails closed");
+        adapter.complete(request, cancel).await.expect("placeholder request is sent");
 
-        let message = error.to_string();
-        assert!(message.contains("image/webp"), "{message}");
-        assert!(message.contains("image/png"), "{message}");
-        assert_eq!(*calls.lock().expect("calls"), 0, "no billable request was sent");
+        let seen = seen.lock().expect("seen");
+        let text = seen[0]["messages"].to_string();
+        assert!(text.contains("image/webp"), "{text}");
+        assert!(text.contains("omitted"), "{text}");
     }
 
     #[tokio::test]

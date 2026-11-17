@@ -223,7 +223,10 @@ pub mod private_fs;
 pub mod progress;
 pub mod progress_scoring;
 mod prompt;
-pub use prompt::{McpInstructionMessage, PromptBundle, RuntimeSnapshot, WorkspaceMessage};
+pub use prompt::{
+    FetchFuture, McpInstructionMessage, PromptBundle, RemoteInstructionBody,
+    RemoteInstructionFetcher, RuntimeSnapshot, WorkspaceMessage,
+};
 pub mod prompt_injection;
 pub mod provider_adapter;
 pub mod rate_limit;
@@ -319,7 +322,10 @@ pub use completion::{
     CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionState, EvidenceStatus,
     derive_completion,
 };
-pub use config::{OrchestratorConfig, RecoveryConfig, ToolTimeoutPolicy};
+pub use config::{
+    InstructionSourceConfig, MAX_REMOTE_INSTRUCTION_SOURCES, OrchestratorConfig, RecoveryConfig,
+    ToolTimeoutPolicy,
+};
 pub use context_pack::{
     ActiveTaskSummary, ContextItemProvenance, ContextMemoryItem, ContextPack, ContextPackBuilder,
     ContextPackConfig, ContextTruncation, DEFAULT_CONTEXT_PACK_MAX_BYTES,
@@ -410,11 +416,11 @@ pub use model::{
     estimate_prompt_tokens, fit_output_limit, validate_tool_names,
 };
 pub use model_metadata::{
-    CostTier, MEDIA_TARGET_BYTES, MEDIA_TRIGGER_BYTES, Modalities, ModelCost, ModelKind,
-    ModelRoutes, ReasoningProtocol, ReasoningSupport, ReasoningVariant, SamplingSupport,
-    TokenCounts, apply_catalog_cost, bounded_media, find_variant, format_price_micros,
-    guard_transcript, media_bytes, modality_violation, reasoning_variants, usage_with_cost,
-    variant_ids,
+    CacheCapability, CacheFormatId, CachePlacement, CacheTargets, CostTier, MEDIA_TARGET_BYTES,
+    MEDIA_TRIGGER_BYTES, Modalities, ModelCapabilities, ModelCost, ModelKind, ModelRoutes,
+    ReasoningProtocol, ReasoningSupport, ReasoningVariant, SamplingSupport, TokenCounts,
+    apply_catalog_cost, bounded_media, find_variant, format_price_micros, guard_transcript,
+    media_bytes, reasoning_variants, sanitize_modalities, usage_with_cost, variant_ids,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,

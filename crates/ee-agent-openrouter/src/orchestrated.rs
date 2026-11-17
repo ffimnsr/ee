@@ -76,10 +76,12 @@ pub fn openrouter_orchestrator_config(
                 mode: config.compaction_mode,
                 ..ee_agent_orchestrator::CompactionConfig::default()
             },
+            instructions: ee_agent_orchestrator::InstructionSourceConfig::from_env(),
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
         session_log_dir: session_log_root.clone(),
+        remote_instruction_fetcher: Some(ee_chat_completions::http_instruction_fetcher()),
         ..OrchestratorProviderConfig::default()
     };
     if let Some(root) = session_log_root {

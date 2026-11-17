@@ -757,7 +757,7 @@ impl Config {
 }
 
 /// Strips a trailing `#variant` and trims the model id.
-fn base_model_id(model: &str) -> &str {
+pub(crate) fn base_model_id(model: &str) -> &str {
     match model.rsplit_once('#') {
         Some((base, _)) => base.trim(),
         None => model.trim(),

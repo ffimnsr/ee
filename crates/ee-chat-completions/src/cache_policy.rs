@@ -509,21 +509,51 @@ pub fn warn_dropped(plan: &CachePlan, protocol: &str, cap: usize) {
     );
 }
 
-/// Gateway policy for an OpenRouter/Vercel-style model id.
+/// Lowers a catalog cache capability into placement support.
 ///
-/// `~anthropic/...` aliases resolve to the same family as `anthropic/...`;
-/// Qwen caches system and tail only; everything else keeps no breakpoints
-/// because a new cache write per step costs more than it saves.
-#[must_use]
-pub fn gateway_policy(model_id: &str) -> CachePolicy {
-    let id = model_id.trim_start_matches('~').to_ascii_lowercase();
-    if id.starts_with("anthropic/") || id.contains("claude") {
-        return CachePolicy::Auto;
+/// A declared `max_breakpoints` of `0` means the provider did not state a cap,
+/// so the protocol default applies.
+impl From<ee_agent_orchestrator::CacheCapability> for CacheSupport {
+    fn from(capability: ee_agent_orchestrator::CacheCapability) -> Self {
+        let targets = CacheTargets {
+            tools: capability.targets.tools,
+            system: capability.targets.system,
+            messages: capability.targets.messages,
+        };
+        Self {
+            implicit: capability.implicit,
+            explicit: capability.explicit,
+            max_breakpoints: if capability.max_breakpoints == 0 {
+                BREAKPOINT_CAP
+            } else {
+                capability.max_breakpoints
+            },
+            targets,
+            min_tokens: capability.min_tokens,
+        }
     }
-    if id.starts_with("qwen/") || id.starts_with("alibaba/qwen") {
-        return CachePolicy::Explicit(CachePolicyObject::qwen());
+}
+
+impl From<ee_agent_orchestrator::CacheFormatId> for CacheFormat {
+    fn from(format: ee_agent_orchestrator::CacheFormatId) -> Self {
+        match format {
+            ee_agent_orchestrator::CacheFormatId::Alibaba => Self::Alibaba,
+            ee_agent_orchestrator::CacheFormatId::None
+            | ee_agent_orchestrator::CacheFormatId::Anthropic => Self::Anthropic,
+        }
     }
-    CachePolicy::None
+}
+
+impl From<ee_agent_orchestrator::CachePlacement> for CachePolicy {
+    fn from(placement: ee_agent_orchestrator::CachePlacement) -> Self {
+        match placement {
+            ee_agent_orchestrator::CachePlacement::None => Self::None,
+            ee_agent_orchestrator::CachePlacement::Auto => Self::Auto,
+            ee_agent_orchestrator::CachePlacement::SystemAndTail => {
+                Self::Explicit(CachePolicyObject::qwen())
+            }
+        }
+    }
 }
 
 /// Parses `auto`, `none`, or the object form of a cache policy.
@@ -748,14 +778,28 @@ mod tests {
     }
 
     #[test]
-    fn gateway_policy_matches_the_reference_families() {
-        assert_eq!(gateway_policy("anthropic/claude-sonnet-4"), CachePolicy::Auto);
-        assert_eq!(gateway_policy("~anthropic/claude-sonnet-latest"), CachePolicy::Auto);
-        assert_eq!(gateway_policy("google/gemini-2.5-pro"), CachePolicy::None);
+    fn catalog_capability_lowers_into_placement_support() {
+        use ee_agent_orchestrator::{CacheCapability, CacheFormatId, CachePlacement, CacheTargets};
+        let capability = CacheCapability {
+            implicit: true,
+            explicit: true,
+            max_breakpoints: 2,
+            targets: CacheTargets::SYSTEM_AND_MESSAGES,
+            min_tokens: Some(512),
+            ttl: &["5m"],
+            format: CacheFormatId::Alibaba,
+            placement: CachePlacement::SystemAndTail,
+        };
+        let support = CacheSupport::from(capability);
+        assert!(support.accepts_markers());
+        assert_eq!(support.max_breakpoints, 2);
+        assert!(!support.targets.tools);
+        assert_eq!(CacheFormat::from(capability.format), CacheFormat::Alibaba);
         assert!(matches!(
-            gateway_policy("qwen/qwen3-max"),
+            CachePolicy::from(capability.placement),
             CachePolicy::Explicit(CachePolicyObject { tools: false, system: true, .. })
         ));
+        assert_eq!(CachePolicy::from(CachePlacement::None), CachePolicy::None);
     }
 
     #[test]

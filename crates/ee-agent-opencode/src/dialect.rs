@@ -20,7 +20,7 @@ pub(crate) fn codec_error(label: &str, detail: impl std::fmt::Display) -> Provid
     ee_chat_completions::wire::codec_error(label, detail)
 }
 
-/// Applies the catalog modality gate and media-size budget before a request
+/// Applies the catalog modality filter and media-size budget before a request
 /// body exists.
 ///
 /// Returns the borrowed transcript when nothing changed, so the common path
@@ -28,11 +28,10 @@ pub(crate) fn codec_error(label: &str, detail: impl std::fmt::Display) -> Provid
 pub(crate) fn guarded_transcript<'a>(
     profile: &EndpointProfile,
     transcript: &'a [ModelMessage],
-) -> Result<Cow<'a, [ModelMessage]>, ProviderError> {
+) -> Cow<'a, [ModelMessage]> {
     match ee_agent_orchestrator::guard_transcript(profile.modalities, &profile.model, transcript) {
-        Ok(None) => Ok(Cow::Borrowed(transcript)),
-        Ok(Some(bounded)) => Ok(Cow::Owned(bounded)),
-        Err(detail) => Err(codec_error(&profile.label, detail)),
+        None => Cow::Borrowed(transcript),
+        Some(guarded) => Cow::Owned(guarded),
     }
 }
 

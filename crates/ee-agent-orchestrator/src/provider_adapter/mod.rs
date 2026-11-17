@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod auto_compact;
+mod bootstrap;
 
 use ee_agent_acp_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
@@ -37,10 +38,9 @@ use ee_agent_acp_server::{
 };
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
-    DISCARD_COMMAND_NAME, Implementation, McpCapabilities, MessageId, RUBBER_DUCK_COMMAND_NAME,
-    SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities, SessionMode,
-    SessionModeId, SessionModeState, SessionResumeCapabilities, SessionUpdate, StopReason,
-    TextContent, branch_available_command, compact_available_command, discard_available_command,
+    DISCARD_COMMAND_NAME, Implementation, MessageId, RUBBER_DUCK_COMMAND_NAME, SessionId,
+    SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
+    branch_available_command, compact_available_command, discard_available_command,
     is_resume_command, parse_slash_command, resume_available_command,
     rubber_duck_available_command,
 };
@@ -63,7 +63,8 @@ use crate::observability::{
 };
 use crate::policy::{PolicyEngine, ToolPolicy};
 use crate::prompt::{
-    AgentIdentity, ApprovalMode, PromptBundle, PromptInputs, PromptPreset, SandboxMode,
+    AgentIdentity, ApprovalMode, PromptBundle, PromptInputs, PromptPreset,
+    RemoteInstructionFetcher, SandboxMode, WorkspaceMessage,
 };
 use crate::runtime::{
     OrchestratorRuntime, StrategicRecoveryContext, StrategicRecoveryTurn, StrategicTurnOutcome,
@@ -111,6 +112,11 @@ pub struct OrchestratorProviderConfig {
     pub telemetry: TelemetryConfig,
     /// Opaque version labels attached to locally retained telemetry records.
     pub telemetry_attribution: TelemetryAttribution,
+    /// Network client for configured remote instruction URLs.
+    ///
+    /// The orchestrator holds no HTTP client; a provider binary injects one.
+    /// `None` keeps remote instructions disabled even when URLs are configured.
+    pub remote_instruction_fetcher: Option<RemoteInstructionFetcher>,
 }
 
 impl Default for OrchestratorProviderConfig {
@@ -129,6 +135,7 @@ impl Default for OrchestratorProviderConfig {
             validation_workspace: WorkspaceValidationConfig::default(),
             telemetry: TelemetryConfig::default(),
             telemetry_attribution: default_telemetry_attribution(),
+            remote_instruction_fetcher: None,
         }
     }
 }
@@ -157,6 +164,10 @@ struct SessionRuntime {
     /// calls, and tool results) retained across prompts so compaction and the
     /// next turn see real provenance instead of a text-only tail.
     model_transcript: Arc<Mutex<Vec<ModelMessage>>>,
+    /// Configured remote instruction messages, fetched once per session on the
+    /// first turn. `None` means "not fetched yet"; an empty vector is a
+    /// completed fetch that produced nothing.
+    remote_instructions: Arc<Mutex<Option<Vec<WorkspaceMessage>>>>,
 }
 
 /// One recorded conversation message for `session/load` replay.

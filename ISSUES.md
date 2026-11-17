@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–22 implemented and tested (2026-11-17). Gaps 23–24 (Part 5 second-pass findings) remain open.
+**Status:** Gaps 1–24 implemented and tested (2026-11-17). Part 6 (Gaps 25–28) remains open.
 
 ## Execution Overview
 
@@ -2153,18 +2153,20 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 23 — Prompt Payload Parity (Instruction Sources, Media Gating)
 
-- [ ] Align the payload shape that reaches the model, not just the transport.
-  - [ ] **Problem:**
+**Landed (Gap 23):** `ee-agent-orchestrator/src/prompt/remote.rs` renders operator-configured HTTPS instruction sources and is injected with a `RemoteInstructionFetcher` so the orchestrator still links no HTTP client; `ee-chat-completions::http_instruction_fetcher` is the bounded implementation (5 s timeout, 3 redirects, 128 KiB per source, HTTPS + no userinfo). `InstructionSourceConfig` reads `EE_INSTRUCTION_URLS` / `EE_OFFLINE`, validates at startup, and is cached once per session by the provider adapter. `WorkspaceInstructionTracker` now keeps a session `known` ledger and re-emits a changed instruction file as one bounded diff; unchanged revision yields nothing. `guard_transcript` no longer fails on an undeclared modality: `sanitize_modalities` replaces it with a deterministic placeholder naming the MIME type, decoded size, model, and declaration, then the existing 25 MiB/15 MiB offload runs. Recompression remains the documented placeholder offload rather than a codec dependency.
+
+- [x] Align the payload shape that reaches the model, not just the transport.
+  - [x] **Problem:**
     - The reference discovers project and global instructions including **remote URL** sources, and re-renders changed instructions mid-session as bounded diffs or replacements (`packages/core/src/instruction-discovery.ts`).
     - It strips content parts the model cannot accept and bounds images (25 MiB trigger, 15 MiB target) before sending (`packages/core/src/session/model-request.ts:337-352`).
     - It includes builtin instruction sources (code-mode, MCP, skills, references) in the same payload.
     - Our prompt bundle covers stable/global/workspace/MCP sections plus runtime deltas, and subdirectory AGENTS.md discovery is implemented (see Improvement 2), but there is no remote instruction source, no diff rendering for a changed existing instruction file, and no capability-based part stripping or image bounding.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add opt-in remote instruction URLs: HTTPS only, bounded size and redirect count, short timeout, rendered under the untrusted-instruction trust level, and never fetched when offline mode is set.
     - Re-emit a changed workspace instruction file as a bounded diff once per change, reusing the existing runtime-delta channel.
     - Filter transcript parts by catalog modalities (audio/video/PDF) and replace them with deterministic placeholders instead of dropping silently.
     - Bound image payloads with the documented trigger/target sizes and a deterministic placeholder that keeps the prefix cache stable.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - An audio part sent to a text-only model becomes a deterministic placeholder naming the mime type and size.
     - An image over 25 MiB is recompressed or replaced below 15 MiB before the request, with a stable placeholder when it cannot be.
     - A changed instruction file produces exactly one diff notice per change, and an unchanged file produces none.
@@ -2172,16 +2174,18 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 24 — Catalog Capability Matrix Completion
 
-- [ ] Finish the catalog so every gating decision above reads data instead of heuristics.
-  - [ ] **Problem:**
+**Landed (Gap 24):** both subsets were refreshed from the bundled models.dev snapshot, so rows now carry `release_date`, `family`, `status`, and a shared `ModelCapabilities` matrix (`tool_choices`, `tool_search`, `tool_updates`, `cache {implicit, explicit, max_breakpoints, targets, min_tokens, ttl, format, placement}`, `store`, `stream_usage`, `prompt_cache_key`, `service_tiers`, `system_updates`, `reasoning_updates`, `require_*`). Generators emit the matrix and fail on unknown `type`, `status`, API kind, reasoning effort, cache key, service tier, compatibility key, or `tool_choice`. `gateway_policy` and the Qwen/Cloudflare name sniffing are gone: OpenRouter and OpenCode cache directives, and the OpenRouter `max_tokens` field, come from the row (a generator-side vendor table covers `max_tokens_field`, and a runtime host check remains only for unknown custom endpoints). Time-window cost multipliers are documented as provider-reported-cost territory rather than duplicated wall-clock logic.
+
+- [x] Finish the catalog so every gating decision above reads data instead of heuristics.
+  - [x] **Problem:**
     - The reference capability matrix includes `tools { supported, strict, choice, search, freeform, updates }`, `reasoning { supported, default, toggle, effort, budget, updates }`, `cache { implicit|explicit with ttl, minTokens, maxBreakpoints, targets }`, `structuredOutput`, `temperature`, `topP`, `topK`, `systemUpdates`, `store`, `streamUsage`, `promptCacheKey`, and `serviceTier` values (`packages/ai/src/schema/options.ts:240-287`), plus the per-provider compatibility flags `reasoningField`, `requireReasoning`, `maxTokensField`, `requireFinishReason`, and `requireAssistantAfterTool` (`packages/schema/src/model-compatibility.ts`).
     - Catalog costs carry tiers, overrides keyed by context size, and multiplicative factors; models carry status, release time, and family (`packages/core/src/models-dev.ts`).
     - Our generated catalog plan (Gap 1) listed only the basics. Without the full matrix, Gaps 6, 7, 11, 12, 14, 19, and 20 would have to reintroduce hardcoded provider/model lists — exactly the heuristics the reference removed.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend the generated catalog schema with the capability matrix above, cost tiers/overrides/factors, status, release time, and family.
     - Replace the remaining heuristics: `supports_anthropic_prompt_cache` name sniffing (`crates/ee-agent-openrouter/src/openrouter.rs`), fixed cache format, fixed tool-choice emission, and any provider-string checks.
     - Validate at generation time that every capability needed by a shipped code path exists for at least one model; fail the generator when an enum value is unknown rather than silently skipping.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - No production code path decides a request field from a model-id substring after this gap lands (grep-level assertion in review).
     - Cost tiers and overrides resolve deterministically for a table-driven test set.
     - The generator fails loudly on an unknown capability enum or service tier value.
@@ -2195,8 +2199,8 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 - [x] Slice J: Gap 15 (usage accounting) with telemetry and metrics wiring.
 - [x] Slice K: Gap 18 (streaming events) plus the ACP mapping.
 - [x] Slice L: Gap 19 + Gap 20 (hosted tools, continuation, provider compaction).
-- [ ] Slice M: Gap 23 (prompt payload parity); Gap 21 (config surface) and Gap 22 (usage probe) landed.
-- [ ] Slice N: Gap 24 (capability matrix) — must land before inverting any remaining heuristic; can run in parallel with Slice G.
+- [x] Slice M: Gap 23 (prompt payload parity); Gap 21 (config surface) and Gap 22 (usage probe) landed.
+- [x] Slice N: Gap 24 (capability matrix) — must land before inverting any remaining heuristic; can run in parallel with Slice G.
 
 **Ordering note:** Gap 24 and Gap 1 share one generator; land them together. Gap 18 changes a shared enum consumed by the orchestrator and both provider crates, so it should not be in flight at the same time as Gap 6 or Gap 4 transcript work.
 

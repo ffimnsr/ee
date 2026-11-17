@@ -20,11 +20,12 @@ use std::sync::Arc;
 use ee_agent_orchestrator::Modalities;
 use ee_chat_completions::{
     BearerToken, CacheDirective, CacheFormat, CachePolicy, CacheSupport, ChatCompletionsClient,
-    EndpointProfile, MaxTokensField, RetryPolicy, TokenSource, TrustedEndpoint, gateway_policy,
+    EndpointProfile, MaxTokensField, RetryPolicy, TokenSource, TrustedEndpoint,
 };
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+use crate::catalog::CatalogModel;
 use crate::config::{Config, OpenRouterApiKind};
 
 pub(crate) use ee_chat_completions::{
@@ -67,7 +68,10 @@ pub(crate) fn openrouter_profile_with_options(
     model: &str,
     options: &OpenRouterOptions,
 ) -> Result<EndpointProfile, String> {
-    let entry = config.catalog_entry();
+    // Look the row up for the requested model, not `config.model`: the
+    // rubber-duck critic reuses the same configuration against a different id,
+    // and a `#variant` suffix must not hide the base row.
+    let entry = crate::catalog::find(crate::config::base_model_id(model));
     validate_route(config, entry)?;
     let endpoint = TrustedEndpoint::parse(match config.api_kind {
         OpenRouterApiKind::Chat => &config.api_url,
@@ -97,7 +101,7 @@ pub(crate) fn openrouter_profile_with_options(
     let max_tokens_field = options
         .max_tokens_field()
         .or(declared_field)
-        .unwrap_or_else(|| detect_max_tokens_field(model, endpoint.as_str()));
+        .unwrap_or_else(|| endpoint_max_tokens_field(endpoint.as_str()));
     let reasoning_field = options
         .reasoning_field()
         .or_else(|| entry.and_then(|entry| entry.reasoning_field.map(String::from)));
@@ -137,7 +141,7 @@ pub(crate) fn openrouter_profile_with_options(
             config.retry_base_delay,
             config.retry_max_delay,
         ))
-        .with_cache(cache_directive(model, options, config.api_kind))
+        .with_cache(cache_directive(entry, options, config.api_kind))
         .with_headers(headers)
         .with_stream_usage(options.include_usage())
         .with_max_output_tokens(options.max_output_tokens())
@@ -162,22 +166,10 @@ pub(crate) fn openrouter_profile_with_options(
     Ok(profile)
 }
 
-/// Vendors whose OpenAI-compatible surface still requires `max_tokens`.
+/// Endpoint hosts whose OpenAI-compatible surface still requires `max_tokens`.
 ///
-/// Anything else gets `max_completion_tokens`, matching the reference agent's
-/// detection. Vendors are matched on the id prefix before `/`, and endpoints by
-/// host substring.
-const MAX_TOKENS_VENDORS: [&str; 9] = [
-    "deepseek",
-    "moonshotai",
-    "togetherai",
-    "zai",
-    "z-ai",
-    "zhipuai",
-    "nvidia",
-    "cerebras",
-    "chutes",
-];
+/// Catalog rows carry their own field; this only covers a model the catalog does
+/// not know on a self-hosted or proxied endpoint.
 const MAX_TOKENS_HOSTS: [&str; 10] = [
     "deepseek.com",
     "api.moonshot.ai",
@@ -220,18 +212,16 @@ fn config_headers(config: &Config) -> Result<Vec<(HeaderName, HeaderValue)>, Str
     Ok(headers)
 }
 
-/// Detects the output-token body field for one OpenRouter model and endpoint.
+/// Output-token field an unknown OpenRouter endpoint requires.
 ///
-/// An explicit `OPENROUTER_MAX_TOKENS_FIELD` wins; otherwise the model vendor
-/// prefix and endpoint host decide. Cloudflare vendors always use `max_tokens`.
+/// Catalog rows carry their own field, derived at generation time. This only
+/// covers the endpoint-host case for a model the catalog does not know: a
+/// self-hosted or proxied endpoint that mirrors a vendor which still requires
+/// `max_tokens`.
 #[must_use]
-pub(crate) fn detect_max_tokens_field(model: &str, endpoint: &str) -> MaxTokensField {
-    let vendor = model.split('/').next().unwrap_or(model).trim().to_ascii_lowercase();
+pub(crate) fn endpoint_max_tokens_field(endpoint: &str) -> MaxTokensField {
     let host = endpoint.to_ascii_lowercase();
-    let requires_max_tokens = MAX_TOKENS_VENDORS.iter().any(|name| vendor.starts_with(name))
-        || vendor.starts_with("cloudflare")
-        || MAX_TOKENS_HOSTS.iter().any(|name| host.contains(name));
-    if requires_max_tokens {
+    if MAX_TOKENS_HOSTS.iter().any(|name| host.contains(name)) {
         MaxTokensField::MaxTokens
     } else {
         MaxTokensField::MaxCompletionTokens
@@ -240,44 +230,33 @@ pub(crate) fn detect_max_tokens_field(model: &str, endpoint: &str) -> MaxTokensF
 
 /// Resolves the prompt-cache directive for one OpenRouter model and route.
 ///
-/// OpenRouter forwards inline markers to upstreams that understand them, so the
-/// chat route advertises explicit caching and the *policy* decides whether
-/// anything is placed. The default policy is the reference gateway heuristic:
-/// Anthropic and Qwen families only. `/responses` ignores inline markers, so it
-/// advertises provider-managed caching and only carries a request-level TTL.
+/// Everything comes from the catalog row: whether the route accepts inline
+/// markers, which planes they apply to, the breakpoint cap, the declared TTLs,
+/// and the marker format. `/responses` ignores inline markers, so a row that
+/// declares only implicit caching carries a request-level lifetime and no
+/// per-part markers. An unknown model gets no markers, because guessing a
+/// cache write would cost more than the hit saves.
 fn cache_directive(
-    model: &str,
+    entry: Option<&CatalogModel>,
     options: &OpenRouterOptions,
-    kind: crate::config::OpenRouterApiKind,
+    kind: OpenRouterApiKind,
 ) -> CacheDirective {
-    if kind == crate::config::OpenRouterApiKind::Responses {
-        let policy = options.cache_policy().unwrap_or(CachePolicy::None);
-        return CacheDirective {
-            policy: policy.with_ttl(options.cache_ttl()),
-            support: CacheSupport::IMPLICIT,
-            format: CacheFormat::Anthropic,
-        };
-    }
-    let format = if model.to_ascii_lowercase().contains("qwen") {
-        CacheFormat::Alibaba
-    } else {
-        CacheFormat::Anthropic
-    };
-    let policy = options.cache_policy().unwrap_or_else(|| gateway_policy(model));
-    let (format, support) = if format == CacheFormat::Alibaba {
-        // Qwen ignores breakpoints on tool definitions and caches them with the
-        // system prompt, so the tool plane is excluded outright.
-        (
-            CacheFormat::Alibaba,
-            CacheSupport {
-                targets: ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES,
-                ..CacheSupport::ANTHROPIC
+    let capability = entry.map_or_else(
+        || match kind {
+            OpenRouterApiKind::Responses => ee_agent_orchestrator::CacheCapability {
+                implicit: true,
+                ..ee_agent_orchestrator::CacheCapability::NONE
             },
-        )
-    } else {
-        (CacheFormat::Anthropic, CacheSupport::ANTHROPIC)
-    };
-    CacheDirective { policy: policy.with_ttl(options.cache_ttl()), support, format }
+            OpenRouterApiKind::Chat => ee_agent_orchestrator::CacheCapability::NONE,
+        },
+        |entry| entry.capabilities.cache,
+    );
+    let policy = options.cache_policy().unwrap_or_else(|| CachePolicy::from(capability.placement));
+    CacheDirective {
+        policy: policy.with_ttl(options.cache_ttl()),
+        support: CacheSupport::from(capability),
+        format: CacheFormat::from(capability.format),
+    }
 }
 
 /// Resolves the OpenRouter bearer token for each round trip.
@@ -671,31 +650,32 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_routes_enable_prompt_cache_breakpoints() {
+    fn catalog_rows_drive_the_prompt_cache_directive() {
         let mut config = test_config();
-        config.model = String::from("anthropic/claude-sonnet-4");
+        config.model = String::from("anthropic/claude-sonnet-5");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
         assert_eq!(profile.cache.policy, CachePolicy::Auto);
         assert!(profile.cache.places_markers());
+        assert_eq!(profile.cache.support.max_breakpoints, 4);
+        assert_eq!(profile.cache.format, CacheFormat::Anthropic);
 
-        config.model = String::from("openai/gpt-5");
+        // An implicit-only row carries no inline markers.
+        config.model = String::from("openai/gpt-5.5");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
         assert_eq!(profile.cache.policy, CachePolicy::None);
         assert!(!profile.cache.places_markers());
+        assert!(profile.cache.support.implicit);
     }
 
     #[test]
-    fn qwen_routes_keep_system_and_tail_breakpoints_only() {
+    fn undeclared_cache_rows_place_no_markers() {
         let mut config = test_config();
         config.model = String::from("qwen/qwen3-coder");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
 
-        assert_eq!(profile.cache.format, CacheFormat::Alibaba);
-        assert_eq!(
-            profile.cache.support.targets,
-            ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES
-        );
-        assert!(profile.cache.places_markers());
+        assert_eq!(profile.cache.policy, CachePolicy::None);
+        assert!(!profile.cache.places_markers());
+        assert!(!profile.cache.support.explicit);
     }
 
     #[test]
@@ -735,24 +715,31 @@ mod tests {
     }
 
     #[test]
-    fn output_token_field_is_detected_per_vendor() {
-        let endpoint = "https://openrouter.ai/api/v1/chat/completions";
-        for model in
-            ["deepseek/deepseek-chat", "moonshotai/kimi-k2", "z-ai/glm-4.6", "nvidia/llama"]
-        {
-            assert_eq!(
-                detect_max_tokens_field(model, endpoint),
-                MaxTokensField::MaxTokens,
-                "{model} still expects max_tokens"
-            );
+    fn output_token_field_comes_from_the_catalog_row() {
+        let mut config = test_config();
+        for (model, expected) in [
+            ("deepseek/deepseek-v4-pro", MaxTokensField::MaxTokens),
+            ("moonshotai/kimi-k2", MaxTokensField::MaxTokens),
+            ("z-ai/glm-4.6", MaxTokensField::MaxTokens),
+            ("anthropic/claude-sonnet-5", MaxTokensField::MaxCompletionTokens),
+            ("openai/gpt-5.5", MaxTokensField::MaxCompletionTokens),
+        ] {
+            config.model = String::from(model);
+            let profile = openrouter_profile(&config, model).expect("profile builds");
+            assert_eq!(profile.max_tokens_field, expected, "{model}");
         }
-        for model in ["anthropic/claude-sonnet-4", "openai/gpt-5", "google/gemini-3-pro"] {
-            assert_eq!(
-                detect_max_tokens_field(model, endpoint),
-                MaxTokensField::MaxCompletionTokens,
-                "{model} accepts the newer field"
-            );
-        }
+    }
+
+    #[test]
+    fn unknown_endpoint_host_still_detects_the_output_token_field() {
+        assert_eq!(
+            endpoint_max_tokens_field("https://api.deepseek.com/v1/chat/completions"),
+            MaxTokensField::MaxTokens
+        );
+        assert_eq!(
+            endpoint_max_tokens_field("https://openrouter.ai/api/v1/chat/completions"),
+            MaxTokensField::MaxCompletionTokens
+        );
     }
 
     #[test]
@@ -771,9 +758,9 @@ mod tests {
         assert_eq!(profile.max_tokens_field, MaxTokensField::MaxTokens);
 
         config.api_url = String::from("https://openrouter.ai/api/v1/chat/completions");
-        let detected = openrouter_profile(&config, "deepseek/deepseek-chat").expect("profile");
+        let detected = openrouter_profile(&config, "deepseek/deepseek-v4-pro").expect("profile");
         assert_eq!(detected.max_tokens_field, MaxTokensField::MaxTokens);
-        let detected = openrouter_profile(&config, "anthropic/claude-sonnet-4").expect("profile");
+        let detected = openrouter_profile(&config, "anthropic/claude-sonnet-5").expect("profile");
         assert_eq!(detected.max_tokens_field, MaxTokensField::MaxCompletionTokens);
     }
 

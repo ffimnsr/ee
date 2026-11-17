@@ -786,3 +786,22 @@ fn config_file_headers_reach_the_profile_but_credentials_do_not() {
     .expect("config resolves");
     assert!(config.profile().is_err(), "credential headers cannot be overridden");
 }
+
+#[test]
+fn catalog_rows_drive_the_cache_directive_per_dialect() {
+    let key = dotenv(&[(API_KEY_ENV, "sk-secret")]);
+
+    let messages = Config::from_args_and_dotenv(args(Some("zen"), Some("claude-sonnet-5")), &key)
+        .expect("messages route");
+    let directive = messages.cache_directive();
+    assert!(directive.places_markers(), "explicit-cache row places markers");
+    assert_eq!(directive.format, ee_chat_completions::CacheFormat::Anthropic);
+    assert!(directive.support.explicit);
+    assert_eq!(directive.support.max_breakpoints, 4);
+
+    let responses =
+        Config::from_args_and_dotenv(args(Some("zen"), Some("gpt-5.5")), &key).expect("responses");
+    let directive = responses.cache_directive();
+    assert!(!directive.places_markers(), "implicit-only row carries no markers");
+    assert!(directive.support.implicit);
+}

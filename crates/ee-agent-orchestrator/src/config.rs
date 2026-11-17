@@ -328,6 +328,95 @@ pub struct OrchestratorConfig {
     /// admitted, before projection and compaction.
     #[serde(default)]
     pub tool_output: crate::tool_output::ToolOutputLimits,
+    /// Additional instruction sources beyond workspace discovery. Remote URLs
+    /// are opt-in, fetched at most once per session, and skipped offline.
+    #[serde(default)]
+    pub instructions: InstructionSourceConfig,
+}
+
+/// Extra instruction sources for the prompt payload.
+///
+/// Only HTTPS URLs are accepted, so a configuration value can never downgrade a
+/// source to plaintext. The reference agent treats configured URLs as explicit
+/// requests rather than discovery, which is why they work even when workspace
+/// discovery is disabled.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstructionSourceConfig {
+    /// Configured instruction URLs, fetched once per session.
+    pub remote_urls: Vec<String>,
+    /// When true, no remote source is ever fetched.
+    pub offline: bool,
+}
+
+/// Maximum configured remote instruction sources.
+pub const MAX_REMOTE_INSTRUCTION_SOURCES: usize = 8;
+
+impl InstructionSourceConfig {
+    /// Whether any remote source would be fetched.
+    #[must_use]
+    pub fn has_remote(&self) -> bool {
+        !self.offline && !self.remote_urls.is_empty()
+    }
+
+    /// Reads the process environment.
+    ///
+    /// `EE_INSTRUCTION_URLS` is a comma-separated HTTPS list and `EE_OFFLINE`
+    /// (or `EE_INSTRUCTION_OFFLINE`) disables every remote source. Values are
+    /// trimmed; empty entries are dropped rather than rejected.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let offline = env_flag("EE_OFFLINE") || env_flag("EE_INSTRUCTION_OFFLINE");
+        let remote_urls = std::env::var("EE_INSTRUCTION_URLS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { remote_urls, offline }
+    }
+
+    /// Rejects a configuration that cannot be honoured.
+    ///
+    /// Errors name the offending index and the reason, never the URL's
+    /// credentials or query string.
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.remote_urls.len() > MAX_REMOTE_INSTRUCTION_SOURCES {
+            return Err(OrchestratorError::InvalidState(format!(
+                "instructions.remote_urls accepts at most {MAX_REMOTE_INSTRUCTION_SOURCES} sources"
+            )));
+        }
+        for (index, url) in self.remote_urls.iter().enumerate() {
+            let url = url.trim();
+            if !url.starts_with("https://") {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "instructions.remote_urls[{index}] must be an https:// URL"
+                )));
+            }
+            if url.len() > crate::prompt::remote::MAX_REMOTE_URL_LEN {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "instructions.remote_urls[{index}] exceeds {} bytes",
+                    crate::prompt::remote::MAX_REMOTE_URL_LEN
+                )));
+            }
+            let authority = url
+                .trim_start_matches("https://")
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default();
+            if authority.is_empty() || authority.contains('@') {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "instructions.remote_urls[{index}] must not carry credentials"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl OrchestratorConfig {
@@ -371,6 +460,7 @@ impl OrchestratorConfig {
         self.compaction.validate()?;
         self.session_log.validate()?;
         self.tool_output.validate()?;
+        self.instructions.validate()?;
         self.approval_classifier.validate().map_err(OrchestratorError::InvalidState)?;
         Ok(())
     }
@@ -416,8 +506,16 @@ impl Default for OrchestratorConfig {
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::default(),
             tool_output: crate::tool_output::ToolOutputLimits::default(),
+            instructions: InstructionSourceConfig::default(),
         }
     }
+}
+
+/// Reads a boolean environment flag (`1`, `true`, `yes`, `on`).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    })
 }
 
 #[cfg(test)]
@@ -583,6 +681,7 @@ mod tests {
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::auto(),
             tool_output: crate::tool_output::ToolOutputLimits::default(),
+            instructions: InstructionSourceConfig::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
@@ -615,5 +714,40 @@ mod tests {
         assert_eq!(restored.repair, RepairConfig { max_attempts: 2 });
         assert_eq!(restored.compaction.max_input_bytes, 2048);
         assert!(restored.recovery.enabled);
+    }
+
+    #[test]
+    fn remote_instruction_sources_are_https_only_and_bounded() {
+        let mut config = InstructionSourceConfig::default();
+        assert!(!config.has_remote());
+        assert_eq!(config.validate(), Ok(()));
+
+        config.remote_urls = vec![String::from("https://example.com/AGENTS.md")];
+        assert!(config.has_remote());
+        assert_eq!(config.validate(), Ok(()));
+
+        config.offline = true;
+        assert!(!config.has_remote());
+
+        for bad in [
+            String::from("http://example.com/AGENTS.md"),
+            String::from("https://user:secret@example.com/AGENTS.md"),
+            String::from("https:///missing-host"),
+        ] {
+            let error = InstructionSourceConfig { remote_urls: vec![bad.clone()], offline: false }
+                .validate()
+                .expect_err("rejected");
+            assert!(error.to_string().contains("remote_urls[0]"), "{error}");
+            assert!(!error.to_string().contains("secret"), "{error}");
+        }
+
+        let too_many = InstructionSourceConfig {
+            remote_urls: vec![
+                String::from("https://example.com/a");
+                MAX_REMOTE_INSTRUCTION_SOURCES + 1
+            ],
+            offline: false,
+        };
+        assert!(too_many.validate().is_err());
     }
 }
