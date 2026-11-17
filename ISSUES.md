@@ -2351,20 +2351,20 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 | 3 | Divergent (minor) | numbering | output-limit floor is 1 token, not the planned 1024 |
 | 4 | Clean | — | signed thinking replay, reasoning items, `reasoning_details` all present |
 | 5 | Divergent | behaviour | 429 carrying an overflow **code** classifies as `ContextOverflow` |
-| 6 | Divergent | dead wiring | Qwen `SystemAndTail` policy unreachable — zero catalog rows carry that placement |
-| 7 | Divergent | missing gate | no `structured_output` capability gate; `tools.updates` never wired |
+| 6 | Resolved (R1) | dead wiring | Qwen rows now carry `SystemAndTail` placement, so the Qwen policy is reachable |
+| 7 | Resolved (R1) | missing gate | `structured_output` gate enforced in the adapters; `tools.updates` now derived from the catalog |
 | 8 | Clean (minor note) | consistency | trailing `model#` errors on OpenCode, silently ignored on OpenRouter |
 | 9 | Clean (minor note) | wording | `--discover-models` still performs a network fetch |
 | 10 | Divergent | plan contradiction | undeclared media becomes a placeholder, but Gap 10's acceptance demands a pre-request failure |
 | 11 | Clean | — | generation knobs, env readers, absent-config behaviour all match |
 | 12 | Divergent (minor) | missing gate | `service_tier` emitted without catalog check; duplicate query keys deduped instead of rejected |
 | 13 | Divergent | typing + config | no typed `Timeout { phase }`; header/chunk share one retry budget; setup pins a 120 s total |
-| 14 | Divergent | dead wiring | `parent_session_id`/`project_id`/`client_name` are never populated in production |
+| 14 | Resolved (R1) | dead wiring | session affinity now carries project, client, and branch-parent identity into every turn |
 | 15 | Divergent (minor) | decode | cost-only usage payloads are dropped; `context_tokens` never surfaced |
 | 16 | Divergent | default-off + lifecycle | overflow artifact is opt-in; unchanged results omit `truncated: false`; no cleanup path |
 | 17 | Divergent | behaviour | overflow recovery shrinks the transcript instead of compacting; `RetryKind` is dead vocabulary |
 | 18 | Divergent (minor) | surface | `ToolInputError` variant absent; ACP drops `Raw` and never forwards `Usage` |
-| 19 | Divergent | dead wiring | store/continuation never enabled; `with_store_responses` has zero call sites |
+| 19 | Resolved (R1) | dead wiring | store/continuation now derived from catalog state in both provider profiles |
 | 20 | Divergent | capability + lifecycle | compact body lacks `prompt_cache_options`; checkpoint not provider-gated; lost on resume |
 | 21 | Divergent | resolution | no deterministic default/small selection; `disabled` not checked on the small-model path |
 | 22 | Divergent | doc drift | code is correct; the plan and module doc URL omit the `/console` segment |
@@ -2384,6 +2384,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual:** `EndpointProfile::store_responses` defaults to `false` (`crates/ee-chat-completions/src/profile.rs:384`); the only setter, `with_store_responses` (`profile.rs:400`), has **zero call sites in the workspace**; `crates/ee-chat-completions/src/responses.rs:748-752` gates `previous_response_id` on that flag. `responses.rs:174` therefore always emits `store: false`. Catalog rows carrying `store: true` (both provider catalogs) are never consulted.
 - **Impact:** the stale-continuation retry path (`responses_wire.rs:68-80`, `adapter.rs:287-302`) is unreachable too, so the acceptance criterion cannot be exercised at all. The module doc at `responses.rs:143-145` states the opposite of the effective behaviour.
 - **Fix direction:** derive `store_responses` from the catalog row's `store` capability in both provider crates' `route_profile`/`route_plan`, and let the orchestrator seed `Continuation` after a completed Responses turn. Keep `store: false` when the capability is absent.
+- **Landed (R1/Gap 19):** `OpenCodeRoute::supports_store()` (`routes.rs`) reads `capabilities.store`; `route_profile` now calls `.with_store_responses(route.supports_store())` (`crates/ee-agent-opencode/src/config.rs`), and the OpenRouter profile enables the flag only when `api_kind == Responses` and the catalog row advertises `store` (`crates/ee-agent-openrouter/src/openrouter.rs`). The orchestrator already seeds `Continuation` from the decoded response id, so the codec path (`responses.rs:748-752`, stale-id retry in `adapter.rs:287-302`) is now reachable: 33 OpenCode rows and 372 OpenRouter rows advertise store. Tests: `route_profile_advertises_store_only_where_the_catalog_does` (OpenCode `config::tests`) and `responses_profiles_advertise_catalog_store_support` (OpenRouter lib).
 
 #### 7.2.2 Gap 14 — session affinity context is never populated
 
@@ -2391,6 +2392,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual:** `OrchestratorOptions.session_context` is declared at `crates/ee-agent-orchestrator/src/loop_engine.rs:146` and defaults to `None` at `:183`. The loop only stamps `session_id` (`:487-495`) before handing the context to `ModelRequest` (`model.rs:384`, `:473`). No production site constructs a context with a parent, project, or client name — `rg session_context` outside tests returns only the field, the default, and that one read.
 - **Impact:** `affinity()` is always the current session id, so `x-opencode-parent-session-id`/`x-session-affinity` can never carry a shared lineage. Acceptance "a child session sends the parent's affinity value while carrying its own session id" is unreachable. `prompt_cache_key` is still session-scoped (acceptance "two sessions with identical system prompts produce different keys" holds).
 - **Fix direction:** populate `session_context` where provider crates build `OrchestratorOptions`, taking parent/project/client from the host session record; keep the `session_id` stamp in the loop.
+- **Landed (R1/Gap 14):** `OrchestratorRuntime` now owns a `session_context` (`runtime/mod.rs`, `runtime/lifecycle.rs` with `set_session_context`/`session_context_snapshot`). The provider adapter seeds it once per session through the new `provider_adapter/session_identity.rs`, which derives a hashed `project_id` (`session_context::project_id_for_path` — SHA-256 of the workspace path, never the path itself), a header-safe client name from the ACP implementation name (`sanitize_client_name`), and the parent id on branches. `session_identity::register` also registers built-ins, replacing four duplicated `register_builtins` blocks. Every `LoopOptions` construction site (`runtime/turn.rs`, `runtime/resume.rs`, `runtime/strategic.rs`, `strategy.rs` via `StrategyExecutor::with_session_context`) now forwards the snapshot, and the loop keeps stamping the active session id. Tests: `session_affinity_reaches_every_model_request`, `new_session_records_project_and_client_affinity`, `branch_inherits_parent_session_affinity`, plus `session_context::` and `session_identity::` unit tests. Remaining deviation: the ACP `session/prompt` schema carries no parent id, so forks created by a host that does not use `/branch` cannot inherit one until the host passes it.
 
 #### 7.2.3 Gap 17 — overflow recovery is transcript shrinking, not compaction
 
@@ -2405,6 +2407,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual:** `CachePolicyObject::qwen()` exists at `crates/ee-chat-completions/src/cache_policy.rs:143`, but it is selected from `CachePlacement::SystemAndTail`, and both generated catalogs contain **zero** rows with that placement (`grep -c "CachePlacement::SystemAndTail"` → 0 for OpenRouter and OpenCode). `crates/ee-agent-openrouter/src/catalog/tests.rs:69-70` asserts the opposite outcome (Qwen rows have no explicit cache).
 - **Impact:** acceptance "a Qwen route carries system + tail only" cannot be satisfied by any catalog model. The policy is exercised only by unit tests that construct `CacheCapability` by hand.
 - **Fix direction:** fix at the generator, not by hand: when `format == alibaba` (see 7.2.11) emit an explicit capability with `targets = [system, messages]`, `max_breakpoints`, and `placement = SystemAndTail`; then update the catalog test to assert the new shape.
+- **Landed (R1/Gap 6):** the OpenRouter generator now synthesizes that capability for Qwen-family rows that declare no cache: `_is_qwen_family` prefers the snapshot's `family` field and falls back to the reference's `qwen/` / `alibaba/qwen` id prefixes, and `qwen_cache_literal` emits `explicit: true`, `max_breakpoints: 4`, `targets { tools: false, system: true, messages: true }`, `format: Alibaba`, `placement: SystemAndTail`. 46 generated rows now carry the placement (was 0). Because the placement maps to `CachePolicyObject::qwen()` in `cache_policy.rs`, the previously unreachable policy is live: system + tail marks, never a tool breakpoint. Tests: `capability_matrix_replaces_provider_heuristics` asserts the generated shape, `qwen_routes_place_system_and_tail_breakpoints_only` asserts the profile directive (policy, targets, format), and `undeclared_cache_rows_place_no_markers` moved to a genuinely undeclared non-Qwen row.
 
 #### 7.2.5 Gap 5 — a 429 carrying an overflow code becomes `ContextOverflow`
 
@@ -2420,6 +2423,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual (tool updates):** `ModelRequest.allow_tool_list_updates` (`model.rs:374`) is never set and never read. The loop checks `config.tool_list_updates` (`loop_engine.rs:560`), which no provider derives from catalog `tool_updates` (`model_metadata.rs:379`); both provider configs use `..OrchestratorConfig::default()` and the field defaults to `false`. Mid-turn tool-list changes are therefore always refused, even on models that declare support.
 - **Impact:** two acceptance criteria fail; one capability (`tool_updates`) is parsed, listed, and never used.
 - **Fix direction:** carry the capability on `ModelRequest` (or gate in the provider adapters where catalog metadata already lives), and derive `config.tool_list_updates` from the catalog row instead of leaving it at the default.
+- **Landed (R1/Gap 7):** the gate now lives where the catalog metadata already is. `EndpointProfile` carries `structured_output` (default `false`, `with_structured_output`), both provider profiles set it from their catalog row, and `ensure_structured_output` in `crates/ee-chat-completions/src/adapter.rs` rejects a `response_format` request before any body is built, naming the model and the missing capability (called from all four Chat/Responses complete paths). `tools.updates` is derived from the catalog in both provider config builders (`ee-agent-opencode/src/adapter.rs`, `ee-agent-openrouter/src/orchestrated.rs`), so the existing loop gate now reflects the route instead of a hardcoded default. Tests: `structured_output_requires_catalog_support`, `structured_output_reaches_a_declaring_route`, `tool_list_updates_follows_the_catalog`, plus profile assertions in both provider suites. Not changed: the Responses path still does not emit per-tool `strict` or `allowed_tools` (documented divergence, hidden-tool path is the parity path).
 
 #### 7.2.7 Gap 26 — normalization runs on two paths out of five
 
@@ -2455,7 +2459,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 
 - **Plan requires:** every gating decision above reads data instead of heuristics, with the full matrix including `reasoning.default`, cost factors, and no model-id-substring decisions in any code path.
 - **Actual:** `crates/ee-agent-orchestrator/src/model_metadata.rs:373-425` declares `tool_choices`, `tool_search`, `tool_updates`, `store`, `stream_usage`, `prompt_cache_key`, `service_tiers`, `system_updates`, `reasoning_updates`, `require_reasoning`, `require_finish_reason`, `require_assistant_after_tool`. Of these, `tool_choices`, `service_tiers`, `system_updates`, `reasoning_updates`, `tool_search`, `tool_updates`, and all three `require_*` flags have **no production reader** — only generators and tests. `ReasoningSupport` has no `default` field. `ModelCost` has base prices plus context tiers but no multiplicative factors.
-- **Actual (heuristic):** `crates/ee-agent-openrouter/scripts/gen_catalog.py:250` still returns `alibaba` when `"qwen" in vendor`, i.e. a model-id substring decides a request-shaping field. It is generator code rather than runtime code, but it is the exact heuristic the gap set out to remove.
+- **Actual (heuristic):** `crates/ee-agent-openrouter/scripts/gen_catalog.py:250` still returns `alibaba` when `"qwen" in vendor` for rows that *do* declare a cache; the new Qwen placeholder path (Gap 6, R1) uses the snapshot `family` field first and only falls back to the reference's id prefixes. It is generator code rather than runtime code, but it is the exact heuristic the gap set out to remove.
 - **Impact:** Gap 24's grep-level acceptance ("no production code path decides a request field from a model-id substring") holds for runtime crates but is violated in data generation; several capabilities are declared with no consumer, which makes future gating look implemented when it is not.
 - **Fix direction:** finish the consumers or delete the fields; lift the cache-format decision into the snapshot (`cache_format` already exists as a compatibility key — make it mandatory for `alibaba` rows so the fallback disappears).
 
@@ -2530,7 +2534,7 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 - [ ] `crates/ee-chat-completions/src/transport.rs` — 1,011 LOC. Split the SSE drive loop from the request sender.
 - [x] Plan's `routes.rs` LOC figure is stale (775 actual, still under the cap) — text fix tracked in 7.4.4.
 - Files already over the cap that the series modified anyway: `crates/ee-agent-orchestrator/src/loop_engine.rs` 2,651, `src/model.rs` 1,729, `src/tools.rs` 2,437. The rule says do not apply changes to a file at or over the threshold; these were modified repeatedly. Either split them or record an explicit exemption per file.
-- Approaching the cap: `provider_adapter/agent_impl.rs` 996, `wire.rs` 982, `opencode/config.rs` 958, `agent_impl` call sites. Any further growth must split first.
+- Approaching the cap: `provider_adapter/agent_impl.rs` 995 (R1 extracted `SessionRuntime::new` to pull it back under after the session-identity wiring), `wire.rs` 982, `opencode/config.rs` 965. Any further growth must split first.
 
 #### 7.5.2 Lint escapes
 
@@ -2568,7 +2572,7 @@ No build, test, clippy, or fmt run was performed for Part 7; findings are static
 
 Ordered by ratio of parity gained to risk. Each slice is independently shippable and lands with its own tests.
 
-- [ ] **Slice R1 — wire the dead paths.** Gap 19 store/continuation from catalog capability; Gap 14 session context population; Gap 7 `structured_output` + `tools.updates` gates; Gap 6 Qwen placement in the generator. Small diffs, all mechanical, all currently unreachable code.
+- [x] **Slice R1 — wire the dead paths.** Gap 19 store/continuation from catalog capability; Gap 14 session context population; Gap 7 `structured_output` + `tools.updates` gates; Gap 6 Qwen placement in the generator. Small diffs, all mechanical, all currently unreachable code. **Landed 2026-11-17:** all four; see the `Landed (R1/...)` notes above.
 - [ ] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep.
 - [ ] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
 - [ ] **Slice R4 — file splits.** `messages.rs`, `transport.rs`, `acp_flows.rs`; record or remove the pre-existing oversized files; delete the `#[allow]` in `transport.rs`.

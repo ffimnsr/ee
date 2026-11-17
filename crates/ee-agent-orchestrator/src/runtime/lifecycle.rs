@@ -200,6 +200,7 @@ impl OrchestratorRuntime {
             session_logs,
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
             workspace_scope: Mutex::new(None),
+            session_context: Mutex::new(crate::session_context::SessionContext::default()),
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
             workspace_instruction_known: Arc::new(Mutex::new(std::collections::HashMap::new())),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
@@ -415,6 +416,20 @@ impl OrchestratorRuntime {
         session_id: &ee_agent_protocol::SessionId,
     ) -> Result<(), OrchestratorError> {
         self.tools.lock().expect("tool registry poisoned").register_builtins(session_id)
+    }
+    /// Records the provider-facing affinity for this session.
+    ///
+    /// Providers key prompt caches and per-session rate limits on the affinity,
+    /// so a branch or forked child shares its parent's lineage while carrying
+    /// its own session id. The provider adapter seeds this once per session;
+    /// the loop stamps the active session id on every request.
+    pub fn set_session_context(&self, context: crate::session_context::SessionContext) {
+        *self.session_context.lock().expect("session context poisoned") = context;
+    }
+    /// Snapshot of the provider-facing affinity for this session.
+    #[must_use]
+    pub fn session_context_snapshot(&self) -> crate::session_context::SessionContext {
+        self.session_context.lock().expect("session context poisoned").clone()
     }
     /// Removes a previously registered tool (per-prompt MCP tools are
     /// deregistered at prompt end so they never leak across turns).

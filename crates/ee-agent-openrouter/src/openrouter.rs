@@ -150,11 +150,18 @@ pub(crate) fn openrouter_profile_with_options(
         .with_limits(entry.and_then(|entry| entry.limits))
         .with_cost(entry.and_then(|entry| entry.cost))
         .with_modalities(entry.map_or(Modalities::UNKNOWN, |entry| entry.modalities))
+        // Continuation needs server-side storage, which only the Responses route
+        // consumes. A chat profile keeps the flag off so no anchor is ever sent.
+        .with_store_responses(
+            config.api_kind == OpenRouterApiKind::Responses
+                && entry.is_some_and(|entry| entry.capabilities.store),
+        )
         .with_compaction(entry.is_some_and(|entry| entry.compaction))
         .with_sampling(
             entry.map_or(ee_agent_orchestrator::SamplingSupport::ALL, |entry| entry.sampling),
         )
         .with_tools_strict(entry.is_some_and(|entry| entry.tools_strict))
+        .with_structured_output(entry.is_some_and(|entry| entry.structured_output))
         .with_freeform(
             entry
                 .map(|entry| entry.freeform.iter().map(|value| (*value).to_string()).collect())
@@ -370,6 +377,44 @@ mod tests {
         assert!(profile.cost.is_some(), "catalog prices are attached");
         assert!(profile.modalities.accepts("text"));
         assert_eq!(profile.model, "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn responses_profiles_advertise_catalog_store_support() {
+        let mut responses = test_config();
+        responses.api_kind = crate::config::OpenRouterApiKind::Responses;
+        responses.model = String::from("anthropic/claude-haiku-4.5");
+
+        let profile = openrouter_profile(&responses, responses.base_model()).expect("profile");
+
+        assert!(profile.store_responses, "a store-capable Responses row enables continuation");
+        assert!(profile.structured_output, "the catalog declares structured output");
+
+        let mut chat = test_config();
+        chat.model = String::from("anthropic/claude-haiku-4.5");
+        let chat_profile = openrouter_profile(&chat, chat.base_model()).expect("profile");
+        assert!(!chat_profile.store_responses, "a chat route never carries a continuation anchor");
+    }
+
+    #[test]
+    fn qwen_routes_place_system_and_tail_breakpoints_only() {
+        let mut config = test_config();
+        config.model = String::from("qwen/qwen3-coder");
+
+        let profile = openrouter_profile(&config, config.base_model()).expect("profile");
+
+        assert!(profile.cache.support.accepts_markers());
+        assert_eq!(
+            profile.cache.support.targets,
+            ee_chat_completions::CacheTargets::SYSTEM_AND_MESSAGES
+        );
+        assert_eq!(
+            profile.cache.policy,
+            ee_chat_completions::CachePolicy::Explicit(
+                ee_chat_completions::CachePolicyObject::qwen()
+            )
+        );
+        assert_eq!(profile.cache.format, ee_chat_completions::CacheFormat::Alibaba);
     }
 
     #[test]
@@ -670,7 +715,10 @@ mod tests {
     #[test]
     fn undeclared_cache_rows_place_no_markers() {
         let mut config = test_config();
-        config.model = String::from("qwen/qwen3-coder");
+        // Qwen rows are the documented exception: the reference places
+        // system + tail breakpoints on them, so this fixture is a route with no
+        // declared cache and no family policy.
+        config.model = String::from("google/gemma-2-27b-it");
         let profile = openrouter_profile(&config, &config.model).expect("profile builds");
 
         assert_eq!(profile.cache.policy, CachePolicy::None);

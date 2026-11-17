@@ -250,9 +250,42 @@ def _cache_format(model_id: str, compatibility: dict) -> str:
     return "alibaba" if "qwen" in vendor else "anthropic"
 
 
-def cache_literal(model_id: str, cache: dict, compatibility: dict) -> str:
+def _is_qwen_family(model_id: str, family: str) -> bool:
+    """Matches the reference cache-policy branch for Qwen-family routes.
+
+    The models.dev snapshot does not declare a cache capability for OpenRouter
+    Qwen routes, but the reference agent still places breakpoints on them
+    (`qwen/` and `alibaba/qwen` ids resolve to the Qwen policy). The family
+    field is authoritative; the id prefix is the fallback the reference uses.
+    """
+    if family.lower() == "qwen":
+        return True
+    vendor, _, rest = model_id.lstrip("~").partition("/")
+    vendor = vendor.lower()
+    if vendor == "qwen":
+        return True
+    return vendor == "alibaba" and rest.lower().startswith("qwen")
+
+
+def qwen_cache_literal() -> str:
+    """System + tail placement, never tool definitions.
+
+    `max_breakpoints` stays at the global cap so the policy's own marks are
+    never dropped; the Qwen shape simply never marks tools.
+    """
+    return (
+        "CacheCapability { implicit: false, explicit: true, max_breakpoints: 4, "
+        "targets: CacheTargets { tools: false, system: true, messages: true }, "
+        "min_tokens: None, ttl: &[], "
+        "format: CacheFormatId::Alibaba, placement: CachePlacement::SystemAndTail }"
+    )
+
+
+def cache_literal(
+    model_id: str, family: str, cache: dict, compatibility: dict
+) -> str:
     if not cache:
-        return "CacheCapability::NONE"
+        return qwen_cache_literal() if _is_qwen_family(model_id, family) else "CacheCapability::NONE"
     explicit = cache.get("explicit")
     implicit = cache.get("implicit")
     explicit_settings = explicit if isinstance(explicit, dict) else {}
@@ -309,7 +342,7 @@ def capabilities_literal(model: dict) -> str:
         "ModelCapabilities { tool_choices: &["
         f"{choices}], tool_search: {'true' if tools.get('search') else 'false'}, "
         f"tool_updates: {'true' if tools.get('updates') else 'false'}, "
-        f"cache: {cache_literal(model['id'], cache, compatibility)}, "
+        f"cache: {cache_literal(model['id'], model.get('family') or '', cache, compatibility)}, "
         # The snapshot declares no provider state for this provider, so the
         # declared routes decide: chat/responses stream usage and responses
         # exposes store/prompt_cache_key.

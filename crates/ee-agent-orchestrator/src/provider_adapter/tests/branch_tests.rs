@@ -179,3 +179,43 @@ async fn branch_command_rejects_malformed_sequence() {
         .expect_err("malformed sequence is rejected");
     assert!(error.to_string().contains("invalid checkpoint sequence"), "{error}");
 }
+
+#[tokio::test]
+async fn branch_inherits_parent_session_affinity() {
+    let provider = OrchestratorProvider::new(
+        OrchestratorProviderConfig::default(),
+        Arc::new(FakeModel::new(Vec::new())),
+    );
+    let init = provider.new_session(NewSessionContext::new("/work")).await.expect("session");
+    let source = init.session_id.to_string();
+    save_checkpoint(&provider, &source);
+
+    let (sink, client, _rx) = plumbing(&init.session_id);
+    let (_cancel_tx, cancel) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                init.session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/branch"))],
+            ),
+            sink,
+            client,
+            cancel,
+        )
+        .await
+        .expect("branch succeeds");
+
+    let branch_id = branch_session_id(&source, 1);
+    let context = {
+        let sessions = provider.sessions.lock().expect("sessions");
+        sessions
+            .get(&branch_id)
+            .expect("branch session is registered")
+            .runtime
+            .session_context_snapshot()
+    };
+    assert_eq!(context.session_id, branch_id);
+    assert_eq!(context.parent_session_id.as_deref(), Some(source.as_str()));
+    assert_eq!(context.affinity(), source, "the branch shares its parent's cache lineage");
+    assert!(context.project_id.is_some(), "the project id is derived at construction");
+}

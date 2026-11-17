@@ -24,6 +24,29 @@ async fn provider_adapter_initialize_metadata_through_memory_transport() {
 }
 
 #[tokio::test]
+async fn new_session_records_project_and_client_affinity() {
+    let provider = OrchestratorProvider::new(
+        OrchestratorProviderConfig::default(),
+        Arc::new(FakeModel::new(Vec::new())),
+    );
+    let init = provider.new_session(NewSessionContext::new("/work")).await.expect("session");
+    let session_id = init.session_id.to_string();
+
+    let context = {
+        let sessions = provider.sessions.lock().expect("sessions");
+        sessions.get(&session_id).expect("session is registered").runtime.session_context_snapshot()
+    };
+    assert_eq!(context.session_id, session_id);
+    assert!(context.parent_session_id.is_none(), "a root session has no parent");
+    assert!(
+        context.project_id.as_deref().is_some_and(|id| id.starts_with("proj_")),
+        "the project id is hashed, never the path"
+    );
+    assert!(context.client_name.is_some(), "the ACP implementation name is the client name");
+    assert_eq!(context.affinity(), session_id);
+}
+
+#[tokio::test]
 async fn provider_adapter_new_session_creates_orchestrator_state() {
     let model = Arc::new(FakeModel::new(Vec::new()));
     let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());

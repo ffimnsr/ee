@@ -155,6 +155,7 @@ impl OrchestratorRuntime {
                 stop_gate: self.config.stop_gate.enabled.then(|| self.config.stop_gate.bounded()),
                 workspace_instructions: self.workspace_instruction_tracker(),
                 metrics: Some(self.metrics.clone()),
+                session_context: Some(self.session_context_snapshot()),
                 ..LoopOptions::default()
             },
         );
@@ -299,6 +300,7 @@ impl OrchestratorRuntime {
                 graph: Some(self.tasks.clone()),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                session_context: Some(self.session_context_snapshot()),
                 ..LoopOptions::default()
             },
         )

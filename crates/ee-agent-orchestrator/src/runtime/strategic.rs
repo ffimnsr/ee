@@ -500,6 +500,7 @@ impl OrchestratorRuntime {
                 memory: Some(self.memory.clone()),
                 checkpoint: Some(handle),
                 execution_log: Some(execution_log),
+                session_context: Some(self.session_context_snapshot()),
                 ..LoopOptions::default()
             },
         );

@@ -29,6 +29,46 @@ pub struct SessionContext {
     pub client_name: Option<String>,
 }
 
+/// Maximum accepted client-name length, in bytes.
+const MAX_CLIENT_NAME_BYTES: usize = 64;
+
+/// Deterministic, non-identifying project id for one workspace root.
+///
+/// Providers only need a stable grouping key for prompt caches and per-session
+/// rate limits, so the path is hashed instead of sent: a cache or rate-limit
+/// header must never carry a filesystem path.
+#[must_use]
+pub(crate) fn project_id_for_path(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let digest = Sha256::digest(path.as_os_str().as_encoded_bytes());
+    let mut id = String::with_capacity(21);
+    id.push_str("proj_");
+    for byte in &digest[..8] {
+        // Writing to a String cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
+
+/// Reduces an ACP client name to a header-safe token.
+///
+/// The header layer rejects values containing control characters, whitespace,
+/// or separators, so an unusual client name must not be able to fail a turn.
+/// Non-token characters are dropped; `None` means the caller should omit the
+/// field rather than send an empty or unsafe value.
+#[must_use]
+pub(crate) fn sanitize_client_name(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-'))
+        .take(MAX_CLIENT_NAME_BYTES)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 impl SessionContext {
     /// Builds a context for a root session.
     #[must_use]
@@ -118,5 +158,29 @@ mod tests {
         assert_eq!(context.cache_key(), "s-1");
         let short = SessionContext::new("ses_short");
         assert_eq!(short.cache_key(), "ses_short");
+    }
+
+    #[test]
+    fn project_ids_are_stable_per_path_and_never_carry_the_path() {
+        let root = std::path::Path::new("/home/someone/work/project");
+        let other = std::path::Path::new("/home/someone/work/other");
+
+        let first = project_id_for_path(root);
+        assert_eq!(first, project_id_for_path(root));
+        assert_ne!(first, project_id_for_path(other));
+        assert!(first.starts_with("proj_"), "{first}");
+        assert_eq!(first.len(), 21, "proj_ plus eight bytes of hex");
+        assert!(!first.contains("someone"), "a path must never reach a header");
+        assert!(!first.contains("project"), "a path must never reach a header");
+    }
+
+    #[test]
+    fn client_names_are_reduced_to_header_safe_tokens() {
+        assert_eq!(sanitize_client_name("Zed").as_deref(), Some("Zed"));
+        assert_eq!(sanitize_client_name("ee_cli-1.2").as_deref(), Some("ee_cli-1.2"));
+        assert_eq!(sanitize_client_name("  ").as_deref(), None);
+        assert_eq!(sanitize_client_name("/home/someone").as_deref(), Some("homesomeone"));
+        let long = sanitize_client_name(&"a".repeat(200)).expect("token");
+        assert_eq!(long.len(), MAX_CLIENT_NAME_BYTES);
     }
 }

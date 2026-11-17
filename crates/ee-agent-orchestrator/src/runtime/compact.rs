@@ -125,7 +125,8 @@ impl OrchestratorRuntime {
             policy,
             self.tasks.clone(),
             events.clone(),
-        );
+        )
+        .with_session_context(self.session_context_snapshot());
         let (prompt_result, reflection) = executor
             .execute(decision.strategy, ctx, memory, context_plan.as_ref(), run, &mut validation)
             .await?;

@@ -224,6 +224,13 @@ impl OpenCodeRoute {
         self.entry.compaction
     }
 
+    /// Whether the route advertises server-side response storage, which is what
+    /// makes `previous_response_id` continuation legal on the Responses dialect.
+    #[must_use]
+    pub const fn supports_store(&self) -> bool {
+        self.entry.capabilities.store
+    }
+
     /// Every reasoning variant this route exposes.
     #[must_use]
     pub fn variants(&self) -> Vec<ReasoningVariant> {

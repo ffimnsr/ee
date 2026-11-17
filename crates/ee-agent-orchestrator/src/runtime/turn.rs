@@ -147,6 +147,7 @@ impl OrchestratorRuntime {
                     checkpoint: Some(handle),
                     execution_log: Some(execution_log.clone()),
                     until: self.until_hook(),
+                    session_context: Some(self.session_context_snapshot()),
                     ..LoopOptions::default()
                 },
             )
@@ -269,6 +270,7 @@ impl OrchestratorRuntime {
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 until: self.until_hook(),
+                session_context: Some(self.session_context_snapshot()),
                 ..LoopOptions::default()
             },
         )

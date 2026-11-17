@@ -911,10 +911,17 @@ pub fn route_profile(
     .with_cost(route.cost())
     .with_modalities(route.entry.modalities)
     .with_tools_strict(route.entry.tools_strict)
+    // A route whose catalog entry does not declare structured output rejects a
+    // `response_format` request before it is built.
+    .with_structured_output(route.entry.structured_output)
     .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
     // Reference opt-in: only sent when the request actually carries an image,
     // so text-only request bytes stay identical.
     .with_image_opt_in_header(Some(HeaderName::from_static("typesafe-danger-zone-images")))
+    // Continuation is a capability: only rows that advertise server-side state
+    // may receive a `previous_response_id`. The Responses codec enforces the
+    // rest, so a chat or Messages route ignores the flag.
+    .with_store_responses(route.supports_store())
     .with_stream_usage(true))
 }
 

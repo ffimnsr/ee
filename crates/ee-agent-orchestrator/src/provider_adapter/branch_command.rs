@@ -13,6 +13,7 @@ use ee_agent_acp_server::{PromptResult, ProviderError, UpdateSink};
 use ee_agent_protocol::{BRANCH_COMMAND_NAME, SessionId, SessionModeId, StopReason};
 
 use super::conversation::session_snapshot;
+use super::session_identity;
 use super::{
     ConversationMessage, ConversationRole, McpServerDescriptor, ProviderTelemetryTurn,
     SessionRuntime, SessionStateStore, finish_provider_telemetry, mode_policy,
@@ -84,10 +85,14 @@ pub(super) fn handle_branch_command(ctx: BranchCommand<'_>) -> Result<PromptResu
         )?
         .with_plugin_observer(ctx.plugins.bridge().observer(outcome.session_id.clone())),
     );
-    branch_runtime.register_builtins(&SessionId::new(outcome.session_id.clone())).map_err(
-        |error| {
-            ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
-        },
+    // The branch keeps its own session id but inherits the source session's
+    // affinity, so the whole fork tree shares one provider cache lineage.
+    session_identity::register(
+        &branch_runtime,
+        &SessionId::new(outcome.session_id.clone()),
+        ctx.workspace,
+        ctx.implementation_name,
+        Some(&source_id),
     )?;
     ctx.plugins.session_scope(&outcome.session_id).map_err(ProviderError::from)?;
     let replayed = if outcome.conversation_replayed {

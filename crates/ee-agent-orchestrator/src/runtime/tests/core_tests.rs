@@ -2,6 +2,30 @@
 use super::*;
 
 #[tokio::test]
+async fn session_affinity_reaches_every_model_request() {
+    let model = FakeModel::new(vec![ModelResponse::new().text("ok").completed()]);
+    let (sink, client, _rx) = plumbing();
+    let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), Arc::new(model.clone()));
+    runtime.set_session_context(
+        crate::session_context::SessionContext::new("s-child")
+            .with_parent("s-parent")
+            .with_project("proj_test")
+            .with_client("ee"),
+    );
+
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    runtime.run_turn(prompt("hello"), sink, client, cancel_rx).await.expect("turn succeeds");
+
+    let request = model.requests().pop().expect("one request");
+    let session = request.session.expect("affinity reaches the request");
+    assert_eq!(session.session_id, "s-1", "the loop stamps the turn's session id");
+    assert_eq!(session.parent_session_id.as_deref(), Some("s-parent"));
+    assert_eq!(session.project_id.as_deref(), Some("proj_test"));
+    assert_eq!(session.client_name.as_deref(), Some("ee"));
+    assert_eq!(session.affinity(), "s-parent", "a child inherits the parent affinity");
+}
+
+#[tokio::test]
 async fn runtime_runs_one_complete_turn_with_fake_model() {
     let model = FakeModel::new(vec![
         ModelResponse::new().reasoning("thinking hard").text("final answer").completed(),

@@ -289,6 +289,25 @@ fn orchestrator_config_carries_opencode_identity_budgets_and_recovery() {
 }
 
 #[test]
+fn tool_list_updates_follows_the_catalog() {
+    let session_state_dir = PathBuf::from("/tmp/ee-agent-opencode-tool-updates-test");
+
+    let capable = test_config(OpenCodeSurface::Zen, "gpt-5.5");
+    assert!(
+        opencode_orchestrator_config(&capable, session_state_dir.clone())
+            .orchestrator
+            .tool_list_updates,
+        "gpt-5.5 advertises tool updates"
+    );
+
+    let frozen = test_config(OpenCodeSurface::Zen, "claude-sonnet-5");
+    assert!(
+        !opencode_orchestrator_config(&frozen, session_state_dir).orchestrator.tool_list_updates,
+        "a route without the capability keeps the tool list frozen"
+    );
+}
+
+#[test]
 fn orchestrator_config_carries_durable_session_log_when_opted_in() {
     let mut config = test_config(OpenCodeSurface::Zen, "gpt-5.5");
     let session_state_dir = PathBuf::from("/tmp/ee-agent-opencode-session-log-test");

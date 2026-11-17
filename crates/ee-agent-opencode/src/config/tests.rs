@@ -258,6 +258,22 @@ fn route_profile_uses_the_catalog_endpoint_and_names_the_route() {
 }
 
 #[test]
+fn route_profile_advertises_store_only_where_the_catalog_does() {
+    let responses = routes::resolve_route(OpenCodeSurface::Zen, "gpt-5.5").expect("routed");
+    let chat = routes::resolve_route(OpenCodeSurface::Zen, "minimax-m3").expect("routed");
+
+    let responses_profile =
+        route_profile(&responses, "", Timeouts::new(), RetryPolicy::none()).expect("profile");
+    let chat_profile =
+        route_profile(&chat, "", Timeouts::new(), RetryPolicy::none()).expect("profile");
+
+    assert!(responses_profile.store_responses, "Responses rows advertise server-side state");
+    assert!(!chat_profile.store_responses, "a chat row never invites a continuation anchor");
+    assert!(responses_profile.structured_output, "gpt-5.5 declares structured output");
+    assert!(!chat_profile.structured_output, "minimax-m3 does not");
+}
+
+#[test]
 fn every_catalog_route_has_a_trusted_profile() {
     let mut count = 0;
     for route in routes::catalog() {

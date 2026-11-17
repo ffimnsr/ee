@@ -222,6 +222,10 @@ pub struct OrchestratorRuntime {
     /// Session working directory and workspace roots used for mid-turn nested
     /// instruction discovery. Set by the provider adapter per session.
     workspace_scope: Mutex<Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
+    /// Provider/project/client affinity for this session. The loop stamps the
+    /// active session id; providers key caches and per-session limits on the
+    /// resulting affinity.
+    session_context: Mutex<crate::session_context::SessionContext>,
     /// Content digests of workspace instructions already injected this session,
     /// shared by every per-turn tracker.
     workspace_instruction_seen: Arc<Mutex<std::collections::HashSet<[u8; 32]>>>,

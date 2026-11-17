@@ -475,6 +475,8 @@ pub(crate) struct StrategyExecutor {
     policy: PolicyEngine,
     tasks: Arc<Mutex<TaskGraph>>,
     events: EventRecorder,
+    /// Provider-facing session affinity stamped on every request this turn.
+    session_context: crate::session_context::SessionContext,
 }
 
 impl StrategyExecutor {
@@ -487,7 +489,27 @@ impl StrategyExecutor {
         tasks: Arc<Mutex<TaskGraph>>,
         events: EventRecorder,
     ) -> Self {
-        Self { config, model, tools, budget, policy, tasks, events }
+        Self {
+            config,
+            model,
+            tools,
+            budget,
+            policy,
+            tasks,
+            events,
+            session_context: crate::session_context::SessionContext::default(),
+        }
+    }
+
+    /// Seeds the provider-facing session affinity for every request the turn
+    /// makes. A runtime without a recorded context leaves the default.
+    #[must_use]
+    pub(crate) fn with_session_context(
+        mut self,
+        context: crate::session_context::SessionContext,
+    ) -> Self {
+        self.session_context = context;
+        self
     }
 
     /// Runs one strategic turn: builds the transcript, then dispatches to the
@@ -593,6 +615,7 @@ impl StrategyExecutor {
             read_first,
             execution_log: Some(run.execution_log.clone()),
             graph: Some(self.tasks.clone()),
+            session_context: Some(self.session_context.clone()),
             ..LoopOptions::default()
         };
         let engine = LoopEngine::new(

@@ -67,7 +67,13 @@ fn capability_matrix_replaces_provider_heuristics() {
     assert!(gpt.capabilities.prompt_cache_key);
 
     let qwen = find("qwen/qwen3-coder").expect("qwen row");
-    assert!(!qwen.capabilities.cache.explicit, "undeclared caches place no markers");
+    assert!(qwen.capabilities.cache.explicit, "Qwen routes place breakpoints");
+    assert_eq!(qwen.capabilities.cache.placement, CachePlacement::SystemAndTail);
+    assert_eq!(qwen.capabilities.cache.format, CacheFormatId::Alibaba);
+    assert_eq!(qwen.capabilities.cache.max_breakpoints, 4);
+    assert!(qwen.capabilities.cache.targets.system);
+    assert!(qwen.capabilities.cache.targets.messages);
+    assert!(!qwen.capabilities.cache.targets.tools, "Qwen never marks tool definitions");
 }
 
 #[test]

@@ -105,6 +105,27 @@ impl ChatCompletionsAdapter {
     }
 }
 
+/// Rejects a structured-output request on a route whose catalog entry does not
+/// declare support, before any request body is built.
+///
+/// The hidden forced tool works on every route, so this is a configuration
+/// check: the caller asked for behaviour the selected model does not advertise,
+/// and sending it anyway would make the failure a provider error instead of
+/// actionable guidance.
+fn ensure_structured_output(
+    profile: &EndpointProfile,
+    request: &ModelRequest,
+) -> Result<(), ModelError> {
+    if request.response_format.is_some() && !profile.structured_output {
+        return Err(ModelError::Adapter(format!(
+            "model `{}` does not advertise structured output; remove the response-format \
+             request or select a model whose catalog entry sets `structured_output`",
+            profile.model
+        )));
+    }
+    Ok(())
+}
+
 impl ModelAdapter for ChatCompletionsAdapter {
     fn complete(
         &self,
@@ -121,6 +142,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
             // The credential is checked before any request body exists, and the
             // message names the provider's own environment variable.
             token().map_err(ModelError::Adapter)?;
+            ensure_structured_output(&profile, &request)?;
             let request = wire_request(&profile, &request)?;
             let answer = tokio::select! {
                 answer = completion(request) => {
@@ -162,6 +184,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
                 return Err(ModelError::Cancelled);
             }
             token().map_err(ModelError::Adapter)?;
+            ensure_structured_output(&profile, &request)?;
             let wire = wire_request(&profile, &request)?;
             let answer = tokio::select! {
                 answer = streaming(wire, events) => {
@@ -230,6 +253,7 @@ impl ModelAdapter for ResponsesAdapter {
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let profile = codec.profile();
+            ensure_structured_output(profile, &request)?;
             let generation = merged_generation(profile, &request)?;
             let completion = codec.complete_controlled(
                 &request.transcript,
@@ -263,6 +287,7 @@ impl ModelAdapter for ResponsesAdapter {
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let profile = codec.profile();
+            ensure_structured_output(profile, &request)?;
             let generation = merged_generation(profile, &request)?;
             let mut sink = |delta: StreamDelta| forward_delta(delta, &events);
             let completion = async move {
@@ -674,5 +699,54 @@ mod tests {
         assert_eq!(merged.reasoning, "thinking");
         assert_eq!(merged.text_chunks, 1);
         assert_eq!(merged.reasoning_chunks, 1);
+    }
+
+    #[tokio::test]
+    async fn structured_output_requires_catalog_support() {
+        let completion: Arc<CompletionClient> = Arc::new(|_request: ChatRequest| {
+            Box::pin(async { panic!("the completion client must not run") })
+        });
+        let adapter = ChatCompletionsAdapter::with_completion(profile(), token(), completion);
+        let mut request = request();
+        request.response_format = Some(ee_agent_orchestrator::ResponseFormat::JsonObject);
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        let error = adapter.complete(request, cancel).await.expect_err("gate rejects");
+        let text = error.to_string();
+        assert!(text.contains("structured output"), "{text}");
+        assert!(text.contains("example-model"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn structured_output_reaches_a_declaring_route() {
+        let seen = Arc::new(Mutex::new(0usize));
+        let recorder = seen.clone();
+        let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
+            let recorder = recorder.clone();
+            Box::pin(async move {
+                *recorder.lock().expect("seen") += 1;
+                Ok(AssistantTurn {
+                    content: String::from("{}"),
+                    reasoning: String::new(),
+                    raw: Value::Null,
+                    native_reasoning: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some(String::from("stop")),
+                    usage: None,
+                    response_id: None,
+                })
+            })
+        });
+        let adapter = ChatCompletionsAdapter::with_completion(
+            profile().with_structured_output(true),
+            token(),
+            completion,
+        );
+        let mut request = request();
+        request.response_format = Some(ee_agent_orchestrator::ResponseFormat::JsonObject);
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        adapter.complete(request, cancel).await.expect("declared route runs");
+        assert_eq!(*seen.lock().expect("seen"), 1, "the client ran exactly once");
     }
 }

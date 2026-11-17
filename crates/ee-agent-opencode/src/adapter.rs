@@ -582,6 +582,9 @@ pub fn opencode_orchestrator_config(
                 ..ee_agent_orchestrator::CompactionConfig::default()
             },
             instructions: ee_agent_orchestrator::InstructionSourceConfig::from_env(),
+            // Mid-turn tool-list changes are legal only where the catalog says
+            // so; anything else is frozen for the session.
+            tool_list_updates: config.route.entry.capabilities.tool_updates,
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),

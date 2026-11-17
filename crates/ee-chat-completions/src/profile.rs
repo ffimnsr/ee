@@ -282,6 +282,9 @@ pub struct EndpointProfile {
     pub cache: CacheDirective,
     /// Whether tool schemas accept the `strict` flag on this route.
     pub tools_strict: bool,
+    /// Whether the catalog declares native structured-output support. A route
+    /// without it rejects a `response_format` request before sending.
+    pub structured_output: bool,
     /// Free-form tool input formats this route advertises (`text`, `lark`,
     /// `regex`); empty when it advertises none.
     pub freeform: Vec<String>,
@@ -368,6 +371,7 @@ impl EndpointProfile {
             extensions: None,
             cache: CacheDirective::disabled(),
             tools_strict: false,
+            structured_output: false,
             freeform: Vec::new(),
             limits: None,
             cost: None,
@@ -542,6 +546,13 @@ impl EndpointProfile {
     #[must_use]
     pub fn with_tools_strict(mut self, strict: bool) -> Self {
         self.tools_strict = strict;
+        self
+    }
+
+    /// Declares whether the catalog advertises native structured output.
+    #[must_use]
+    pub fn with_structured_output(mut self, supported: bool) -> Self {
+        self.structured_output = supported;
         self
     }
 

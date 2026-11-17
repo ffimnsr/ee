@@ -17,6 +17,7 @@ use super::conversation::session_compaction_history;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
 use super::conversation::{PromptBundleInputs, prompt_bundle};
+use super::session_identity;
 use super::*;
 
 impl AgentProvider for OrchestratorProvider {
@@ -62,22 +63,22 @@ impl AgentProvider for OrchestratorProvider {
                 )?
                 .with_plugin_observer(plugins.bridge().observer(session_id.to_string())),
             );
-            runtime.register_builtins(&session_id).map_err(|error| {
-                ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
-            })?;
+            session_identity::register(
+                &runtime,
+                &session_id,
+                &ctx.cwd,
+                &implementation.name,
+                None,
+            )?;
             plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
-            let entry = SessionRuntime {
+            let entry = SessionRuntime::new(
                 runtime,
-                workspace: ctx.cwd.clone(),
+                ctx.cwd.clone(),
                 workspace_roots,
-                provider_label,
-                model_label,
-                mode: mode.clone(),
+                (provider_label, model_label),
+                mode.clone(),
                 mcp_servers,
-                conversation: Arc::new(Mutex::new(Vec::new())),
-                model_transcript: Arc::new(Mutex::new(Vec::new())),
-                remote_instructions: Arc::new(Mutex::new(None)),
-            };
+            );
             session_store
                 .save(
                     &implementation.name,
@@ -191,26 +192,26 @@ impl AgentProvider for OrchestratorProvider {
                     (runtime, Vec::new(), mode)
                 }
             };
-            runtime.register_builtins(&session_id).map_err(|error| {
-                ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
-            })?;
+            session_identity::register(
+                &runtime,
+                &session_id,
+                &ctx.cwd,
+                &implementation.name,
+                None,
+            )?;
             replay_conversation(ctx.replay_sink.as_ref(), &conversation)?;
             plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
             // The checkpoint stays pending: the next prompt resumes it.
             sessions.lock().expect("adapter sessions poisoned").insert(
                 session_id.to_string(),
-                SessionRuntime {
+                SessionRuntime::new(
                     runtime,
-                    workspace: ctx.cwd.clone(),
+                    ctx.cwd.clone(),
                     workspace_roots,
-                    provider_label,
-                    model_label,
-                    mode: mode.clone(),
+                    (provider_label, model_label),
+                    mode.clone(),
                     mcp_servers,
-                    conversation: Arc::new(Mutex::new(Vec::new())),
-                    model_transcript: Arc::new(Mutex::new(Vec::new())),
-                    remote_instructions: Arc::new(Mutex::new(None)),
-                },
+                ),
             );
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
@@ -277,27 +278,25 @@ impl AgentProvider for OrchestratorProvider {
                     plugins.gate_policy(mode_policy(&policy, &mode)?),
                     Some(plugins.bridge().observer(session_id.to_string())),
                 )?;
-                runtime.register_builtins(&session_id).map_err(|error| {
-                    ProviderError::BackendFailure(format!(
-                        "failed to register built-in tools: {error}"
-                    ))
-                })?;
+                session_identity::register(
+                    &runtime,
+                    &session_id,
+                    &ctx.cwd,
+                    &implementation.name,
+                    None,
+                )?;
                 plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
                 // The checkpoint stays pending: the next prompt resumes it.
                 sessions.lock().expect("adapter sessions poisoned").insert(
                     session_id.to_string(),
-                    SessionRuntime {
+                    SessionRuntime::new(
                         runtime,
-                        workspace: ctx.cwd.clone(),
+                        ctx.cwd.clone(),
                         workspace_roots,
-                        provider_label,
-                        model_label,
-                        mode: mode.clone(),
+                        (provider_label, model_label),
+                        mode.clone(),
                         mcp_servers,
-                        conversation: Arc::new(Mutex::new(Vec::new())),
-                        model_transcript: Arc::new(Mutex::new(Vec::new())),
-                        remote_instructions: Arc::new(Mutex::new(None)),
-                    },
+                    ),
                 );
                 mode
             };

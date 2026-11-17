@@ -31,6 +31,7 @@ use std::time::Instant;
 
 mod auto_compact;
 mod bootstrap;
+mod session_identity;
 
 use ee_agent_acp_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
@@ -168,6 +169,35 @@ struct SessionRuntime {
     /// first turn. `None` means "not fetched yet"; an empty vector is a
     /// completed fetch that produced nothing.
     remote_instructions: Arc<Mutex<Option<Vec<WorkspaceMessage>>>>,
+}
+
+impl SessionRuntime {
+    /// Builds one session entry with empty conversation and transcript planes.
+    ///
+    /// Session construction repeats at four sites; grouping the empty planes
+    /// here keeps each site to its own facts and leaves no field unset.
+    pub(super) fn new(
+        runtime: Arc<OrchestratorRuntime>,
+        workspace: std::path::PathBuf,
+        workspace_roots: Vec<std::path::PathBuf>,
+        labels: (String, String),
+        mode: SessionModeId,
+        mcp_servers: Vec<McpServerDescriptor>,
+    ) -> Self {
+        let (provider_label, model_label) = labels;
+        Self {
+            runtime,
+            workspace,
+            workspace_roots,
+            provider_label,
+            model_label,
+            mode,
+            mcp_servers,
+            conversation: Arc::new(Mutex::new(Vec::new())),
+            model_transcript: Arc::new(Mutex::new(Vec::new())),
+            remote_instructions: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 /// One recorded conversation message for `session/load` replay.
