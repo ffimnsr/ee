@@ -196,6 +196,7 @@ pub mod events;
 pub mod evidence_classification;
 pub mod fanout_fanin;
 pub mod final_response;
+pub mod generation;
 pub mod issue_integration;
 pub mod loop_engine;
 pub mod loop_hooks;
@@ -372,6 +373,7 @@ pub use final_response::{
     ChangedFile, FinalResponse, FinalResponseBuilder, ValidationOutcome, ValidationRecord,
     ValidationRecorder, changed_files_from_log,
 };
+pub use generation::{GenerationOptions, MAX_STOP_SEQUENCE_BYTES, MAX_STOP_SEQUENCES};
 pub use issue_integration::{
     CRITERIA_KEY_MARKER, ChecklistEdit, ChecklistItem, IssueChecklist, IssueChecklistConfig,
     is_configured,
@@ -398,9 +400,10 @@ pub use model::{
 };
 pub use model_metadata::{
     CostTier, MEDIA_TARGET_BYTES, MEDIA_TRIGGER_BYTES, Modalities, ModelCost, ModelKind,
-    ModelRoutes, ReasoningProtocol, ReasoningSupport, ReasoningVariant, TokenCounts,
-    apply_catalog_cost, bounded_media, find_variant, format_price_micros, guard_transcript,
-    media_bytes, modality_violation, reasoning_variants, usage_with_cost, variant_ids,
+    ModelRoutes, ReasoningProtocol, ReasoningSupport, ReasoningVariant, SamplingSupport,
+    TokenCounts, apply_catalog_cost, bounded_media, find_variant, format_price_micros,
+    guard_transcript, media_bytes, modality_violation, reasoning_variants, usage_with_cost,
+    variant_ids,
 };
 pub use model_registry::{
     ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,

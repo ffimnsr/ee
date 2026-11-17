@@ -57,7 +57,12 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
         reasoning_effort: None,
         system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
-        timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        timeouts: ee_chat_completions::Timeouts::new()
+            .with_total(Some(Duration::from_millis(DEFAULT_TIMEOUT_MS))),
+        generation: ee_agent_orchestrator::GenerationOptions::none(),
+        provider_options: ee_chat_completions::ProviderOptions::none(),
+        encoding: ee_chat_completions::RequestEncoding::None,
+        query: Vec::new(),
         max_iterations: None,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
         max_output_tokens: None,

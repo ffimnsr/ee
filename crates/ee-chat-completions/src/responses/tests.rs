@@ -577,6 +577,7 @@ fn body_with(control: &ee_agent_orchestrator::ToolCallControl, cache: &CacheDire
         stream: false,
         max_output_tokens: None,
         extensions: None,
+        generation: None,
         tool_control: control,
         cache,
     })
@@ -615,4 +616,51 @@ fn request_level_cache_ttl_uses_the_documented_field() {
     let body = body_with(&ee_agent_orchestrator::ToolCallControl::auto(), &ttl("1h"));
     assert_eq!(body["prompt_cache_options"]["ttl"], "1h");
     assert!(body.get("prompt_cache_retention").is_none());
+}
+
+// ── Sampling knobs ─────────────────────────────────────────────────
+
+fn generated_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Value {
+    let cache = CacheDirective::disabled();
+    responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        system_prompt: "system",
+        transcript: &transcript(),
+        tools: &definitions(),
+        stream: false,
+        max_output_tokens: None,
+        extensions: None,
+        generation: Some(generation),
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+    })
+}
+
+#[test]
+fn no_sampling_key_appears_when_nothing_is_configured() {
+    let body = generated_body(&ee_agent_orchestrator::GenerationOptions::none());
+    for key in ["temperature", "top_p", "top_k", "seed", "stop"] {
+        assert!(body.get(key).is_none(), "{key} must stay absent");
+    }
+}
+
+#[test]
+fn responses_writes_only_its_own_sampling_subset() {
+    let generation = ee_agent_orchestrator::GenerationOptions {
+        temperature: Some(0.1),
+        top_p: Some(0.7),
+        top_k: Some(30),
+        frequency_penalty: Some(0.4),
+        presence_penalty: Some(0.2),
+        seed: Some(77),
+        stop: Some(vec![String::from("END")]),
+        ..ee_agent_orchestrator::GenerationOptions::none()
+    };
+    let body = generated_body(&generation);
+    assert_eq!(body["temperature"], 0.1);
+    assert_eq!(body["top_p"], 0.7);
+    assert_eq!(body["seed"], 77);
+    for key in ["top_k", "frequency_penalty", "presence_penalty", "stop"] {
+        assert!(body.get(key).is_none(), "Responses does not document {key}");
+    }
 }

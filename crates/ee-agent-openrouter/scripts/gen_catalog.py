@@ -63,6 +63,11 @@ def compact_model(model: dict) -> dict:
                 if key in reasoning
             },
             "structured_output": bool(capabilities.get("structured_output")),
+            "sampling": {
+                key: capabilities[key]
+                for key in ("temperature", "topP", "topK")
+                if key in capabilities
+            },
         },
         "modalities": {
             "input": list((model.get("modalities") or {}).get("input") or []),
@@ -222,6 +227,25 @@ def routes_literal(model: dict) -> str:
     )
 
 
+def sampling_literal(model: dict) -> str:
+    """Renders the sampling declaration from the catalog flags.
+
+    An absent flag means the protocol default applies, so the knob is accepted;
+    only an explicit `false` rejects it.
+    """
+    capabilities = model.get("capabilities") or {}
+
+    def flag(camel: str, snake: str) -> str:
+        value = capabilities.get(camel, capabilities.get(snake))
+        return "false" if value is False else "true"
+
+    return (
+        "SamplingSupport { temperature: "
+        f"{flag('temperature', 'temperature')}, top_p: {flag('topP', 'top_p')}, "
+        f"top_k: {flag('topK', 'top_k')} }}"
+    )
+
+
 def model_literal(model: dict) -> str:
     kind = model.get("type", "chat")
     limit = model.get("limit") or {}
@@ -253,6 +277,7 @@ def model_literal(model: dict) -> str:
         f"tools_supported: {'true' if tools.get('supported') else 'false'}, "
         f"tools_strict: {'true' if tools.get('strict') else 'false'}, "
         f"freeform: &[{freeform}], "
+        f"sampling: {sampling_literal(model)}, "
         f"max_tokens_field: {rust(compatibility.get('max_tokens_field') or '')}, "
         f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'} }},"
     )
@@ -291,6 +316,7 @@ def generate() -> str:
 
 use ee_agent_orchestrator::{{
     CostTier, Modalities, ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningSupport,
+    SamplingSupport,
 }};
 
 use crate::catalog::CatalogModel;

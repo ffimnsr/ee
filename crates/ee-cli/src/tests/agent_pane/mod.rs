@@ -289,7 +289,7 @@ fn openrouter_fixture_config() -> OpenRouterConfig {
         api_key: Some(String::from("sk-hermetic-test-key")),
         site_url: None,
         app_title: String::from("ee-cli-live-phase-six-test"),
-        timeout: Duration::from_secs(1),
+        timeouts: ee_chat_completions::Timeouts::new().with_total(Some(Duration::from_secs(1))),
         system_prompt: String::from("system"),
         reasoning_effort: None,
         orchestrated: true,

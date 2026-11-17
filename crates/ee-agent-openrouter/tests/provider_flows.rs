@@ -40,7 +40,7 @@ fn test_config_with(
         api_key: Some(String::from("sk-test")),
         site_url: None,
         app_title: String::from("ee-test"),
-        timeout: Duration::from_secs(5),
+        timeouts: ee_chat_completions::Timeouts::new().with_total(Some(Duration::from_secs(5))),
         system_prompt: String::from("system"),
         reasoning_effort: None,
         orchestrated: false,

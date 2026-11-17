@@ -167,10 +167,11 @@ pub fn openrouter_multi_model_provider(
     config: &Config,
     session_state_dir: PathBuf,
 ) -> Result<(OrchestratorProvider, Option<String>), String> {
-    let http = reqwest::Client::builder()
-        .timeout(config.timeout)
-        .build()
-        .map_err(|error| format!("failed to build HTTP client: {error}"))?;
+    let mut builder = reqwest::Client::builder();
+    if let Some(total) = config.timeouts.total {
+        builder = builder.timeout(total);
+    }
+    let http = builder.build().map_err(|error| format!("failed to build HTTP client: {error}"))?;
     let root = OpenRouterModelAdapter::with_http(config.clone(), http.clone())
         .map_err(|error| error.to_string())?;
     let root_family = config

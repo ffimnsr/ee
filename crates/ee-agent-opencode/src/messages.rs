@@ -24,14 +24,15 @@ use std::collections::BTreeMap;
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl, ToolChoice,
-    ToolDefinition, estimate_prompt_tokens,
+    GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl,
+    ToolChoice, ToolDefinition, estimate_prompt_tokens,
 };
 use ee_chat_completions::{
     AssistantTurn, CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective, DeltaSink,
     EndpointRequest, EndpointTransport, SseControl, StreamDelta, ToolCall, Usage, cache_control,
-    content_text, drive_sse, emit_finished_deltas, is_event_stream, plan, response_from_turn,
-    tool_call_id_of, usage_from_tokens, warn_dropped, with_buffered_retry, with_stream_retry,
+    content_text, drive_sse_with_chunk_timeout, emit_finished_deltas, is_event_stream, plan,
+    response_from_turn, tool_call_id_of, usage_from_tokens, warn_dropped, with_buffered_retry,
+    with_stream_retry,
 };
 use serde_json::{Value, json};
 
@@ -71,6 +72,8 @@ pub struct MessagesBody<'a> {
     pub cache: &'a CacheDirective,
     /// Prompt size measured by the provider on the previous call, when known.
     pub prompt_tokens: Option<u64>,
+    /// Sampling knobs to write; `None` leaves every field absent.
+    pub generation: Option<&'a GenerationOptions>,
 }
 
 /// Builds an Anthropic Messages request body.
@@ -101,6 +104,7 @@ pub fn request_body(
         tool_control: &auto,
         cache: &cache,
         prompt_tokens: None,
+        generation: None,
     })
 }
 
@@ -267,14 +271,21 @@ pub fn messages_body(input: &MessagesBody<'_>) -> Value {
         );
         body["tool_choice"] = messages_tool_choice(input.tool_control);
     }
-    if let Some(Value::Object(extra)) = input.extensions
-        && let Some(object) = body.as_object_mut()
-    {
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
+    if let Some(generation) = input.generation {
+        ee_chat_completions::apply_generation_messages(&mut body, generation);
+    }
+    if let Some(extensions) = input.extensions {
+        // Deep merge so a partial provider override keeps sibling keys.
+        ee_chat_completions::deep_merge(&mut body, extensions);
     }
     clamp_thinking_budget(&mut body, input.max_output_tokens);
+    // Sampling knobs may have lowered the output bound; keep the thinking budget
+    // below the final value.
+    if let Some(max_tokens) = input.generation.and_then(|generation| generation.max_output_tokens)
+        && max_tokens < input.max_output_tokens
+    {
+        clamp_thinking_budget(&mut body, max_tokens);
+    }
     body
 }
 
@@ -753,7 +764,7 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens).await
+        self.complete_controlled(transcript, tools, &control, prompt_tokens, None).await
     }
 
     /// Performs one buffered round trip with tool-call control.
@@ -763,14 +774,19 @@ impl MessagesCodec {
         tools: &[ToolDefinition],
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
+        generation: Option<&GenerationOptions>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
-        let max_output_tokens =
-            profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let max_output_tokens = profile
+            .fitted_output_limit_with(
+                prompt,
+                generation.and_then(|generation| generation.max_output_tokens),
+            )
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
@@ -782,6 +798,7 @@ impl MessagesCodec {
             tool_control,
             cache: &profile.cache,
             prompt_tokens,
+            generation,
         });
         let transport = &self.transport;
         let label = profile.label.as_str();
@@ -822,7 +839,8 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens).await
+        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens, None)
+            .await
     }
 
     /// Performs one streaming round trip with tool-call control.
@@ -833,14 +851,19 @@ impl MessagesCodec {
         tool_control: &ToolCallControl,
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
+        generation: Option<&GenerationOptions>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
-        let max_output_tokens =
-            profile.fitted_output_limit(prompt).unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let max_output_tokens = profile
+            .fitted_output_limit_with(
+                prompt,
+                generation.and_then(|generation| generation.max_output_tokens),
+            )
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
@@ -852,6 +875,7 @@ impl MessagesCodec {
             tool_control,
             cache: &profile.cache,
             prompt_tokens,
+            generation,
         });
         let mut attempt = MessagesStreamAttempt { transport: &self.transport, body: &body };
         with_stream_retry(&self.transport.profile().retry, sink, &mut attempt)
@@ -883,7 +907,13 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for MessagesStreamAttempt
                 return Ok(ee_chat_completions::seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
-            drive_sse(&label, &mut response, |event| decoder.apply(event, sink)).await?;
+            drive_sse_with_chunk_timeout(
+                &label,
+                &mut response,
+                Some(transport.profile().timeouts.chunk),
+                |event| decoder.apply(event, sink),
+            )
+            .await?;
             decoder.finish().map(|response| ee_chat_completions::seal_response(response, &model))
         })
     }

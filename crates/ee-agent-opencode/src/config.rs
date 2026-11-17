@@ -17,15 +17,20 @@ use std::time::Duration;
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
 use ee_agent_acp_server::env_or_dotenv;
-use ee_agent_orchestrator::{RubberDuckConfig, RubberDuckMode};
+use ee_agent_orchestrator::{GenerationOptions, RubberDuckConfig, RubberDuckMode};
 use ee_agent_protocol::setup::{
     SETUP_MANIFEST_SCHEMA_VERSION, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig,
     SetupManifest,
 };
-use ee_chat_completions::{EndpointProfile, RetryPolicy, TokenSource, TrustedEndpoint};
+use ee_chat_completions::{EndpointProfile, RetryPolicy, Timeouts, TokenSource, TrustedEndpoint};
 
 use crate::reasoning::{self, ReasoningEffort};
 use crate::routes::{self, OpenCodeRoute, OpenCodeSurface};
+
+mod error;
+mod options;
+
+pub use error::ConfigError;
 
 /// Secret used only for `Authorization: Bearer` on routed OpenCode requests.
 ///
@@ -267,8 +272,20 @@ pub struct Args {
     #[arg(long, env = "OPENCODE_SYSTEM_PROMPT", default_value = DEFAULT_SYSTEM_PROMPT)]
     system_prompt: String,
     /// Request timeout in milliseconds.
-    #[arg(long, env = "OPENCODE_TIMEOUT_MS", default_value_t = DEFAULT_TIMEOUT_MS, value_parser = parse_positive_u64)]
-    timeout_ms: u64,
+    ///
+    /// Historical alias for the whole-exchange budget; the per-phase budgets are
+    /// `OPENCODE_TIMEOUT_HEADERS_MS` and `OPENCODE_TIMEOUT_CHUNK_MS`.
+    #[arg(long, env = "OPENCODE_TIMEOUT_MS", value_parser = parse_positive_u64, hide = true)]
+    timeout_ms: Option<u64>,
+    /// Whole-exchange timeout in milliseconds (unset = unbounded).
+    #[arg(long, env = "OPENCODE_TIMEOUT_TOTAL_MS", value_parser = parse_positive_u64)]
+    timeout_total_ms: Option<u64>,
+    /// Budget until response headers arrive, in milliseconds.
+    #[arg(long, env = "OPENCODE_TIMEOUT_HEADERS_MS", value_parser = parse_positive_u64)]
+    timeout_headers_ms: Option<u64>,
+    /// Idle budget between streamed chunks, in milliseconds.
+    #[arg(long, env = "OPENCODE_TIMEOUT_CHUNK_MS", value_parser = parse_positive_u64)]
+    timeout_chunk_ms: Option<u64>,
     /// Maximum tool-loop iterations, and model calls, per prompt turn.
     /// Omit for unlimited.
     #[arg(long, env = "OPENCODE_MAX_ITERATIONS", value_parser = parse_positive_usize)]
@@ -336,7 +353,10 @@ impl Args {
             rubber_duck_mode: None,
             reasoning_effort: None,
             system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: None,
+            timeout_total_ms: None,
+            timeout_headers_ms: None,
+            timeout_chunk_ms: None,
             max_iterations: None,
             context_window: None,
             max_output_tokens: None,
@@ -368,8 +388,16 @@ pub struct Config {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// System prompt sent with each session transcript.
     pub system_prompt: String,
-    /// Per-request timeout.
-    pub timeout: Duration,
+    /// Per-phase HTTP budgets for every model call.
+    pub timeouts: Timeouts,
+    /// Session-default sampling knobs; a per-request value wins knob by knob.
+    pub generation: GenerationOptions,
+    /// Typed OpenAI/Responses provider options merged into every body.
+    pub provider_options: ee_chat_completions::ProviderOptions,
+    /// Request-body compression for the routed endpoint.
+    pub encoding: ee_chat_completions::RequestEncoding,
+    /// Extra endpoint query parameters, percent-encoded once by the transport.
+    pub query: Vec<(String, String)>,
     /// Maximum tool-loop iterations, and model calls, per prompt turn.
     pub max_iterations: Option<usize>,
     /// Context-window size reported to the client.
@@ -399,7 +427,11 @@ impl std::fmt::Debug for Config {
             .field("critic_model", &self.critic_model)
             .field("rubber_duck", &self.rubber_duck)
             .field("reasoning_effort", &self.reasoning_effort)
-            .field("timeout", &self.timeout)
+            .field("timeouts", &self.timeouts)
+            .field("generation", &self.generation)
+            .field("provider_options", &self.provider_options)
+            .field("encoding", &self.encoding)
+            .field("query", &self.query)
             .field("max_iterations", &self.max_iterations)
             .field("context_window", &self.context_window)
             .field("max_output_tokens", &self.max_output_tokens)
@@ -493,7 +525,20 @@ impl Config {
             },
             reasoning_effort,
             system_prompt: args.system_prompt,
-            timeout: Duration::from_millis(args.timeout_ms),
+            timeouts: options::timeouts_from(
+                |name| env_or_dotenv(name, dotenv),
+                args.timeout_total_ms.or(args.timeout_ms),
+                args.timeout_headers_ms,
+                args.timeout_chunk_ms,
+            )?,
+            generation: {
+                let generation = options::generation_from(|name| env_or_dotenv(name, dotenv))?;
+                options::validate_generation(route.model_id, route.entry.sampling, &generation)?;
+                generation
+            },
+            provider_options: options::provider_options_from(|name| env_or_dotenv(name, dotenv))?,
+            encoding: options::encoding_from(|name| env_or_dotenv(name, dotenv))?,
+            query: options::query_from(|name| env_or_dotenv(name, dotenv))?,
             max_iterations: args.max_iterations,
             context_window,
             max_output_tokens: args.max_output_tokens,
@@ -574,11 +619,22 @@ impl Config {
     /// error.
     pub fn profile(&self) -> Result<EndpointProfile, ConfigError> {
         let mut profile =
-            route_profile(&self.route, &self.system_prompt, self.timeout, self.retry)?;
-        profile.extensions = self.reasoning_extensions();
+            route_profile(&self.route, &self.system_prompt, self.timeouts, self.retry)?;
+        let mut extensions = self.reasoning_extensions().unwrap_or_else(|| serde_json::json!({}));
+        self.provider_options.merge_into(
+            &mut extensions,
+            matches!(self.route.dialect, crate::routes::OpenCodeDialect::OpenAiResponses),
+        );
+        profile.extensions =
+            extensions.as_object().is_some_and(|object| !object.is_empty()).then_some(extensions);
         profile =
             profile.with_limits(self.route.limits()).with_max_output_tokens(self.max_output_tokens);
-        profile = profile.with_cache(self.cache_directive());
+        profile = profile
+            .with_cache(self.cache_directive())
+            .with_sampling(self.route.entry.sampling)
+            .with_generation(self.generation.clone())
+            .with_query(self.query.clone())
+            .with_encoding(self.encoding);
         if let Some(field) = self.route.max_tokens_field() {
             let parsed = ee_chat_completions::MaxTokensField::parse(field).map_err(|_| {
                 ConfigError::InvalidCatalogMetadata {
@@ -681,7 +737,7 @@ impl Config {
 pub fn route_profile(
     route: &OpenCodeRoute,
     system_prompt: impl Into<String>,
-    timeout: Duration,
+    timeouts: Timeouts,
     retry: RetryPolicy,
 ) -> Result<EndpointProfile, ConfigError> {
     let endpoint = TrustedEndpoint::parse(route.endpoint).map_err(|error| {
@@ -699,7 +755,7 @@ pub fn route_profile(
         route.model_id,
     )
     .with_system_prompt(system_prompt)
-    .with_timeout(timeout)
+    .with_timeouts(timeouts)
     .with_retry(retry)
     .with_limits(route.limits())
     .with_cost(route.cost())
@@ -708,215 +764,6 @@ pub fn route_profile(
     .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
     .with_stream_usage(true))
 }
-
-/// Why an OpenCode surface/model selection could not be routed.
-///
-/// Every variant is produced before any HTTP client or credential header is
-/// constructed, and no variant ever carries the API key or a raw authorization
-/// value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
-    /// `OPENCODE_CACHE_POLICY` / `OPENCODE_CACHE_TTL` is malformed.
-    InvalidCacheOption {
-        /// Environment variable that was rejected.
-        variable: &'static str,
-        /// Parser diagnostic.
-        detail: String,
-    },
-    /// `OPENCODE_SURFACE` was unset or empty.
-    MissingSurface,
-    /// `OPENCODE_SURFACE` was neither `zen` nor `go`.
-    UnsupportedSurface {
-        /// The rejected value, after trimming.
-        value: String,
-    },
-    /// `OPENCODE_MODEL` was unset or empty.
-    MissingModel,
-    /// The id is not a documented model on the selected surface.
-    UnknownModel {
-        /// Surface the id was requested on.
-        surface: OpenCodeSurface,
-        /// The rejected model id.
-        model_id: String,
-    },
-    /// The id is documented, but only on the other surface.
-    WrongSurface {
-        /// Surface the id was requested on.
-        surface: OpenCodeSurface,
-        /// The rejected model id.
-        model_id: String,
-        /// Surface that documents the id.
-        documented_surface: OpenCodeSurface,
-    },
-    /// The id is documented as deprecated on the selected surface.
-    RetiredModel {
-        /// Surface that retired the id.
-        surface: OpenCodeSurface,
-        /// The rejected model id.
-        model_id: String,
-        /// Upstream published deprecation date.
-        deprecated_on: &'static str,
-    },
-    /// The id is documented, but its protocol class has no codec in EE.
-    UnsupportedModelDialect {
-        /// Surface that documents the id.
-        surface: OpenCodeSurface,
-        /// The rejected model id.
-        model_id: String,
-        /// Model class EE cannot encode or decode yet.
-        dialect: routes::UnsupportedDialect,
-    },
-    /// `OPENCODE_RUBBER_DUCK_MODE` was not one of the documented modes.
-    UnsupportedRubberDuckMode {
-        /// The rejected value, after trimming.
-        value: String,
-    },
-    /// `OPENCODE_REASONING_EFFORT` was not one of the documented levels.
-    UnsupportedReasoningEffort {
-        /// The rejected value, after trimming.
-        value: String,
-        /// Guidance naming the accepted values.
-        detail: String,
-    },
-    /// The id carries an OpenCode TUI-only provider alias prefix.
-    TuiAliasModel {
-        /// The rejected id, including its alias prefix.
-        model_id: String,
-        /// Catalog id the alias prefix wraps.
-        bare_model_id: String,
-    },
-    /// `model#variant` carried an empty variant after the separator.
-    MissingVariant {
-        /// Model id before the `#`.
-        model_id: String,
-    },
-    /// The selected variant is not one the model's catalog row exposes.
-    UnknownVariant {
-        /// Catalog model id.
-        model_id: String,
-        /// Rejected variant id.
-        variant: String,
-        /// Comma-separated valid variant ids, or `none` when the model exposes
-        /// no reasoning variants at all.
-        valid: String,
-    },
-    /// A catalog endpoint is not a credential-safe origin.
-    UntrustedRouteEndpoint {
-        /// The rejected catalog endpoint.
-        endpoint: &'static str,
-        /// Why the endpoint cannot carry a credential.
-        detail: String,
-    },
-    /// `OPENCODE_MAX_OUTPUT_TOKENS` exceeds the catalog output limit.
-    OutputLimitExceeded {
-        /// Catalog model id.
-        model_id: String,
-        /// Requested output bound.
-        requested: u64,
-        /// Catalog maximum output bound.
-        maximum: u64,
-    },
-    /// A generated catalog value is not one the codec understands.
-    InvalidCatalogMetadata {
-        /// Catalog model id.
-        model_id: String,
-        /// Field name.
-        field: &'static str,
-        /// Rejected value.
-        value: &'static str,
-    },
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingSurface => write!(
-                formatter,
-                "{SURFACE_ENV} is required and must be \"zen\" or \"go\": no OpenCode surface is \
-                 selected by default"
-            ),
-            Self::UnsupportedSurface { value } => write!(
-                formatter,
-                "unsupported OpenCode surface {value:?}: expected \"zen\" or \"go\""
-            ),
-            Self::MissingModel => write!(
-                formatter,
-                "{MODEL_ENV} is required: set an exact documented model id for the selected surface"
-            ),
-            Self::UnknownModel { surface, model_id } => write!(
-                formatter,
-                "model {model_id:?} is not a documented OpenCode {} model: pass an exact model id \
-                 from the current OpenCode {} model list",
-                surface.as_str(),
-                surface.as_str()
-            ),
-            Self::WrongSurface { surface, model_id, documented_surface } => write!(
-                formatter,
-                "model {model_id:?} is documented for OpenCode {}, not {}: set {SURFACE_ENV}={} or \
-                 pick a {} model id",
-                documented_surface.as_str(),
-                surface.as_str(),
-                documented_surface.as_str(),
-                surface.as_str()
-            ),
-            Self::RetiredModel { surface, model_id, deprecated_on } => write!(
-                formatter,
-                "model {model_id:?} was deprecated on OpenCode {} on {deprecated_on} and is not \
-                 routed: pick a current model id",
-                surface.as_str()
-            ),
-            Self::UnsupportedModelDialect { surface, model_id, dialect } => write!(
-                formatter,
-                "model {model_id:?} on OpenCode {} uses the {} dialect, which ee-agent-opencode \
-                 does not support yet: no request was attempted",
-                surface.as_str(),
-                dialect.label()
-            ),
-            Self::UnsupportedRubberDuckMode { value } => write!(
-                formatter,
-                "unsupported rubber duck mode {value:?}: {RUBBER_DUCK_MODE_ENV} accepts \"off\", \
-                 \"manual\", or \"automatic\""
-            ),
-            Self::UnsupportedReasoningEffort { value, detail } => write!(
-                formatter,
-                "unsupported reasoning effort {value:?} from {REASONING_EFFORT_ENV}: {detail}"
-            ),
-            Self::TuiAliasModel { model_id, bare_model_id } => write!(
-                formatter,
-                "model id {model_id:?} is an OpenCode TUI alias: pass the documented model id \
-                 {bare_model_id:?} instead"
-            ),
-            Self::MissingVariant { model_id } => write!(
-                formatter,
-                "model id {model_id:?} ends with an empty #variant: append a variant id or drop the \
-                 trailing '#'"
-            ),
-            Self::UnknownVariant { model_id, variant, valid } => write!(
-                formatter,
-                "model {model_id:?} has no reasoning variant {variant:?}: expected one of {valid}"
-            ),
-            Self::UntrustedRouteEndpoint { endpoint, detail } => write!(
-                formatter,
-                "route endpoint {endpoint:?} is not a credential-safe origin: {detail}"
-            ),
-            Self::OutputLimitExceeded { model_id, requested, maximum } => write!(
-                formatter,
-                "max output tokens {requested} exceeds the documented ceiling {maximum} for model \
-                 {model_id:?}: lower OPENCODE_MAX_OUTPUT_TOKENS or leave it unset"
-            ),
-            Self::InvalidCatalogMetadata { model_id, field, value } => write!(
-                formatter,
-                "catalog metadata {field}={value:?} for model {model_id:?} is not supported by this \
-                 ee release: regenerate the catalog with scripts/gen_catalog.py"
-            ),
-            Self::InvalidCacheOption { variable, detail } => {
-                write!(formatter, "invalid {variable}: {detail}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 /// Resolves the exact route for `OPENCODE_SURFACE` and `OPENCODE_MODEL`.
 ///

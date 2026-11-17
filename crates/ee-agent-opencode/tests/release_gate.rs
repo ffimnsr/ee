@@ -12,7 +12,7 @@ use ee_agent_opencode::discovery::{HttpMetadataFetcher, metadata_endpoint};
 use ee_agent_opencode::routes::{
     self, GO_API_ROOT, OpenCodeDialect, OpenCodeSurface, ZEN_API_ROOT, catalog,
 };
-use ee_chat_completions::{EndpointTransport, RetryPolicy, TrustedEndpoint};
+use ee_chat_completions::{EndpointTransport, RetryPolicy, Timeouts, TrustedEndpoint};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -67,8 +67,13 @@ fn every_catalog_row_is_an_exact_https_route_for_its_declared_dialect() {
         let endpoint = TrustedEndpoint::parse(route.endpoint).expect("trusted endpoint");
         assert_eq!(endpoint.as_str(), route.endpoint);
         assert!(
-            route_profile(&route, "system", std::time::Duration::from_secs(1), RetryPolicy::none())
-                .is_ok(),
+            route_profile(
+                &route,
+                "system",
+                Timeouts::new().with_total(Some(std::time::Duration::from_secs(1))),
+                RetryPolicy::none()
+            )
+            .is_ok(),
             "{label} builds a profile for its endpoint"
         );
     }
@@ -82,9 +87,13 @@ fn malformed_endpoint_metadata_cannot_carry_a_credential() {
         routes::resolve_route(OpenCodeSurface::Zen, "gpt-5.5").expect("documented route");
     route.endpoint = "http://insecure.test/v1/responses";
 
-    let error =
-        route_profile(&route, "system", std::time::Duration::from_secs(1), RetryPolicy::none())
-            .expect_err("insecure endpoint is refused");
+    let error = route_profile(
+        &route,
+        "system",
+        Timeouts::new().with_total(Some(std::time::Duration::from_secs(1))),
+        RetryPolicy::none(),
+    )
+    .expect_err("insecure endpoint is refused");
 
     assert!(matches!(error, ConfigError::UntrustedRouteEndpoint { .. }), "{error}");
     assert!(!error.to_string().contains("key"), "{error}");

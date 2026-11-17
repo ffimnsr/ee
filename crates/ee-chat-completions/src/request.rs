@@ -10,7 +10,8 @@
 //! planes instead of being applied independently.
 
 use ee_agent_orchestrator::{
-    ModelMessage, ModelRole, ToolCallControl, ToolChoice, ToolDefinition, ToolFormat,
+    GenerationOptions, ModelMessage, ModelRole, ToolCallControl, ToolChoice, ToolDefinition,
+    ToolFormat,
 };
 use serde_json::{Value, json};
 
@@ -18,6 +19,8 @@ use crate::cache_policy::{
     CacheCandidate, CacheCandidateRole, CacheCandidates, CacheDirective, cache_control, plan,
     warn_dropped,
 };
+use crate::generation::apply_generation_chat;
+use crate::merge::deep_merge;
 use crate::profile::MaxTokensField;
 use crate::reasoning_replay::{replay_reasoning, replay_tool_calls};
 use crate::wire::{content_has_media, content_parts, content_text, tool_call_id_of};
@@ -35,6 +38,8 @@ pub struct RequestBodyOptions<'a> {
     pub max_tokens_field: MaxTokensField,
     /// Tool-call control; `None` keeps the provider default (`auto`).
     pub tool_control: Option<&'a ToolCallControl>,
+    /// Sampling knobs to write; `None` leaves every field absent.
+    pub generation: Option<&'a GenerationOptions>,
     /// Provider body fields merged last, e.g. reasoning shaping.
     pub extensions: Option<&'a Value>,
 }
@@ -47,6 +52,7 @@ impl Default for RequestBodyOptions<'_> {
             max_tokens: None,
             max_tokens_field: MaxTokensField::MaxTokens,
             tool_control: None,
+            generation: None,
             extensions: None,
         }
     }
@@ -84,6 +90,7 @@ pub fn request_body(
         max_tokens,
         max_tokens_field,
         tool_control,
+        generation,
         extensions,
     } = options;
     let mut body = json!({
@@ -107,12 +114,13 @@ pub fn request_body(
     if let Some(max_tokens) = max_tokens {
         body[max_tokens_field.as_str()] = Value::from(max_tokens);
     }
-    if let Some(Value::Object(extra)) = extensions
-        && let Some(object) = body.as_object_mut()
-    {
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
+    if let Some(generation) = generation {
+        apply_generation_chat(&mut body, generation);
+    }
+    if let Some(extensions) = extensions {
+        // Deep merge so a partial provider override (for example
+        // `reasoning.effort` alone) keeps the sibling keys EE already wrote.
+        deep_merge(&mut body, extensions);
     }
     body
 }

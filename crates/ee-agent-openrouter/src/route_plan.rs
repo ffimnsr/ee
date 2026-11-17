@@ -5,7 +5,10 @@
 //! endpoint comes from the session configuration, and a row can only reject a
 //! model or route the catalog does not advertise.
 
-use ee_agent_orchestrator::{ReasoningProtocol, ReasoningVariant, find_variant, variant_ids};
+use ee_agent_orchestrator::{
+    GenerationOptions, ReasoningProtocol, ReasoningVariant, SamplingSupport, find_variant,
+    variant_ids,
+};
 use serde_json::{Value, json};
 
 use crate::catalog::CatalogModel;
@@ -55,6 +58,35 @@ pub(crate) fn validate_route(
         )),
         _ => Ok(()),
     }
+}
+
+/// Rejects a sampling knob the route does not document.
+///
+/// Only the knobs the selected dialect actually lowers are checked, so a knob the
+/// route never sends cannot fail the configuration for no reason.
+pub(crate) fn validate_generation(
+    kind: OpenRouterApiKind,
+    model: &str,
+    sampling: SamplingSupport,
+    generation: &GenerationOptions,
+) -> Result<(), String> {
+    let applicable = match kind {
+        OpenRouterApiKind::Chat => generation.clone(),
+        OpenRouterApiKind::Responses => GenerationOptions {
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            ..generation.clone()
+        },
+    };
+    generation.validate().and_then(|()| match applicable.unsupported(sampling) {
+        Some(knob) => Err(format!(
+            "OpenRouter model {model:?} does not document the {knob} sampling knob: unset it \
+                 or select a model that declares {knob} support"
+        )),
+        None => Ok(()),
+    })
 }
 
 /// Resolves the requested `model#variant` against the catalog row.

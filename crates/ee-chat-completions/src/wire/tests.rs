@@ -205,6 +205,7 @@ fn request_body_requests_stream_usage_and_output_bound() {
             max_tokens: Some(1_234),
             max_tokens_field: crate::profile::MaxTokensField::MaxCompletionTokens,
             tool_control: None,
+            generation: None,
             extensions: None,
         },
     );
@@ -976,6 +977,7 @@ fn body_with(control: &ToolCallControl, tools: &[Value]) -> Value {
             max_tokens: None,
             max_tokens_field: crate::profile::MaxTokensField::MaxTokens,
             tool_control: Some(control),
+            generation: None,
             extensions: None,
         },
     )
@@ -1016,4 +1018,78 @@ fn strict_and_freeform_tools_follow_route_capabilities() {
     assert_eq!(supported[0]["function"]["strict"], true);
     assert_eq!(supported[1]["type"], "custom");
     assert_eq!(supported[1]["custom"]["format"]["grammar"]["syntax"], "lark");
+}
+
+// ── Sampling knobs and nested extension merge ─────────────────────────
+
+fn generated(generation: &ee_agent_orchestrator::GenerationOptions) -> Value {
+    request_body(
+        "m",
+        &[],
+        &[],
+        RequestBodyOptions {
+            stream: false,
+            stream_usage: false,
+            max_tokens: None,
+            max_tokens_field: crate::profile::MaxTokensField::MaxTokens,
+            tool_control: None,
+            generation: Some(generation),
+            extensions: None,
+        },
+    )
+}
+
+#[test]
+fn no_sampling_key_appears_when_nothing_is_configured() {
+    let body = generated(&ee_agent_orchestrator::GenerationOptions::none());
+    for key in
+        ["temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "seed", "stop"]
+    {
+        assert!(body.get(key).is_none(), "{key} must stay absent");
+    }
+}
+
+#[test]
+fn configured_sampling_knobs_round_trip_with_native_types() {
+    let generation = ee_agent_orchestrator::GenerationOptions {
+        temperature: Some(0.2),
+        top_p: Some(0.9),
+        top_k: Some(12),
+        frequency_penalty: Some(0.5),
+        presence_penalty: Some(-0.5),
+        seed: Some(7),
+        stop: Some(vec![String::from("END")]),
+        ..ee_agent_orchestrator::GenerationOptions::none()
+    };
+    let body = generated(&generation);
+
+    assert_eq!(body["temperature"], 0.2);
+    assert_eq!(body["top_p"], 0.9);
+    assert_eq!(body["top_k"], 12);
+    assert_eq!(body["frequency_penalty"], 0.5);
+    assert_eq!(body["presence_penalty"], -0.5);
+    assert_eq!(body["seed"], 7);
+    assert!(body["seed"].is_i64(), "seed stays an integer");
+    assert_eq!(body["stop"], json!(["END"]));
+}
+
+#[test]
+fn extensions_deep_merge_over_the_native_body() {
+    let extensions = json!({ "reasoning": { "effort": "high" }, "metadata": { "a": "b" } });
+    let body = request_body(
+        "m",
+        &[],
+        &[],
+        RequestBodyOptions { extensions: Some(&extensions), ..RequestBodyOptions::default() },
+    );
+    assert_eq!(body["model"], "m", "the native body survives the merge");
+    assert_eq!(body["reasoning"]["effort"], "high");
+    assert_eq!(body["metadata"]["a"], "b");
+}
+
+#[test]
+fn nested_extension_keeps_a_sibling_key_written_by_the_provider() {
+    let mut extensions = json!({ "reasoning": { "effort": "high" } });
+    crate::deep_merge(&mut extensions, &json!({ "reasoning": { "summary": "auto" } }));
+    assert_eq!(extensions, json!({ "reasoning": { "effort": "high", "summary": "auto" } }));
 }

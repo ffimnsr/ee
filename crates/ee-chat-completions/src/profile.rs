@@ -7,7 +7,8 @@ use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 
 use ee_agent_orchestrator::{
-    Modalities, ModelCost, ModelLimits, OUTPUT_LIMIT_MAX, fit_output_limit,
+    GenerationOptions, Modalities, ModelCost, ModelLimits, OUTPUT_LIMIT_MAX, SamplingSupport,
+    fit_output_limit,
 };
 
 use crate::cache_policy::{CacheDirective, CachePolicy};
@@ -45,6 +46,109 @@ impl MaxTokensField {
             other => Err(format!(
                 "unsupported output-token field {other:?}: expected \"max_tokens\" or \"max_completion_tokens\""
             )),
+        }
+    }
+}
+
+/// Per-phase HTTP budgets for one endpoint.
+///
+/// The reference agent bounds each phase separately: a `headers` budget until
+/// the response starts, an idle `chunk` budget between streamed events, and an
+/// optional `total` budget for the whole exchange
+/// (`packages/ai/src/schema/options.ts:44-56`). A single total timeout cannot
+/// express a long reasoning stream: some providers stay silent for many minutes
+/// while they think.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Whole exchange, from send until the body is fully read; `None` is
+    /// unbounded.
+    pub total: Option<Duration>,
+    /// Budget until response headers arrive.
+    pub headers: Duration,
+    /// Budget between streamed response chunks.
+    pub chunk: Duration,
+}
+
+impl Timeouts {
+    /// Reference defaults: 300 s to headers, 900 s between chunks, unbounded
+    /// total.
+    pub const DEFAULT_HEADERS: Duration = Duration::from_secs(300);
+    /// Reference default idle budget between streamed chunks.
+    pub const DEFAULT_CHUNK: Duration = Duration::from_secs(900);
+
+    /// Reference defaults with no total budget.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { total: None, headers: Self::DEFAULT_HEADERS, chunk: Self::DEFAULT_CHUNK }
+    }
+
+    /// Sets the whole-exchange budget; `None` keeps it unbounded.
+    #[must_use]
+    pub const fn with_total(mut self, total: Option<Duration>) -> Self {
+        self.total = total;
+        self
+    }
+
+    /// Sets the header budget.
+    #[must_use]
+    pub const fn with_headers(mut self, headers: Duration) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Sets the idle chunk budget.
+    #[must_use]
+    pub const fn with_chunk(mut self, chunk: Duration) -> Self {
+        self.chunk = chunk;
+        self
+    }
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compression applied to a JSON request body.
+///
+/// Off by default: only set it for an endpoint known to decode it. The value is
+/// validated at startup so an unknown encoding never becomes a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestEncoding {
+    /// Plain JSON.
+    #[default]
+    None,
+    /// `Content-Encoding: gzip`.
+    Gzip,
+    /// `Content-Encoding: zstd`.
+    Zstd,
+}
+
+impl RequestEncoding {
+    /// Parses the configured encoding name.
+    ///
+    /// # Errors
+    ///
+    /// Returns guidance naming the accepted values.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "gzip" => Ok(Self::Gzip),
+            "zstd" => Ok(Self::Zstd),
+            other => Err(format!(
+                "unsupported request encoding {other:?}: expected \"none\", \"gzip\", or \"zstd\""
+            )),
+        }
+    }
+
+    /// `Content-Encoding` value, or `None` when the body is sent plain.
+    #[must_use]
+    pub const fn content_encoding(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Gzip => Some("gzip"),
+            Self::Zstd => Some("zstd"),
         }
     }
 }
@@ -151,8 +255,12 @@ pub struct EndpointProfile {
     pub model: String,
     /// System prompt prepended to a normalized transcript.
     pub system_prompt: String,
-    /// Request timeout applied by the HTTP client.
-    pub timeout: Duration,
+    /// Per-phase HTTP budgets applied by the HTTP client and the SSE reader.
+    pub timeouts: Timeouts,
+    /// Query parameters appended to the endpoint, percent-encoded exactly once.
+    pub query: Vec<(String, String)>,
+    /// Compression applied to the JSON request body.
+    pub encoding: RequestEncoding,
     /// Retry policy for transient and rate-limited failures.
     pub retry: RetryPolicy,
     /// Extension headers sent with every request; never credential headers.
@@ -182,6 +290,10 @@ pub struct EndpointProfile {
     /// Assistant field a route requires for replayed reasoning when the provider
     /// streamed only structured details (for example Kimi's `reasoning_content`).
     pub reasoning_field: Option<String>,
+    /// Sampling knobs the model documents.
+    pub sampling: SamplingSupport,
+    /// Session-default sampling knobs; a per-request value wins knob by knob.
+    pub generation: GenerationOptions,
 }
 
 impl EndpointProfile {
@@ -200,7 +312,9 @@ impl EndpointProfile {
             endpoint,
             model: model.into(),
             system_prompt: String::new(),
-            timeout: Duration::from_secs(60),
+            timeouts: Timeouts::new(),
+            query: Vec::new(),
+            encoding: RequestEncoding::None,
             retry: RetryPolicy::none(),
             headers: Vec::new(),
             extensions: None,
@@ -214,6 +328,8 @@ impl EndpointProfile {
             stream_usage: false,
             max_tokens_field: MaxTokensField::MaxTokens,
             reasoning_field: None,
+            sampling: SamplingSupport::ALL,
+            generation: GenerationOptions::none(),
         }
     }
 
@@ -224,11 +340,59 @@ impl EndpointProfile {
         self
     }
 
-    /// Sets the request timeout.
+    /// Sets the whole-exchange timeout.
+    ///
+    /// Kept as the short form of [`Self::with_timeouts`]: it only replaces the
+    /// total budget, so the phase defaults stay in force.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeouts = self.timeouts.with_total(Some(timeout));
         self
+    }
+
+    /// Sets the per-phase HTTP budgets.
+    #[must_use]
+    pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
+    /// Sets query parameters appended to the endpoint.
+    ///
+    /// Duplicate keys keep the first value; the transport percent-encodes each
+    /// pair exactly once, so a value cannot inject another parameter.
+    #[must_use]
+    pub fn with_query(mut self, query: Vec<(String, String)>) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        self.query = query.into_iter().filter(|(key, _)| seen.insert(key.clone())).collect();
+        self
+    }
+
+    /// Sets the request-body compression.
+    #[must_use]
+    pub fn with_encoding(mut self, encoding: RequestEncoding) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    /// Sets the sampling knobs the model documents.
+    #[must_use]
+    pub fn with_sampling(mut self, sampling: SamplingSupport) -> Self {
+        self.sampling = sampling;
+        self
+    }
+
+    /// Sets the session-default sampling knobs.
+    #[must_use]
+    pub fn with_generation(mut self, generation: GenerationOptions) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    /// Returns the first configured sampling knob the model does not document.
+    #[must_use]
+    pub fn unsupported_generation(&self) -> Option<&'static str> {
+        self.generation.unsupported(self.sampling)
     }
 
     /// Sets the retry policy.
@@ -349,7 +513,33 @@ impl EndpointProfile {
         let requested = self.max_output_tokens.map_or(ceiling, |value| value.min(ceiling));
         fit_output_limit(Some(ModelLimits::new(limits.context, requested)), Some(prompt_tokens))
     }
+
+    /// Output-token bound for one call, where a per-request value wins over the
+    /// profile default while still respecting the catalog ceiling.
+    #[must_use]
+    pub fn fitted_output_limit_with(
+        &self,
+        prompt_tokens: u64,
+        requested: Option<u64>,
+    ) -> Option<u64> {
+        match (requested, self.max_output_tokens) {
+            (Some(requested), _) => {
+                let Some(limits) = self.limits else {
+                    return Some(requested.clamp(1, OUTPUT_LIMIT_MAX));
+                };
+                let ceiling = limits.output.clamp(1, OUTPUT_LIMIT_MAX);
+                fit_output_limit(
+                    Some(ModelLimits::new(limits.context, requested.min(ceiling))),
+                    Some(prompt_tokens),
+                )
+            }
+            (None, _) => self.fitted_output_limit(prompt_tokens),
+        }
+    }
 }
+
+#[cfg(test)]
+mod extra_tests;
 
 #[cfg(test)]
 mod tests {
@@ -391,7 +581,7 @@ mod tests {
         assert_eq!(profile.credential_var, "EXAMPLE_API_KEY");
         assert_eq!(profile.model, "example-model");
         assert_eq!(profile.system_prompt, "system");
-        assert_eq!(profile.timeout, Duration::from_secs(5));
+        assert_eq!(profile.timeouts.total, Some(Duration::from_secs(5)));
         assert_eq!(profile.retry.max_attempts, 2);
         assert_eq!(profile.headers.len(), 0);
         assert_eq!(profile.extensions.expect("extensions")["reasoning"]["effort"], "low");

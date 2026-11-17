@@ -36,7 +36,10 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         rubber_duck_mode: None,
         reasoning_effort: None,
         system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
-        timeout_ms: DEFAULT_TIMEOUT_MS,
+        timeout_ms: Some(DEFAULT_TIMEOUT_MS),
+        timeout_total_ms: None,
+        timeout_headers_ms: None,
+        timeout_chunk_ms: None,
         max_iterations: None,
         context_window: None,
         max_output_tokens: None,
@@ -56,7 +59,7 @@ fn dotenv(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 #[test]
 fn explicit_args_resolve_the_route_and_keep_the_knobs() {
     let mut args = args(Some("go"), Some("kimi-k3"));
-    args.timeout_ms = 5_000;
+    args.timeout_ms = Some(5_000);
     args.max_iterations = Some(7);
     args.context_window = Some(32_768);
     args.retry_max_attempts = 4;
@@ -68,7 +71,7 @@ fn explicit_args_resolve_the_route_and_keep_the_knobs() {
 
     assert_eq!(config.route.model_id, "kimi-k3");
     assert_eq!(config.route.surface, OpenCodeSurface::Go);
-    assert_eq!(config.timeout, Duration::from_secs(5));
+    assert_eq!(config.timeouts.total, Some(Duration::from_secs(5)));
     assert_eq!(config.max_iterations, Some(7));
     assert_eq!(config.context_window, 32_768);
     assert_eq!(config.retry.max_attempts, 4);
@@ -233,15 +236,15 @@ fn setup_manifest_asks_for_bare_model_ids_not_tui_aliases() {
 fn route_profile_uses_the_catalog_endpoint_and_names_the_route() {
     let route = routes::resolve_route(OpenCodeSurface::Zen, "minimax-m3").expect("routed");
 
-    let profile = route_profile(&route, "system", Duration::from_secs(5), RetryPolicy::none())
-        .expect("profile");
+    let profile =
+        route_profile(&route, "system", Timeouts::new(), RetryPolicy::none()).expect("profile");
 
     assert_eq!(profile.label, "OpenCode zen minimax-m3 (openai_chat_completions)");
     assert_eq!(profile.credential_var, API_KEY_ENV);
     assert_eq!(profile.endpoint.as_str(), "https://opencode.ai/zen/v1/chat/completions");
     assert_eq!(profile.model, "minimax-m3");
     assert_eq!(profile.system_prompt, "system");
-    assert_eq!(profile.timeout, Duration::from_secs(5));
+    assert_eq!(profile.timeouts, Timeouts::new());
     assert_eq!(profile.retry, RetryPolicy::none());
     assert!(profile.extensions.is_none());
 }
@@ -250,7 +253,7 @@ fn route_profile_uses_the_catalog_endpoint_and_names_the_route() {
 fn every_catalog_route_has_a_trusted_profile() {
     let mut count = 0;
     for route in routes::catalog() {
-        let profile = route_profile(&route, "", Duration::from_secs(1), RetryPolicy::none())
+        let profile = route_profile(&route, "", Timeouts::new(), RetryPolicy::none())
             .unwrap_or_else(|error| {
                 panic!("{} {}: {error}", route.surface.as_str(), route.model_id)
             });
@@ -591,4 +594,80 @@ fn legacy_routes_fall_back_to_the_configured_context_window() {
             .expect("legacy route resolves");
     assert!(config.route.limits().is_none());
     assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
+}
+
+// ── Sampling and transport options ─────────────────────────────────
+
+fn lookup(name: &str) -> Option<String> {
+    match name {
+        "OPENCODE_TEMPERATURE" => Some(String::from("0.3")),
+        "OPENCODE_TOP_P" => Some(String::from("0.9")),
+        "OPENCODE_TOP_K" => Some(String::from("32")),
+        "OPENCODE_FREQUENCY_PENALTY" => Some(String::from("0.1")),
+        "OPENCODE_PRESENCE_PENALTY" => Some(String::from("-0.1")),
+        "OPENCODE_SEED" => Some(String::from("11")),
+        "OPENCODE_STOP" => Some(String::from("END, STOP")),
+        _ => None,
+    }
+}
+
+#[test]
+fn sampling_options_parse_from_the_environment() {
+    let generation = super::options::generation_from(lookup).expect("valid values");
+    assert_eq!(generation.temperature, Some(0.3));
+    assert_eq!(generation.top_p, Some(0.9));
+    assert_eq!(generation.top_k, Some(32));
+    assert_eq!(generation.frequency_penalty, Some(0.1));
+    assert_eq!(generation.presence_penalty, Some(-0.1));
+    assert_eq!(generation.seed, Some(11));
+    assert_eq!(generation.stop.as_deref(), Some(&[String::from("END"), String::from("STOP")][..]));
+}
+
+#[test]
+fn an_unset_environment_produces_no_sampling_knobs() {
+    let generation = super::options::generation_from(|_| None).expect("empty is valid");
+    assert!(generation.is_empty());
+}
+
+#[test]
+fn malformed_sampling_values_fail_at_startup() {
+    let error = super::options::generation_from(|name| {
+        (name == "OPENCODE_TEMPERATURE").then(|| String::from("hot"))
+    })
+    .expect_err("rejected");
+    assert!(error.to_string().contains("OPENCODE_TEMPERATURE"), "{error}");
+
+    let error = super::options::generation_from(|name| {
+        (name == "OPENCODE_TEMPERATURE").then(|| String::from("9.5"))
+    })
+    .expect_err("out of range");
+    assert!(error.to_string().contains("temperature"), "{error}");
+
+    let error = super::options::generation_from(|name| {
+        (name == "OPENCODE_STOP").then(|| String::from("A,,B"))
+    })
+    .expect_err("empty entry");
+    assert!(error.to_string().contains("OPENCODE_STOP"), "{error}");
+}
+
+#[test]
+fn a_model_without_a_knob_rejects_the_configuration() {
+    let sampling =
+        ee_agent_orchestrator::SamplingSupport { temperature: false, ..Default::default() };
+    let generation =
+        ee_agent_orchestrator::GenerationOptions { temperature: Some(0.4), ..Default::default() };
+    let error = super::options::validate_generation("gpt-5.5", sampling, &generation)
+        .expect_err("rejected");
+    let text = error.to_string();
+    assert!(text.contains("gpt-5.5"), "{text}");
+    assert!(text.contains("temperature"), "{text}");
+}
+
+#[test]
+fn phase_budgets_use_the_alias_and_the_reference_defaults() {
+    let timeouts =
+        super::options::timeouts_from(|_| None, Some(42_000), None, Some(1_500)).expect("valid");
+    assert_eq!(timeouts.total, Some(Duration::from_millis(42_000)));
+    assert_eq!(timeouts.headers, ee_chat_completions::Timeouts::DEFAULT_HEADERS);
+    assert_eq!(timeouts.chunk, Duration::from_millis(1_500));
 }

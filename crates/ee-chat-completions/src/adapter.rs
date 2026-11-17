@@ -240,11 +240,14 @@ impl ModelAdapter for ResponsesAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            let profile = codec.profile();
+            let generation = merged_generation(profile, &request)?;
             let completion = codec.complete_controlled(
                 &request.transcript,
                 &request.tools,
                 &request.tool_control,
                 request.prompt_tokens,
+                (!generation.is_empty()).then_some(&generation),
             );
             tokio::select! {
                 response = completion => response.map_err(response_error),
@@ -269,6 +272,8 @@ impl ModelAdapter for ResponsesAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            let profile = codec.profile();
+            let generation = merged_generation(profile, &request)?;
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(sink_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(sink_error),
@@ -279,6 +284,7 @@ impl ModelAdapter for ResponsesAdapter {
                 &request.tool_control,
                 &mut sink,
                 request.prompt_tokens,
+                (!generation.is_empty()).then_some(&generation),
             );
             tokio::select! {
                 response = completion => response.map_err(response_error),
@@ -320,6 +326,7 @@ fn wire_request(
     )
     .map_err(ModelError::Adapter)?;
     let transcript = guarded.as_deref().unwrap_or(&request.transcript);
+    let generation = merged_generation(profile, request)?;
     let (messages, tools) = chat_request_parts(&ChatRequestParts {
         system_prompt: &profile.system_prompt,
         transcript,
@@ -335,8 +342,33 @@ fn wire_request(
         messages,
         tools,
         tool_control: request.tool_control.clone(),
+        generation: (!generation.is_empty()).then_some(generation),
         prompt_tokens: request.prompt_tokens,
     })
+}
+
+/// Merges the request's sampling knobs over the profile defaults and validates
+/// the result against the model's declared capabilities.
+///
+/// Validation happens before any body exists, so an unsupported knob is a local
+/// configuration error naming the model and the knob, never a billable provider
+/// rejection.
+fn merged_generation(
+    profile: &EndpointProfile,
+    request: &ModelRequest,
+) -> Result<ee_agent_orchestrator::GenerationOptions, ModelError> {
+    let generation = request.generation.clone().map_or_else(
+        || profile.generation.clone(),
+        |request| request.merged_over(&profile.generation),
+    );
+    generation.validate().map_err(ModelError::Adapter)?;
+    if let Some(knob) = generation.unsupported(profile.sampling) {
+        return Err(ModelError::Adapter(format!(
+            "model {:?} does not document the {knob} sampling knob",
+            profile.model
+        )));
+    }
+    Ok(generation)
 }
 
 /// Resolves when the cancellation signal flips, so every model call stays

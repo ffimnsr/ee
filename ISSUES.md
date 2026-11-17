@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–10 implemented and tested (2026-11-17). Gap 11 and later (Part 5 second-pass findings) remain open.
+**Status:** Gaps 1–13 implemented and tested (2026-11-17). Gap 14 and later (Part 5 second-pass findings) remain open.
 
 ## Execution Overview
 
@@ -1871,7 +1871,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 - [x] Preserve the security model: catalog-derived HTTPS origins only, no env-supplied endpoints for OpenCode, credential bound to origin, no secrets or raw provider bodies in errors/logs.
 - [x] Keep shared behavior shared: request bodies, SSE decoding, retry, and transcript assembly stay in `ee-chat-completions`; provider crates keep only their own names, headers, options, and error wording.
 - [x] No new dependencies without justification; reuse `serde_json`, `reqwest`, `sha2`, and existing EE crates.
-- [ ] Every behavior change ships with unit tests in the owning crate and one integration test through the ACP adapter path (`crates/ee-agent-opencode/tests/acp_flows.rs`, `crates/ee-agent-openrouter/tests/provider_flows.rs`).
+- [x] Every behavior change ships with unit tests in the owning crate and one integration test through the ACP adapter path (`crates/ee-agent-opencode/tests/acp_flows.rs`, `crates/ee-agent-openrouter/tests/provider_flows.rs`); Gaps 11–13 add `sampling_and_phase_budgets_reach_the_routed_profile` to `acp_flows.rs`.
 - [x] Document non-obvious wire decisions in the module docs that already explain dialect routing.
 
 ### 4.2 Test gates (run quiet, mem-guarded)
@@ -1918,17 +1918,19 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 11 — Sampling and Generation Knobs
 
-- [ ] Let callers set sampling parameters per model/session, gated by catalog capabilities.
-  - [ ] **Problem:**
+**Landed (Gap 11):** `ee-agent-orchestrator/src/generation.rs` (`GenerationOptions`, `MAX_STOP_SEQUENCES`, `MAX_STOP_SEQUENCE_BYTES`, `validate`, `merged_over`, `unsupported`) plus `ModelRequest.generation` / `with_generation`; `model_metadata::SamplingSupport` (+ `ALL`, `declared`); catalogs carry `sampling` (both `gen_catalog.py` emit it, absent upstream flag = protocol default, matching the reference comment); `ee-chat-completions/src/generation.rs` lowers `apply_generation_{chat,responses,messages}`; `EndpointProfile.generation`/`sampling`/`fitted_output_limit_with`; env `OPENCODE_{TEMPERATURE,TOP_P,TOP_K,FREQUENCY_PENALTY,PRESENCE_PENALTY,SEED,STOP}` parsed in `ee-agent-opencode/src/config/options.rs` and `OPENROUTER_*` equivalents in `ee-agent-openrouter/src/options.rs`. Deliberate divergence: a catalog row that omits a sampling flag is treated as declaring the protocol default (the reference does the same), so only an explicit upstream `false` rejects a knob; the gate is covered by a unit test with a synthetic `SamplingSupport`.
+
+- [x] Let callers set sampling parameters per model/session, gated by catalog capabilities.
+  - [x] **Problem:**
     - The reference defines `GenerationOptionsFields { maxTokens, temperature, topP, topK, frequencyPenalty, presencePenalty, seed, stop }`, merges them across route/model/request (`packages/ai/src/schema/options.ts:166-196`), and splits them from provider options by `GENERATION_KEYS` before building a body (`packages/core/src/session/model-request.ts:317-320`).
     - Their capabilities carry `temperature`, `topP`, `topK` so unsupported knobs are dropped instead of rejected (`packages/ai/src/schema/options.ts:240-287`).
     - `ee_agent_orchestrator::ModelRequest` (`crates/ee-agent-orchestrator/src/model.rs:277-294`) carries only transcript, tools, budget, task, available models, and model id. No adapter in `ee-agent-opencode` or `ee-agent-openrouter` can express temperature, top-p, top-k, penalties, seed, or stop sequences, and no request body emits them.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add an optional `GenerationOptions` struct to `ModelRequest`: `max_output_tokens`, `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `seed`, `stop` (bounded list, bounded string length, validated ranges).
     - Lower it per dialect: Chat Completions `temperature`/`top_p`/`top_k`/penalties/`seed`/`stop`; Responses `temperature`/`top_p`/`seed`; Messages `temperature`/`top_k`/`stop_sequences`; reject knobs the catalog does not advertise at config time, not request time.
     - Expose per-provider configuration (`OPENCODE_TEMPERATURE`, `OPENCODE_TOP_P`, `OPENCODE_SEED`, `OPENROUTER_TEMPERATURE`, `OPENROUTER_TOP_P`, `OPENROUTER_SEED`, and stop lists) that fills session defaults; request-level values still win.
     - Never send zero-value defaults: absent configuration must produce absent body fields so strict providers keep working.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - With nothing configured, no sampling key appears in any dialect's body (assertion per codec).
     - `stop` is capped in count and length, and an empty entry is rejected at startup.
     - A model whose catalog omits `temperature` fails configuration with the model id and the unsupported knob named.
@@ -1936,18 +1938,20 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 12 — Provider Options, Deep Merge, and HTTP Overrides
 
-- [ ] Support nested provider options and transport-level overrides without editing shared code.
-  - [ ] **Problem:**
+**Landed (Gap 12):** `ee-chat-completions/src/merge.rs` (`deep_merge`, `MAX_MERGE_DEPTH`, `MAX_MERGE_NODES`) now backs every `extensions` merge (chat, Responses, Messages); `EndpointProfile.query`/`with_query` (+ `EndpointTransport::endpoint_url` percent-encodes each pair once via `url::Url`) and `RequestEncoding`/`with_encoding` (gzip via `flate2`, zstd via `zstd`, both already in the dependency graph; off by default); `ee-chat-completions/src/provider_options.rs` (`ProviderOptions` for `service_tier`, `text_verbosity`, `reasoning_summary`, `safety_identifier`, `metadata`, `max_tool_calls`, `truncation`, redacted `Debug`, per-route field rendering); env `OPENROUTER_{PROVIDER_OPTIONS_JSON,REQUEST_ENCODING,QUERY_JSON}` and `OPENCODE_{PROVIDER_OPTIONS_JSON,REQUEST_ENCODING,QUERY_JSON}`. mTLS stays out of scope.
+
+- [x] Support nested provider options and transport-level overrides without editing shared code.
+  - [x] **Problem:**
     - The reference transport options include `headers`, per-phase `timeout`, and `http { query, body, encoding, tls }`, where `body` is **deep-merged** over the provider-native body and `encoding` selects `zstd`/`gzip`/`none` (`packages/ai/src/schema/options.ts:60-110`).
     - OpenAI/Responses options include `store`, `include`, `reasoning.summary`, `text.verbosity`, `service_tier`, `safety_identifier`, `metadata`, `max_tool_calls`, `truncation`, and `top_logprobs` (`packages/ai/src/providers/openai-options.ts`, `packages/ai/src/protocols/open-responses.ts:819-844`).
     - Our `EndpointProfile.extensions` is merged by top-level key insertion (`crates/ee-chat-completions/src/wire.rs:110-118`): supplying `{"reasoning":{"effort":"high"}}` replaces any full `reasoning` object, so partial nested overrides are impossible. There is no query-map support, no compression selection, and no TLS client configuration.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a bounded `deep_merge` for JSON objects in `ee-chat-completions` and use it for `extensions`; arrays replace wholesale, objects merge recursively, `null` deletes only when explicitly requested.
     - Add `query: Vec<(String, String)>` support to `EndpointProfile` with strict percent-encoding, and reject duplicate reserved keys.
     - Add optional request compression (`none` default) behind an explicit setting; do not enable by default.
     - Add typed OpenAI/Responses options (`service_tier`, `text.verbosity`, `reasoning.summary`, `safety_identifier`, `metadata`, `max_tool_calls`, `truncation`) to the OpenRouter/OpenCode option modules, gated on catalog capabilities.
     - Keep mTLS out of scope for now; if added later it requires separate key-handling review.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - Nested extension merge preserves sibling keys and replaces arrays (unit tests).
     - Query values are encoded exactly once and a `?`/`&` in a value cannot inject another parameter.
     - Compression is off unless configured; a configured value the endpoint rejects fails at startup.
@@ -1955,18 +1959,20 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 13 — Transport Timeouts, Stream Stalls, and Session Transport
 
-- [ ] Make timeouts phase-aware and stop killing long reasoning streams.
-  - [ ] **Problem:**
+**Landed (Gap 13):** `ee-chat-completions` `Timeouts { total, headers, chunk }` (defaults `None` / 300 s / 900 s) replace the single `timeout`; `EndpointTransport::new` applies `total` to the client and `send_with_deadline` bounds the header phase; `drive_sse_with_chunk_timeout` (used by Chat, Responses, and Messages) enforces the idle-chunk budget and returns `Transport { code: "TimeoutChunk" }`; `error_classification::{is_timeout, timeout_phase}` recognize `Timeout`, `TimeoutHeaders`, and `TimeoutChunk`; env `OPENCODE_TIMEOUT_{TOTAL,HEADERS,CHUNK}_MS` and `OPENROUTER_*` (historical `*_TIMEOUT_MS` remains a hidden alias for `total`). The stateful WebSocket `response.create` channel is deliberately deferred, recorded here and in the transport module docs.
+
+- [x] Make timeouts phase-aware and stop killing long reasoning streams.
+  - [x] **Problem:**
     - The reference defaults to a **300 s header** budget (total unbounded unless configured) and a **900 s chunk-idle** budget, with per-phase overrides (`packages/ai/src/schema/options.ts:44-56`; the comment cites DeepSeek asking for ≥15 min of silence).
     - Our adapters build a reqwest client with a single `.timeout(profile.timeout)` (`crates/ee-chat-completions/src/transport.rs:155-165`), and both binaries default that to 120 s (`DEFAULT_TIMEOUT_MS` in `crates/ee-agent-opencode/src/config.rs:60`; `--timeout-ms` default `120_000` in `crates/ee-agent-openrouter/src/config.rs`).
     - There is no idle-chunk watchdog: a stream that produces no delta for 120 s is indistinguishable from a completed one and is aborted as a transport timeout.
     - The reference also carries a stateful WebSocket `response.create` channel with rotation and HTTP fallback (`packages/ai/src/protocols/open-responses-channel.ts`, `packages/core/src/session/model-transport.ts`), which we lack entirely.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Replace the single timeout with `total`, `headers`, and `chunk` budgets: headers 300 s and chunk 900 s by default, total unbounded unless configured (matching the reference); expose `OPENCODE_TIMEOUT_TOTAL_MS`, `OPENCODE_TIMEOUT_CHUNK_MS`, and the OpenRouter equivalents, keeping the existing variable as an alias for `total`.
     - Implement the chunk watchdog in the SSE loop: reset on each event, fail with a typed `Timeout { phase: "chunk" }` when idle past the budget.
     - Classify header timeouts distinctly from chunk timeouts so retry policy can treat them differently (Gap 5).
     - Defer the WebSocket session channel to its own issue; record the decision in the module docs so it is not silently assumed.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - A stream that stalls 200 s with a 900 s chunk budget completes when the next event arrives.
     - Exceeding the chunk budget produces `Timeout { phase: "chunk" }`, not a generic transport failure.
     - Total-budget expiry still bounds a stream that keeps trickling events.

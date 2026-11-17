@@ -17,7 +17,7 @@ use std::fmt;
 
 use ee_agent_orchestrator::{
     Modalities, ModelCost, ModelKind, ModelLimits, ModelRoutes, ReasoningProtocol,
-    ReasoningSupport, ReasoningVariant, reasoning_variants,
+    ReasoningSupport, ReasoningVariant, SamplingSupport, reasoning_variants,
 };
 
 /// One catalog row.
@@ -51,6 +51,9 @@ pub struct CatalogModel {
     pub tools_strict: bool,
     /// Free-form tool input formats the model advertises.
     pub freeform: &'static [&'static str],
+    /// Sampling knobs the model documents; an absent upstream flag means the
+    /// protocol default applies, so the knob is accepted.
+    pub sampling: SamplingSupport,
     /// Chat Completions output-token field the model documents; empty means
     /// unset.
     pub max_tokens_field: &'static str,

@@ -71,6 +71,7 @@ pub trait DialectCodec: Send + Sync + 'static {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         _prompt_tokens: Option<u64>,
+        _generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         let _ = tool_control;
         self.complete(transcript, tools)
@@ -84,6 +85,7 @@ pub trait DialectCodec: Send + Sync + 'static {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         _prompt_tokens: Option<u64>,
+        _generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         let _ = tool_control;
         self.complete_streaming(transcript, tools, sink)
@@ -118,6 +120,7 @@ impl DialectCodec for ResponsesCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(ResponsesCodec::complete_controlled(
             self,
@@ -125,6 +128,7 @@ impl DialectCodec for ResponsesCodec {
             tools,
             tool_control,
             prompt_tokens,
+            generation,
         ))
     }
 
@@ -135,6 +139,7 @@ impl DialectCodec for ResponsesCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(ResponsesCodec::complete_streaming_controlled(
             self,
@@ -143,6 +148,7 @@ impl DialectCodec for ResponsesCodec {
             tool_control,
             sink,
             prompt_tokens,
+            generation,
         ))
     }
 }
@@ -175,6 +181,7 @@ impl DialectCodec for MessagesCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(MessagesCodec::complete_controlled(
             self,
@@ -182,6 +189,7 @@ impl DialectCodec for MessagesCodec {
             tools,
             tool_control,
             prompt_tokens,
+            generation,
         ))
     }
 
@@ -192,6 +200,7 @@ impl DialectCodec for MessagesCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(MessagesCodec::complete_streaming_controlled(
             self,
@@ -200,6 +209,7 @@ impl DialectCodec for MessagesCodec {
             tool_control,
             sink,
             prompt_tokens,
+            generation,
         ))
     }
 }
@@ -232,6 +242,7 @@ impl DialectCodec for ChatCompletionsCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(ChatCompletionsCodec::complete_controlled(
             self,
@@ -239,6 +250,7 @@ impl DialectCodec for ChatCompletionsCodec {
             tools,
             tool_control,
             prompt_tokens,
+            generation,
         ))
     }
 
@@ -249,6 +261,7 @@ impl DialectCodec for ChatCompletionsCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
+        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
     ) -> CodecFuture<'a> {
         Box::pin(ChatCompletionsCodec::complete_streaming_controlled(
             self,
@@ -257,6 +270,7 @@ impl DialectCodec for ChatCompletionsCodec {
             tool_control,
             sink,
             prompt_tokens,
+            generation,
         ))
     }
 }
@@ -336,6 +350,8 @@ impl ModelAdapter for OpenCodeModelAdapter {
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
         let codec = self.codec.clone();
         let credential = self.check_credential();
+        let model_id = self.route.model_id;
+        let sampling = self.route.entry.sampling;
         Box::pin(async move {
             if *cancel.borrow() {
                 return Err(ModelError::Cancelled);
@@ -344,11 +360,13 @@ impl ModelAdapter for OpenCodeModelAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            check_generation(model_id, sampling, &request)?;
             let completion = codec.complete_with_prompt(
                 &request.transcript,
                 &request.tools,
                 &request.tool_control,
                 request.prompt_tokens,
+                request.generation.as_ref(),
             );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),
@@ -365,6 +383,8 @@ impl ModelAdapter for OpenCodeModelAdapter {
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
         let codec = self.codec.clone();
         let credential = self.check_credential();
+        let model_id = self.route.model_id;
+        let sampling = self.route.entry.sampling;
         Box::pin(async move {
             if *cancel.borrow() {
                 return Err(ModelError::Cancelled);
@@ -373,6 +393,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            check_generation(model_id, sampling, &request)?;
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(forward_error),
@@ -383,12 +404,36 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 &request.tool_control,
                 &mut sink,
                 request.prompt_tokens,
+                request.generation.as_ref(),
             );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),
                 () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
             }
         })
+    }
+}
+
+/// Validates per-request sampling knobs before a body exists.
+///
+/// Session defaults are validated at startup; a request-level override still has
+/// to respect the same ranges and the model's declared capabilities, so an
+/// unsupported knob is a local configuration error rather than a billable
+/// provider rejection.
+fn check_generation(
+    model_id: &str,
+    sampling: ee_agent_orchestrator::SamplingSupport,
+    request: &ModelRequest,
+) -> Result<(), ModelError> {
+    let Some(generation) = request.generation.as_ref() else {
+        return Ok(());
+    };
+    generation.validate().map_err(ModelError::Adapter)?;
+    match generation.unsupported(sampling) {
+        Some(knob) => Err(ModelError::Adapter(format!(
+            "model {model_id:?} does not document the {knob} sampling knob"
+        ))),
+        None => Ok(()),
     }
 }
 

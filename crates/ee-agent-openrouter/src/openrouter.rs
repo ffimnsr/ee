@@ -42,7 +42,8 @@ pub(crate) use crate::options::OpenRouterOptions;
 #[cfg(test)]
 pub(crate) use crate::options::{MAX_OPTION_JSON_BYTES, OptionSources};
 use crate::route_plan::{
-    clamp_reasoning_budget, merge_reasoning, resolved_variant, validate_route, variant_reasoning,
+    clamp_reasoning_budget, merge_reasoning, resolved_variant, validate_generation, validate_route,
+    variant_reasoning,
 };
 
 /// Builds the OpenRouter profile for one model id.
@@ -106,9 +107,19 @@ pub(crate) fn openrouter_profile_with_options(
     if let Some(limits) = entry.and_then(|entry| entry.limits) {
         clamp_reasoning_budget(&mut extensions, limits.output);
     }
+    let generation = options.generation().clone();
+    validate_generation(
+        config.api_kind,
+        model,
+        entry.map_or(ee_agent_orchestrator::SamplingSupport::ALL, |entry| entry.sampling),
+        &generation,
+    )?;
     let mut profile = EndpointProfile::new("OpenRouter", API_KEY_ENV, endpoint, model)
         .with_system_prompt(config.system_prompt.clone())
-        .with_timeout(config.timeout)
+        .with_timeouts(config.timeouts)
+        .with_query(options.query())
+        .with_encoding(options.encoding())
+        .with_generation(generation)
         .with_retry(RetryPolicy::new(
             config.retry_max_attempts,
             config.retry_base_delay,
@@ -123,6 +134,9 @@ pub(crate) fn openrouter_profile_with_options(
         .with_limits(entry.and_then(|entry| entry.limits))
         .with_cost(entry.and_then(|entry| entry.cost))
         .with_modalities(entry.map_or(Modalities::UNKNOWN, |entry| entry.modalities))
+        .with_sampling(
+            entry.map_or(ee_agent_orchestrator::SamplingSupport::ALL, |entry| entry.sampling),
+        )
         .with_tools_strict(entry.is_some_and(|entry| entry.tools_strict))
         .with_freeform(
             entry
@@ -300,7 +314,7 @@ mod tests {
             api_key: Some(String::from("sk-test")),
             site_url: None,
             app_title: String::from("ee-test"),
-            timeout: Duration::from_secs(1),
+            timeouts: ee_chat_completions::Timeouts::new().with_total(Some(Duration::from_secs(1))),
             system_prompt: String::from("system"),
             reasoning_effort: None,
             orchestrated: true,
@@ -454,7 +468,7 @@ mod tests {
         assert_eq!(profile.endpoint.as_str(), DEFAULT_API_URL);
         assert_eq!(profile.model, "critic/model");
         assert_eq!(profile.system_prompt, "system");
-        assert_eq!(profile.timeout, Duration::from_secs(1));
+        assert_eq!(profile.timeouts.total, Some(Duration::from_secs(1)));
         assert_eq!(profile.retry.max_attempts, 2);
         assert_eq!(profile.retry.base_delay, Duration::from_millis(500));
         assert_eq!(profile.retry.max_delay, Duration::from_secs(30));

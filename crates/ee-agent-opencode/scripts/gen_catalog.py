@@ -76,6 +76,11 @@ def compact_model(model: dict) -> dict:
                 if key in reasoning
             },
             "structured_output": bool(capabilities.get("structured_output")),
+            "sampling": {
+                key: capabilities[key]
+                for key in ("temperature", "topP", "topK")
+                if key in capabilities
+            },
         },
         "modalities": {
             "input": list((model.get("modalities") or {}).get("input") or []),
@@ -262,6 +267,25 @@ def unsupported_kind(model: dict) -> str | None:
     return None
 
 
+def sampling_literal(model: dict) -> str:
+    """Renders the sampling declaration.
+
+    models.dev omits a sampling flag when the protocol default applies, so an
+    absent flag means "accepted"; only an explicit `false` rejects the knob.
+    """
+    capabilities = model.get("capabilities") or {}
+
+    def flag(camel: str, snake: str) -> str:
+        value = capabilities.get(camel, capabilities.get(snake))
+        return "false" if value is False else "true"
+
+    return (
+        "SamplingSupport { temperature: "
+        f"{flag('temperature', 'temperature')}, top_p: {flag('topP', 'top_p')}, "
+        f"top_k: {flag('topK', 'top_k')} }}"
+    )
+
+
 def model_literal(surface: str, model: dict, kind: str) -> str:
     limit = model.get("limit") or {}
     context = int(limit.get("context") or 0)
@@ -292,6 +316,7 @@ def model_literal(surface: str, model: dict, kind: str) -> str:
         f"tools_supported: {'true' if tools.get('supported') else 'false'}, "
         f"tools_strict: {'true' if tools.get('strict') else 'false'}, "
         f"freeform: &[{freeform_literal}], "
+        f"sampling: {sampling_literal(model)}, "
         f"max_tokens_field: {rust(compatibility.get('max_tokens_field') or '')}, "
         f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'}, "
         "legacy: false },"
@@ -308,7 +333,8 @@ def legacy_literal(surface: str, model_id: str, kind: str) -> str:
         "modalities: Modalities::UNKNOWN, "
         "reasoning: ReasoningSupport::UNSUPPORTED, cost: None, "
         "structured_output: false, tools_supported: true, tools_strict: false, "
-        "freeform: &[], max_tokens_field: \"\", reasoning_field: None, "
+        "freeform: &[], sampling: SamplingSupport::ALL, "
+        "max_tokens_field: \"\", reasoning_field: None, "
         "legacy: true },"
     )
 
@@ -390,7 +416,7 @@ use ee_agent_orchestrator::ModelLimits;
 
 use crate::catalog::{{
     CatalogModel, Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningSupport, RetiredModel,
-    UnsupportedModel,
+    SamplingSupport, UnsupportedModel,
 }};
 use crate::routes::{{OpenCodeDialect as D, OpenCodeSurface as S, UnsupportedDialect}};
 

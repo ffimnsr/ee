@@ -146,6 +146,7 @@ fn automatic_policy_places_the_four_reference_breakpoints() {
         tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
         cache: &cache,
         prompt_tokens: None,
+        generation: None,
     });
 
     assert_eq!(cache_markers(&body).len(), 4, "the API allows four breakpoints: {body}");
@@ -187,6 +188,7 @@ fn manual_breakpoints_are_preserved_and_counted() {
         tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
         cache: &cache,
         prompt_tokens: None,
+        generation: None,
     });
 
     let markers = cache_markers(&body);
@@ -640,6 +642,7 @@ fn tool_choice_lowers_to_the_anthropic_shape() {
             tool_control: control,
             cache: &cache,
             prompt_tokens: None,
+            generation: None,
         })
     };
 
@@ -674,6 +677,7 @@ fn body_with(max_output_tokens: u64, extensions: Value) -> Value {
         tool_control: &control,
         cache: &cache,
         prompt_tokens: None,
+        generation: None,
     })
 }
 
@@ -698,4 +702,51 @@ fn thinking_is_dropped_when_no_valid_budget_fits() {
 fn disabled_thinking_passes_through_unchanged() {
     let body = body_with(8_000, json!({ "thinking": { "type": "disabled" } }));
     assert_eq!(body["thinking"]["type"], "disabled");
+}
+
+// ── Sampling knobs ─────────────────────────────────────────────────
+
+fn sampling_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Value {
+    let transcript = vec![ModelMessage::text(ModelRole::User, "hello")];
+    let cache = ee_chat_completions::CacheDirective::disabled();
+    messages_body(&MessagesBody {
+        model: "claude",
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &[],
+        stream: false,
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        extensions: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        prompt_tokens: None,
+        generation: Some(generation),
+    })
+}
+
+#[test]
+fn no_sampling_key_appears_when_nothing_is_configured() {
+    let body = sampling_body(&ee_agent_orchestrator::GenerationOptions::none());
+    for key in ["temperature", "top_p", "top_k", "stop_sequences", "seed", "stop"] {
+        assert!(body.get(key).is_none(), "{key} must stay absent");
+    }
+}
+
+#[test]
+fn messages_lowers_its_sampling_subset_and_renames_stop() {
+    let generation = ee_agent_orchestrator::GenerationOptions {
+        temperature: Some(0.3),
+        top_p: Some(0.8),
+        top_k: Some(25),
+        seed: Some(5),
+        stop: Some(vec![String::from("END")]),
+        ..ee_agent_orchestrator::GenerationOptions::none()
+    };
+    let body = sampling_body(&generation);
+    assert_eq!(body["temperature"], 0.3);
+    assert_eq!(body["top_p"], 0.8);
+    assert_eq!(body["top_k"], 25);
+    assert_eq!(body["stop_sequences"], json!(["END"]));
+    assert!(body.get("seed").is_none(), "Messages documents no seed");
+    assert!(body.get("stop").is_none(), "stop is renamed, never sent raw");
 }

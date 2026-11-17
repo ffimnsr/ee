@@ -94,6 +94,7 @@ ee-agent-host = { workspace = true, features = ["test-utils"] }
 ee-agent-orchestrator.workspace = true
 ee-mcp = { workspace = true, features = ["test-utils"] }
 ee-agent-openrouter = { path = "../ee-agent-openrouter", features = ["test-utils"] }
+ee-chat-completions = { path = "../ee-chat-completions" }
 ee-agent-opencode = { path = "../ee-agent-opencode" }
 futures.workspace = true
 insta.workspace = true

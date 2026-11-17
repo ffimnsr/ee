@@ -9,14 +9,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ee_agent_acp_server::{Delivery, ProviderError};
 use ee_agent_orchestrator::ToolCallControl;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use crate::profile::{BearerToken, EndpointProfile, RetryPolicy, TokenSource};
+use crate::profile::{BearerToken, EndpointProfile, RequestEncoding, RetryPolicy, TokenSource};
 use crate::wire::{
     AssistantTurn, SseDecoder, StreamAccumulator, StreamDelta, classify_status_error,
     decode_message, emit_finished_deltas, is_retryable, is_timeout, is_unreachable, request_body,
@@ -92,6 +92,30 @@ pub enum SseControl {
 pub async fn drive_sse<F>(
     label: &str,
     source: &mut dyn ChunkSource,
+    on_event: F,
+) -> Result<(), ProviderError>
+where
+    F: FnMut(&str) -> Result<SseControl, ProviderError>,
+{
+    drive_sse_with_chunk_timeout(label, source, None, on_event).await
+}
+
+/// Drives SSE framing with an optional idle budget between chunks.
+///
+/// `chunk` is the maximum silence tolerated between body reads. A stream that
+/// produces no bytes for longer than the budget fails with
+/// `Timeout { phase: "chunk" }` (`code = "TimeoutChunk"`), which is distinct from
+/// a whole-request timeout so retry policy can treat them differently.
+///
+/// # Errors
+///
+/// Returns a typed error when the body cannot be read, an event is not UTF-8,
+/// the consumer rejects an event, or the idle budget expires.
+#[allow(clippy::needless_pass_by_value)]
+pub async fn drive_sse_with_chunk_timeout<F>(
+    label: &str,
+    source: &mut dyn ChunkSource,
+    chunk: Option<Duration>,
     mut on_event: F,
 ) -> Result<(), ProviderError>
 where
@@ -99,10 +123,7 @@ where
 {
     let mut decoder = SseDecoder::new(label);
     loop {
-        let Some(chunk) = source.next_chunk().await.map_err(|detail| {
-            ProviderError::BackendFailure(format!("{label} streaming response failed: {detail}"))
-        })?
-        else {
+        let Some(chunk) = next_chunk(label, source, chunk).await? else {
             break;
         };
         for event in decoder.push(&chunk)? {
@@ -117,6 +138,34 @@ where
         }
     }
     Ok(())
+}
+
+/// Reads the next body chunk, enforcing the idle budget when one is set.
+async fn next_chunk(
+    label: &str,
+    source: &mut dyn ChunkSource,
+    chunk: Option<Duration>,
+) -> Result<Option<Vec<u8>>, ProviderError> {
+    let read = match chunk {
+        Some(limit) => match tokio::time::timeout(limit, source.next_chunk()).await {
+            Ok(result) => result,
+            Err(_) => return Err(chunk_timeout(label)),
+        },
+        None => source.next_chunk().await,
+    };
+    read.map_err(|detail| {
+        ProviderError::BackendFailure(format!("{label} streaming response failed: {detail}"))
+    })
+}
+
+/// Typed idle-chunk timeout.
+#[must_use]
+pub fn chunk_timeout(label: &str) -> ProviderError {
+    ProviderError::Transport {
+        delivery: Delivery::Ambiguous,
+        code: Some(String::from("TimeoutChunk")),
+        detail: format!("{label} stream produced no data within the chunk budget"),
+    }
 }
 
 /// Whether a response body is an SSE stream.
@@ -154,16 +203,22 @@ pub struct EndpointTransport {
 }
 
 impl EndpointTransport {
-    /// Builds a transport with an HTTP timeout taken from the profile.
+    /// Builds a transport with the profile's phase budgets.
+    ///
+    /// The whole-exchange budget (when configured) is applied by the HTTP client;
+    /// the header and idle-chunk budgets are enforced per phase by
+    /// [`EndpointTransport::send_json`] and the body readers.
     ///
     /// # Errors
     ///
     /// Returns the HTTP client construction failure as a diagnostic string.
     pub fn new(profile: EndpointProfile, token: TokenSource) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
-            .timeout(profile.timeout)
-            .build()
-            .map_err(|error| format!("failed to build HTTP client: {error}"))?;
+        let mut builder = reqwest::Client::builder();
+        if let Some(total) = profile.timeouts.total {
+            builder = builder.timeout(total);
+        }
+        let http =
+            builder.build().map_err(|error| format!("failed to build HTTP client: {error}"))?;
         Ok(Self::with_http(profile, token, http))
     }
 
@@ -223,19 +278,36 @@ impl EndpointTransport {
 
     /// Sends one JSON request to the profile endpoint.
     ///
+    /// Provider query parameters are percent-encoded exactly once, and the body
+    /// is compressed only when the profile selects an encoding.
+    ///
     /// # Errors
     ///
     /// Returns a typed error when the credential is missing, a header is
-    /// invalid, or the request cannot be sent.
+    /// invalid, the body cannot be encoded, the header budget expires, or the
+    /// request cannot be sent.
     pub async fn send_json(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
-        let headers = self.headers()?;
-        self.http
-            .post(self.profile.endpoint.as_str())
-            .headers(headers)
-            .json(body)
-            .send()
-            .await
-            .map_err(|error| transport_error(self.profile.label.as_str(), &error))
+        let mut headers = self.headers()?;
+        let url = self.endpoint_url()?;
+        let label = self.profile.label.as_str();
+        let payload = encode_body(body, &mut headers, self.profile.encoding, label)?;
+        let request = self.http.post(url).headers(headers).body(payload);
+        send_with_deadline(request.send(), self.profile.timeouts.headers, label).await
+    }
+
+    /// Endpoint URL with the profile's query parameters appended.
+    fn endpoint_url(&self) -> Result<url::Url, ProviderError> {
+        let label = self.profile.label.as_str();
+        let mut url = url::Url::parse(self.profile.endpoint.as_str()).map_err(|error| {
+            ProviderError::BackendFailure(format!("{label} endpoint is not a URL: {error}"))
+        })?;
+        if !self.profile.query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in &self.profile.query {
+                pairs.append_pair(key, value);
+            }
+        }
+        Ok(url)
     }
 
     /// Reads a response body as JSON, bounded by [`MAX_JSON_BODY_BYTES`].
@@ -253,9 +325,9 @@ impl EndpointTransport {
     ) -> Result<Value, ProviderError> {
         let label = self.profile.label.as_str();
         let mut buffer = Vec::new();
-        while let Some(chunk) = response.next_chunk().await.map_err(|detail| {
-            ProviderError::BackendFailure(format!("{label} streaming response failed: {detail}"))
-        })? {
+        while let Some(chunk) =
+            next_chunk(label, response, Some(self.profile.timeouts.chunk)).await?
+        {
             extend_bounded(&mut buffer, &chunk, MAX_JSON_BODY_BYTES).map_err(|detail| {
                 ProviderError::BackendFailure(format!("{label} {context} {detail}"))
             })?;
@@ -331,6 +403,8 @@ pub struct ChatRequest {
     pub tools: Vec<Value>,
     /// Tool-choice and parallel-call control.
     pub tool_control: ToolCallControl,
+    /// Sampling knobs for this round trip; `None` keeps the profile default.
+    pub generation: Option<ee_agent_orchestrator::GenerationOptions>,
     /// Prompt size measured by the provider on the previous call, when known.
     pub prompt_tokens: Option<u64>,
 }
@@ -396,6 +470,10 @@ impl ChatCompletionsClient {
                 &Value::Array(request.tools.clone()),
             )
         });
+        let generation = request
+            .generation
+            .clone()
+            .map_or(profile.generation.clone(), |request| request.merged_over(&profile.generation));
         let mut body = request_body(
             &profile.model,
             &request.messages,
@@ -403,9 +481,10 @@ impl ChatCompletionsClient {
             crate::wire::RequestBodyOptions {
                 stream,
                 stream_usage: profile.stream_usage,
-                max_tokens: profile.fitted_output_limit(prompt),
+                max_tokens: profile.fitted_output_limit_with(prompt, generation.max_output_tokens),
                 max_tokens_field: profile.max_tokens_field,
                 tool_control: Some(&request.tool_control),
+                generation: (!generation.is_empty()).then_some(&generation),
                 extensions: profile.extensions.as_ref(),
             },
         );
@@ -452,6 +531,7 @@ impl ChatCompletionsClient {
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             tool_control: ToolCallControl::auto(),
+            generation: None,
             prompt_tokens,
         })
         .await
@@ -507,6 +587,7 @@ impl ChatCompletionsClient {
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             tool_control: ToolCallControl::auto(),
+            generation: None,
             prompt_tokens,
         })
         .await
@@ -559,6 +640,7 @@ impl ChatCompletionsClient {
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
                 tool_control: ToolCallControl::auto(),
+                generation: None,
                 prompt_tokens,
             },
             sink,
@@ -617,6 +699,7 @@ impl ChatCompletionsClient {
                 messages: messages.to_vec(),
                 tools: tools.to_vec(),
                 tool_control: ToolCallControl::auto(),
+                generation: None,
                 prompt_tokens,
             },
             sink,
@@ -664,7 +747,7 @@ impl ChatCompletionsClient {
             return Ok(answer);
         }
         let mut accumulator = StreamAccumulator::new(label);
-        drive_sse(label, &mut response, |event| {
+        drive_sse_with_chunk_timeout(label, &mut response, Some(profile.timeouts.chunk), |event| {
             let value: Value = serde_json::from_str(event).map_err(|error| {
                 ProviderError::BackendFailure(format!("{label} stream event was not JSON: {error}"))
             })?;
@@ -691,6 +774,7 @@ impl StreamAttempt<AssistantTurn> for HttpStreamAttempt<'_> {
 }
 
 /// Maps one failed HTTP send onto a typed transport failure.
+/// Maps one failed HTTP send onto a typed transport failure.
 ///
 /// A connect failure never reached the provider; anything else may have, so the
 /// delivery stays ambiguous and a billable retry is not attempted blindly.
@@ -698,6 +782,66 @@ fn transport_error(label: &str, error: &reqwest::Error) -> ProviderError {
     let code = if error.is_timeout() { Some(String::from("Timeout")) } else { io_code(error) };
     let delivery = if error.is_connect() { Delivery::NotSent } else { Delivery::Ambiguous };
     ProviderError::Transport { delivery, code, detail: format!("{label} request failed: {error}") }
+}
+
+/// Awaits one request phase under its own budget.
+///
+/// The header phase is bounded separately from the whole request so a provider
+/// that accepts the connection but never answers is distinguishable from a
+/// stream that stalls after the headers arrived.
+async fn send_with_deadline<F, T>(
+    future: F,
+    limit: Duration,
+    label: &str,
+) -> Result<T, ProviderError>
+where
+    F: Future<Output = Result<T, reqwest::Error>>,
+{
+    match tokio::time::timeout(limit, future).await {
+        Ok(result) => result.map_err(|error| transport_error(label, &error)),
+        Err(_) => Err(ProviderError::Transport {
+            delivery: Delivery::Ambiguous,
+            code: Some(String::from("TimeoutHeaders")),
+            detail: format!("{label} response headers did not arrive within the header budget"),
+        }),
+    }
+}
+
+/// Serializes one request body, compressing it only when configured.
+///
+/// Compression is off by default: an endpoint that does not decode the body
+/// would reject the request, so the setting is explicit and validated at
+/// startup.
+fn encode_body(
+    body: &Value,
+    headers: &mut HeaderMap,
+    encoding: RequestEncoding,
+    label: &str,
+) -> Result<Vec<u8>, ProviderError> {
+    let plain = serde_json::to_vec(body).map_err(|error| {
+        ProviderError::BackendFailure(format!("{label} request body is not JSON: {error}"))
+    })?;
+    let Some(encoding_name) = encoding.content_encoding() else {
+        return Ok(plain);
+    };
+    let compressed = match encoding {
+        RequestEncoding::None => plain,
+        RequestEncoding::Gzip => {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&plain).and_then(|()| encoder.finish()).map_err(|error| {
+                ProviderError::BackendFailure(format!("{label} request body gzip failed: {error}"))
+            })?
+        }
+        RequestEncoding::Zstd => {
+            zstd::stream::encode_all(plain.as_slice(), 3).map_err(|error| {
+                ProviderError::BackendFailure(format!("{label} request body zstd failed: {error}"))
+            })?
+        }
+    };
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding_name));
+    Ok(compressed)
 }
 
 /// Network error code of the underlying I/O failure, when one is available.
@@ -845,3 +989,5 @@ pub async fn with_stream_retry<T>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeout_tests;

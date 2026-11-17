@@ -938,3 +938,34 @@ async fn rubber_duck_without_a_critic_reports_contrast_unavailable() {
 
     harness.shutdown(task).await;
 }
+
+#[tokio::test]
+async fn sampling_and_phase_budgets_reach_the_routed_profile() {
+    let dirs = TestDirs::new();
+    let mut config = test_config(OpenCodeSurface::Zen, "claude-sonnet-5");
+    config.generation = ee_agent_orchestrator::GenerationOptions {
+        temperature: Some(0.2),
+        top_k: Some(40),
+        ..ee_agent_orchestrator::GenerationOptions::none()
+    };
+    config.timeouts.chunk = std::time::Duration::from_secs(7);
+
+    let profile = config.profile().expect("profile builds");
+    assert_eq!(profile.generation.temperature, Some(0.2));
+    assert_eq!(profile.generation.top_k, Some(40));
+    assert_eq!(profile.timeouts.chunk, std::time::Duration::from_secs(7));
+    assert_eq!(profile.timeouts.headers, ee_chat_completions::Timeouts::DEFAULT_HEADERS);
+
+    let (codec, harness, task) =
+        spawn_agent_with_config(config, vec![ScriptedAnswer::text("ok")], &dirs);
+    initialize(&harness).await;
+    let session_id = new_session(&harness, 2).await;
+    harness.send(request(3, "session/prompt", prompt_params(&session_id, "hello")));
+    drain_prompt_start(&harness).await;
+    let (_updates, result) = harness.collect_until_response(3).await;
+
+    assert_eq!(result["stopReason"], "end_turn");
+    assert_eq!(codec.requests().len(), 1, "the turn still runs one model round");
+
+    harness.shutdown(task).await;
+}

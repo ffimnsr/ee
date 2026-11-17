@@ -32,8 +32,11 @@ pub mod adapter;
 pub mod cache_policy;
 pub mod endpoint;
 mod error_classification;
+pub mod generation;
+pub mod merge;
 pub mod native;
 pub mod profile;
+pub mod provider_options;
 mod reasoning_replay;
 mod request;
 pub mod responses;
@@ -51,12 +54,24 @@ pub use cache_policy::{
     warn_dropped,
 };
 pub use endpoint::{EndpointError, TrustedEndpoint};
+pub use generation::{
+    apply_generation_chat, apply_generation_messages, apply_generation_responses,
+};
+pub use merge::{MAX_MERGE_DEPTH, MAX_MERGE_NODES, deep_merge};
 pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
-pub use profile::{BearerToken, EndpointProfile, MaxTokensField, RetryPolicy, TokenSource};
+pub use profile::{
+    BearerToken, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy, Timeouts,
+    TokenSource,
+};
+pub use provider_options::{
+    MAX_METADATA_ENTRIES, MAX_PROVIDER_OPTIONS_BYTES, ProviderOptions, REASONING_SUMMARY_VALUES,
+    TEXT_VERBOSITY_VALUES, TRUNCATION_VALUES,
+};
 pub use transport::{
     ChatCompletionsClient, ChatRequest, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest,
-    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse,
-    is_event_stream, with_buffered_retry, with_stream_retry,
+    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, chunk_timeout,
+    drive_sse, drive_sse_with_chunk_timeout, is_event_stream, with_buffered_retry,
+    with_stream_retry,
 };
 pub use wire::{
     AssistantTurn, ChatRequestParts, RequestBodyOptions, StreamDelta, ToolCall, Usage,
@@ -64,6 +79,6 @@ pub use wire::{
     content_parts, content_text, decode_message, emit_finished_deltas, http_error_message,
     is_retryable, messages_from_transcript, messages_from_transcript_replaying,
     messages_from_transcript_with_cache, parse_retry_after, request_body, response_from_turn,
-    retry_after_of, retry_delay, tool_call_id_of, tool_choice_value, tools_from_definitions,
-    tools_from_definitions_with, usage_from_tokens,
+    retry_after_of, retry_delay, timeout_phase, tool_call_id_of, tool_choice_value,
+    tools_from_definitions, tools_from_definitions_with, usage_from_tokens,
 };

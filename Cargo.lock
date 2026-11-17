@@ -1473,6 +1473,7 @@ dependencies = [
  "ee-agent-openrouter",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
+ "ee-chat-completions",
  "ee-mcp",
  "futures",
  "reqwest 0.12.28",
@@ -1572,12 +1573,14 @@ version = "0.11.12"
 dependencies = [
  "ee-agent-acp-server",
  "ee-agent-orchestrator",
+ "flate2",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tracing",
  "url",
+ "zstd",
 ]
 
 [[package]]
@@ -1600,6 +1603,7 @@ dependencies = [
  "ee-agent-openrouter",
  "ee-agent-orchestrator",
  "ee-agent-protocol",
+ "ee-chat-completions",
  "ee-mcp",
  "ee-plugin-api",
  "ee-plugin-runtime",

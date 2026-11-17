@@ -201,9 +201,30 @@ pub fn is_unreachable(error: &ProviderError) -> bool {
 }
 
 /// Whether the transport failed by timing out.
+///
+/// Phase-specific codes (`TimeoutHeaders`, `TimeoutChunk`) count as timeouts so
+/// the retry budget treats them the same way; the code still names the phase for
+/// diagnostics and for a caller that wants to distinguish them.
 #[must_use]
 pub fn is_timeout(error: &ProviderError) -> bool {
-    matches!(error, ProviderError::Transport { code: Some(code), .. } if code == "Timeout")
+    matches!(
+        error,
+        ProviderError::Transport { code: Some(code), .. } if code.starts_with("Timeout")
+    )
+}
+
+/// Which phase of a timed-out transport request expired, when known.
+#[must_use]
+pub fn timeout_phase(error: &ProviderError) -> Option<&'static str> {
+    let ProviderError::Transport { code: Some(code), .. } = error else {
+        return None;
+    };
+    match code.as_str() {
+        "TimeoutHeaders" | "Timeout:headers" => Some("headers"),
+        "TimeoutChunk" | "Timeout:chunk" => Some("chunk"),
+        "Timeout" => Some("total"),
+        _ => None,
+    }
 }
 
 /// Parses a `Retry-After` header value (delta-seconds form; HTTP dates are rare

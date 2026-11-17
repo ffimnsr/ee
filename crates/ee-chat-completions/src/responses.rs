@@ -23,18 +23,20 @@ use std::collections::BTreeMap;
 
 use crate::{
     AssistantTurn, CacheDirective, DeltaSink, EndpointProfile, EndpointRequest, EndpointTransport,
-    SseControl, StreamDelta, StreamFuture, ToolCall, Usage, content_text, drive_sse,
-    emit_finished_deltas, is_event_stream, openai_request_ttl, response_from_turn, seal_response,
-    tool_call_id_of, usage_from_tokens, with_buffered_retry, with_stream_retry,
+    SseControl, StreamDelta, StreamFuture, ToolCall, Usage, content_text,
+    drive_sse_with_chunk_timeout, emit_finished_deltas, is_event_stream, openai_request_ttl,
+    response_from_turn, seal_response, tool_call_id_of, usage_from_tokens, with_buffered_retry,
+    with_stream_retry,
 };
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl, ToolChoice,
-    ToolDefinition, estimate_prompt_tokens,
+    GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl,
+    ToolChoice, ToolDefinition, estimate_prompt_tokens,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::merge::deep_merge;
 use crate::wire::{codec_error, parse_arguments};
 
 /// Applies the catalog modality gate and media-size budget before a request
@@ -73,6 +75,8 @@ pub struct ResponsesBody<'a> {
     pub max_output_tokens: Option<u64>,
     /// Provider body fields merged last.
     pub extensions: Option<&'a Value>,
+    /// Sampling knobs to write; `None` leaves every field absent.
+    pub generation: Option<&'a GenerationOptions>,
     /// Tool-call control.
     pub tool_control: &'a ToolCallControl,
     /// Prompt-cache policy, for the request-level lifetime only.
@@ -104,6 +108,7 @@ pub fn request_body(
         stream,
         max_output_tokens,
         extensions,
+        generation: None,
         tool_control: &auto,
         cache: &cache,
     })
@@ -179,12 +184,12 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
             body["parallel_tool_calls"] = Value::from(parallel);
         }
     }
-    if let Some(Value::Object(extra)) = input.extensions
-        && let Some(object) = body.as_object_mut()
-    {
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
+    if let Some(generation) = input.generation {
+        crate::generation::apply_generation_responses(&mut body, generation);
+    }
+    if let Some(extensions) = input.extensions {
+        // Deep merge so a partial provider override keeps sibling keys.
+        deep_merge(&mut body, extensions);
     }
     body
 }
@@ -714,6 +719,12 @@ impl ResponsesCodec {
         Self { transport }
     }
 
+    /// Returns the provider profile this codec sends with.
+    #[must_use]
+    pub fn profile(&self) -> &EndpointProfile {
+        self.transport.profile()
+    }
+
     /// Returns the transport this codec sends through.
     #[must_use]
     pub fn transport(&self) -> &EndpointTransport {
@@ -742,23 +753,28 @@ impl ResponsesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens).await
+        self.complete_controlled(transcript, tools, &control, prompt_tokens, None).await
     }
 
-    /// Performs one buffered round trip with tool-call control.
+    /// Performs one buffered round trip with tool-call control and sampling
+    /// knobs.
     pub async fn complete_controlled(
         &self,
         transcript: &[ModelMessage],
         tools: &[ToolDefinition],
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
+        generation: Option<&GenerationOptions>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let transcript = guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
-        let max_output_tokens = profile.fitted_output_limit(prompt);
+        let max_output_tokens = profile.fitted_output_limit_with(
+            prompt,
+            generation.and_then(|generation| generation.max_output_tokens),
+        );
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
@@ -767,6 +783,7 @@ impl ResponsesCodec {
             stream: false,
             max_output_tokens,
             extensions: profile.extensions.as_ref(),
+            generation,
             tool_control,
             cache: &profile.cache,
         });
@@ -809,10 +826,12 @@ impl ResponsesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens).await
+        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens, None)
+            .await
     }
 
-    /// Performs one streaming round trip with tool-call control.
+    /// Performs one streaming round trip with tool-call control and sampling
+    /// knobs.
     pub async fn complete_streaming_controlled(
         &self,
         transcript: &[ModelMessage],
@@ -820,13 +839,17 @@ impl ResponsesCodec {
         tool_control: &ToolCallControl,
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
+        generation: Option<&GenerationOptions>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.transport.profile();
         let transcript = guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
-        let max_output_tokens = profile.fitted_output_limit(prompt);
+        let max_output_tokens = profile.fitted_output_limit_with(
+            prompt,
+            generation.and_then(|generation| generation.max_output_tokens),
+        );
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
             system_prompt: &profile.system_prompt,
@@ -835,6 +858,7 @@ impl ResponsesCodec {
             stream: true,
             max_output_tokens,
             extensions: profile.extensions.as_ref(),
+            generation,
             tool_control,
             cache: &profile.cache,
         });
@@ -865,7 +889,13 @@ impl crate::StreamAttempt<ModelResponse> for ResponsesStreamAttempt<'_> {
                 return Ok(seal_response(decoded, &model));
             }
             let mut decoder = StreamDecoder::new(&label);
-            drive_sse(&label, &mut response, |event| decoder.apply(event, sink)).await?;
+            drive_sse_with_chunk_timeout(
+                &label,
+                &mut response,
+                Some(transport.profile().timeouts.chunk),
+                |event| decoder.apply(event, sink),
+            )
+            .await?;
             decoder.finish().map(|response| seal_response(response, &model))
         })
     }

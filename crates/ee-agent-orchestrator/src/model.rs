@@ -356,6 +356,12 @@ pub struct ModelRequest {
     /// fails closed instead of silently sending it.
     #[serde(default)]
     pub allow_tool_list_updates: bool,
+    /// Sampling knobs for this call; `None` keeps the provider session default.
+    ///
+    /// A configured value wins knob by knob over the session default, and an
+    /// unset knob emits no body field at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<crate::generation::GenerationOptions>,
 }
 
 impl ModelRequest {
@@ -379,7 +385,20 @@ impl ModelRequest {
             tool_control: ToolCallControl::auto(),
             response_format: None,
             allow_tool_list_updates: false,
+            generation: None,
         }
+    }
+
+    /// Sets the sampling knobs for this request.
+    ///
+    /// Per-request values win over the provider's session defaults.
+    #[must_use]
+    pub fn with_generation(
+        mut self,
+        generation: Option<crate::generation::GenerationOptions>,
+    ) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Sets the tool-call control for this request.
@@ -1108,6 +1127,7 @@ mod tests {
             tool_control: ToolCallControl::auto(),
             response_format: None,
             allow_tool_list_updates: false,
+            generation: None,
         }
     }
 

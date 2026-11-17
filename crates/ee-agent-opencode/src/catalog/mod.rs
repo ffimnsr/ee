@@ -40,7 +40,7 @@ use crate::routes::{OpenCodeDialect, OpenCodeSurface, UnsupportedDialect};
 /// [`ee_agent_orchestrator::model_metadata`].
 pub use ee_agent_orchestrator::{
     Modalities, ModelCost, ModelKind, ModelRoutes, ReasoningProtocol, ReasoningSupport,
-    ReasoningVariant, find_variant, reasoning_variants, variant_ids,
+    ReasoningVariant, SamplingSupport, find_variant, reasoning_variants, variant_ids,
 };
 
 /// One routable `(surface, model)` entry.
@@ -82,6 +82,9 @@ pub struct CatalogModel {
     pub tools_strict: bool,
     /// Free-form tool input formats the model advertises.
     pub freeform: &'static [&'static str],
+    /// Sampling knobs the model documents; an absent upstream flag means the
+    /// protocol default applies, so the knob is accepted.
+    pub sampling: SamplingSupport,
     /// Chat Completions output-token field the model documents; empty means unset.
     pub max_tokens_field: &'static str,
     /// Chat Completions assistant field carrying reasoning, when declared.

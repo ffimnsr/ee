@@ -66,6 +66,9 @@ arboard = { version = "3.7", default-features = false, features = ["wayland-data
 bytecount = "0.6.9"
 bzip2 = "0.6"
 flate2 = "1"
+# Request-body compression for provider transports; the `zstd` crate is already
+# in the graph through reqwest's response decoder.
+zstd = "0.14"
 rmcp = { version = "3.2.0", default-features = false, features = ["client", "elicitation", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 cc = "1.2"
 clap = { version = "4", features = ["derive", "env"] }

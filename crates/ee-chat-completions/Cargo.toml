@@ -10,12 +10,14 @@ description = "Provider-neutral OpenAI-compatible Chat Completions transport, co
 [dependencies]
 ee-agent-acp-server.workspace = true
 ee-agent-orchestrator.workspace = true
+flate2.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tracing.workspace = true
 url.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util"] }

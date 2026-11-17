@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 pub use crate::error_classification::{
     classify_http_error, classify_status_error, http_error_message, is_retryable, is_timeout,
     is_unreachable, parse_rate_limit, parse_retry_after, parse_should_retry, retry_after_of,
-    retry_delay, unreachable_delay,
+    retry_delay, timeout_phase, unreachable_delay,
 };
 use crate::reasoning_replay::{append_reasoning_detail, native_reasoning_of};
 pub use crate::request::{

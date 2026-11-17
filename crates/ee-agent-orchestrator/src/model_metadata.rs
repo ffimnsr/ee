@@ -224,6 +224,48 @@ impl Modalities {
     }
 }
 
+/// Sampling knobs a model documents.
+///
+/// The reference catalog treats an absent flag as "the protocol default applies"
+/// (`packages/ai/src/schema/options.ts`), so a catalog row that declares nothing
+/// accepts the knob. A row that explicitly declares `false` rejects it, which is
+/// what the provider configuration validates before a request exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplingSupport {
+    /// Whether `temperature` is accepted.
+    pub temperature: bool,
+    /// Whether `top_p` is accepted.
+    pub top_p: bool,
+    /// Whether `top_k` is accepted.
+    pub top_k: bool,
+}
+
+impl SamplingSupport {
+    /// Every knob is accepted; used for rows that declare no sampling metadata.
+    pub const ALL: Self = Self { temperature: true, top_p: true, top_k: true };
+
+    /// Builds the declaration from the catalog's optional flags, defaulting each
+    /// unset flag to the protocol default (`true`).
+    #[must_use]
+    pub const fn declared(
+        temperature: Option<bool>,
+        top_p: Option<bool>,
+        top_k: Option<bool>,
+    ) -> Self {
+        Self {
+            temperature: !matches!(temperature, Some(false)),
+            top_p: !matches!(top_p, Some(false)),
+            top_k: !matches!(top_k, Some(false)),
+        }
+    }
+}
+
+impl Default for SamplingSupport {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// Reasoning controls a model documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReasoningSupport {

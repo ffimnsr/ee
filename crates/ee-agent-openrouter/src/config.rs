@@ -19,6 +19,7 @@ use ee_agent_protocol::setup::{
     SETUP_MANIFEST_SCHEMA_VERSION, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig,
     SetupManifest,
 };
+use ee_chat_completions::Timeouts;
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -154,6 +155,21 @@ fn parse_positive_u64(value: &str) -> Result<u64, String> {
         return Err(String::from("must be at least 1"));
     }
     Ok(value)
+}
+
+/// Builds the per-phase HTTP budgets from the parsed arguments.
+///
+/// The historical `--timeout-ms` / `OPENROUTER_TIMEOUT_MS` value is the
+/// whole-exchange budget; the header and chunk budgets fall back to the shared
+/// reference defaults when unset.
+fn timeouts_from_args(args: &Args) -> Timeouts {
+    let defaults = Timeouts::new();
+    let total = args.timeout_total_ms.or(args.timeout_ms);
+    Timeouts {
+        total: total.map(Duration::from_millis),
+        headers: args.timeout_headers_ms.map_or(defaults.headers, Duration::from_millis),
+        chunk: args.timeout_chunk_ms.map_or(defaults.chunk, Duration::from_millis),
+    }
 }
 
 fn parse_rubber_duck_mode(value: &str) -> Result<RubberDuckMode, String> {
@@ -323,9 +339,19 @@ pub struct Args {
     /// Optional X-Title value recommended by OpenRouter.
     #[arg(long, env = "OPENROUTER_APP_TITLE", default_value = "ee")]
     app_title: String,
-    /// Request timeout in milliseconds.
-    #[arg(long, env = "OPENROUTER_TIMEOUT_MS", default_value_t = 120_000)]
-    timeout_ms: u64,
+    /// Whole-exchange timeout in milliseconds (historical alias; unset is
+    /// unbounded and the per-phase budgets apply).
+    #[arg(long, env = "OPENROUTER_TIMEOUT_MS", hide = true)]
+    timeout_ms: Option<u64>,
+    /// Whole-exchange timeout in milliseconds (unset = unbounded).
+    #[arg(long, env = "OPENROUTER_TIMEOUT_TOTAL_MS")]
+    timeout_total_ms: Option<u64>,
+    /// Budget until response headers arrive, in milliseconds.
+    #[arg(long, env = "OPENROUTER_TIMEOUT_HEADERS_MS")]
+    timeout_headers_ms: Option<u64>,
+    /// Idle budget between streamed chunks, in milliseconds.
+    #[arg(long, env = "OPENROUTER_TIMEOUT_CHUNK_MS")]
+    timeout_chunk_ms: Option<u64>,
     /// Optional OpenRouter reasoning effort (`low`, `medium`, or `high`).
     #[arg(long, env = "OPENROUTER_REASONING_EFFORT")]
     reasoning_effort: Option<String>,
@@ -431,8 +457,8 @@ pub struct Config {
     pub site_url: Option<String>,
     /// X-Title value.
     pub app_title: String,
-    /// Per-request HTTP timeout.
-    pub timeout: Duration,
+    /// Per-phase HTTP budgets.
+    pub timeouts: Timeouts,
     /// System prompt sent with each session history.
     pub system_prompt: String,
     /// Optional reasoning effort passed as `reasoning.effort`.
@@ -484,7 +510,7 @@ impl std::fmt::Debug for Config {
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("site_url", &self.site_url)
             .field("app_title", &self.app_title)
-            .field("timeout", &self.timeout)
+            .field("timeouts", &self.timeouts)
             .field("orchestrated", &self.orchestrated)
             .finish_non_exhaustive()
     }
@@ -495,6 +521,7 @@ impl Config {
     /// for the variables that are not CLI flags (`OPENROUTER_API_KEY`,
     /// `OPENROUTER_SITE_URL`).
     pub fn from_args_and_dotenv(args: Args, dotenv: &BTreeMap<String, String>) -> Self {
+        let timeouts = timeouts_from_args(&args);
         let catalog_limits =
             crate::catalog::find(base_model_id(&args.model)).and_then(|entry| entry.limits);
         let context_window = args
@@ -524,7 +551,7 @@ impl Config {
             api_key: Self::env_or_dotenv("OPENROUTER_API_KEY", dotenv),
             site_url: args.site_url.or_else(|| Self::env_or_dotenv("OPENROUTER_SITE_URL", dotenv)),
             app_title: args.app_title,
-            timeout: Duration::from_millis(args.timeout_ms),
+            timeouts,
             system_prompt: args.system_prompt,
             reasoning_effort: args.reasoning_effort,
             orchestrated: args.orchestrated,
@@ -669,7 +696,10 @@ mod tests {
             responses_url: String::from(DEFAULT_RESPONSES_URL),
             site_url: None,
             app_title: String::from("ee-test"),
-            timeout_ms: 1_000,
+            timeout_ms: Some(1_000),
+            timeout_total_ms: None,
+            timeout_headers_ms: None,
+            timeout_chunk_ms: None,
             reasoning_effort: None,
             system_prompt: String::from("system"),
             orchestrated: true,
@@ -739,14 +769,14 @@ mod tests {
     #[test]
     fn from_args_and_dotenv_keeps_all_args() {
         let mut parsed = args();
-        parsed.timeout_ms = 42_000;
+        parsed.timeout_ms = Some(42_000);
         let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
 
         assert_eq!(config.model, "test/model");
         assert_eq!(config.rubber_duck, RubberDuckConfig::default());
         assert_eq!(config.api_url, DEFAULT_API_URL);
         assert_eq!(config.app_title, "ee-test");
-        assert_eq!(config.timeout, Duration::from_millis(42_000));
+        assert_eq!(config.timeouts.total, Some(Duration::from_millis(42_000)));
         assert_eq!(config.system_prompt, "system");
         assert!(config.reasoning_effort.is_none());
         assert!(config.orchestrated, "defaults to orchestrated mode");

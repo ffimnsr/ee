@@ -124,7 +124,7 @@ impl HttpMetadataFetcher {
             // its label so failures name the routed surface.
             String::new(),
         )
-        .with_timeout(config.timeout)
+        .with_timeouts(config.timeouts)
         // One explicit local action is one attempt: no retries, no backoff.
         .with_retry(RetryPolicy::none());
         let transport = EndpointTransport::new(profile, config.token_source())?;
