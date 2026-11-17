@@ -362,3 +362,26 @@ async fn drive_sse_flushes_trailing_events_without_a_terminator() {
 
     assert_eq!(events, vec![String::from("tail")]);
 }
+
+#[test]
+fn image_opt_in_header_detection_covers_all_dialects() {
+    assert!(request_contains_image(&json!({
+        "messages": [{ "role": "user", "content": [
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } }
+        ]}]
+    })));
+    assert!(request_contains_image(&json!({
+        "input": [{ "content": [
+            { "type": "input_image", "image_url": "data:image/png;base64,AA==" }
+        ]}]
+    })));
+    assert!(request_contains_image(&json!({
+        "messages": [{ "content": [
+            { "type": "image", "source": { "data": "AA==" } }
+        ]}]
+    })));
+    assert!(request_contains_image(&json!({
+        "messages": [{ "content": "data:image/png;base64,AA==" }]
+    })));
+    assert!(!request_contains_image(&json!({ "messages": [{ "content": "hello" }] })));
+}

@@ -54,6 +54,8 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = ee_agent_orchestrator::OUTPUT_LIMIT_F
 pub struct MessagesBody<'a> {
     /// Wire model id.
     pub model: &'a str,
+    /// Route identity native state is sealed with; `None` replays by model only.
+    pub provider: Option<&'a str>,
     /// Profile system prompt, hoisted into `system`.
     pub system_prompt: &'a str,
     /// Normalized conversation.
@@ -95,6 +97,7 @@ pub fn request_body(
     let cache = CacheDirective::disabled();
     messages_body(&MessagesBody {
         model,
+        provider: None,
         system_prompt,
         transcript,
         tools,
@@ -172,7 +175,7 @@ pub fn messages_body(input: &MessagesBody<'_>) -> Value {
                     });
                     messages.push(json!({
                         "role": "user",
-                        "content": [text_block(&text, false, &marker)],
+                        "content": user_content_blocks(&message.content, &marker),
                     }));
                 }
             }
@@ -186,8 +189,8 @@ pub fn messages_body(input: &MessagesBody<'_>) -> Value {
                     .iter()
                     .any(|block| matches!(block, ModelContent::ToolCall { .. }));
                 if !text.is_empty() || has_calls {
-                    let mut blocks =
-                        replay_thinking_blocks(message, input.model).unwrap_or_default();
+                    let mut blocks = replay_thinking_blocks(message, input.provider, input.model)
+                        .unwrap_or_default();
                     if !text.is_empty() {
                         blocks.push(text_block(&text, false, &marker));
                     }
@@ -419,11 +422,15 @@ fn thinking_blocks_of(blocks: &[Value]) -> Option<Value> {
 }
 
 /// Thinking blocks a transcript message may replay to `model`.
-fn replay_thinking_blocks(message: &ModelMessage, model: &str) -> Option<Vec<Value>> {
+fn replay_thinking_blocks(
+    message: &ModelMessage,
+    provider: Option<&str>,
+    model: &str,
+) -> Option<Vec<Value>> {
     let state = message
         .native
         .as_ref()
-        .and_then(|native| ee_chat_completions::replayable(native, model))?;
+        .and_then(|native| ee_chat_completions::replayable_for(native, provider, model))?;
     let stored = state.get(THINKING_BLOCKS)?.as_array()?;
     let mut blocks = Vec::new();
     for block in stored {
@@ -457,6 +464,68 @@ fn text_block(text: &str, cache: bool, marker: &Value) -> Value {
         block["cache_control"] = marker.clone();
     }
     block
+}
+
+/// Builds Anthropic user content blocks, routing inline media and PDFs to
+/// their native block shapes and everything else to text.
+fn user_content_blocks(content: &[ModelContent], marker: &Value) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for block in content {
+        match block {
+            ModelContent::Text(text) => blocks.push(text_block(text, false, marker)),
+            ModelContent::Image { data, mime_type, .. } => {
+                blocks.push(media_block("image", data, mime_type));
+            }
+            ModelContent::EmbeddedResource { uri, mime_type, text, blob } => match (text, blob) {
+                (Some(text), _) => {
+                    let mime = mime_type.as_deref().unwrap_or("text/plain");
+                    blocks.push(text_block(
+                        &format!("[file: {uri} ({mime})]\n{text}"),
+                        false,
+                        marker,
+                    ));
+                }
+                (None, Some(blob)) => match mime_type.as_deref() {
+                    Some(mime) if mime.starts_with("image/") => {
+                        blocks.push(media_block("image", blob, mime));
+                    }
+                    Some("application/pdf") => blocks.push(document_block(blob)),
+                    mime => blocks.push(text_block(
+                        &format!("[resource:{uri}:{}]", mime.unwrap_or("application/octet-stream")),
+                        false,
+                        marker,
+                    )),
+                },
+                (None, None) => {
+                    blocks.push(text_block(&format!("[resource:{uri}]"), false, marker))
+                }
+            },
+            other => {
+                let text = content_text(std::slice::from_ref(other));
+                if !text.is_empty() {
+                    blocks.push(text_block(&text, false, marker));
+                }
+            }
+        }
+    }
+    if blocks.is_empty() {
+        blocks.push(text_block(&content_text(content), false, marker));
+    }
+    blocks
+}
+
+fn media_block(kind: &str, data: &str, mime_type: &str) -> Value {
+    json!({
+        "type": kind,
+        "source": { "type": "base64", "media_type": mime_type, "data": data },
+    })
+}
+
+fn document_block(data: &str) -> Value {
+    json!({
+        "type": "document",
+        "source": { "type": "base64", "media_type": "application/pdf", "data": data },
+    })
 }
 
 fn is_messages_payload(value: &Value) -> bool {
@@ -833,6 +902,7 @@ impl MessagesCodec {
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
+            provider: Some(profile.label.as_str()),
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
             tools,
@@ -918,6 +988,7 @@ impl MessagesCodec {
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
+            provider: Some(profile.label.as_str()),
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
             tools,
@@ -956,7 +1027,11 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for MessagesStreamAttempt
                 let value = transport.read_json(&mut response, "streaming response").await?;
                 let decoded = response_from_buffered(&label, &value)?;
                 emit_finished_deltas(&decoded, sink)?;
-                return Ok(ee_chat_completions::seal_response(decoded, &model));
+                return Ok(ee_chat_completions::seal_response_with_provider(
+                    decoded,
+                    Some(&label),
+                    &model,
+                ));
             }
             let mut decoder = StreamDecoder::new(&label);
             let raw = transport.profile().raw_stream_events;
@@ -972,7 +1047,9 @@ impl ee_chat_completions::StreamAttempt<ModelResponse> for MessagesStreamAttempt
                 },
             )
             .await?;
-            decoder.finish().map(|response| ee_chat_completions::seal_response(response, &model))
+            decoder.finish().map(|response| {
+                ee_chat_completions::seal_response_with_provider(response, Some(&label), &model)
+            })
         })
     }
 }

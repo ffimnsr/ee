@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use crate::{
     AssistantTurn, CacheDirective, DeltaSink, EndpointProfile, EndpointRequest, EndpointTransport,
     SseControl, StreamDelta, StreamFuture, ToolCall, Usage, drive_sse_with_chunk_timeout,
-    emit_finished_deltas, is_event_stream, openai_request_ttl, response_from_turn, seal_response,
-    usage_from_tokens, with_buffered_retry, with_stream_retry,
+    emit_finished_deltas, is_event_stream, openai_request_ttl, response_from_turn,
+    seal_response_with_provider, usage_from_tokens, with_buffered_retry, with_stream_retry,
 };
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
@@ -60,7 +60,7 @@ pub(crate) fn guarded_transcript<'a>(
 /// Fills a catalog cost and seals the response for the producing model.
 fn finalize(mut response: ModelResponse, profile: &EndpointProfile) -> ModelResponse {
     ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
-    seal_response(response, &profile.model)
+    seal_response_with_provider(response, Some(&profile.label), &profile.model)
 }
 
 /// Inputs for one Responses request body.
@@ -68,6 +68,8 @@ fn finalize(mut response: ModelResponse, profile: &EndpointProfile) -> ModelResp
 pub struct ResponsesBody<'a> {
     /// Wire model id.
     pub model: &'a str,
+    /// Route identity native state is sealed with; `None` replays by model only.
+    pub provider: Option<&'a str>,
     /// Profile system prompt, sent as `instructions`.
     pub system_prompt: &'a str,
     /// Normalized conversation.
@@ -113,6 +115,7 @@ pub fn request_body(
     let cache = CacheDirective::disabled();
     responses_body(&ResponsesBody {
         model,
+        provider: None,
         system_prompt,
         transcript,
         tools,
@@ -153,7 +156,7 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         // Reasoning items precede the assistant item they belong to: the
         // protocol replays them as their own input items, in generation order.
         if message.role == ModelRole::Assistant {
-            items.extend(replay_reasoning_items(message, input.model));
+            items.extend(replay_reasoning_items(message, input.provider, input.model));
             if let Some(item) = input_item(message) {
                 items.push(item);
             }
@@ -655,6 +658,7 @@ impl ResponsesCodec {
         );
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
+            provider: Some(profile.label.as_str()),
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
             tools,
@@ -750,6 +754,7 @@ impl ResponsesCodec {
             .unwrap_or((None, 0));
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
+            provider: Some(profile.label.as_str()),
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
             tools,
@@ -787,7 +792,7 @@ impl crate::StreamAttempt<ModelResponse> for ResponsesStreamAttempt<'_> {
                 let value = transport.read_json(&mut response, "streaming response").await?;
                 let decoded = response_from_buffered(&label, &value)?;
                 emit_finished_deltas(&decoded, sink)?;
-                return Ok(seal_response(decoded, &model));
+                return Ok(seal_response_with_provider(decoded, Some(&label), &model));
             }
             let mut decoder = StreamDecoder::new(&label);
             let raw = transport.profile().raw_stream_events;
@@ -803,7 +808,9 @@ impl crate::StreamAttempt<ModelResponse> for ResponsesStreamAttempt<'_> {
                 },
             )
             .await?;
-            decoder.finish().map(|response| seal_response(response, &model))
+            decoder
+                .finish()
+                .map(|response| seal_response_with_provider(response, Some(&label), &model))
         })
     }
 }

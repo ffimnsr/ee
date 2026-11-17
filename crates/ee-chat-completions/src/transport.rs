@@ -270,6 +270,11 @@ impl EndpointTransport {
     /// request cannot be sent.
     pub async fn send_json(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
         let mut headers = self.headers()?;
+        if let Some(header) = &self.profile.image_opt_in_header
+            && request_contains_image(body)
+        {
+            headers.insert(header.clone(), HeaderValue::from_static("true"));
+        }
         let url = self.endpoint_url()?;
         let label = self.profile.label.as_str();
         let payload = encode_body(body, &mut headers, self.profile.encoding, label)?;
@@ -973,6 +978,30 @@ pub async fn with_stream_retry<T>(
             retry_delay(policy, retries.saturating_sub(1), retry_after_of(&error))
         };
         tokio::time::sleep(delay).await;
+    }
+}
+
+/// Whether a request body carries an inline image part.
+///
+/// Recognizes the three dialect shapes (`image_url`, `input_image`, and
+/// Anthropic `image`) plus any base64 image data URI, so a route that gates
+/// image processing behind an opt-in header only emits it when an image is
+/// actually present.
+pub(crate) fn request_contains_image(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "image_url" | "input_image" | "image"))
+            {
+                return true;
+            }
+            object.values().any(request_contains_image)
+        }
+        Value::Array(items) => items.iter().any(request_contains_image),
+        Value::String(text) => text.starts_with("data:image/"),
+        _ => false,
     }
 }
 

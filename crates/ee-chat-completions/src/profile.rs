@@ -323,6 +323,10 @@ pub struct EndpointProfile {
     /// Off by default: an unadvertised route must never receive a `/compact`
     /// request.
     pub compaction: bool,
+    /// Opt-in header sent only when the request body carries an image part.
+    /// OpenCode uses this to enable its image processing lane without changing
+    /// text-only request bytes.
+    pub image_opt_in_header: Option<HeaderName>,
 }
 
 /// How provider-specific session header names are spelled.
@@ -380,7 +384,15 @@ impl EndpointProfile {
             store_responses: false,
             raw_stream_events: false,
             compaction: false,
+            image_opt_in_header: None,
         }
+    }
+
+    /// Sets the header sent only when the request carries an image part.
+    #[must_use]
+    pub fn with_image_opt_in_header(mut self, header: Option<HeaderName>) -> Self {
+        self.image_opt_in_header = header;
+        self
     }
 
     /// Declares whether the route stores responses for continuation.

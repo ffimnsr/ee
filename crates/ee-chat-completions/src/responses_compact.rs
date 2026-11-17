@@ -80,6 +80,7 @@ impl ResponsesCodec {
         let profile = transport.profile();
         let body = compact_body(&CompactBody {
             model: &profile.model,
+            provider: Some(profile.label.as_str()),
             system_prompt: &profile.system_prompt,
             transcript: transcript.as_ref(),
             tools,
@@ -130,6 +131,8 @@ async fn send_compact(
 pub struct CompactBody<'a> {
     /// Wire model id.
     pub model: &'a str,
+    /// Route identity native state is sealed with; `None` replays by model only.
+    pub provider: Option<&'a str>,
     /// Profile system prompt, sent as `instructions`.
     pub system_prompt: &'a str,
     /// Conversation to compact.
@@ -157,7 +160,11 @@ pub fn compact_body(input: &CompactBody<'_>) -> Value {
             continue;
         }
         if message.role == ModelRole::Assistant {
-            items.extend(crate::responses_encode::replay_reasoning_items(message, input.model));
+            items.extend(crate::responses_encode::replay_reasoning_items(
+                message,
+                input.provider,
+                input.model,
+            ));
             if let Some(item) = input_item(message) {
                 items.push(item);
             }

@@ -27,6 +27,7 @@ fn compact_body_carries_no_store_stream_or_output_bound() {
     let cache = CacheDirective::disabled();
     let body = compact_body(&CompactBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &tools,
@@ -52,6 +53,7 @@ fn session_affinity_supplies_the_cache_key() {
     let session = SessionContext::new("s-1");
     let body = compact_body(&CompactBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &[],
@@ -75,6 +77,7 @@ fn decode_returns_a_byte_identical_checkpoint_and_summary() {
     // The replacement re-encodes the same encrypted payload, byte for byte.
     let body = compact_body(&CompactBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "",
         transcript: &outcome.replacement,
         tools: &[],

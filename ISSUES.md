@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–24 implemented and tested (2026-11-17). Part 6 (Gaps 25–28) remains open.
+**Status:** Gaps 1–28 implemented and tested (2026-11-17). Part 6 closed.
 
 ## Execution Overview
 
@@ -2250,71 +2250,76 @@ Third pass re-read the reference files and cross-checked every claim in Parts 0�
 
 ### Gap 25 — Provider-Native State Passthrough and Replay Gating
 
-- [ ] Preserve opaque provider state on messages, reasoning parts, tool calls, and tool results, and replay it only to the model that produced it.
-  - [ ] **Problem:**
+- [x] Preserve opaque provider state on messages, reasoning parts, tool calls, and tool results, and replay it only to the model that produced it.
+  - [x] **Problem:**
     - The reference stores per-part native state and gates replay by identity: text/reasoning/tool-call metadata only for the same provider **and** model, hosted tool-result state for the same provider, and it strips the tail block's state when a stream was cut (`packages/core/src/session/runner/to-llm-message.ts:155-215`).
     - That state is what makes Gemini's `extra_content.google.thought_signature`, Kimi `reasoning_content`, Anthropic thinking signatures, and OpenAI encrypted reasoning replayable; OpenRouter requires `reasoning_details` replay including `index` (`packages/ai/src/protocols/openai-chat.ts:96-110`, `packages/ai/src/providers/openrouter.ts`).
     - Our `ModelMessage.metadata` is a `BTreeMap<String, String>` explicitly documented as diagnostics that "never carries required fields" (`crates/ee-agent-orchestrator/src/model.rs:129-140`). `ToolIntent` and `ToolResult` carry no metadata at all (`crates/ee-agent-orchestrator/src/tools.rs:247-254,301-310`), and `ModelContent` has no native block. The Messages decoder flattens thinking text without its signature (`messages.rs:188-190`), Chat flattens to `reasoning` text (`wire.rs:434-437`), and Responses emits no reasoning items. `reasoning_summary` is never encoded back into any request.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a bounded opaque `native: BTreeMap<String, Value>` (size-capped, redaction-checked) to assistant content parts, tool calls, tool results, and message-level metadata, recorded at decode time together with the producing `(provider, model)`.
     - Replay rules: same provider + same model for text/reasoning/tool-call native state; same provider for hosted tool results; drop native state on model switch while keeping readable text/reasoning; drop the final block's native state when the prior assistant message ended in an error or without a finish.
     - Encode per protocol: Chat `reasoning_content`/`reasoning_text`/`reasoning_details` and `extra_content` for tool calls; Messages `thinking` blocks with `signature`; Responses `reasoning` items with `encrypted_content`/`id`, plus `include: ["reasoning.encrypted_content"]` where supported.
     - Never log or persist native state outside the session transcript; treat it as opaque bytes for storage and equality.
-  - [ ] **Acceptance criteria:**
-    - A two-turn fixture preserves Anthropic thinking signatures, OpenRouter `reasoning_details` (including `index`), and Gemini-style `extra_content` byte-identically.
-    - Switching the model drops native state but keeps readable reasoning text, and the next request validates against the new protocol.
-    - Native state never appears in errors, metrics, telemetry, or tool output; redaction tests cover the transcript assembler.
-    - A cut stream (`error` set, `finish` absent) omits the tail block's native state and keeps only completed local tool calls.
+  - [x] **Acceptance criteria:**
+    - [x] A two-turn fixture preserves Anthropic thinking signatures, OpenRouter `reasoning_details` (including `index`), and Gemini-style `extra_content` byte-identically.
+    - [x] Switching the model drops native state but keeps readable reasoning text, and the next request validates against the new protocol.
+    - [x] Native state never appears in errors, metrics, telemetry, or tool output; redaction tests cover the transcript assembler.
+    - [x] A cut stream (`error` set, `finish` absent) omits the tail block's native state and keeps only completed local tool calls.
+  - **Landed (Gap 25):** `OpaqueProviderState` envelopes now record `_ee.provider` beside `_ee.model`; `seal_with_provider`, `seal_response_with_provider`, and `replayable_for` gate replay on both identities while legacy payloads without a provider keep model-only gating. Every codec seals with its route label (`ChatCompletionsAdapter`, `ResponsesCodec`, `MessagesCodec`, and the OpenCode `finalize` path). Chat Completions captures per-call `extra_content` at decode time (`native_reasoning_of`, `StreamAccumulator`) under a `tool_calls` map keyed by call id and replays it byte-identically in `replay_tool_calls`; the same state is dropped for a foreign provider. Messages, Responses, and compaction replay reasoning through `replayable_for`, so a provider switch drops signatures/encrypted items while readable text stays. `Transcript::push_assistant` drops native state when a turn reports `error`/`interrupted`/`cancelled` and keeps its reasoning summary. Tests cover provider+model gating (`native::tests`), per-call `extra_content` round-trip and cross-provider suppression (`wire::tests`), Messages provider gating, and cut-turn state stripping (`model::tests`).
 
 ### Gap 26 — Transcript Normalization and Interrupted-Turn Repair
 
-- [ ] Normalize the outgoing transcript and repair interrupted turns before every request.
-  - [ ] **Problem:**
+- [x] Normalize the outgoing transcript and repair interrupted turns before every request.
+  - [x] **Problem:**
     - The reference runs a normalization pass on every send: missing tool results are synthesized with `Tool result missing`, empty outputs become `(no tool output)`, tool names/namespaces are reconciled with the originating call, system messages are held until every pending call is answered, and hosted results pass through (`packages/ai/src/tool-history.ts`).
     - Failed or cut assistant turns are repaired: keep content through the last local call that actually ran, drop calls that never ran (keeping input-error calls so the model can retry), and drop the cut tail's provider state (`packages/core/src/session/runner/to-llm-message.ts:170-215`).
     - Our loop pushes a result for each intent in the normal path (`crates/ee-agent-orchestrator/src/loop_engine.rs:669,772-780,865`), but nothing normalizes stored or replayed transcripts: `with_pruned_tool_result` is the only rewrite and it runs only in compaction (`compaction/pipeline.rs:120,182`). There is no missing-result synthesis, no empty-output label, no system-message placement rule, and no cut-stream trimming.
     - Reference tool dispatch is unbounded-concurrency with permission gating; ours parallelizes read-only tools only and caps at 10 (`config.rs:51,279-281`). That divergence is intentional, but it should be documented next to the normalizer so the two rules do not drift.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `normalize_transcript()` in `ee-agent-orchestrator`, applied before every `ModelRequest` and before compaction: synthesize missing results, label empty outputs, reconcile tool names/ids, hold system messages between a call and its results, and trim cut turns per the rules above.
     - Persist a synthetic aborted result for each unanswered call when a turn is cancelled or a provider stream dies mid-call, so the stored transcript is already valid on resume.
     - Document the concurrency divergence (read-only parallel + cap) in the loop module docs.
-  - [ ] **Acceptance criteria:**
-    - A transcript with a missing tool result gains exactly one synthesized error result with a stable id.
-    - An empty tool output becomes `(no tool output)` in the request but stays empty in the stored transcript.
-    - A system message inserted between a tool call and its result is reordered after the results.
-    - A failed-turn fixture drops unrun calls and keeps input-error calls; the resulting request validates on the next turn.
+  - [x] **Acceptance criteria:**
+    - [x] A transcript with a missing tool result gains exactly one synthesized error result with a stable id.
+    - [x] An empty tool output becomes `(no tool output)` in the request but stays empty in the stored transcript.
+    - [x] A system message inserted between a tool call and its result is reordered after the results.
+    - [x] A failed-turn fixture drops unrun calls and keeps input-error calls; the resulting request validates on the next turn.
+  - **Landed (Gap 26):** New `crates/ee-agent-orchestrator/src/transcript_normalize.rs` exports `normalize_transcript`, which runs on every request projection (`Transcript::request_messages`) and at compaction stage 0 (`DefaultCompactionStrategy::plan`). It holds system messages until pending calls are answered, synthesizes exactly one `Tool result missing` / argument-error observation per unanswered active call (marked `ee_synthetic_tool_result`, so a second pass is a no-op), labels empty output `(no tool output)` only in the request copy, reconciles tool names from the originating call, and drops unrun calls plus provider-native state on a turn marked `ee_turn_error` while keeping calls with observations and input-error calls. Historical turns before the last user prompt are left untouched so forked subagent context keeps its pending parent call. `Transcript::push_assistant` records `ee_turn_error` and per-call `ee_argument_error:` metadata; `Transcript::push_aborted_results_for_unanswered` persists `Tool execution aborted` results for every unanswered call when tool execution is cancelled or errors, called from both parallel and sequential dispatch paths. The loop module docs record the intentional read-only/parallel-capped dispatch divergence. Tests cover synthetic results and idempotence, empty-output labeling without mutating the durable transcript, system-message reordering, failed-turn trimming, hosted-call pass-through, name reconciliation, and aborted-result persistence.
 
 ### Gap 27 — Attachment and Modality Normalization
 
-- [ ] Normalize user attachments and unsupported modalities consistently with the reference.
-  - [ ] **Problem:**
+- [x] Normalize user attachments and unsupported modalities consistently with the reference.
+  - [x] **Problem:**
     - The reference converts attachments by kind: `text/plain` inlined with a header and description, `application/x-directory` rendered as a listing, images and PDFs sent as media with a path line, unsupported MIME types dropped, and duplicate inline images deduplicated by `(mime, name, description, mention)` plus payload (`packages/core/src/session/runner/to-llm-message.ts:12-90`).
     - Our `EmbeddedResource` becomes inline text when a text payload exists and a `[resource:uri:mime]` placeholder otherwise; images become image parts (`crates/ee-chat-completions/src/wire.rs:484-499,518-570`). There is no PDF document part, no directory listing, no MIME allowlist, no dedupe, and no size bound (Gap 23). The OpenCode provider also never sends the `TypeSafe-Danger-Zone-Images: true` opt-in header that the reference sets unconditionally on that route (`packages/ai/src/providers/opencode.ts:17-25`; the reference notes text-only requests are unchanged by it), so image support on that surface is not actually enabled by us.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add one attachment normalizer shared by both provider crates: classify by MIME, inline text with the reference's header format, render directories as listings, route PDFs to `input_file`/document parts where the dialect supports them and to a text placeholder otherwise, drop unknown MIME types with a single bounded notice, and dedupe identical inline images.
     - Apply the image size guard from Gap 23 in the same pass so ordering is deterministic.
     - Emit the OpenCode image opt-in header only when the request carries an image part and the route is an OpenCode surface, so text-only requests stay byte-identical.
-  - [ ] **Acceptance criteria:**
-    - The same inline image attached twice is sent once.
-    - A PDF on a capable route becomes a document part; on an incapable route it becomes a deterministic placeholder naming the MIME type.
-    - A directory attachment renders a bounded listing.
-    - An unknown MIME type is dropped with one notice, not silently.
-    - An OpenCode image request carries the image opt-in header; a text-only request on the same route does not.
+  - [x] **Acceptance criteria:**
+    - [x] The same inline image attached twice is sent once.
+    - [x] A PDF on a capable route becomes a document part; on an incapable route it becomes a deterministic placeholder naming the MIME type.
+    - [x] A directory attachment renders a bounded listing.
+    - [x] An unknown MIME type is dropped with one notice, not silently.
+    - [x] An OpenCode image request carries the image opt-in header; a text-only request on the same route does not.
+  - **Landed (Gap 27):** New `crates/ee-agent-orchestrator/src/attachments.rs` exports `normalize_attachments`, called first inside `guard_transcript`, so every codec and both provider crates share one pass. It inlines `text/*` with a `[file: uri (mime)]` header and a 64 KiB bound, renders `application/x-directory` as a listing bounded to 200 lines / 4 KiB (or an explicit unavailable marker), keeps PDF payloads for native document encoding, dedupes identical inline images by `(mime, uri, data)`, and replaces the first occurrence of any unsupported MIME type with one deterministic notice (later occurrences of the same type are dropped). Gap 23 size bounding still runs after normalization. Responses now emits `input_file` for PDFs; Anthropic Messages now emits native `image` and `document` blocks instead of flattening user media to text; Chat Completions keeps its documented placeholder path. `EndpointProfile` gained `image_opt_in_header`; `EndpointTransport::send_json` inserts it only when the body actually contains an image part (detected across Chat, Responses, and Messages shapes plus image data URIs), and `ee-agent-opencode` sets `typesafe-danger-zone-images` on every route, so text-only requests stay byte-identical. Tests cover dedupe, text headers, bounded directory listings, one-notice MIME drops, PDF passthrough, Responses `input_file`, Messages image/document blocks, dialect-wide image detection, and the OpenCode profile flag.
 
 ### Gap 28 — Auxiliary Generation Surfaces
 
-- [ ] Close the remaining non-chat call paths the reference exposes.
-  - [ ] **Problem:**
+- [x] Close the remaining non-chat call paths the reference exposes.
+  - [x] **Problem:**
     - The reference can generate session titles with a small model (`packages/core/src/session/title.ts:116`, `model.ts::small`), run one-shot `generate`, expose `compact`/`canCompact` (`packages/ai/src/llm.ts:313-330`), and stop a loop with a caller-supplied `until` predicate (`llm.ts:216-245`).
-    - Our orchestrator has rubber-duck critique, compaction, and budgeted loops, but no title/small-model selection, no one-shot generate API, no loop `until`, and no provider-compaction entry point.
-  - [ ] **Fix:**
-    - Decide per surface: titles belong to the host if the ee pane needs generated names; small-model selection belongs to the catalog (Gap 1) and can be added without a new call path.
-    - Add `until` only when a real consumer needs deterministic early stop; otherwise keep budget caps.
-    - Treat `compact` as covered by Gap 20; do not add a second compaction API.
-  - [ ] **Acceptance criteria:**
-    - No duplicate compaction API lands; provider compaction is reachable only through Gap 20.
-    - If titles are enabled, the chosen model comes from catalog small-model selection and failures never block the turn.
-    - `until`, if added, is covered by a loop test that asserts the final response is not a budget error.
+    - Current ee state: `LoopOptions.until` already exists with `UntilPredicate` and a loop test; `ModelAdapter::compact` is the single provider-compaction entry point (Gap 20); both provider config files already accept `small_model` and use it for the auxiliary rubber-duck model. Session-title generation and a one-shot `generate` API are not exposed, and no consumer needs them yet.
+  - [x] **Fix:**
+    - Titles are host-owned: no provider title call path is added. If the ee pane later needs generated names, the host supplies them through the existing small-model configuration rather than a new orchestrator API.
+    - Small-model selection already flows through both provider config files (`small_model`) and the catalog; no new call path was added.
+    - `until` is already implemented for callers that need deterministic early stop, with a loop test proving a normal final response.
+    - `compact` stays covered by Gap 20: `ModelAdapter::compact` is the only provider-compaction entry point, and its doc comment now records that contract.
+  - [x] **Acceptance criteria:**
+    - [x] No duplicate compaction API lands; provider compaction is reachable only through Gap 20.
+    - [x] If titles are enabled, the chosen model comes from catalog small-model selection and failures never block the turn.
+    - [x] `until`, if added, is covered by a loop test that asserts the final response is not a budget error.
+  - **Landed (Gap 28):** Decision-only gap. Titles remain host-owned and are not enabled in the orchestrator, so no title call path exists to fail a turn; when the host enables them it uses the existing `small_model` configuration. `small_model` is already supported by both provider config files and selects the auxiliary model without a new call path. `LoopOptions::until`/`UntilPredicate` already exist and `until_hook_ends_the_loop_after_the_named_step` asserts `StopReason::EndTurn` after one step (not a budget error). Provider compaction remains exclusively `ModelAdapter::compact` (Gap 20), and its doc comment now states that it is the single entry point. No one-shot `generate` API was added because no consumer needs it.
 
 ### 6.3 Remaining uncertainty
 
@@ -2325,8 +2330,8 @@ Third pass re-read the reference files and cross-checked every claim in Parts 0�
 
 ### 6.4 Additional delivery slices
 
-- [ ] Slice O: Gap 25 + Gap 26 (native state, replay gating, transcript normalization) — land before any reasoning-replay work in Gap 4.
-- [ ] Slice P: Gap 27 (attachment normalization) with the Gap 23 media bounds.
-- [ ] Slice Q: Gap 28 (deferred; decide after the P0/P1 slices).
+- [x] Slice O: Gap 25 + Gap 26 (native state, replay gating, transcript normalization) — land before any reasoning-replay work in Gap 4.
+- [x] Slice P: Gap 27 (attachment normalization) with the Gap 23 media bounds.
+- [x] Slice Q: Gap 28 (decision-only: titles host-owned, small model already configured, `until` already tested, single compaction API).
 
 Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any later "reasoning/vision parity" claim.

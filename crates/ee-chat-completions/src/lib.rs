@@ -66,7 +66,10 @@ pub use generation::{
     apply_generation_chat, apply_generation_messages, apply_generation_responses,
 };
 pub use merge::{MAX_MERGE_DEPTH, MAX_MERGE_NODES, deep_merge};
-pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
+pub use native::{
+    CHAT_REPLAY_FIELDS, NATIVE_META_KEY, PROVIDER_META_KEY, replayable, replayable_for, seal,
+    seal_response, seal_response_with_provider, seal_with_provider,
+};
 pub use partial_json::{MAX_PARTIAL_JSON_BYTES, parse_partial};
 pub use profile::{
     BearerToken, CallOptions, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy,

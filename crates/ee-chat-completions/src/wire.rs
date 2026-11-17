@@ -733,6 +733,8 @@ struct PendingToolCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    /// Provider-native tool-call metadata, for example Gemini `extra_content`.
+    extra_content: Option<Value>,
     started: bool,
     ended: bool,
 }
@@ -852,6 +854,19 @@ impl StreamAccumulator {
         if let Some(opaque) = self.native_opaque.as_ref() {
             object.insert("reasoning_opaque".into(), Value::String(opaque.clone()));
         }
+        let mut per_call = serde_json::Map::new();
+        for call in self.tool_calls.values() {
+            let Some(id) = call.id.as_deref().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let Some(extra) = call.extra_content.as_ref() else {
+                continue;
+            };
+            per_call.insert(id.to_string(), json!({ "extra_content": extra }));
+        }
+        if !per_call.is_empty() {
+            object.insert("tool_calls".into(), Value::Object(per_call));
+        }
         (!object.is_empty()).then_some(Value::Object(object))
     }
 
@@ -861,6 +876,9 @@ impl StreamAccumulator {
         })? as usize;
         let mut output = Vec::new();
         let call = self.tool_calls.entry(index).or_default();
+        if let Some(extra) = value.get("extra_content").filter(|value| !value.is_null()) {
+            call.extra_content = Some(extra.clone());
+        }
         if let Some(id) = value.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
             call.id = Some(id.to_string());
         }

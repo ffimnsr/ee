@@ -12,7 +12,7 @@
 //! memory budget by dropping the oldest messages first, recording truncation
 //! metadata so later phases can surface it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -797,7 +797,7 @@ impl Transcript {
             return;
         }
         let mut message = ModelMessage::new(ModelRole::Assistant).with_content(content);
-        let provider_ids: Vec<(String, String)> = response
+        let mut entries: Vec<(String, String)> = response
             .tool_intents
             .iter()
             .filter(|intent| intent.provider_executed)
@@ -808,18 +808,48 @@ impl Transcript {
                 )
             })
             .collect();
-        if !provider_ids.is_empty() {
-            message = message.with_metadata(provider_ids);
+        for intent in &response.tool_intents {
+            if let Some(error) = &intent.argument_error {
+                entries.push((
+                    format!(
+                        "{}{}",
+                        crate::transcript_normalize::ARGUMENT_ERROR_METADATA_PREFIX,
+                        intent.tool_call_id
+                    ),
+                    error.clone(),
+                ));
+            }
+        }
+        if Self::cut_turn(response) {
+            entries.push((
+                crate::transcript_normalize::TURN_ERROR_METADATA_KEY.to_string(),
+                String::from("true"),
+            ));
+        }
+        if !entries.is_empty() {
+            message = message.with_metadata(entries);
         }
         if let Some(reasoning) = response.reasoning.as_deref() {
             message = message.with_reasoning_summary(reasoning);
         }
-        if response.native.is_some() {
+        // A turn that ended in a provider error must not replay reasoning state
+        // whose generation was cut: the provider will reject a truncated or
+        // unsigned tail. Readable reasoning text is kept.
+        if response.native.is_some() && !Self::cut_turn(response) {
             message = message.with_native(response.native.clone());
         }
         self.messages.push(message);
         let id = self.record_message_at(self.messages.len() - 1, None);
         self.log_ids.push(id);
+    }
+
+    /// Whether a response ended without a usable finish marker.
+    ///
+    /// A transport error aborts the loop before the assistant message is pushed, so
+    /// this only sees a response that explicitly reports an error/cut stop reason.
+    /// Stored interrupted turns are repaired again by transcript normalization.
+    fn cut_turn(response: &ModelResponse) -> bool {
+        matches!(response.finish_reason.as_deref(), Some("error" | "interrupted" | "cancelled"))
     }
 
     /// Appends a tool observation carrying the stable tool-call id.
@@ -829,6 +859,70 @@ impl Transcript {
         self.messages.push(ModelMessage::tool_result(tool_call_id.clone(), result));
         let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
         self.log_ids.push(id);
+    }
+
+    /// Answers every still-unanswered call of the last assistant turn with a
+    /// synthetic aborted observation.
+    ///
+    /// Called when tool execution is cancelled or a provider failure aborts the
+    /// turn after the assistant message was already recorded, so a resumed or
+    /// replayed transcript is valid without relying on request-time repair.
+    /// Returns how many observations were added.
+    pub(crate) fn push_aborted_results_for_unanswered(&mut self) -> usize {
+        let Some(start) =
+            self.messages.iter().rposition(|message| message.role == ModelRole::Assistant)
+        else {
+            return 0;
+        };
+        let answered: BTreeSet<String> = self.messages[start + 1..]
+            .iter()
+            .filter_map(|message| {
+                message.content.iter().find_map(|block| match block {
+                    ModelContent::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
+        let calls: Vec<(String, String)> = self.messages[start]
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ModelContent::ToolCall { tool_call_id, name, .. } => {
+                    Some((tool_call_id.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if calls.is_empty() {
+            return 0;
+        }
+        let provider_executed: BTreeSet<String> = self.messages[start]
+            .metadata
+            .keys()
+            .filter_map(|key| key.strip_prefix(PROVIDER_EXECUTED_METADATA_PREFIX))
+            .map(str::to_string)
+            .collect();
+        let mut added = 0;
+        for (tool_call_id, name) in calls {
+            if answered.contains(&tool_call_id) || provider_executed.contains(&tool_call_id) {
+                continue;
+            }
+            let result = ToolResult {
+                success: false,
+                text_output: crate::transcript_normalize::ABORTED_TOOL_RESULT_TEXT.to_string(),
+                structured_output: None,
+                error_kind: Some(crate::tools::ToolErrorKind::Cancelled),
+            };
+            self.push_message(ModelMessage::tool_result(tool_call_id, result).with_metadata([
+                (
+                    crate::transcript_normalize::SYNTHETIC_TOOL_RESULT_KEY.to_string(),
+                    String::from("true"),
+                ),
+                (TOOL_NAME_METADATA_KEY.to_string(), name),
+            ]));
+            added += 1;
+        }
+        added
     }
 
     /// Appends a tool observation with classification metadata.
@@ -896,10 +990,12 @@ impl Transcript {
     /// durable transcript used by checkpoints and replay.
     #[must_use]
     pub(crate) fn request_messages(&self) -> Vec<ModelMessage> {
-        self.messages
+        let projected: Vec<ModelMessage> = self
+            .messages
             .iter()
             .map(|message| message.with_pruned_tool_result().unwrap_or_else(|| message.clone()))
-            .collect()
+            .collect();
+        crate::transcript_normalize::normalize_transcript(&projected)
     }
 
     /// Text of the newest assistant message, when it carries any — used as
@@ -1103,10 +1199,12 @@ pub trait ModelAdapter: Send + Sync + 'static {
 
     /// Runs one provider-native compaction request.
     ///
-    /// The default fails closed: a route that does not implement provider
-    /// compaction must say so instead of silently returning a local summary.
-    /// Adapters that support native compaction return the provider replacement
-    /// transcript plus the opaque checkpoint it carries.
+    /// This is the single provider-compaction entry point; there is no second
+    /// compaction API on the orchestrator surface. The default fails closed: a
+    /// route that does not implement provider compaction must say so instead of
+    /// silently returning a local summary. Adapters that support native
+    /// compaction return the provider replacement transcript plus the opaque
+    /// checkpoint it carries.
     fn compact(
         &self,
         request: ModelRequest,
@@ -1333,6 +1431,24 @@ mod tests {
     }
 
     #[test]
+    fn aborted_tool_results_answer_every_unanswered_call() {
+        let mut transcript = Transcript::new();
+        transcript.push_assistant(&ModelResponse::new().tool_intents(vec![
+            ToolIntent::new("tc-1", "read_file", serde_json::json!({})),
+            ToolIntent::new("tc-2", "read_file", serde_json::json!({})),
+        ]));
+        transcript.push_tool_result("tc-1", ToolResult::success("ok"));
+        assert_eq!(transcript.push_aborted_results_for_unanswered(), 1);
+        assert_eq!(transcript.messages().len(), 3);
+        let last = &transcript.messages()[2];
+        let ModelContent::ToolResult { tool_call_id, result } = &last.content[0] else {
+            panic!("expected a tool result");
+        };
+        assert_eq!(tool_call_id, "tc-2");
+        assert_eq!(result.error_kind, Some(crate::tools::ToolErrorKind::Cancelled));
+    }
+
+    #[test]
     fn tool_result_appends_stable_tool_call_id() {
         let mut transcript = Transcript::new();
         transcript.push_tool_result("tc-9", ToolResult::success("done"));
@@ -1530,6 +1646,23 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serializes");
         let restored: ModelResponse = serde_json::from_str(&json).expect("parses");
         assert_eq!(restored.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn cut_turn_drops_native_state_but_keeps_reasoning_text() {
+        let native = OpaqueProviderState::new(serde_json::json!({
+            "thinking_blocks": [{ "type": "thinking", "signature": "sig" }],
+        }))
+        .expect("fits");
+        let response = ModelResponse::new()
+            .reasoning("partial reasoning")
+            .with_native(Some(native))
+            .with_finish_reason(Some(String::from("error")));
+        let mut transcript = Transcript::new();
+        transcript.push_assistant(&response);
+        let message = transcript.messages.first().expect("assistant message");
+        assert!(message.native.is_none(), "a cut turn must not replay provider state");
+        assert_eq!(message.reasoning_summary.as_deref(), Some("partial reasoning"));
     }
 
     #[test]

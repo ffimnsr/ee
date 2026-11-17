@@ -16,7 +16,7 @@ use ee_agent_orchestrator::{
 };
 use tokio::sync::watch;
 
-use crate::native::seal_response;
+use crate::native::seal_response_with_provider;
 use crate::profile::{EndpointProfile, TokenSource};
 use crate::responses::ResponsesCodec;
 use crate::transport::{ChatCompletionsClient, ChatRequest, EndpointTransport};
@@ -130,7 +130,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
             };
             let mut response = response_from_turn(answer);
             ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
-            Ok(seal_response(response, &profile.model))
+            Ok(seal_response_with_provider(response, Some(&profile.label), &profile.model))
         })
     }
 
@@ -171,7 +171,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
             };
             let mut response = response_from_turn(answer);
             ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
-            Ok(seal_response(response, &profile.model))
+            Ok(seal_response_with_provider(response, Some(&profile.label), &profile.model))
         })
     }
 }
@@ -403,6 +403,7 @@ fn wire_request(
         definitions: &request.tools,
         cache: &profile.cache,
         model: &profile.model,
+        provider: Some(profile.label.as_str()),
         reasoning_field: profile.reasoning_field.as_deref(),
         tools_strict: profile.tools_strict,
         freeform: &profile.freeform,

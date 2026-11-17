@@ -11,6 +11,13 @@
 //! exhaustion, or when the per-turn timeout elapses.  Subagent intents fail
 //! closed until the subagent phase.  Every loop decision is recorded as an
 //! [`OrchestratorEvent`] so tests can assert the exact decision sequence.
+//!
+//! Tool dispatch intentionally differs from the reference agent: `ee` runs
+//! read-only tools in parallel up to [`crate::config::OrchestratorConfig::max_parallel_tools`]
+//! and everything else sequentially, while the reference dispatches with
+//! unbounded concurrency behind its permission gate. Transcript normalization
+//! ([`crate::transcript_normalize`]) therefore reasons only about call/result
+//! correlation, never about dispatch order.
 
 use std::{
     collections::HashSet,
@@ -905,8 +912,15 @@ impl LoopEngine {
                             summary,
                         });
                     }
+                    let executed = match executed {
+                        Ok(result) => result,
+                        Err(error) => {
+                            transcript.push_aborted_results_for_unanswered();
+                            return Err(error);
+                        }
+                    };
                     let result =
-                        compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
+                        compact_repeated_web_fetch(&intent, executed, &mut observed_web_sources);
                     let succeeded = result.success;
                     track.lock().expect("recovery track poisoned").completed_tools.push(
                         CompletedToolCall {
@@ -1004,8 +1018,15 @@ impl LoopEngine {
                             summary,
                         });
                     }
-                    let result =
-                        compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
+                    let result = match executed {
+                        Ok(executed) => {
+                            compact_repeated_web_fetch(&intent, executed, &mut observed_web_sources)
+                        }
+                        Err(error) => {
+                            transcript.push_aborted_results_for_unanswered();
+                            return Err(error);
+                        }
+                    };
                     let succeeded = result.success;
                     if !reused {
                         track.lock().expect("recovery track poisoned").completed_tools.push(

@@ -723,6 +723,10 @@ pub fn guard_transcript(
     model_id: &str,
     transcript: &[ModelMessage],
 ) -> Option<Vec<ModelMessage>> {
+    // Attachment normalization runs first so text/directory/PDF/unknown-MIME
+    // decisions are made once, before capability filtering and size offload.
+    let normalized = crate::attachments::normalize_attachments(transcript);
+    let transcript = normalized.as_deref().unwrap_or(transcript);
     match sanitize_modalities(modalities, model_id, transcript) {
         Some(sanitized) => {
             let bounded = bounded_media(&sanitized);

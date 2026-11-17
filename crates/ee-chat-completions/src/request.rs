@@ -190,6 +190,7 @@ pub fn messages_from_transcript_replaying(
         definitions: &[],
         cache: &cache,
         model,
+        provider: None,
         reasoning_field,
         tools_strict: false,
         freeform: &[],
@@ -211,6 +212,8 @@ pub struct ChatRequestParts<'a> {
     pub cache: &'a CacheDirective,
     /// Target model id; native reasoning sealed for another model is not replayed.
     pub model: &'a str,
+    /// Route identity native state is sealed with; `None` replays by model only.
+    pub provider: Option<&'a str>,
     /// Assistant field this route requires for replayed reasoning.
     pub reasoning_field: Option<&'a str>,
     /// Whether the route accepts the function `strict` flag.
@@ -264,8 +267,14 @@ pub fn chat_request_parts(parts: &ChatRequestParts<'_>) -> (Vec<Value>, Vec<Valu
             json!({ "role": role, "content": content })
         };
         if message.role == ModelRole::Assistant {
-            replay_tool_calls(&mut entry, message, content.is_empty());
-            replay_reasoning(&mut entry, message, parts.model, parts.reasoning_field);
+            replay_tool_calls(&mut entry, message, content.is_empty(), parts.provider, parts.model);
+            replay_reasoning(
+                &mut entry,
+                message,
+                parts.provider,
+                parts.model,
+                parts.reasoning_field,
+            );
         }
         let index = messages.len();
         messages.push(entry);

@@ -113,9 +113,11 @@ impl CompactionStrategy for DefaultCompactionStrategy {
 
     fn plan(&self, input: &CompactionInput<'_>) -> CompactPlan {
         let requested_messages = input.recent_messages.len();
+        // Stage 0: normalize the send-time copy so an interrupted turn or an
+        // unanswered call cannot poison the evidence window.
+        let normalized = crate::transcript_normalize::normalize_transcript(input.recent_messages);
         // Stage 1: request projection without mutating durable messages.
-        let projected: Vec<ModelMessage> = input
-            .recent_messages
+        let projected: Vec<ModelMessage> = normalized
             .iter()
             .map(|message| message.with_pruned_tool_result().unwrap_or_else(|| message.clone()))
             .collect();

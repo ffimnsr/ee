@@ -250,6 +250,11 @@ fn route_profile_uses_the_catalog_endpoint_and_names_the_route() {
     assert_eq!(profile.timeouts, Timeouts::new());
     assert_eq!(profile.retry, RetryPolicy::none());
     assert!(profile.extensions.is_none());
+    assert_eq!(
+        profile.image_opt_in_header.as_ref().map(reqwest::header::HeaderName::as_str),
+        Some("typesafe-danger-zone-images"),
+        "the OpenCode image lane needs its opt-in header, gated per request"
+    );
 }
 
 #[test]

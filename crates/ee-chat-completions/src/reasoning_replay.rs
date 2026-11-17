@@ -11,20 +11,46 @@ use serde_json::{Value, json};
 
 use crate::native;
 
+/// Envelope key holding per-tool-call provider metadata, keyed by call id.
+pub(crate) const TOOL_CALL_NATIVE_KEY: &str = "tool_calls";
+
 /// Replays the assistant tool calls a turn's observations answer.
 ///
 /// A tool message without the call it answers is rejected by every dialect, so
 /// the assistant turn is kept in the transcript and re-encoded here.
-pub(crate) fn replay_tool_calls(entry: &mut Value, message: &ModelMessage, empty_content: bool) {
+pub(crate) fn replay_tool_calls(
+    entry: &mut Value,
+    message: &ModelMessage,
+    empty_content: bool,
+    provider: Option<&str>,
+    model: &str,
+) {
+    let per_call = message
+        .native
+        .as_ref()
+        .and_then(|native| native::replayable_for(native, provider, model))
+        .and_then(|state| state.get(TOOL_CALL_NATIVE_KEY))
+        .and_then(Value::as_object);
     let calls: Vec<Value> = message
         .content
         .iter()
         .filter_map(|block| match block {
-            ModelContent::ToolCall { tool_call_id, name, arguments } => Some(json!({
-                "id": tool_call_id,
-                "type": "function",
-                "function": { "name": name, "arguments": arguments.to_string() },
-            })),
+            ModelContent::ToolCall { tool_call_id, name, arguments } => {
+                let mut call = json!({
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments.to_string() },
+                });
+                if let Some(state) = per_call.and_then(|calls| calls.get(tool_call_id)) {
+                    // Provider-native tool-call metadata (for example Gemini's
+                    // `extra_content.google.thought_signature`) must be replayed
+                    // byte-identically or the provider rejects the call.
+                    if let Some(extra) = state.get("extra_content") {
+                        call["extra_content"] = extra.clone();
+                    }
+                }
+                Some(call)
+            }
             _ => None,
         })
         .collect();
@@ -50,10 +76,12 @@ pub(crate) fn replay_tool_calls(entry: &mut Value, message: &ModelMessage, empty
 pub(crate) fn replay_reasoning(
     entry: &mut Value,
     message: &ModelMessage,
+    provider: Option<&str>,
     model: &str,
     configured_field: Option<&str>,
 ) {
-    let Some(state) = message.native.as_ref().and_then(|native| native::replayable(native, model))
+    let Some(state) =
+        message.native.as_ref().and_then(|native| native::replayable_for(native, provider, model))
     else {
         return;
     };
@@ -116,6 +144,25 @@ pub(crate) fn native_reasoning_of(message: &Value) -> Option<Value> {
         message.get("reasoning_opaque").and_then(Value::as_str).filter(|text| !text.is_empty())
     {
         object.insert("reasoning_opaque".into(), Value::String(opaque.to_string()));
+    }
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        let mut per_call = serde_json::Map::new();
+        for call in calls {
+            let Some(id) = call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let mut state = serde_json::Map::new();
+            if let Some(extra) = call.get("extra_content").filter(|value| !value.is_null()) {
+                state.insert("extra_content".into(), extra.clone());
+            }
+            if !state.is_empty() {
+                per_call.insert(id.to_string(), Value::Object(state));
+            }
+        }
+        if !per_call.is_empty() {
+            object.insert(TOOL_CALL_NATIVE_KEY.into(), Value::Object(per_call));
+        }
     }
     (!object.is_empty()).then_some(Value::Object(object))
 }

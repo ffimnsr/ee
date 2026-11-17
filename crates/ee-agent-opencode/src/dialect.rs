@@ -38,7 +38,7 @@ pub(crate) fn guarded_transcript<'a>(
 /// Fills a catalog cost and seals the response for the producing model.
 pub(crate) fn finalize(mut response: ModelResponse, profile: &EndpointProfile) -> ModelResponse {
     ee_agent_orchestrator::apply_catalog_cost(&mut response, profile.cost);
-    ee_chat_completions::seal_response(response, &profile.model)
+    ee_chat_completions::seal_response_with_provider(response, Some(&profile.label), &profile.model)
 }
 
 /// Parses tool arguments from their wire form.

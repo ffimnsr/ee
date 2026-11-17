@@ -170,6 +170,7 @@
 //! and fake tools over in-memory framework plumbing.
 
 pub mod approval_classifier;
+pub mod attachments;
 pub mod background_jobs;
 pub mod budget;
 pub mod checkpoint;
@@ -274,6 +275,7 @@ pub mod tool_schemas;
 pub mod tools;
 pub mod trace;
 mod transcript_log;
+pub mod transcript_normalize;
 pub mod trust;
 mod usage;
 pub mod validation;
@@ -525,6 +527,11 @@ pub use subagent_handoff::{
 pub use tool_output::{
     BoundedToolOutput, DEFAULT_MAX_TOOL_OUTPUT_BYTES, DEFAULT_MAX_TOOL_OUTPUT_LINES,
     ToolOutputLimits, bound_tool_output,
+};
+pub use transcript_normalize::{
+    ABORTED_TOOL_RESULT_TEXT, ARGUMENT_ERROR_METADATA_PREFIX, EMPTY_TOOL_OUTPUT_TEXT,
+    MISSING_TOOL_RESULT_TEXT, SYNTHETIC_TOOL_RESULT_KEY, TURN_ERROR_METADATA_KEY,
+    normalize_transcript,
 };
 pub use workspace_isolation::{
     MAX_WORKTREE_PATCH_BYTES, WORKTREE_DIR, WorkspaceIsolation, WorkspaceIsolationConfig,

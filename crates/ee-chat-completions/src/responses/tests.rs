@@ -142,6 +142,40 @@ fn request_body_never_carries_a_credential() {
 }
 
 #[test]
+fn request_body_references_pdf_attachments_as_input_files() {
+    let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
+        ModelContent::Text("read this".into()),
+        ModelContent::EmbeddedResource {
+            uri: "file:///scan.pdf".into(),
+            mime_type: Some("application/pdf".into()),
+            text: None,
+            blob: Some("JVBERi0=".into()),
+        },
+    ])];
+    let cache = CacheDirective::disabled();
+    let body = responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        provider: None,
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &[],
+        stream: false,
+        max_output_tokens: None,
+        extensions: None,
+        generation: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        session: None,
+        previous_response_id: None,
+        input_from: 0,
+    });
+    let parts = body["input"][0]["content"].as_array().expect("content parts");
+    let file = parts.iter().find(|part| part["type"] == "input_file").expect("input_file part");
+    assert_eq!(file["filename"], "scan.pdf");
+    assert_eq!(file["file_data"], "data:application/pdf;base64,JVBERi0=");
+}
+
+#[test]
 fn request_body_encodes_image_inputs_as_input_image_parts() {
     let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
         ModelContent::Text("look".into()),
@@ -580,6 +614,7 @@ fn assistant_tool_call_replays_as_a_function_call_item() {
 fn body_with(control: &ee_agent_orchestrator::ToolCallControl, cache: &CacheDirective) -> Value {
     responses_body(&ResponsesBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript(),
         tools: &definitions(),
@@ -636,6 +671,7 @@ fn generated_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Valu
     let cache = CacheDirective::disabled();
     responses_body(&ResponsesBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript(),
         tools: &definitions(),
@@ -690,6 +726,7 @@ fn continuation_sends_only_the_delta_and_sets_store() {
     ];
     let body = responses_body(&ResponsesBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &[],
@@ -714,6 +751,7 @@ fn stateless_routes_never_send_a_continuation() {
     let cache = CacheDirective::disabled();
     let body = responses_body(&ResponsesBody {
         model: "gpt-5.5",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript(),
         tools: &[],

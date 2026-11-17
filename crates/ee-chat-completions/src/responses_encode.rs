@@ -80,6 +80,9 @@ fn response_parts(role: ModelRole, content: &[ModelContent]) -> Vec<Value> {
                     Some(mime) if mime.starts_with("image/") => {
                         parts.push(input_image(blob, mime));
                     }
+                    Some("application/pdf") => {
+                        parts.push(input_file(uri, blob, "application/pdf"));
+                    }
                     mime => push_response_text(
                         &mut parts,
                         text_part,
@@ -106,6 +109,17 @@ fn input_image(data: &str, mime_type: &str) -> Value {
     json!({
         "type": "input_image",
         "image_url": format!("data:{mime_type};base64,{data}"),
+    })
+}
+
+/// Responses file part for a PDF payload.
+fn input_file(uri: &str, data: &str, mime_type: &str) -> Value {
+    let filename =
+        uri.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or("attachment.pdf");
+    json!({
+        "type": "input_file",
+        "filename": filename,
+        "file_data": format!("data:{mime_type};base64,{data}"),
     })
 }
 
@@ -186,8 +200,13 @@ pub(crate) const REASONING_ITEMS: &str = "reasoning_items";
 /// Only documented fields are replayed: `id` addresses the item, `summary`
 /// carries its text, and `encrypted_content` is the stateless proof of
 /// generation that lets the model resume a tool loop without server storage.
-pub(crate) fn replay_reasoning_items(message: &ModelMessage, model: &str) -> Vec<Value> {
-    let Some(state) = message.native.as_ref().and_then(|native| crate::replayable(native, model))
+pub(crate) fn replay_reasoning_items(
+    message: &ModelMessage,
+    provider: Option<&str>,
+    model: &str,
+) -> Vec<Value> {
+    let Some(state) =
+        message.native.as_ref().and_then(|native| crate::replayable_for(native, provider, model))
     else {
         return Vec::new();
     };

@@ -137,6 +137,7 @@ fn automatic_policy_places_the_four_reference_breakpoints() {
     let cache = ee_chat_completions::CacheDirective::anthropic();
     let body = messages_body(&MessagesBody {
         model: "claude",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &tools,
@@ -179,6 +180,7 @@ fn manual_breakpoints_are_preserved_and_counted() {
     };
     let body = messages_body(&MessagesBody {
         model: "claude",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &[ToolDefinition::new("read_file", "reads a file")],
@@ -526,6 +528,30 @@ fn second_turn_replays_the_signed_thinking_block() {
 }
 
 #[test]
+fn provider_scoped_thinking_blocks_require_the_same_provider() {
+    let decoded = response_from_buffered(
+        LABEL,
+        &json!({
+            "type": "message",
+            "content": [
+                { "type": "thinking", "thinking": "consider", "signature": "sig-123" },
+                { "type": "text", "text": "answer" }
+            ],
+            "stop_reason": "end_turn"
+        }),
+    )
+    .expect("decodes");
+    let decoded =
+        ee_chat_completions::seal_response_with_provider(decoded, Some("OpenCode"), "claude-x");
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&decoded);
+    let message = &history.messages[0];
+    assert!(replay_thinking_blocks(message, Some("OpenCode"), "claude-x").is_some());
+    assert!(replay_thinking_blocks(message, Some("OpenRouter"), "claude-x").is_none());
+    assert!(replay_thinking_blocks(message, None, "claude-x").is_none());
+}
+
+#[test]
 fn thinking_blocks_never_replay_to_another_model() {
     let decoded = response_from_buffered(
         LABEL,
@@ -642,6 +668,7 @@ fn tool_choice_lowers_to_the_anthropic_shape() {
     let build = |control: &ee_agent_orchestrator::ToolCallControl| {
         messages_body(&MessagesBody {
             model: "claude",
+            provider: None,
             system_prompt: "system",
             transcript: &transcript(),
             tools: &definitions(),
@@ -672,11 +699,48 @@ fn tool_choice_lowers_to_the_anthropic_shape() {
     assert_eq!(parallel["tool_choice"]["disable_parallel_tool_use"], true);
 }
 
+#[test]
+fn user_attachments_route_images_and_pdfs_to_native_blocks() {
+    let transcript = vec![ModelMessage::new(ModelRole::User).with_content(vec![
+        ModelContent::Text("look".into()),
+        ModelContent::Image { data: "aW1n".into(), mime_type: "image/png".into(), uri: None },
+        ModelContent::EmbeddedResource {
+            uri: "file:///scan.pdf".into(),
+            mime_type: Some("application/pdf".into()),
+            text: None,
+            blob: Some("JVBERi0=".into()),
+        },
+    ])];
+    let cache = CacheDirective::disabled();
+    let body = messages_body(&MessagesBody {
+        model: "claude",
+        provider: None,
+        system_prompt: "system",
+        transcript: &transcript,
+        tools: &[],
+        stream: false,
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        extensions: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &cache,
+        prompt_tokens: None,
+        generation: None,
+    });
+    let blocks = body["messages"][0]["content"].as_array().expect("content blocks");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[2]["type"], "document");
+    assert_eq!(blocks[2]["source"]["media_type"], "application/pdf");
+    assert_eq!(blocks[2]["source"]["data"], "JVBERi0=");
+}
+
 fn body_with(max_output_tokens: u64, extensions: Value) -> Value {
     let control = ee_agent_orchestrator::ToolCallControl::auto();
     let cache = CacheDirective::disabled();
     messages_body(&MessagesBody {
         model: "claude",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript(),
         tools: &definitions(),
@@ -720,6 +784,7 @@ fn sampling_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Value
     let cache = ee_chat_completions::CacheDirective::disabled();
     messages_body(&MessagesBody {
         model: "claude",
+        provider: None,
         system_prompt: "system",
         transcript: &transcript,
         tools: &[],

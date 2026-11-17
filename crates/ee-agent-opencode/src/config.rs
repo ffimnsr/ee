@@ -912,6 +912,9 @@ pub fn route_profile(
     .with_modalities(route.entry.modalities)
     .with_tools_strict(route.entry.tools_strict)
     .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
+    // Reference opt-in: only sent when the request actually carries an image,
+    // so text-only request bytes stay identical.
+    .with_image_opt_in_header(Some(HeaderName::from_static("typesafe-danger-zone-images")))
     .with_stream_usage(true))
 }
 

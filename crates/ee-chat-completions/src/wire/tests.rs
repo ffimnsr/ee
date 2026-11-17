@@ -962,11 +962,100 @@ fn chat_parts(
         definitions: tools,
         cache,
         model: "model-a",
+        provider: None,
         reasoning_field: None,
         tools_strict: false,
         freeform: &[],
         prompt_tokens: None,
     })
+}
+
+#[test]
+fn tool_call_extra_content_round_trips_through_the_transcript() {
+    let value = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup", "arguments": "{}" },
+                    "extra_content": { "google": { "thought_signature": "sig-1" } }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let turn = decode_message(&value).expect("decodes");
+    assert!(
+        turn.native_reasoning.as_ref().and_then(|state| state.get("tool_calls")).is_some(),
+        "per-call native state must be captured at decode time"
+    );
+    let response = response_from_turn(turn);
+    let response = crate::seal_response_with_provider(response, Some("OpenRouter"), "model-a");
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&response);
+
+    let cache = CacheDirective::disabled();
+    let (messages, _) = chat_request_parts(&ChatRequestParts {
+        system_prompt: "system",
+        transcript: &history.messages,
+        definitions: &[],
+        cache: &cache,
+        model: "model-a",
+        provider: Some("OpenRouter"),
+        reasoning_field: None,
+        tools_strict: false,
+        freeform: &[],
+        prompt_tokens: None,
+    });
+    let assistant =
+        messages.iter().find(|message| message["role"] == "assistant").expect("assistant message");
+    assert_eq!(assistant["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "sig-1");
+}
+
+#[test]
+fn tool_call_extra_content_is_not_replayed_across_providers() {
+    let value = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "lookup", "arguments": "{}" },
+                    "extra_content": { "google": { "thought_signature": "sig-1" } }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let response = response_from_turn(decode_message(&value).expect("decodes"));
+    let response = crate::seal_response_with_provider(response, Some("OpenRouter"), "model-a");
+    let mut history = ee_agent_orchestrator::Transcript::new();
+    history.push_assistant(&response);
+
+    let cache = CacheDirective::disabled();
+    let (messages, _) = chat_request_parts(&ChatRequestParts {
+        system_prompt: "system",
+        transcript: &history.messages,
+        definitions: &[],
+        cache: &cache,
+        model: "model-a",
+        provider: Some("OpenCode"),
+        reasoning_field: None,
+        tools_strict: false,
+        freeform: &[],
+        prompt_tokens: None,
+    });
+    let assistant =
+        messages.iter().find(|message| message["role"] == "assistant").expect("assistant message");
+    assert!(
+        assistant["tool_calls"][0].get("extra_content").is_none(),
+        "foreign provider state must not be replayed"
+    );
 }
 
 fn markers(messages: &[Value], tools: &[Value]) -> usize {
