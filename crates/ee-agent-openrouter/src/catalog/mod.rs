@@ -59,6 +59,11 @@ pub struct CatalogModel {
     pub max_tokens_field: &'static str,
     /// Chat Completions assistant field carrying reasoning, when declared.
     pub reasoning_field: Option<&'static str>,
+    /// Whether the route advertises provider-native compaction.
+    ///
+    /// The reference OpenRouter provider exposes no compact route, so every
+    /// row carries `false` until upstream adds one.
+    pub compaction: bool,
 }
 
 impl CatalogModel {

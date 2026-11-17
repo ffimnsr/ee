@@ -89,6 +89,7 @@ pub(crate) fn openrouter_profile_with_options(
                 .map_err(|error| format!("invalid OpenRouter site URL header: {error}"))?,
         ));
     }
+    headers.extend(config_headers(config)?);
     let declared_field = entry
         .map(|entry| entry.max_tokens_field)
         .filter(|field| !field.is_empty())
@@ -106,6 +107,14 @@ pub(crate) fn openrouter_profile_with_options(
     }
     if let Some(limits) = entry.and_then(|entry| entry.limits) {
         clamp_reasoning_budget(&mut extensions, limits.output);
+    }
+    // Config-file body overlay merges last so an operator override wins over
+    // provider defaults without discarding sibling keys.
+    if let Some(overlay) = config.file.body.as_ref() {
+        if !extensions.is_object() {
+            extensions = json!({});
+        }
+        ee_chat_completions::deep_merge(&mut extensions, overlay);
     }
     let generation = options.generation().clone();
     validate_generation(
@@ -137,6 +146,7 @@ pub(crate) fn openrouter_profile_with_options(
         .with_limits(entry.and_then(|entry| entry.limits))
         .with_cost(entry.and_then(|entry| entry.cost))
         .with_modalities(entry.map_or(Modalities::UNKNOWN, |entry| entry.modalities))
+        .with_compaction(entry.is_some_and(|entry| entry.compaction))
         .with_sampling(
             entry.map_or(ee_agent_orchestrator::SamplingSupport::ALL, |entry| entry.sampling),
         )
@@ -180,6 +190,35 @@ const MAX_TOKENS_HOSTS: [&str; 10] = [
     "gateway.ai.cloudflare.com",
     "api.cloudflare.com",
 ];
+
+/// Validates configured request headers.
+///
+/// Credential and transport-controlled headers are rejected: the config file may
+/// add provider metadata, never replace authentication or framing.
+fn config_headers(config: &Config) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    const RESERVED: [&str; 8] = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "x-api-key",
+    ];
+    let mut headers = Vec::with_capacity(config.file.headers.len());
+    for (name, value) in &config.file.headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("configured header name {name:?} is not valid"))?;
+        if RESERVED.iter().any(|reserved| *reserved == header_name.as_str()) {
+            return Err(format!("configured header {name:?} is reserved"));
+        }
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|_| format!("configured header {name:?} has an invalid value"))?;
+        headers.push((header_name, header_value));
+    }
+    Ok(headers)
+}
 
 /// Detects the output-token body field for one OpenRouter model and endpoint.
 ///
@@ -332,6 +371,8 @@ mod tests {
             session_log_dir: None,
             session_log_durable: false,
             session_headers: true,
+            compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
+            file: Default::default(),
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
             max_iterations: None,
         }
@@ -800,5 +841,12 @@ mod tests {
         )
         .expect_err("bad ttl");
         assert!(error.contains("OPENROUTER_CACHE_TTL"), "{error}");
+    }
+
+    #[test]
+    fn openrouter_profiles_never_advertise_provider_compaction() {
+        let config = test_config();
+        let profile = super::openrouter_profile(&config, &config.model).expect("profile");
+        assert!(!profile.compaction, "the reference OpenRouter provider has no compact route");
     }
 }

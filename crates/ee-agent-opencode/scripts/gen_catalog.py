@@ -286,7 +286,24 @@ def sampling_literal(model: dict) -> str:
     )
 
 
-def model_literal(surface: str, model: dict, kind: str) -> str:
+def compaction_literal(surface: str, model_id: str, kind: str, api: dict, allow: set) -> str:
+    """Renders the provider-native compaction capability.
+
+    Upstream exposes explicit compaction only on Responses routes served by the
+    OpenAI provider package (`@opencode/ai/providers/openai/responses`), which
+    re-exports the OpenAI Responses route carrying `/responses/compact`. The
+    curated allowlist can force a row on after a live probe; it is kept empty
+    until a probe proves the gateway serves the endpoint.
+    """
+    forced = (surface, model_id) in allow
+    sdk = api.get("sdk") or ""
+    if isinstance(sdk, dict):
+        sdk = sdk.get("opencodeai", "")
+    derived = kind == "responses" and sdk.endswith("providers/openai/responses")
+    return "true" if forced or derived else "false"
+
+
+def model_literal(surface: str, model: dict, kind: str, compaction_allow: set) -> str:
     limit = model.get("limit") or {}
     context = int(limit.get("context") or 0)
     output = int(limit.get("output") or 0)
@@ -319,6 +336,7 @@ def model_literal(surface: str, model: dict, kind: str) -> str:
         f"sampling: {sampling_literal(model)}, "
         f"max_tokens_field: {rust(compatibility.get('max_tokens_field') or '')}, "
         f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'}, "
+        f"compaction: {compaction_literal(surface, model['id'], kind, api, compaction_allow)}, "
         "legacy: false },"
     )
 
@@ -334,7 +352,7 @@ def legacy_literal(surface: str, model_id: str, kind: str) -> str:
         "reasoning: ReasoningSupport::UNSUPPORTED, cost: None, "
         "structured_output: false, tools_supported: true, tools_strict: false, "
         "freeform: &[], sampling: SamplingSupport::ALL, "
-        "max_tokens_field: \"\", reasoning_field: None, "
+        "max_tokens_field: \"\", reasoning_field: None, compaction: false, "
         "legacy: true },"
     )
 
@@ -347,6 +365,7 @@ def generate() -> str:
 
     retired = {(surface, model_id) for surface, model_id, _ in sources["retired"]}
     unsupported = {(surface, model_id) for surface, model_id, _ in sources["unsupported"]}
+    compaction_allow = {(surface, model_id) for surface, model_id in sources.get("compaction", [])}
 
     rows: list[str] = []
     present: set[tuple[str, str]] = set()
@@ -373,7 +392,7 @@ def generate() -> str:
             if int(limit.get("context") or 0) <= 0 or int(limit.get("output") or 0) <= 0:
                 continue
             present.add(key)
-            rows.append(model_literal(surface, model, kind))
+            rows.append(model_literal(surface, model, kind, compaction_allow))
 
     legacy_rows: list[str] = []
     for surface, model_id, kind in sorted(sources["legacy"]):

@@ -44,6 +44,8 @@ fn test_config() -> Config {
         session_log_dir: None,
         session_log_durable: false,
         session_headers: true,
+        compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
+        file: Default::default(),
         context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
         max_iterations: None,
     }

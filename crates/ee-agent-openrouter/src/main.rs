@@ -38,7 +38,13 @@ async fn main() {
             BTreeMap::new()
         }
     };
-    let config = Config::from_args_and_dotenv(args, &dotenv);
+    let config = match Config::from_args_and_dotenv(args, &dotenv) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ee-agent-openrouter: {error}");
+            std::process::exit(1);
+        }
+    };
     let server_config = AcpAgentServerConfig::default();
     let result = match provider_mode(&config) {
         ProviderMode::Orchestrated => run_orchestrated(config, server_config).await,
@@ -247,6 +253,8 @@ mod tests {
             session_log_dir: None,
             session_log_durable: false,
             session_headers: true,
+            compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
+            file: Default::default(),
         }
     }
 

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, StreamSink,
+    CompactionOutcome, ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse,
+    StreamSink,
 };
 use tokio::sync::watch;
 
@@ -303,6 +304,40 @@ impl ModelAdapter for ResponsesAdapter {
                     other => other,
                 }
             };
+            tokio::select! {
+                response = completion => response.map_err(response_error),
+                () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
+            }
+        })
+    }
+
+    fn compact(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> ModelFuture<Result<CompactionOutcome, ModelError>> {
+        let token = self.token.clone();
+        let codec = Arc::clone(&self.codec);
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(ModelError::Cancelled);
+            }
+            token().map_err(ModelError::Adapter)?;
+            let profile = codec.profile();
+            if !profile.compaction {
+                return Err(ModelError::UnsupportedCompaction(format!(
+                    "{} {} (responses)",
+                    profile.label, profile.model
+                )));
+            }
+            let generation = merged_generation(profile, &request)?;
+            let generation = (!generation.is_empty()).then_some(generation);
+            let completion = codec.compact(
+                &request.transcript,
+                &request.tools,
+                generation.as_ref(),
+                request.session.as_ref(),
+            );
             tokio::select! {
                 response = completion => response.map_err(response_error),
                 () = wait_cancelled(cancel) => Err(ModelError::Cancelled),

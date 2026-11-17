@@ -349,6 +349,14 @@ impl OrchestratorRuntime {
             options.approval_classifier = self.approval_classifier();
         }
         let session_id = ctx.session_id.to_string();
+        if options.compaction_checkpoint.is_none() {
+            options.compaction_checkpoint = self
+                .compaction_checkpoints
+                .lock()
+                .expect("compaction checkpoint map poisoned")
+                .get(&session_id)
+                .cloned();
+        }
         if let Some(store) = &self.session_logs {
             options.session_log = Some(store.log_for(&session_id));
         }

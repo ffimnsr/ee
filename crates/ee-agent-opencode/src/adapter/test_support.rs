@@ -77,6 +77,8 @@ pub fn test_config(surface: OpenCodeSurface, model_id: &str) -> Config {
         session_log_dir: None,
         session_log_durable: false,
         session_headers: true,
+        compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
+        file: crate::config_file::ResolvedConfig::default(),
     }
 }
 

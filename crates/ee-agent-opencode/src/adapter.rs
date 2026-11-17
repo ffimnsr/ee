@@ -21,8 +21,9 @@ use std::sync::Arc;
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::ModelMessage;
 use ee_agent_orchestrator::{
-    ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, OrchestratorConfig,
-    OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolCallControl, ToolDefinition,
+    CompactionOutcome, ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse,
+    OrchestratorConfig, OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolCallControl,
+    ToolDefinition,
 };
 use ee_agent_protocol::Implementation;
 use ee_chat_completions::{DeltaSink, EndpointTransport, StreamDelta, TokenSource, wait_cancelled};
@@ -37,6 +38,10 @@ use crate::routes::{OpenCodeDialect, OpenCodeRoute};
 /// Boxed future returned by a dialect codec.
 pub type CodecFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>;
+
+/// Boxed future returned by one provider-native compaction call.
+pub type CompactFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CompactionOutcome, ProviderError>> + Send + 'a>>;
 
 /// One dialect codec behind the dispatcher.
 ///
@@ -89,6 +94,24 @@ pub trait DialectCodec: Send + Sync + 'static {
     ) -> CodecFuture<'a> {
         let _ = tool_control;
         self.complete_streaming(transcript, tools, sink)
+    }
+
+    /// Runs one provider-native compaction request.
+    ///
+    /// The default fails closed; a dialect that does not implement native
+    /// compaction must say so instead of silently returning a local summary.
+    fn compact<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        _session: Option<&'a ee_agent_orchestrator::SessionContext>,
+    ) -> CompactFuture<'a> {
+        let _ = (transcript, tools);
+        Box::pin(async move {
+            Err(ProviderError::UnsupportedCompaction(String::from(
+                "this dialect does not implement provider compaction",
+            )))
+        })
     }
 }
 
@@ -151,6 +174,15 @@ impl DialectCodec for ResponsesCodec {
             prompt_tokens,
             options,
         ))
+    }
+
+    fn compact<'a>(
+        &'a self,
+        transcript: &'a [ModelMessage],
+        tools: &'a [ToolDefinition],
+        session: Option<&'a ee_agent_orchestrator::SessionContext>,
+    ) -> CompactFuture<'a> {
+        Box::pin(ResponsesCodec::compact(self, transcript, tools, None, session))
     }
 }
 
@@ -436,6 +468,36 @@ impl ModelAdapter for OpenCodeModelAdapter {
             }
         })
     }
+
+    fn compact(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> ModelFuture<Result<CompactionOutcome, ModelError>> {
+        let codec = self.codec.clone();
+        let credential = self.check_credential();
+        let route = self.route;
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(ModelError::Cancelled);
+            }
+            credential?;
+            if !route.entry.compaction {
+                return Err(ModelError::UnsupportedCompaction(format!(
+                    "OpenCode {} {} ({})",
+                    route.surface.as_str(),
+                    route.model_id,
+                    route.dialect.as_str()
+                )));
+            }
+            let completion =
+                codec.compact(&request.transcript, &request.tools, request.session.as_ref());
+            tokio::select! {
+                response = completion => response.map_err(adapter_error),
+                () = wait_cancelled(cancel) => Err(ModelError::Cancelled),
+            }
+        })
+    }
 }
 
 /// Validates per-request sampling knobs before a body exists.
@@ -515,6 +577,10 @@ pub fn opencode_orchestrator_config(
             },
             workspace_isolation,
             approval_classifier,
+            compaction: ee_agent_orchestrator::CompactionConfig {
+                mode: config.compaction_mode,
+                ..ee_agent_orchestrator::CompactionConfig::default()
+            },
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),

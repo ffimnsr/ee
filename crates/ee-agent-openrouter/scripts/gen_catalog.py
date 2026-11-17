@@ -279,7 +279,8 @@ def model_literal(model: dict) -> str:
         f"freeform: &[{freeform}], "
         f"sampling: {sampling_literal(model)}, "
         f"max_tokens_field: {rust(compatibility.get('max_tokens_field') or '')}, "
-        f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'} }},"
+        f"reasoning_field: {'None' if reasoning_field is None else f'Some({rust(str(reasoning_field))})'}, "
+        "compaction: false },"
     )
 
 

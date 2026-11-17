@@ -234,6 +234,10 @@ pub struct OrchestratorRuntime {
     transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
     /// Optional loop stop predicate applied to every root turn.
     until: Mutex<Option<UntilPredicate>>,
+    /// Encrypted provider compaction checkpoints per session. They are opaque
+    /// and never logged; the loop replays them as the first transcript item.
+    compaction_checkpoints:
+        Mutex<HashMap<String, crate::compaction_checkpoint::CompactionCheckpoint>>,
 }
 
 mod branch;

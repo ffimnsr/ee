@@ -41,12 +41,58 @@ const MAX_RECENT_MESSAGES: usize = 20;
 /// Maximum recent runtime events retained before byte bounding.
 const MAX_RECENT_EVENTS: usize = 50;
 
+/// How `/compact` produces the continuation summary.
+///
+/// Provider-native compaction sends the conversation to the provider's
+/// `/compact` endpoint and stores the returned encrypted checkpoint. The local
+/// path is the default because it works on every route and never depends on a
+/// provider capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactionMode {
+    /// Always summarize locally (default).
+    #[default]
+    Local,
+    /// Always use provider-native compaction; an unsupported route fails.
+    Native,
+    /// Use provider-native compaction where the catalog advertises it, else
+    /// fall back to local summarization.
+    Auto,
+}
+
+impl CompactionMode {
+    /// Parses the configuration spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns guidance naming the accepted values.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" | "summary" => Ok(Self::Local),
+            "native" | "provider" => Ok(Self::Native),
+            "auto" => Ok(Self::Auto),
+            other => Err(format!(
+                "unsupported compaction mode {other:?}: expected \"local\", \"native\", or \"auto\""
+            )),
+        }
+    }
+
+    /// Whether this mode may call provider-native compaction.
+    #[must_use]
+    pub const fn uses_provider(self) -> bool {
+        matches!(self, Self::Native | Self::Auto)
+    }
+}
+
 /// Compaction knobs for `/compact` turns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionConfig {
     /// Deterministic memory compaction settings (duplicate merging and
     /// pressure decay; protected keys are never touched).
     pub memory: MemoryCompactionConfig,
+    /// How the continuation summary is produced.
+    #[serde(default)]
+    pub mode: CompactionMode,
     /// Maximum serialized bytes of compaction context (task graph, memory,
     /// recent conversation/events, validation facts, budget) sent to model.
     pub max_input_bytes: usize,
@@ -94,6 +140,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             memory: MemoryCompactionConfig::default(),
+            mode: CompactionMode::Local,
             max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
             strategy: default_compaction_strategy(),
             auto_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,

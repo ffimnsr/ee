@@ -20,6 +20,7 @@ use ee_agent_opencode::config::{self, Args, Config};
 use ee_agent_opencode::critic::opencode_multi_model_provider;
 use ee_agent_opencode::discovery::{self, HttpMetadataFetcher};
 use ee_agent_opencode::routes::{self, OpenCodeRoute};
+use ee_agent_opencode::usage::{self, UsageProbe};
 use serde_json::{Value, json};
 
 #[tokio::main(flavor = "current_thread")]
@@ -37,6 +38,8 @@ async fn main() {
         print_route()
     } else if args.discover_models {
         print_discovered_models(args).await
+    } else if args.usage {
+        print_usage().await
     } else {
         run(args).await
     };
@@ -196,6 +199,15 @@ async fn print_discovered_models(args: Args) -> Result<(), String> {
     }
     let fetcher = HttpMetadataFetcher::new(&config)?;
     let report = discovery::discover_models(&fetcher, config.route.surface).await?;
+    print_json(&report.to_json())
+}
+
+/// Queries workspace budgets and the Go allowance. Reachable only through
+/// `--usage`: no startup path performs this request.
+async fn print_usage() -> Result<(), String> {
+    let dotenv = read_dotenv();
+    let probe = UsageProbe::resolve(&mut |name| env_or_dotenv(name, &dotenv))?;
+    let report = usage::fetch_usage(&probe).await?;
     print_json(&report.to_json())
 }
 

@@ -50,6 +50,8 @@ fn args(surface: Option<&str>, model: Option<&str>) -> Args {
         session_log_dir: None,
         session_log_durable: false,
         session_headers: true,
+        compaction_mode: None,
+        usage: false,
     }
 }
 
@@ -671,4 +673,116 @@ fn phase_budgets_use_the_alias_and_the_reference_defaults() {
     assert_eq!(timeouts.total, Some(Duration::from_millis(42_000)));
     assert_eq!(timeouts.headers, ee_chat_completions::Timeouts::DEFAULT_HEADERS);
     assert_eq!(timeouts.chunk, Duration::from_millis(1_500));
+}
+
+#[test]
+fn config_file_disabled_model_fails_before_routing_by_flag() {
+    let file = crate::config_file::parse(&serde_json::json!({
+        "models": { "gpt-5.5": { "disabled": true } }
+    }))
+    .expect("file parses");
+    let error = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &BTreeMap::new(),
+        file,
+    )
+    .expect_err("disabled model is rejected");
+    assert!(matches!(error, ConfigError::DisabledModel { .. }), "{error}");
+    assert!(error.to_string().contains("disabled"), "{error}");
+}
+
+#[test]
+fn config_file_default_model_selects_when_no_selector_is_given() {
+    let file = crate::config_file::parse(&serde_json::json!({
+        "default_surface": "zen",
+        "default_model": "gpt-5.5"
+    }))
+    .expect("file parses");
+    let config = Config::from_args_and_dotenv_with_file(args(None, None), &BTreeMap::new(), file)
+        .expect("default model resolves");
+    assert_eq!(config.route.model_id, "gpt-5.5");
+    assert_eq!(config.route.surface, OpenCodeSurface::Zen);
+}
+
+#[test]
+fn config_file_variant_fills_when_the_selector_has_none() {
+    let file = crate::config_file::parse(&serde_json::json!({
+        "models": { "gpt-5.5": { "variant": "high" } }
+    }))
+    .expect("file parses");
+    let config = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &BTreeMap::new(),
+        file,
+    )
+    .expect("variant resolves");
+    assert_eq!(config.route.variant.map(|variant| variant.id), Some("high"));
+}
+
+#[test]
+fn native_compaction_on_an_unsupported_route_fails_at_startup() {
+    let error = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("claude-sonnet-5")),
+        &dotenv(&[(COMPACTION_MODE_ENV, "native")]),
+        crate::config_file::FileConfig::default(),
+    )
+    .expect_err("unsupported route is rejected");
+    assert!(matches!(error, ConfigError::UnsupportedCompaction { .. }), "{error}");
+    assert!(error.to_string().contains("claude-sonnet-5"), "{error}");
+}
+
+#[test]
+fn auto_compaction_stays_available_on_a_supported_route() {
+    let config = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &dotenv(&[(COMPACTION_MODE_ENV, "auto")]),
+        crate::config_file::FileConfig::default(),
+    )
+    .expect("auto mode resolves");
+    assert_eq!(config.compaction_mode, ee_agent_orchestrator::CompactionMode::Auto);
+    assert!(config.profile().expect("profile").compaction);
+}
+
+#[test]
+fn free_models_are_refused_when_the_switch_is_on() {
+    let error = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("beam-free")),
+        &dotenv(&[(DISABLE_FREE_MODELS_ENV, "1")]),
+        crate::config_file::FileConfig::default(),
+    )
+    .expect_err("free model is refused");
+    assert!(matches!(error, ConfigError::FreeModelDisabled { .. }), "{error}");
+}
+
+#[test]
+fn config_file_headers_reach_the_profile_but_credentials_do_not() {
+    let file = crate::config_file::parse(&serde_json::json!({
+        "headers": { "x-request-source": "ee" }
+    }))
+    .expect("file parses");
+    let config = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &BTreeMap::new(),
+        file,
+    )
+    .expect("overlay resolves");
+    let profile = config.profile().expect("profile");
+    assert!(
+        profile
+            .headers
+            .iter()
+            .any(|(name, value)| name.as_str() == "x-request-source" && value == "ee")
+    );
+
+    let file = crate::config_file::parse(&serde_json::json!({
+        "headers": { "authorization": "Bearer override" }
+    }))
+    .expect("file parses");
+    let config = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &BTreeMap::new(),
+        file,
+    )
+    .expect("config resolves");
+    assert!(config.profile().is_err(), "credential headers cannot be overridden");
 }

@@ -32,6 +32,7 @@
     ["zen", "jev-1.13", "systemone"],
     ["zen", "jev-1.13-free", "systemone"]
   ],
+  "compaction": [],
   "legacy": [
     ["go", "deepseek-v4-flash", "chat-completions"],
     ["go", "deepseek-v4-flash-vision-exp", "chat-completions"],

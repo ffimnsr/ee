@@ -92,6 +92,12 @@ pub struct CatalogModel {
     /// Whether this row was retained from the pre-catalog table because the
     /// upstream snapshot no longer lists it.
     pub legacy: bool,
+    /// Whether the route advertises provider-native compaction.
+    ///
+    /// Derived from the upstream provider package: only Responses routes served
+    /// by the OpenAI provider package expose `/responses/compact`. Routes that
+    /// do not advertise it must use local summarization.
+    pub compaction: bool,
 }
 
 impl CatalogModel {
@@ -119,6 +125,12 @@ impl CatalogModel {
             self.reasoning_protocol(),
             self.limits.map(|limits| limits.output),
         )
+    }
+
+    /// Whether the route advertises provider-native compaction.
+    #[must_use]
+    pub const fn supports_compaction(&self) -> bool {
+        self.compaction
     }
 }
 
@@ -252,6 +264,26 @@ mod tests {
     fn snapshot_digest_is_recorded() {
         assert_eq!(snapshot_sha256().len(), 64);
         assert!(snapshot_source().starts_with("https://"));
+    }
+
+    #[test]
+    fn provider_compaction_follows_the_openai_responses_package() {
+        for entry in models() {
+            if entry.legacy {
+                assert!(!entry.compaction, "legacy rows never infer compaction: {entry}");
+                continue;
+            }
+            let expected = entry.dialect == OpenCodeDialect::OpenAiResponses
+                && entry.sdk.ends_with("providers/openai/responses");
+            assert_eq!(entry.compaction, expected, "{entry}");
+            if entry.compaction {
+                assert!(entry.routes.responses, "compaction implies a Responses route: {entry}");
+            }
+        }
+        let gpt = find(OpenCodeSurface::Zen, "gpt-5.5").expect("gpt-5.5");
+        assert!(gpt.supports_compaction(), "OpenAI Responses rows advertise /compact");
+        let claude = find(OpenCodeSurface::Zen, "claude-sonnet-5").expect("claude-sonnet-5");
+        assert!(!claude.supports_compaction(), "Messages rows never advertise /compact");
     }
 
     #[test]

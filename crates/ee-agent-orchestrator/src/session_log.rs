@@ -446,7 +446,8 @@ impl SessionLog {
         message: &ModelMessage,
         tool_call_id: Option<&str>,
     ) -> Result<String, OrchestratorError> {
-        let body = serde_json::to_vec(message).map_err(|error| {
+        let loggable = loggable_message(message);
+        let body = serde_json::to_vec(loggable.as_ref()).map_err(|error| {
             OrchestratorError::Serialization(format!(
                 "session log message serialization failed: {error}"
             ))
@@ -874,6 +875,30 @@ impl SessionLogStore {
     pub fn session_ids(&self) -> Vec<String> {
         self.sink.session_ids()
     }
+}
+
+/// Replaces opaque provider checkpoints with a bounded marker before logging.
+///
+/// A checkpoint stands for a compacted conversation and is meaningful only to
+/// the provider that produced it, so it is replayed from the in-memory
+/// transcript and never written to the durable log.
+pub(crate) fn loggable_message(message: &ModelMessage) -> std::borrow::Cow<'_, ModelMessage> {
+    if !message.content.iter().any(|block| matches!(block, ModelContent::CompactionCheckpoint(_))) {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let mut copy = message.clone();
+    copy.content = copy
+        .content
+        .into_iter()
+        .map(|block| match block {
+            ModelContent::CompactionCheckpoint(checkpoint) => ModelContent::Text(format!(
+                "[opaque compaction checkpoint {}]",
+                checkpoint.id.as_deref().unwrap_or("-")
+            )),
+            other => other,
+        })
+        .collect();
+    std::borrow::Cow::Owned(copy)
 }
 
 fn record_bytes(record: &SessionLogRecord) -> usize {

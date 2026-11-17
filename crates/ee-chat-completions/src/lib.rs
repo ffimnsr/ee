@@ -30,6 +30,7 @@
 
 pub mod adapter;
 pub mod cache_policy;
+pub mod config_file;
 pub mod endpoint;
 mod error_classification;
 pub mod generation;
@@ -41,8 +42,11 @@ pub mod provider_options;
 mod reasoning_replay;
 mod request;
 pub mod responses;
+pub mod responses_compact;
+pub(crate) mod responses_encode;
 mod responses_wire;
 pub mod session;
+pub(crate) mod stream_meta;
 pub mod transport;
 pub mod wire;
 
@@ -56,6 +60,7 @@ pub use cache_policy::{
     CacheTargets, cache_control, gateway_policy, openai_request_ttl, parse_policy, parse_ttl, plan,
     warn_dropped,
 };
+pub use config_file::{MAX_CONFIG_BYTES, interpolate, read_document};
 pub use endpoint::{EndpointError, TrustedEndpoint};
 pub use generation::{
     apply_generation_chat, apply_generation_messages, apply_generation_responses,
@@ -71,12 +76,13 @@ pub use provider_options::{
     MAX_METADATA_ENTRIES, MAX_PROVIDER_OPTIONS_BYTES, ProviderOptions, REASONING_SUMMARY_VALUES,
     TEXT_VERBOSITY_VALUES, TRUNCATION_VALUES,
 };
+pub use responses_compact::{COMPACT_PATH_SUFFIX, CompactBody, compact_body, decode_compaction};
 pub use session::{MAX_SESSION_HEADER_VALUE_BYTES, prompt_cache_key, session_headers};
+pub use stream_meta::{chunk_timeout, is_event_stream};
 pub use transport::{
     ChatCompletionsClient, ChatRequest, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest,
-    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, chunk_timeout,
-    drive_sse, drive_sse_with_chunk_timeout, is_event_stream, with_buffered_retry,
-    with_stream_retry,
+    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse,
+    drive_sse_with_chunk_timeout, with_buffered_retry, with_stream_retry,
 };
 pub use wire::{
     AssistantTurn, ChatRequestParts, RequestBodyOptions, StreamDelta, ToolCall, Usage,

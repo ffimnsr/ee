@@ -9,7 +9,10 @@
 //! All `OPENROUTER_*` configuration variables are documented on
 //! [`config::Args`]; `.env` parsing lives in [`dotenv`] and never mutates
 //! the process environment.  `OPENROUTER_API_KEY` is used only for the
-//! Authorization header and is never logged.
+//! Authorization header and is never logged. [`config_file`] adds the optional
+//! `agent-openrouter.json` overlay (default/small model, disabled models,
+//! allowlisted `${VAR}` interpolation, bounded header/body and endpoint
+//! overrides).
 //!
 //! Orchestrated mode is the default: [`orchestrated::OpenRouterModelAdapter`]
 //! feeds OpenRouter into `ee-agent-orchestrator`'s bounded model–tool loop
@@ -50,6 +53,7 @@
 pub mod catalog;
 pub mod compaction;
 pub mod config;
+pub mod config_file;
 mod options;
 mod route_plan;
 /// Non-mutating `.env` parsing.

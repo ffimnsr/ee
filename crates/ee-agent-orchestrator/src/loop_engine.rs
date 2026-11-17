@@ -139,6 +139,10 @@ pub(crate) struct LoopOptions {
     pub session_context: Option<SessionContext>,
     /// Runtime metrics sink for per-model usage aggregation; `None` disables it.
     pub metrics: Option<Arc<Mutex<crate::metrics::OrchestratorMetrics>>>,
+    /// Opaque checkpoint from a prior provider-native compaction. When set it
+    /// is replayed as the first transcript item so the provider resumes from
+    /// the conversation it already compacted.
+    pub compaction_checkpoint: Option<crate::compaction_checkpoint::CompactionCheckpoint>,
 }
 
 pub use crate::loop_hooks::{UntilFn, UntilPredicate};
@@ -171,6 +175,7 @@ impl Default for LoopOptions {
             response_format: None,
             session_context: None,
             metrics: None,
+            compaction_checkpoint: None,
         }
     }
 }
@@ -332,6 +337,11 @@ impl LoopEngine {
             transcript.attach_session_log(log.clone());
         }
         transcript.set_tool_output_limits(self.config.tool_output);
+        // A provider-native checkpoint replaces the conversation prefix the
+        // provider already compacted, so it is replayed first on every step.
+        if let Some(checkpoint) = self.options.compaction_checkpoint.as_ref() {
+            transcript.ensure_compaction_checkpoint(checkpoint);
+        }
         let turn = self.run_loop(
             transcript,
             track.clone(),

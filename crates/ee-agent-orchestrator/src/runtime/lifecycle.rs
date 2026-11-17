@@ -205,6 +205,7 @@ impl OrchestratorRuntime {
             worktrees,
             transcripts,
             until: Mutex::new(None),
+            compaction_checkpoints: Mutex::new(HashMap::new()),
         }
     }
 

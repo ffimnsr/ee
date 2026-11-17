@@ -23,6 +23,7 @@ use ee_agent_protocol::setup::{
     SetupManifest,
 };
 use ee_chat_completions::{EndpointProfile, RetryPolicy, Timeouts, TokenSource, TrustedEndpoint};
+use reqwest::header::{HeaderName, HeaderValue};
 
 use crate::reasoning::{self, ReasoningEffort};
 use crate::routes::{self, OpenCodeRoute, OpenCodeSurface};
@@ -53,6 +54,12 @@ pub const CACHE_POLICY_ENV: &str = "OPENCODE_CACHE_POLICY";
 
 /// Prompt-cache lifetime, in the models.dev duration form.
 pub const CACHE_TTL_ENV: &str = "OPENCODE_CACHE_TTL";
+
+/// `/compact` strategy: `local` (default), `native`, or `auto`.
+pub const COMPACTION_MODE_ENV: &str = "OPENCODE_COMPACTION_MODE";
+
+/// Hide free catalog models from selection when enabled.
+pub const DISABLE_FREE_MODELS_ENV: &str = "OPENCODE_DISABLE_FREE_MODELS";
 
 /// Default system prompt sent with each session transcript.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are an agent running inside ee editor. Answer concisely and help with software engineering tasks. Use available tools for workspace file reads; never print tool-call syntax as prose.";
@@ -90,12 +97,22 @@ pub fn setup_manifest() -> SetupManifest {
     SetupManifest {
         schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
         agent: SetupAgent { id: String::from("opencode"), display_name: String::from("OpenCode") },
-        env_vars: vec![SetupEnvVar {
-            name: String::from(API_KEY_ENV),
-            required: true,
-            secret: true,
-            description: String::from(API_KEY_DESCRIPTION),
-        }],
+        env_vars: vec![
+            SetupEnvVar {
+                name: String::from(API_KEY_ENV),
+                required: true,
+                secret: true,
+                description: String::from(API_KEY_DESCRIPTION),
+            },
+            SetupEnvVar {
+                name: String::from("OPENCODE_ORG_ID"),
+                required: false,
+                secret: false,
+                description: String::from(
+                    "Optional OpenCode workspace organization id used only by --usage to read subscription budgets and the Go meter; never inferred from the API key.",
+                ),
+            },
+        ],
         inputs: vec![
             SetupInput {
                 key: String::from("surface"),
@@ -213,6 +230,11 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     Ok(value)
 }
 
+/// Whether a catalog cost declares the model free.
+fn is_free_model(cost: Option<crate::catalog::ModelCost>) -> bool {
+    cost.is_some_and(|cost| cost.input_micros == 0 && cost.output_micros == 0)
+}
+
 /// Parses the rubber-duck mode selector.
 fn parse_rubber_duck_mode(value: &str) -> Result<RubberDuckMode, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -251,6 +273,13 @@ pub struct Args {
     /// display-only JSON; live metadata never changes routing.
     #[arg(long, conflicts_with = "ee_config")]
     pub discover_models: bool,
+    /// Query OpenCode workspace budgets and the Go allowance, then exit. No
+    /// network call happens on any other path.
+    #[arg(
+        long,
+        conflicts_with_all = ["print_route", "print_catalog", "list_models", "discover_models"]
+    )]
+    pub usage: bool,
     /// OpenCode surface: `zen` (pay-as-you-go) or `go` (subscription).
     #[arg(long, env = SURFACE_ENV)]
     surface: Option<String>,
@@ -331,6 +360,9 @@ pub struct Args {
         default_missing_value = "true",
     )]
     session_log_durable: bool,
+    /// `/compact` strategy: `local` (default), `native`, or `auto`.
+    #[arg(long, env = COMPACTION_MODE_ENV)]
+    compaction_mode: Option<String>,
 }
 
 #[cfg(feature = "test-utils")]
@@ -350,6 +382,7 @@ impl Args {
             list_models: false,
             json: false,
             discover_models: false,
+            usage: false,
             surface: surface.map(String::from),
             model: model.map(String::from),
             critic_model: None,
@@ -370,6 +403,7 @@ impl Args {
             checkpoint_dir: None,
             session_log_dir: None,
             session_log_durable: false,
+            compaction_mode: None,
         }
     }
 }
@@ -422,6 +456,11 @@ pub struct Config {
     pub session_log_durable: bool,
     /// Whether provider session-affinity headers are emitted.
     pub session_headers: bool,
+    /// `/compact` strategy; `local` keeps the summary path that works on every
+    /// route.
+    pub compaction_mode: ee_agent_orchestrator::CompactionMode,
+    /// Overlay resolved from the optional agent configuration file.
+    pub file: crate::config_file::ResolvedConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -444,6 +483,9 @@ impl std::fmt::Debug for Config {
             .field("cache_policy", &self.cache_policy)
             .field("retry", &self.retry)
             .field("checkpoint_dir", &self.checkpoint_dir)
+            .field("compaction_mode", &self.compaction_mode)
+            .field("file_headers", &self.file.headers.len())
+            .field("file_body", &self.file.body.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -462,11 +504,35 @@ impl Config {
         args: Args,
         dotenv: &BTreeMap<String, String>,
     ) -> Result<Self, ConfigError> {
+        let file = crate::config_file::load(&mut |name| env_or_dotenv(name, dotenv))
+            .map_err(|detail| ConfigError::ConfigFile { detail })?;
+        Self::from_args_and_dotenv_with_file(args, dotenv, file)
+    }
+
+    /// Resolves a configuration with an explicit configuration file.
+    ///
+    /// Test fixtures pass a parsed file here; production code goes through
+    /// [`Config::from_args_and_dotenv`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when either selector is missing, empty, or does
+    /// not match exactly one catalog entry.
+    pub fn from_args_and_dotenv_with_file(
+        args: Args,
+        dotenv: &BTreeMap<String, String>,
+        file: crate::config_file::FileConfig,
+    ) -> Result<Self, ConfigError> {
+        let disable_free_models = file.disable_free_models
+            || env_or_dotenv(DISABLE_FREE_MODELS_ENV, dotenv).is_some_and(|value| {
+                matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            });
         let surface = match args
             .surface
             .or_else(|| env_or_dotenv(SURFACE_ENV, dotenv))
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| file.default_surface.clone())
         {
             Some(value) => OpenCodeSurface::parse(&value)?,
             None => return Err(ConfigError::MissingSurface),
@@ -475,8 +541,47 @@ impl Config {
             .model
             .or_else(|| env_or_dotenv(MODEL_ENV, dotenv))
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| file.default_model.clone())
             .ok_or(ConfigError::MissingModel)?;
+        let base_id = model.rsplit_once('#').map_or(model.trim(), |(base, _)| base.trim());
+        if file.resolve(base_id).disabled {
+            return Err(ConfigError::DisabledModel { model_id: base_id.to_string() });
+        }
+        // A configured variant only fills in when the selector carried none.
+        let model = match file.resolve(base_id).variant {
+            Some(variant) if !model.contains('#') => format!("{}{}{variant}", model.trim(), '#'),
+            _ => model,
+        };
         let route = routes::resolve_route(surface, &model)?;
+        if disable_free_models && is_free_model(route.cost()) {
+            return Err(ConfigError::FreeModelDisabled { model_id: route.model_id.to_string() });
+        }
+        let compaction_mode = match args
+            .compaction_mode
+            .or_else(|| env_or_dotenv(COMPACTION_MODE_ENV, dotenv))
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => {
+                ee_agent_orchestrator::CompactionMode::parse(&value).map_err(|detail| {
+                    ConfigError::UnsupportedCompactionMode {
+                        value: value.trim().to_string(),
+                        detail,
+                    }
+                })?
+            }
+            None => ee_agent_orchestrator::CompactionMode::Local,
+        };
+        // Forcing the provider path on an unsupported route is a startup error,
+        // never a request-time surprise. `Auto` falls back to local instead.
+        if compaction_mode == ee_agent_orchestrator::CompactionMode::Native
+            && !route.supports_compaction()
+        {
+            return Err(ConfigError::UnsupportedCompaction {
+                surface,
+                model_id: route.model_id.to_string(),
+                route: route.dialect.as_str(),
+            });
+        }
         let reasoning_effort = match args
             .reasoning_effort
             .or_else(|| env_or_dotenv(REASONING_EFFORT_ENV, dotenv))
@@ -517,7 +622,8 @@ impl Config {
             critic_model: args
                 .critic_model
                 .or_else(|| env_or_dotenv(CRITIC_MODEL_ENV, dotenv))
-                .filter(|value| !value.trim().is_empty()),
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| file.small_model.clone()),
             rubber_duck: RubberDuckConfig {
                 mode: match args
                     .rubber_duck_mode
@@ -573,6 +679,8 @@ impl Config {
             session_log_dir: args.session_log_dir,
             session_log_durable: args.session_log_durable,
             session_headers: args.session_headers,
+            compaction_mode,
+            file: file.resolve(route.model_id),
         })
     }
 
@@ -610,6 +718,48 @@ impl Config {
         })
     }
 
+    /// Returns the workspace organization id for the usage probe.
+    ///
+    /// The value comes from configuration only; it is never inferred from the
+    /// API key.
+    #[must_use]
+    pub fn org_id(&self) -> Option<&str> {
+        self.file.org_id.as_deref()
+    }
+
+    /// Validates configured request headers.
+    ///
+    /// Credential and transport-controlled headers are rejected: the config file
+    /// may add provider metadata, never replace authentication or framing.
+    fn config_headers(&self) -> Result<Vec<(HeaderName, HeaderValue)>, ConfigError> {
+        const RESERVED: [&str; 8] = [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "host",
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "x-api-key",
+        ];
+        let mut headers = Vec::with_capacity(self.file.headers.len());
+        for (name, value) in &self.file.headers {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ConfigError::ConfigFile { detail: format!("header name {name:?} is not valid") }
+            })?;
+            if RESERVED.iter().any(|reserved| *reserved == header_name.as_str()) {
+                return Err(ConfigError::ConfigFile {
+                    detail: format!("header {name:?} is reserved and cannot be configured"),
+                });
+            }
+            let header_value = HeaderValue::from_str(value).map_err(|_| {
+                ConfigError::ConfigFile { detail: format!("header {name:?} has an invalid value") }
+            })?;
+            headers.push((header_name, header_value));
+        }
+        Ok(headers)
+    }
+
     /// Builds the endpoint profile for the resolved route.
     ///
     /// The endpoint is the trusted catalog constant — no environment override can
@@ -627,11 +777,20 @@ impl Config {
     pub fn profile(&self) -> Result<EndpointProfile, ConfigError> {
         let mut profile =
             route_profile(&self.route, &self.system_prompt, self.timeouts, self.retry)?;
+        let mut headers = profile.headers.clone();
+        headers.extend(self.config_headers()?);
+        profile = profile.with_headers(headers);
         let mut extensions = self.reasoning_extensions().unwrap_or_else(|| serde_json::json!({}));
         self.provider_options.merge_into(
             &mut extensions,
             matches!(self.route.dialect, crate::routes::OpenCodeDialect::OpenAiResponses),
         );
+        if let Some(overlay) = self.file.body.as_ref() {
+            if !extensions.is_object() {
+                extensions = serde_json::json!({});
+            }
+            ee_chat_completions::deep_merge(&mut extensions, overlay);
+        }
         profile.extensions =
             extensions.as_object().is_some_and(|object| !object.is_empty()).then_some(extensions);
         profile =
@@ -645,7 +804,8 @@ impl Config {
         profile = profile
             .with_session_headers(self.session_headers)
             .with_session_header_style(ee_chat_completions::SessionHeaderStyle::OpenCode)
-            .with_user_agent(format!("ee-agent-opencode/{}", env!("CARGO_PKG_VERSION")));
+            .with_user_agent(format!("ee-agent-opencode/{}", env!("CARGO_PKG_VERSION")))
+            .with_compaction(self.route.supports_compaction());
         if let Some(field) = self.route.max_tokens_field() {
             let parsed = ee_chat_completions::MaxTokensField::parse(field).map_err(|_| {
                 ConfigError::InvalidCatalogMetadata {

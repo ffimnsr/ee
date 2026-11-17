@@ -124,6 +124,9 @@ pub enum ProviderError {
     /// A provider-side response continuation id is no longer known (expired or
     /// already consumed). The caller replays the full request once.
     StaleContinuation(String),
+    /// Provider-native compaction was requested on a route that does not
+    /// advertise it. The message names the provider, model, and route.
+    UnsupportedCompaction(String),
     /// A failure before or while the request crossed the network.
     Transport {
         /// Whether the provider received and ran the request.
@@ -250,6 +253,7 @@ impl ProviderError {
             | Self::ContextOverflow(_)
             | Self::PayloadTooLarge(_)
             | Self::ContentPolicy(_)
+            | Self::UnsupportedCompaction(_)
             | Self::StaleContinuation(_) => -32600,
             Self::BackendFailure(_) | Self::ClientRequestFailure(_) => -32603,
             Self::Cancellation => CODE_REQUEST_CANCELLED,
@@ -280,6 +284,9 @@ impl ProviderError {
             Self::PayloadTooLarge(detail) => format!("request payload too large: {detail}"),
             Self::QuotaExceeded { detail, .. } => format!("provider quota exhausted: {detail}"),
             Self::ContentPolicy(detail) => format!("content policy rejection: {detail}"),
+            Self::UnsupportedCompaction(detail) => {
+                format!("provider compaction is not supported: {detail}")
+            }
             Self::StaleContinuation(detail) => {
                 format!("stale response continuation: {detail}")
             }
@@ -380,6 +387,9 @@ impl fmt::Display for ProviderError {
             Self::PayloadTooLarge(detail) => write!(f, "request payload too large: {detail}"),
             Self::QuotaExceeded { detail, .. } => write!(f, "provider quota exhausted: {detail}"),
             Self::ContentPolicy(detail) => write!(f, "content policy rejection: {detail}"),
+            Self::UnsupportedCompaction(detail) => {
+                write!(f, "provider compaction is not supported: {detail}")
+            }
             Self::StaleContinuation(detail) => {
                 write!(f, "stale response continuation: {detail}")
             }

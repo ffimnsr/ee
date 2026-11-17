@@ -178,6 +178,7 @@ pub mod checkpoint_store;
 mod child_registry;
 pub mod command_intelligence;
 pub mod compaction;
+pub mod compaction_checkpoint;
 pub mod completion;
 pub mod config;
 pub mod context_budget;
@@ -308,11 +309,12 @@ pub use command_intelligence::{
     ValidationCommandMetadata, ValidationEscalation, ValidationScope,
 };
 pub use compaction::{
-    CompactPlan, CompactTurnReport, CompactionConfig, CompactionInput, CompactionStageCounts,
-    CompactionStrategy, DEFAULT_COMPACT_MAX_INPUT_BYTES, DEFAULT_COMPACTION_STRATEGY,
-    DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy, SESSION_SUMMARY_KEY,
-    build_compaction_context, build_compaction_prompt,
+    CompactPlan, CompactTurnReport, CompactionConfig, CompactionInput, CompactionMode,
+    CompactionStageCounts, CompactionStrategy, DEFAULT_COMPACT_MAX_INPUT_BYTES,
+    DEFAULT_COMPACTION_STRATEGY, DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy,
+    SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
 };
+pub use compaction_checkpoint::{CompactionCheckpoint, CompactionOutcome, MAX_CHECKPOINT_BYTES};
 pub use completion::{
     CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionState, EvidenceStatus,
     derive_completion,

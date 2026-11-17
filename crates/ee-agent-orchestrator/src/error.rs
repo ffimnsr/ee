@@ -46,6 +46,9 @@ pub enum OrchestratorError {
     /// The provider returned output the loop cannot interpret (for example an
     /// unknown stop reason). Never treated as a successful completion.
     InvalidProviderOutput(String),
+    /// Provider-native compaction was requested on a route that does not
+    /// advertise it. The message names the provider, model, and route.
+    UnsupportedCompaction(String),
 }
 
 impl OrchestratorError {
@@ -76,6 +79,9 @@ impl fmt::Display for OrchestratorError {
             Self::InvalidProviderOutput(reason) => {
                 write!(f, "invalid provider output: {reason}")
             }
+            Self::UnsupportedCompaction(reason) => {
+                write!(f, "provider compaction is not supported: {reason}")
+            }
         }
     }
 }
@@ -90,6 +96,9 @@ impl From<crate::model::ModelError> for OrchestratorError {
                 Self::ModelFailure(format!("invalid model response: {reason}"))
             }
             crate::model::ModelError::Cancelled => Self::Cancellation,
+            crate::model::ModelError::UnsupportedCompaction(reason) => {
+                Self::UnsupportedCompaction(reason)
+            }
             crate::model::ModelError::Provider(error) => match error {
                 ProviderError::ContextOverflow(detail) => Self::ContextOverflow(detail),
                 other => Self::ModelFailure(other.to_string()),
@@ -134,6 +143,9 @@ impl From<OrchestratorError> for ProviderError {
             OrchestratorError::InvalidProviderOutput(reason) => {
                 ProviderError::BackendFailure(format!("invalid provider output: {reason}"))
             }
+            OrchestratorError::UnsupportedCompaction(reason) => {
+                ProviderError::UnsupportedCompaction(reason)
+            }
         }
     }
 }
@@ -155,6 +167,10 @@ mod tests {
             (OrchestratorError::SubagentFailure("kid".into()), "subagent failure"),
             (OrchestratorError::Serialization("json".into()), "orchestrator serialization error"),
             (OrchestratorError::Stuck("repeated-model-response".into()), "stuck"),
+            (
+                OrchestratorError::UnsupportedCompaction("openai/gpt-5.5 (responses)".into()),
+                "provider compaction is not supported",
+            ),
         ]
     }
 

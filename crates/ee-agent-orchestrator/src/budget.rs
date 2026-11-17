@@ -96,6 +96,28 @@ pub struct BudgetSnapshot {
     pub output_tokens_max: Option<usize>,
 }
 
+impl Default for BudgetSnapshot {
+    /// Zero-use snapshot with no caps; the state before a turn starts.
+    fn default() -> Self {
+        Self {
+            iterations_used: 0,
+            iterations_max: None,
+            model_calls_used: 0,
+            model_calls_max: None,
+            tool_calls_used: 0,
+            tool_calls_max: None,
+            subagents_used: 0,
+            subagents_max: 0,
+            output_bytes_used: 0,
+            output_bytes_max: None,
+            input_tokens_used: None,
+            input_tokens_max: None,
+            output_tokens_used: None,
+            output_tokens_max: None,
+        }
+    }
+}
+
 impl std::fmt::Display for BudgetSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let opt = |v: &Option<usize>| v.map_or_else(|| "?".to_string(), |n| n.to_string());

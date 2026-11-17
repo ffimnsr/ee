@@ -1,6 +1,26 @@
 //! `impl OrchestratorRuntime` methods: compact.
 use super::*;
 
+use ee_agent_acp_server::ProviderError;
+
+use crate::compaction::CompactionStageCounts;
+use crate::memory_compaction::CompactionReport;
+use crate::model::{CompactionCheckpoint, ModelError};
+use crate::usage::ModelUsage;
+
+/// Everything one compaction turn commits after its summary succeeds.
+struct CompactionCommit<'a> {
+    ctx: &'a PromptContext,
+    sink: &'a UpdateSink,
+    original_memory: MemoryStore,
+    staged_memory: MemoryStore,
+    deterministic: CompactionReport,
+    counts: CompactionStageCounts,
+    summary: &'a str,
+    retained_context_bytes: usize,
+    usage: ModelUsage,
+}
+
 impl OrchestratorRuntime {
     /// Runs one strategic turn: selects a `TurnStrategy` from observed
     /// context, records the decision as an event, executes the strategy
@@ -235,7 +255,7 @@ impl OrchestratorRuntime {
         let deterministic = plan.deterministic;
         let counts = plan.counts;
         let context = plan.context;
-        let mut staged_memory = plan.staged_memory;
+        let staged_memory = plan.staged_memory;
         // 3. One model call, no tools, bounded by the per-turn timeout and
         //    observing cancellation before and after.
         let mut system = plan.prompt;
@@ -260,13 +280,118 @@ impl OrchestratorRuntime {
                 || "Compress the session into a continuation summary.".to_string(),
                 str::to_string,
             );
+        let session_id = ctx.session_id.to_string();
+        // Provider-native compaction runs first when configured. `Auto` keeps the
+        // local path as the fallback, so a route that lacks the capability still
+        // compacts instead of failing the turn.
+        if self.config.compaction.mode.uses_provider() {
+            let mut messages = recent_messages.clone();
+            if messages.is_empty() {
+                messages = vec![
+                    ModelMessage::text(ModelRole::System, system.clone()),
+                    ModelMessage::text(ModelRole::User, user_prompt.clone()),
+                ];
+            }
+            let task = TaskNode::new(
+                TaskId::new("compact-session"),
+                "compact session",
+                "provider-native session compaction",
+            );
+            self.budget
+                .lock()
+                .expect("budget tracker poisoned")
+                .reset_deadline(self.config.turn_timeout);
+            {
+                let mut budget = self.budget.lock().expect("budget tracker poisoned");
+                budget.try_reserve_model_call()?;
+                budget.emit(&events);
+            }
+            events.record(OrchestratorEvent::ModelRequested { iteration: 1 });
+            let request = ModelRequest::new(messages, Vec::new(), budget_snapshot, task)
+                .with_model_id(Some(DEFAULT_MODEL_ID.to_string()));
+            let model = self.models.default_adapter()?;
+            let call = model.compact(request, cancel.clone());
+            let compacted = match if let Some(limit) = self.config.turn_timeout {
+                tokio::time::timeout(limit, call).await
+            } else {
+                Ok(call.await)
+            } {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(OrchestratorError::Timeout(
+                        "provider compaction exceeded the turn timeout".into(),
+                    ));
+                }
+            };
+            match compacted {
+                Ok(outcome) => {
+                    events.record(OrchestratorEvent::ModelResponded { iteration: 1 });
+                    {
+                        let mut budget = self.budget.lock().expect("budget tracker poisoned");
+                        budget.record_model_usage(
+                            outcome.summary_text().len(),
+                            outcome.usage.input_tokens,
+                            outcome.usage.output_tokens,
+                        )?;
+                        budget.emit(&events);
+                    }
+                    if let Some(input_tokens) = outcome.usage.input_tokens {
+                        let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
+                            input_tokens as u64,
+                            self.config.context_window_tokens,
+                        )));
+                    }
+                    if *cancel.borrow() {
+                        return Err(OrchestratorError::Cancellation);
+                    }
+                    if let Some(checkpoint) = outcome.checkpoint.clone() {
+                        self.remember_compaction_checkpoint(&session_id, checkpoint);
+                    }
+                    let summary = outcome.summary_text();
+                    if summary.trim().is_empty() {
+                        return Err(OrchestratorError::InvalidState(
+                            "provider compaction returned no summary text; memory unchanged".into(),
+                        ));
+                    }
+                    return self.commit_compaction_summary(CompactionCommit {
+                        ctx: &ctx,
+                        sink: &sink,
+                        original_memory,
+                        staged_memory,
+                        deterministic,
+                        counts,
+                        summary: summary.trim(),
+                        retained_context_bytes: context.len(),
+                        usage: outcome.usage,
+                    });
+                }
+                Err(ModelError::UnsupportedCompaction(detail))
+                    if self.config.compaction.mode == crate::compaction::CompactionMode::Auto =>
+                {
+                    events.record(OrchestratorEvent::Error {
+                        error: format!(
+                            "provider compaction unavailable; using local summary: {detail}"
+                        ),
+                    });
+                }
+                Err(ModelError::Provider(ProviderError::UnsupportedCompaction(detail)))
+                    if self.config.compaction.mode == crate::compaction::CompactionMode::Auto =>
+                {
+                    events.record(OrchestratorEvent::Error {
+                        error: format!(
+                            "provider compaction endpoint is unavailable; using local summary: {detail}"
+                        ),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let transcript = vec![
             ModelMessage::text(ModelRole::System, system),
             ModelMessage::text(ModelRole::User, user_prompt),
         ];
         // Fail closed before the compaction model call: the durable log must
         // hold the effective request.
-        let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             let log = store.log_for(&session_id);
             log.begin_turn();
@@ -341,8 +466,42 @@ impl OrchestratorRuntime {
                 "compaction summary was empty; memory unchanged".into(),
             ));
         }
+        self.commit_compaction_summary(CompactionCommit {
+            ctx: &ctx,
+            sink: &sink,
+            original_memory,
+            staged_memory,
+            deterministic,
+            counts,
+            summary,
+            retained_context_bytes: context.len(),
+            usage: response.usage,
+        })
+    }
+
+    /// Stores the redacted continuation summary and emits the bounded report.
+    ///
+    /// Shared by the local and provider-native paths so memory commit, the
+    /// durable log, and the ACP report stay identical regardless of where the
+    /// summary came from.
+    fn commit_compaction_summary(
+        &self,
+        commit: CompactionCommit<'_>,
+    ) -> Result<PromptResult, OrchestratorError> {
+        let CompactionCommit {
+            ctx,
+            sink,
+            original_memory,
+            staged_memory,
+            deterministic,
+            counts,
+            summary,
+            retained_context_bytes,
+            usage,
+        } = commit;
         // 4. Store the redacted summary as model-derived session memory;
         //    insertion is additive and never touches protected keys.
+        let mut staged_memory = staged_memory;
         let guard = SensitiveDataGuard::new();
         let item = MemoryItem::new(SESSION_SUMMARY_KEY, guard.redact(summary));
         let summary_bytes = item.byte_size();
@@ -359,7 +518,7 @@ impl OrchestratorRuntime {
             }
             *memory = staged_memory;
         }
-        let retained_context_bytes = context.len();
+        let session_id = ctx.session_id.to_string();
         if let Some(store) = &self.session_logs {
             let _ = store.log_for(&session_id).record_compaction(
                 counts.pruned_tool_results,
@@ -379,6 +538,14 @@ impl OrchestratorRuntime {
             dropped_messages: counts.dropped_messages,
         };
         let _ = sink.agent_message_chunk("compact-report", report.to_status_text());
-        Ok(prompt_result_with_usage(ee_agent_protocol::StopReason::EndTurn, response.usage))
+        Ok(prompt_result_with_usage(ee_agent_protocol::StopReason::EndTurn, usage))
+    }
+
+    /// Retains one opaque provider checkpoint for later replay in this session.
+    fn remember_compaction_checkpoint(&self, session_id: &str, checkpoint: CompactionCheckpoint) {
+        self.compaction_checkpoints
+            .lock()
+            .expect("compaction checkpoint map poisoned")
+            .insert(session_id.to_string(), checkpoint);
     }
 }

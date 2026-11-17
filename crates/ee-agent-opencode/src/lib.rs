@@ -39,6 +39,12 @@
 //! - [`discovery`] is the bounded, display-only `/models` probe behind
 //!   `--discover-models`: one explicit local action against the trusted surface
 //!   root whose output can never select an endpoint, dialect, or route.
+//! - [`config_file`] is the optional `agent-opencode.json` overlay: default and
+//!   small-model selection, disabled models, allowlisted `${VAR}` interpolation,
+//!   and bounded header/body overlays. Credential and endpoint overrides are
+//!   rejected.
+//! - [`usage`] is the explicit `--usage` probe for workspace budgets and the Go
+//!   meter. No startup path calls it, and no result is cached.
 //!
 //! `OPENCODE_API_KEY` is never read here: route resolution performs no I/O, and
 //! no endpoint can be supplied through the environment, so a rejected model
@@ -48,6 +54,7 @@ pub mod adapter;
 pub mod catalog;
 pub mod chat_completions;
 pub mod config;
+pub mod config_file;
 pub mod critic;
 pub mod dialect;
 pub mod discovery;
@@ -56,3 +63,4 @@ pub mod messages;
 pub mod reasoning;
 pub mod responses;
 pub mod routes;
+pub mod usage;

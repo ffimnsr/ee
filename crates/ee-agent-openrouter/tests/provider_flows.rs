@@ -61,6 +61,8 @@ fn test_config_with(
         session_log_dir: None,
         session_log_durable: false,
         session_headers: true,
+        compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
+        file: Default::default(),
     }
 }
 

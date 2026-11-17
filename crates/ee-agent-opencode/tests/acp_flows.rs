@@ -1029,3 +1029,36 @@ async fn session_affinity_reaches_the_routed_profile_headers() {
     assert_eq!(value("x-opencode-project"), Some("project"));
     assert!(value("user-agent").is_some(), "user agent is sent");
 }
+
+/// Gap 20: the adapter refuses provider compaction on a route whose catalog row
+/// does not advertise it, before any request or credential header exists.
+#[tokio::test]
+async fn provider_compaction_is_refused_on_an_unsupported_route() {
+    use ee_agent_orchestrator::{
+        BudgetSnapshot, ModelAdapter, ModelError, ModelRequest, TaskId, TaskNode,
+    };
+
+    let config = test_config(OpenCodeSurface::Zen, "claude-sonnet-5");
+    assert!(!config.profile().expect("profile").compaction);
+    let adapter = ee_agent_opencode::adapter::OpenCodeModelAdapter::new(&config).expect("adapter");
+    let request = ModelRequest::new(
+        Vec::new(),
+        Vec::new(),
+        BudgetSnapshot::default(),
+        TaskNode::new(TaskId::new("compact"), "compact", "compact"),
+    );
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+
+    let error = adapter.compact(request, receiver).await.expect_err("unsupported route");
+    assert!(matches!(error, ModelError::UnsupportedCompaction(_)), "{error}");
+    assert!(error.to_string().contains("claude-sonnet-5"), "{error}");
+}
+
+/// Gap 20: a catalog route that advertises compaction reaches the profile flag
+/// the runtime gates on.
+#[test]
+fn supported_routes_advertise_compaction_in_the_profile() {
+    let config = test_config(OpenCodeSurface::Zen, "gpt-5.5");
+    assert!(config.route.supports_compaction());
+    assert!(config.profile().expect("profile").compaction);
+}

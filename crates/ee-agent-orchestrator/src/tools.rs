@@ -1143,6 +1143,7 @@ fn bridge_error(error: ProviderError) -> ToolResult {
         | ProviderError::PayloadTooLarge(_) => ToolErrorKind::Backend,
         ProviderError::ContentPolicy(_) => ToolErrorKind::InvalidArguments,
         ProviderError::StaleContinuation(_) => ToolErrorKind::Backend,
+        ProviderError::UnsupportedCompaction(_) => ToolErrorKind::Backend,
     };
     ToolResult::failure(kind, error.to_string())
 }

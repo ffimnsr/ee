@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::budget::BudgetSnapshot;
+pub use crate::compaction_checkpoint::{CompactionCheckpoint, CompactionOutcome};
 pub use crate::context_budget::{
     COMPACTION_SUMMARY_RESERVE_DIVISOR, COMPACTION_SUMMARY_RESERVE_FLOOR, ModelLimits,
     OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX, OUTPUT_LIMIT_MIN, PROMPT_BYTES_PER_TOKEN,
@@ -150,6 +151,12 @@ pub enum ModelContent {
         /// Base64-encoded payload for a binary resource.
         blob: Option<String>,
     },
+    /// Opaque provider compaction checkpoint, replayed verbatim.
+    ///
+    /// Only the codec that produced it understands the payload; every other
+    /// codec ignores the part, so a checkpoint never reaches a text prompt or a
+    /// different provider.
+    CompactionCheckpoint(CompactionCheckpoint),
 }
 
 /// One normalized transcript message.
@@ -745,6 +752,32 @@ impl Transcript {
         self.log_ids.insert(0, id);
     }
 
+    /// Prepends an opaque provider compaction checkpoint unless an identical
+    /// one is already present.
+    ///
+    /// The checkpoint stands in for the conversation prefix the provider
+    /// already compacted, so it must be the first item the provider sees. It
+    /// travels as its own content part and every codec that does not understand
+    /// it ignores the message entirely.
+    pub fn ensure_compaction_checkpoint(&mut self, checkpoint: &CompactionCheckpoint) {
+        let present = self.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ModelContent::CompactionCheckpoint(existing) if existing == checkpoint
+                )
+            })
+        });
+        if present {
+            return;
+        }
+        let message = ModelMessage::new(ModelRole::System)
+            .with_content(vec![ModelContent::CompactionCheckpoint(checkpoint.clone())]);
+        self.messages.insert(0, message);
+        let id = self.record_message_at(0, None);
+        self.log_ids.insert(0, id);
+    }
+
     /// Appends the assistant message for a model response: text stays in
     /// content, reasoning stays in the separate reasoning summary, and tool
     /// calls are kept so the next request can replay the turn. Empty responses
@@ -1011,6 +1044,9 @@ pub enum ModelError {
     /// The provider returned a typed failure the loop can act on (a context
     /// overflow triggers compaction, a quota failure reports its reset time).
     Provider(ee_agent_acp_server::ProviderError),
+    /// The caller forced provider-native compaction on a route that does not
+    /// advertise it. The message names the provider, model, and route.
+    UnsupportedCompaction(String),
 }
 
 impl std::fmt::Display for ModelError {
@@ -1020,6 +1056,9 @@ impl std::fmt::Display for ModelError {
             Self::InvalidResponse(message) => write!(f, "invalid model response: {message}"),
             Self::Cancelled => f.write_str("model call cancelled"),
             Self::Provider(error) => write!(f, "provider failure: {error}"),
+            Self::UnsupportedCompaction(message) => {
+                write!(f, "provider compaction is not supported: {message}")
+            }
         }
     }
 }
@@ -1060,6 +1099,22 @@ pub trait ModelAdapter: Send + Sync + 'static {
             }
             Ok(response)
         })
+    }
+
+    /// Runs one provider-native compaction request.
+    ///
+    /// The default fails closed: a route that does not implement provider
+    /// compaction must say so instead of silently returning a local summary.
+    /// Adapters that support native compaction return the provider replacement
+    /// transcript plus the opaque checkpoint it carries.
+    fn compact(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> ModelFuture<Result<CompactionOutcome, ModelError>> {
+        let _ = cancel;
+        let model = request.model_id.unwrap_or_else(|| String::from("unknown model"));
+        Box::pin(async move { Err(ModelError::UnsupportedCompaction(model)) })
     }
 }
 

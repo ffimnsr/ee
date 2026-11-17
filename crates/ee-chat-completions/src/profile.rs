@@ -319,6 +319,10 @@ pub struct EndpointProfile {
     /// Emit raw SSE frames as `StreamDelta::Raw`. Debug-only: frames may carry
     /// user data, so this stays off unless a caller opts in.
     pub raw_stream_events: bool,
+    /// Whether the catalog advertises provider-native compaction on this route.
+    /// Off by default: an unadvertised route must never receive a `/compact`
+    /// request.
+    pub compaction: bool,
 }
 
 /// How provider-specific session header names are spelled.
@@ -375,6 +379,7 @@ impl EndpointProfile {
             user_agent: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
             store_responses: false,
             raw_stream_events: false,
+            compaction: false,
         }
     }
 
@@ -389,6 +394,13 @@ impl EndpointProfile {
     #[must_use]
     pub fn with_raw_stream_events(mut self, enabled: bool) -> Self {
         self.raw_stream_events = enabled;
+        self
+    }
+
+    /// Declares whether the route advertises provider-native compaction.
+    #[must_use]
+    pub fn with_compaction(mut self, enabled: bool) -> Self {
+        self.compaction = enabled;
         self
     }
 

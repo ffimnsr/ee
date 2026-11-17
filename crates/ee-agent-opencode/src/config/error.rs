@@ -139,6 +139,37 @@ pub enum ConfigError {
         /// Rejected knob name.
         knob: &'static str,
     },
+    /// `OPENCODE_COMPACTION_MODE` was not one of the documented modes.
+    UnsupportedCompactionMode {
+        /// The rejected value, after trimming.
+        value: String,
+        /// Guidance naming the accepted values.
+        detail: String,
+    },
+    /// Provider-native compaction was forced on a route that does not advertise it.
+    UnsupportedCompaction {
+        /// Surface serving the route.
+        surface: OpenCodeSurface,
+        /// Catalog model id.
+        model_id: String,
+        /// Protocol route the model speaks.
+        route: &'static str,
+    },
+    /// The agent configuration file is malformed or references a rejected value.
+    ConfigFile {
+        /// Bounded parser diagnostic naming the key or variable, never a value.
+        detail: String,
+    },
+    /// The selected model is disabled in the configuration file.
+    DisabledModel {
+        /// Catalog model id.
+        model_id: String,
+    },
+    /// Free models are disabled and the selected model has no cost.
+    FreeModelDisabled {
+        /// Catalog model id.
+        model_id: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -233,6 +264,28 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "model {model_id:?} does not document the {knob} sampling knob: unset it or pick a \
                  model that declares {knob} support"
+            ),
+            Self::UnsupportedCompactionMode { value, detail } => {
+                write!(formatter, "unsupported compaction mode {value:?}: {detail}")
+            }
+            Self::UnsupportedCompaction { surface, model_id, route } => write!(
+                formatter,
+                "Provider compaction is not supported by OpenCode {}/{model_id} ({route}): use \
+                 OPENCODE_COMPACTION_MODE=local or auto",
+                surface.as_str()
+            ),
+            Self::ConfigFile { detail } => {
+                write!(formatter, "invalid agent configuration: {detail}")
+            }
+            Self::DisabledModel { model_id } => write!(
+                formatter,
+                "model {model_id:?} is disabled in the agent configuration: enable it or pick \
+                 another model"
+            ),
+            Self::FreeModelDisabled { model_id } => write!(
+                formatter,
+                "model {model_id:?} is free and free models are disabled: unset \
+                 OPENCODE_DISABLE_FREE_MODELS or pick a paid model"
             ),
         }
     }

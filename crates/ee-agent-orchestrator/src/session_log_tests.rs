@@ -36,6 +36,22 @@ fn sample_budget() -> BudgetSnapshot {
 }
 
 #[test]
+fn compaction_checkpoints_are_never_written_to_the_log_body() {
+    let checkpoint = crate::compaction_checkpoint::CompactionCheckpoint::new(
+        "openai",
+        Some(String::from("cmp-1")),
+        "c2VjcmV0",
+    )
+    .expect("checkpoint");
+    let message = ModelMessage::new(ModelRole::System)
+        .with_content(vec![crate::model::ModelContent::CompactionCheckpoint(checkpoint)]);
+    let loggable = crate::session_log::loggable_message(&message);
+    let text = serde_json::to_string(loggable.as_ref()).expect("serializes");
+    assert!(!text.contains("c2VjcmV0"), "encrypted payload is not logged: {text}");
+    assert!(text.contains("opaque compaction checkpoint cmp-1"), "{text}");
+}
+
+#[test]
 fn message_bodies_are_content_addressed_and_replay_in_order() {
     let log = SessionLog::in_memory("s-1");
     let first = log.record_message(&message("hello"), None).expect("records");

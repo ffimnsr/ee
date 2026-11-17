@@ -17,6 +17,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, 
 use serde_json::Value;
 
 use crate::profile::{BearerToken, EndpointProfile, RequestEncoding, RetryPolicy, TokenSource};
+use crate::stream_meta::{chunk_timeout, is_event_stream};
 use crate::wire::{
     AssistantTurn, SseDecoder, StreamAccumulator, StreamDelta, classify_status_error,
     decode_message, emit_finished_deltas, is_retryable, is_timeout, is_unreachable, request_body,
@@ -156,25 +157,6 @@ async fn next_chunk(
     read.map_err(|detail| {
         ProviderError::BackendFailure(format!("{label} streaming response failed: {detail}"))
     })
-}
-
-/// Typed idle-chunk timeout.
-#[must_use]
-pub fn chunk_timeout(label: &str) -> ProviderError {
-    ProviderError::Transport {
-        delivery: Delivery::Ambiguous,
-        code: Some(String::from("TimeoutChunk")),
-        detail: format!("{label} stream produced no data within the chunk budget"),
-    }
-}
-
-/// Whether a response body is an SSE stream.
-#[must_use]
-pub fn is_event_stream(headers: &HeaderMap) -> bool {
-    headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|content_type| content_type.starts_with("text/event-stream"))
 }
 
 /// Appends `chunk` to `buffer`, failing closed beyond `limit` bytes.

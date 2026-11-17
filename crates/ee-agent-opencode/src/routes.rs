@@ -80,6 +80,21 @@ impl OpenCodeSurface {
             _ => Err(ConfigError::UnsupportedSurface { value: value.to_string() }),
         }
     }
+
+    /// Documented subscription-quota endpoint for this surface, when one is
+    /// published.
+    ///
+    /// The quota URL is modelled separately from the chat root because the Go
+    /// meter lives on `/zen/go/v1/usage` even though chat traffic uses the
+    /// `/inference/go/...` family. `None` means the surface publishes no quota
+    /// endpoint.
+    #[must_use]
+    pub const fn quota_url(self) -> Option<&'static str> {
+        match self {
+            Self::Go => Some("https://opencode.ai/zen/go/v1/usage"),
+            Self::Zen => None,
+        }
+    }
 }
 
 /// Wire dialect a model speaks on its surface.
@@ -201,6 +216,12 @@ impl OpenCodeRoute {
         } else {
             Some(self.entry.max_tokens_field)
         }
+    }
+
+    /// Whether the route advertises provider-native compaction.
+    #[must_use]
+    pub const fn supports_compaction(&self) -> bool {
+        self.entry.compaction
     }
 
     /// Every reasoning variant this route exposes.

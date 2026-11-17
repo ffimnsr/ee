@@ -23,19 +23,22 @@ use std::collections::BTreeMap;
 
 use crate::{
     AssistantTurn, CacheDirective, DeltaSink, EndpointProfile, EndpointRequest, EndpointTransport,
-    SseControl, StreamDelta, StreamFuture, ToolCall, Usage, content_text,
-    drive_sse_with_chunk_timeout, emit_finished_deltas, is_event_stream, openai_request_ttl,
-    response_from_turn, seal_response, tool_call_id_of, usage_from_tokens, with_buffered_retry,
-    with_stream_retry,
+    SseControl, StreamDelta, StreamFuture, ToolCall, Usage, drive_sse_with_chunk_timeout,
+    emit_finished_deltas, is_event_stream, openai_request_ttl, response_from_turn, seal_response,
+    usage_from_tokens, with_buffered_retry, with_stream_retry,
 };
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, SessionContext,
-    ToolCallControl, ToolDefinition, estimate_prompt_tokens,
+    GenerationOptions, ModelMessage, ModelResponse, ModelRole, SessionContext, ToolCallControl,
+    ToolDefinition, estimate_prompt_tokens,
 };
 use serde_json::{Value, json};
 
 use crate::merge::deep_merge;
+use crate::responses_encode::{
+    REASONING_ITEMS, compaction_items, function_call_items, input_item, replay_reasoning_items,
+    tools_array,
+};
 use crate::responses_wire::{
     continuation_or_codec_error, error_detail, finish_reason, hosted_tool_call, hosted_tool_name,
     output_index, prompt_cache_key, responses_tool_choice, started_tool,
@@ -44,7 +47,7 @@ use crate::wire::codec_error;
 
 /// Applies the catalog modality gate and media-size budget before a request
 /// body exists.
-fn guarded_transcript<'a>(
+pub(crate) fn guarded_transcript<'a>(
     profile: &EndpointProfile,
     transcript: &'a [ModelMessage],
 ) -> Result<Cow<'a, [ModelMessage]>, ProviderError> {
@@ -140,6 +143,14 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         if index < input.input_from {
             continue;
         }
+        // A provider compaction checkpoint replaces the conversation prefix, so
+        // it is replayed as its own top-level item and the message carrying it
+        // renders nothing else.
+        let checkpoints = compaction_items(message);
+        if !checkpoints.is_empty() {
+            items.extend(checkpoints);
+            continue;
+        }
         // Reasoning items precede the assistant item they belong to: the
         // protocol replays them as their own input items, in generation order.
         if message.role == ModelRole::Assistant {
@@ -189,20 +200,7 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         }
     }
     if !input.tools.is_empty() {
-        body["tools"] = Value::Array(
-            input
-                .tools
-                .iter()
-                .map(|definition| {
-                    json!({
-                        "type": "function",
-                        "name": definition.name,
-                        "description": definition.description,
-                        "parameters": definition.input_schema,
-                    })
-                })
-                .collect(),
-        );
+        body["tools"] = tools_array(input.tools);
         body["tool_choice"] = responses_tool_choice(&input.tool_control.choice);
         if let Some(parallel) = input.tool_control.parallel {
             body["parallel_tool_calls"] = Value::from(parallel);
@@ -216,175 +214,6 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         deep_merge(&mut body, extensions);
     }
     body
-}
-
-/// Converts one transcript message into an input item.
-///
-/// Messages whose rendered text is empty are omitted: Responses rejects empty
-/// text parts.
-fn input_item(message: &ModelMessage) -> Option<Value> {
-    // A provider-executed result is already part of the provider's response; a
-    // synthetic `function_call_output` would reference a call it never saw as a
-    // local function.
-    if message.role == ModelRole::Tool
-        && message.metadata.contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
-    {
-        return None;
-    }
-    let text = content_text(&message.content);
-    match message.role {
-        ModelRole::Tool => Some(json!({
-            "type": "function_call_output",
-            "call_id": tool_call_id_of(&message.content),
-            "output": text,
-        })),
-        ModelRole::User | ModelRole::Subagent | ModelRole::System | ModelRole::Assistant => {
-            let parts = response_parts(message.role, &message.content);
-            if parts.is_empty() {
-                return None;
-            }
-            let role = match message.role {
-                ModelRole::System => "system",
-                ModelRole::Assistant => "assistant",
-                _ => "user",
-            };
-            Some(json!({
-                "type": "message",
-                "role": role,
-                "content": parts,
-            }))
-        }
-    }
-}
-
-/// Builds Responses content parts; text keeps the dialect's part names and
-/// image payloads become `input_image` items.
-fn response_parts(role: ModelRole, content: &[ModelContent]) -> Vec<Value> {
-    let text_part = if role == ModelRole::Assistant { "output_text" } else { "input_text" };
-    let mut parts = Vec::new();
-    for block in content {
-        match block {
-            ModelContent::Text(text) => push_response_text(&mut parts, text_part, text),
-            ModelContent::ToolResult { result, .. } => {
-                push_response_text(&mut parts, text_part, &result.summary_text())
-            }
-            ModelContent::FileReference { path } => {
-                push_response_text(&mut parts, text_part, &format!("[file:{path}]"))
-            }
-            ModelContent::TerminalReference { terminal_id } => {
-                push_response_text(&mut parts, text_part, &format!("[terminal:{terminal_id}]"))
-            }
-            ModelContent::Image { data, mime_type, .. } => {
-                parts.push(input_image(data, mime_type));
-            }
-            ModelContent::Audio { mime_type, .. } => {
-                push_response_text(&mut parts, text_part, &format!("[audio:{mime_type}]"))
-            }
-            ModelContent::EmbeddedResource { uri, mime_type, text, blob } => match (text, blob) {
-                (Some(text), _) => {
-                    let rendered = format!("[resource:{uri}]\n{text}");
-                    push_response_text(&mut parts, text_part, &rendered)
-                }
-                (None, Some(blob)) => match mime_type.as_deref() {
-                    Some(mime) if mime.starts_with("image/") => {
-                        parts.push(input_image(blob, mime));
-                    }
-                    mime => push_response_text(
-                        &mut parts,
-                        text_part,
-                        &format!("[resource:{uri}:{}]", mime.unwrap_or("application/octet-stream")),
-                    ),
-                },
-                (None, None) => {
-                    push_response_text(&mut parts, text_part, &format!("[resource:{uri}]"))
-                }
-            },
-            _ => {} // future content kinds stay out of the request
-        }
-    }
-    parts
-}
-
-fn push_response_text(parts: &mut Vec<Value>, part_type: &str, text: &str) {
-    if !text.is_empty() {
-        parts.push(json!({ "type": part_type, "text": text }));
-    }
-}
-
-fn input_image(data: &str, mime_type: &str) -> Value {
-    json!({
-        "type": "input_image",
-        "image_url": format!("data:{mime_type};base64,{data}"),
-    })
-}
-
-/// Replays the assistant tool calls a turn's observations answer.
-///
-/// Responses keeps a function call as its own input item, so the assistant turn
-/// is kept in the transcript and re-encoded here; a `function_call_output`
-/// without its matching call is rejected.
-fn function_call_items(message: &ModelMessage) -> Vec<Value> {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ModelContent::ToolCall { tool_call_id, name, arguments } => {
-                // Hosted calls are replayed by the provider that ran them, not as
-                // local function calls.
-                if message.metadata.contains_key(&format!(
-                    "{}{tool_call_id}",
-                    ee_agent_orchestrator::PROVIDER_EXECUTED_METADATA_PREFIX
-                )) {
-                    return None;
-                }
-                Some(json!({
-                    "type": "function_call",
-                    "call_id": tool_call_id,
-                    "name": name,
-                    "arguments": arguments.to_string(),
-                }))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// Key holding the replayable Responses reasoning items.
-const REASONING_ITEMS: &str = "reasoning_items";
-
-/// Reasoning input items a transcript message may replay to `model`.
-///
-/// Only documented fields are replayed: `id` addresses the item, `summary`
-/// carries its text, and `encrypted_content` is the stateless proof of
-/// generation that lets the model resume a tool loop without server storage.
-fn replay_reasoning_items(message: &ModelMessage, model: &str) -> Vec<Value> {
-    let Some(state) = message.native.as_ref().and_then(|native| crate::replayable(native, model))
-    else {
-        return Vec::new();
-    };
-    let Some(items) = state.get(REASONING_ITEMS).and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut replayed = Vec::new();
-    for item in items {
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            continue;
-        }
-        let mut replay = json!({ "type": "reasoning", "summary": [] });
-        if let Some(summary) = item.get("summary").filter(|summary| summary.is_array()) {
-            replay["summary"] = summary.clone();
-        }
-        for key in ["id", "encrypted_content"] {
-            if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
-                replay[key] = value.clone();
-            }
-        }
-        let has_summary = replay["summary"].as_array().is_some_and(|summary| !summary.is_empty());
-        if has_summary || replay.get("encrypted_content").is_some() {
-            replayed.push(replay);
-        }
-    }
-    replayed
 }
 
 /// Decodes a buffered Responses payload into a normalized response.
@@ -757,7 +586,7 @@ impl StreamDecoder {
 
 /// One streaming Responses round trip over an authorized endpoint.
 pub struct ResponsesCodec {
-    transport: EndpointTransport,
+    pub(crate) transport: EndpointTransport,
 }
 
 impl ResponsesCodec {

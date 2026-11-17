@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–19 implemented and tested (2026-11-17). Gaps 20–24 (Part 5 second-pass findings) remain open.
+**Status:** Gaps 1–22 implemented and tested (2026-11-17). Gaps 23–24 (Part 5 second-pass findings) remain open.
 
 ## Execution Overview
 
@@ -2094,32 +2094,39 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 20 — Provider-Side Compaction and Checkpoints
 
-- [ ] Use provider-native compaction where available and replay encrypted checkpoints opaquely.
-  - [ ] **Problem:**
+**Landed (Gap 20):** `ee-agent-orchestrator/src/compaction_checkpoint.rs` adds the opaque `CompactionCheckpoint` (bounded, redacted `Debug`) and `CompactionOutcome`; `ModelContent::CompactionCheckpoint` travels as a transcript part and is replayed by the Responses encoder only. `ee-chat-completions/src/responses_compact.rs` owns the `/responses/compact` body and buffer decoder (exactly one checkpoint required, oversized payloads rejected without echo), with `ResponsesCodec::compact` and the `ModelAdapter::compact` default that fails closed. `EndpointProfile::compaction` and the generated catalog `compaction` flag gate every call; the OpenCode generator derives it from the OpenAI Responses provider package (with a curated `sources.json` allowlist) and OpenRouter rows never advertise it. `CompactionConfig.mode` (`local` default, `native`, `auto`) runs provider compaction first, stores the checkpoint per session, replays it as the leading transcript item, and falls back to the local summary path in `auto` mode. `ProviderError::UnsupportedCompaction` names the provider, model, and route at startup and runtime.
+
+
+- [x] Use provider-native compaction where available and replay encrypted checkpoints opaquely.
+  - [x] **Problem:**
     - The reference implements `/responses/compact` with `prompt_cache_retention`, `prompt_cache_options {mode, ttl}`, `service_tier`, `include`, and `tools`, and decodes encrypted compaction items into `CompactionPart`s that are replayed byte-identically (`packages/ai/src/protocols/utils/responses-compaction.ts`, `.../responses-checkpoint.ts`).
     - Routes without compaction support fail with an explicit `UnsupportedCompactionError` naming provider and model (`packages/core/src/model-resolver.ts`).
     - Our compaction is purely local summarization (`crates/ee-agent-orchestrator/src/compaction/`), and neither provider crate has a compaction capability or an opaque checkpoint part.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a `compaction` capability to the generated catalog (Gap 24) for routes that support it.
     - Implement the compact request/response in a shared module with the Responses codec, storing the encrypted checkpoint as an opaque transcript part (never parsed, never logged).
     - Fall back to local summarization when the capability is absent, and emit the reference's explicit unsupported diagnostic when a caller forces provider compaction on an unsupported route.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - An encrypted checkpoint round-trips byte-identically across two turns (hash equality test).
     - Unsupported routes take the local path with a single bounded notice.
     - Checkpoint content never appears in logs, metrics, or error messages.
 
 ### Gap 21 — Provider Auth, Credentials, and Configuration Surface
 
-- [ ] Support the provider configuration surface a first-class OpenCode/OpenRouter client is expected to have.
-  - [ ] **Problem:**
+**Landed (Gap 21):** `ee-chat-completions/src/config_file.rs` provides the bounded (`1 MiB`) JSON loader and allowlisted `${VAR}` interpolation (fail-closed, names never values). Each agent has a typed file: `ee-agent-opencode/src/config_file.rs` (`$XDG_CONFIG_HOME/ee/agents/agent-opencode.json`) and `ee-agent-openrouter/src/config_file.rs` (`.../agent-openrouter.json`), covering default/small-model selection, per-model `disabled` and `variant`, provider and model `headers`/`body` overlays (deep-merged), and OpenRouter endpoint overrides. OpenCode rejects any `baseURL` key; credential/transport headers are rejected everywhere. `OPENCODE_DISABLE_FREE_MODELS`/`disable_free_models` filter free rows. OAuth and runtime package installation stay out of scope. Test builds (`cfg(test)` or `test-utils`) never read the developer's real config tree; fixtures use `load_from` /
+`from_args_and_dotenv_with_file`.
+
+
+- [x] Support the provider configuration surface a first-class OpenCode/OpenRouter client is expected to have.
+  - [x] **Problem:**
     - The reference supports OAuth login (`packages/core/src/oauth`), a credential store, `apiKey: false` providers, provider env arrays with variable interpolation, provider packages installed at runtime, per-provider and per-model `headers`/`body` overlays, model `disabled`, default and small-model selection, free-model filtering (`OPENCODE_DISABLE_FREE_MODELS`), and model status/release ordering (`packages/core/src/model.ts:232`, `packages/schema/src/config/provider.ts`).
     - Our binaries read one API key from one environment variable, one model id, and a fixed endpoint (OpenCode) or one URL override (OpenRouter); there is no config file, credential store, per-model override, disable list, or default/small selection.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a bounded JSON/TOML config file under the ee config home for each agent: provider block (`baseURL` only where already allowed, `headers`, `body` overlays), model block (`disabled`, per-model `headers`/`body`, variant defaults), and session selection (`default_model`, `small_model`).
     - Support `${VAR}` interpolation in config values with an allowlist of names, fail closed on unresolved references, and never echo resolved values.
     - Implement `disabled` filtering and deterministic default/small selection from the catalog; add the OpenCode free-model filter as an explicit switch.
     - Defer OAuth and runtime package installation to a separate issue; document that only static keys are supported until then.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - A disabled model cannot be selected by flag, env, or default resolution, and the diagnostic says it is disabled.
     - Interpolation resolves only allowlisted variables; a missing variable fails startup with the variable name, not the value.
     - Config-derived headers/body overlay through the same deep-merge path as Gap 12.
@@ -2127,16 +2134,19 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 22 — Usage-Limit and Quota Visibility
 
-- [ ] Make OpenCode subscription limits and rate-limit resets visible.
-  - [ ] **Problem:**
+**Landed (Gap 22):** `ee-agent-opencode/src/usage.rs` implements the explicit `--usage` action only. It probes `GET https://opencode.ai/api/policies/current-budgets` and `GET https://opencode.ai/zen/go/v1/usage` under one 15 s budget, treats `403` as "not available" (Go notice, empty budgets), and renders percentages, spend, and provider reset timestamps. `OpenCodeSurface::quota_url()` models the quota URL separately from the chat root; the organization id comes from `OPENCODE_ORG_ID` or the config file and is never inferred from the key. No startup path calls the probe and nothing is cached.
+
+
+- [x] Make OpenCode subscription limits and rate-limit resets visible.
+  - [x] **Problem:**
     - The reference reads OpenCode Console budgets and the Go meter from `/zen/go/v1/usage` with an `x-opencode-org-id` header, surfaces reset times, and treats 403 as "no allowance to show" (`packages/core/src/usage-limits.ts`).
     - Our binaries expose nothing: a 429 retry hint exists only inside the retry boundary, and there is no way to ask "how much of my Go allowance is left".
     - The quota probe lives on `/zen/go/v1/usage` even though chat traffic in the v2.3.0 catalog uses `/inference/go/openai/v1`; the two root families coexist, so the catalog must model the chat base URL and the quota URL separately.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add an explicit, read-only `--usage` invocation (or ACP slash command if a host surface exists) that queries the documented usage endpoints only when invoked, with a 15 s timeout and no startup cost.
     - Handle 403 as "not subscribed to Go" and render percentages plus reset times; never cache beyond the process lifetime.
     - Keep the org id sourced from configuration, never inferred from the environment key.
-  - [ ] **Acceptance criteria:**
+  - [x] **Acceptance criteria:**
     - The command performs no network call unless explicitly invoked.
     - 403 renders a clear "not available" result rather than an error.
     - Percentages and reset timestamps match the documented payload fields, and no credential is printed.
@@ -2179,13 +2189,13 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### 5.5 Additional Delivery Slices
 
-- [ ] Slice G: Gap 11 + Gap 12 (request options, deep merge, query/compression).
-- [ ] Slice H: Gap 13 + Gap 14 (phase timeouts, chunk watchdog, affinity headers).
-- [ ] Slice I: Gap 16 + Gap 17 (tool-result bounding/offload, loop termination/recovery).
-- [ ] Slice J: Gap 15 (usage accounting) with telemetry and metrics wiring.
-- [ ] Slice K: Gap 18 (streaming events) plus the ACP mapping.
-- [ ] Slice L: Gap 19 + Gap 20 (hosted tools, continuation, provider compaction).
-- [ ] Slice M: Gap 21 + Gap 22 + Gap 23 (config surface, usage probe, prompt payload parity).
+- [x] Slice G: Gap 11 + Gap 12 (request options, deep merge, query/compression).
+- [x] Slice H: Gap 13 + Gap 14 (phase timeouts, chunk watchdog, affinity headers).
+- [x] Slice I: Gap 16 + Gap 17 (tool-result bounding/offload, loop termination/recovery).
+- [x] Slice J: Gap 15 (usage accounting) with telemetry and metrics wiring.
+- [x] Slice K: Gap 18 (streaming events) plus the ACP mapping.
+- [x] Slice L: Gap 19 + Gap 20 (hosted tools, continuation, provider compaction).
+- [ ] Slice M: Gap 23 (prompt payload parity); Gap 21 (config surface) and Gap 22 (usage probe) landed.
 - [ ] Slice N: Gap 24 (capability matrix) — must land before inverting any remaining heuristic; can run in parallel with Slice G.
 
 **Ordering note:** Gap 24 and Gap 1 share one generator; land them together. Gap 18 changes a shared enum consumed by the orchestrator and both provider crates, so it should not be in flight at the same time as Gap 6 or Gap 4 transcript work.

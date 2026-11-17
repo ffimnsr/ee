@@ -42,6 +42,15 @@ fn representative_rows_carry_expected_metadata() {
 }
 
 #[test]
+fn provider_compaction_is_never_advertised() {
+    // The reference OpenRouter provider exposes no `/compact` route, so no row
+    // may claim the capability.
+    for entry in models() {
+        assert!(!entry.compaction, "{entry} must not advertise provider compaction");
+    }
+}
+
+#[test]
 fn unknown_models_have_no_catalog_row() {
     assert!(find("vendor/not-a-catalog-model").is_none());
 }

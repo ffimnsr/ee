@@ -72,6 +72,10 @@ pub fn openrouter_orchestrator_config(
             },
             workspace_isolation,
             approval_classifier,
+            compaction: ee_agent_orchestrator::CompactionConfig {
+                mode: config.compaction_mode,
+                ..ee_agent_orchestrator::CompactionConfig::default()
+            },
             ..OrchestratorConfig::default()
         },
         session_state_dir: Some(session_state_dir),
