@@ -969,3 +969,30 @@ async fn sampling_and_phase_budgets_reach_the_routed_profile() {
 
     harness.shutdown(task).await;
 }
+
+#[tokio::test]
+async fn session_affinity_reaches_the_routed_profile_headers() {
+    let mut config = test_config(OpenCodeSurface::Zen, "claude-sonnet-5");
+    config.session_headers = true;
+    let profile = config.profile().expect("profile builds");
+
+    assert_eq!(profile.session_header_style, ee_chat_completions::SessionHeaderStyle::OpenCode);
+    assert!(profile.user_agent.starts_with("ee-agent-opencode/"));
+
+    let context = ee_agent_orchestrator::SessionContext::new("child")
+        .with_parent("parent")
+        .with_project("project");
+    let headers =
+        ee_chat_completions::session_headers(&profile, &context).expect("affinity headers build");
+    let value = |name: &str| {
+        headers
+            .iter()
+            .find(|(header, _)| header.as_str() == name)
+            .and_then(|(_, value)| value.to_str().ok())
+    };
+    assert_eq!(value("x-opencode-session-id"), Some("child"));
+    assert_eq!(value("x-session-affinity"), Some("parent"));
+    assert_eq!(value("x-opencode-session"), Some("parent"));
+    assert_eq!(value("x-opencode-project"), Some("project"));
+    assert!(value("user-agent").is_some(), "user agent is sent");
+}

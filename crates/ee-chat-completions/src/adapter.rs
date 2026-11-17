@@ -248,6 +248,7 @@ impl ModelAdapter for ResponsesAdapter {
                 &request.tool_control,
                 request.prompt_tokens,
                 (!generation.is_empty()).then_some(&generation),
+                request.session.as_ref(),
             );
             tokio::select! {
                 response = completion => response.map_err(response_error),
@@ -284,7 +285,10 @@ impl ModelAdapter for ResponsesAdapter {
                 &request.tool_control,
                 &mut sink,
                 request.prompt_tokens,
-                (!generation.is_empty()).then_some(&generation),
+                crate::CallOptions {
+                    generation: (!generation.is_empty()).then_some(&generation),
+                    session: request.session.as_ref(),
+                },
             );
             tokio::select! {
                 response = completion => response.map_err(response_error),
@@ -344,6 +348,7 @@ fn wire_request(
         tool_control: request.tool_control.clone(),
         generation: (!generation.is_empty()).then_some(generation),
         prompt_tokens: request.prompt_tokens,
+        session: request.session.clone(),
     })
 }
 

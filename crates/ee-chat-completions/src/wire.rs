@@ -87,6 +87,10 @@ pub struct Usage {
     pub cached_input_tokens: Option<u64>,
     /// Prompt tokens written to the provider cache.
     pub cache_creation_input_tokens: Option<u64>,
+    /// Hidden reasoning tokens; a subset of `output_tokens` when reported.
+    pub reasoning_tokens: Option<u64>,
+    /// Effective context size of the final iteration, when reported.
+    pub context_tokens: Option<u64>,
     /// Provider-reported cost in integer micro-dollars, when reported.
     pub cost_micros: Option<u64>,
 }
@@ -147,6 +151,9 @@ pub fn response_from_turn(answer: AssistantTurn) -> ModelResponse {
         reported.cached_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     usage.cache_creation_input_tokens =
         reported.cache_creation_input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.reasoning_tokens =
+        reported.reasoning_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.context_tokens = reported.context_tokens.and_then(|tokens| usize::try_from(tokens).ok());
     usage.cost_micros = reported.cost_micros;
     let mut response =
         ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
@@ -200,11 +207,15 @@ pub fn usage_from_tokens(value: &Value) -> Option<Usage> {
     let output = value.get("output_tokens").and_then(Value::as_u64);
     let total = value.get("total_tokens").and_then(Value::as_u64);
     let (cached_input_tokens, cache_creation_input_tokens) = cache_tokens_of(value);
+    let reasoning_tokens = reasoning_tokens_of(value);
+    let context_tokens = context_tokens_of(value);
     if usage.is_none()
         && output.is_none()
         && total.is_none()
         && cached_input_tokens.is_none()
         && cache_creation_input_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && context_tokens.is_none()
     {
         return None;
     }
@@ -214,6 +225,8 @@ pub fn usage_from_tokens(value: &Value) -> Option<Usage> {
         total_tokens: total,
         cached_input_tokens,
         cache_creation_input_tokens,
+        reasoning_tokens,
+        context_tokens,
         cost_micros: cost_micros_of(value),
     })
 }
@@ -260,11 +273,15 @@ fn usage_of(value: &Value) -> Option<Usage> {
     let output_tokens = usage.get("completion_tokens").and_then(Value::as_u64);
     let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
     let (cached_input_tokens, cache_creation_input_tokens) = cache_tokens_of(usage);
+    let reasoning_tokens = reasoning_tokens_of(usage);
+    let context_tokens = context_tokens_of(usage);
     if input_tokens.is_none()
         && output_tokens.is_none()
         && total_tokens.is_none()
         && cached_input_tokens.is_none()
         && cache_creation_input_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && context_tokens.is_none()
     {
         return None;
     }
@@ -274,6 +291,8 @@ fn usage_of(value: &Value) -> Option<Usage> {
         total_tokens,
         cached_input_tokens,
         cache_creation_input_tokens,
+        reasoning_tokens,
+        context_tokens,
         cost_micros: cost_micros_of(usage),
     })
 }
@@ -288,6 +307,42 @@ fn cache_tokens_of(usage: &Value) -> (Option<u64>, Option<u64>) {
         .or_else(|| usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_u64));
     let creation = usage.get("cache_creation_input_tokens").and_then(Value::as_u64);
     (cached, creation)
+}
+
+/// Hidden reasoning tokens from either dialect's nested details or a top-level
+/// counter.
+fn reasoning_tokens_of(usage: &Value) -> Option<u64> {
+    for pointer in [
+        "/completion_tokens_details/reasoning_tokens",
+        "/output_tokens_details/reasoning_tokens",
+        "/output_tokens_details/thinking_tokens",
+    ] {
+        if let Some(tokens) = usage.pointer(pointer).and_then(Value::as_u64) {
+            return Some(tokens);
+        }
+    }
+    usage.get("reasoning_tokens").and_then(Value::as_u64)
+}
+
+/// Effective context size: an explicit field, or the Anthropic input + cache
+/// breakdown when the payload reports one.
+///
+/// OpenAI-style payloads report cached tokens as a subset of `input_tokens`, so
+/// adding them would double-count; only the Anthropic names imply a
+/// non-overlapping breakdown.
+fn context_tokens_of(usage: &Value) -> Option<u64> {
+    if let Some(context) = usage.get("context_tokens").and_then(Value::as_u64) {
+        return Some(context);
+    }
+    let anthropic_breakdown = usage.get("cache_read_input_tokens").is_some()
+        || usage.get("cache_creation_input_tokens").is_some();
+    if !anthropic_breakdown {
+        return None;
+    }
+    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cached = usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let write = usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    Some(input.saturating_add(cached).saturating_add(write))
 }
 
 /// Extracts reasoning text from first present of `reasoning`,

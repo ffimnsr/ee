@@ -60,6 +60,7 @@ fn test_config_with(
         checkpoint_dir: None,
         session_log_dir: None,
         session_log_durable: false,
+        session_headers: true,
     }
 }
 

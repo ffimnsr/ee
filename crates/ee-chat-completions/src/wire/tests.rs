@@ -132,6 +132,70 @@ fn cache_usage_is_parsed_from_both_provider_shapes() {
 }
 
 #[test]
+fn reasoning_tokens_are_parsed_from_every_dialect_shape() {
+    let chat = json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "completion_tokens_details": { "reasoning_tokens": 7 },
+        }
+    });
+    let usage = decode_message(&chat).unwrap().usage.expect("usage parsed");
+    assert_eq!(usage.reasoning_tokens, Some(7));
+
+    let responses = json!({
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "output_tokens_details": { "reasoning_tokens": 9 },
+    });
+    let usage = usage_from_tokens(&responses).expect("usage parsed");
+    assert_eq!(usage.reasoning_tokens, Some(9));
+
+    let anthropic = json!({
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "output_tokens_details": { "thinking_tokens": 5 },
+    });
+    let usage = usage_from_tokens(&anthropic).expect("usage parsed");
+    assert_eq!(usage.reasoning_tokens, Some(5));
+
+    let absent = json!({ "input_tokens": 10, "output_tokens": 20 });
+    let usage = usage_from_tokens(&absent).expect("usage parsed");
+    assert_eq!(usage.reasoning_tokens, None, "never zero-filled");
+}
+
+#[test]
+fn context_tokens_use_the_anthropic_breakdown_but_not_openai_subset_counts() {
+    let anthropic = json!({
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_input_tokens": 80,
+        "cache_creation_input_tokens": 10,
+    });
+    let usage = usage_from_tokens(&anthropic).expect("usage parsed");
+    assert_eq!(usage.context_tokens, Some(190), "input + cache read + cache write");
+
+    let openai = json!({
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "input_tokens_details": { "cached_tokens": 60 },
+    });
+    let usage = usage_from_tokens(&openai).expect("usage parsed");
+    assert_eq!(usage.context_tokens, None, "OpenAI cached tokens are a subset of input");
+}
+
+#[test]
+fn reported_zero_cost_stays_zero() {
+    let body = json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 2, "cost": 0 }
+    });
+    let usage = decode_message(&body).unwrap().usage.expect("usage parsed");
+    assert_eq!(usage.cost_micros, Some(0), "a free request is authoritative");
+}
+
+#[test]
 fn cache_breakpoints_wrap_only_marked_messages_without_rewriting_text() {
     let transcript = vec![
         ModelMessage::text(ModelRole::User, "stable instructions").with_cache_breakpoint(),

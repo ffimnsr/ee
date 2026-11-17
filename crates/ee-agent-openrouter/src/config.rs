@@ -352,6 +352,9 @@ pub struct Args {
     /// Idle budget between streamed chunks, in milliseconds.
     #[arg(long, env = "OPENROUTER_TIMEOUT_CHUNK_MS")]
     timeout_chunk_ms: Option<u64>,
+    /// Emit provider session-affinity headers (`OPENROUTER_SESSION_HEADERS`).
+    #[arg(long, env = "OPENROUTER_SESSION_HEADERS", default_value_t = true, action = ArgAction::Set)]
+    session_headers: bool,
     /// Optional OpenRouter reasoning effort (`low`, `medium`, or `high`).
     #[arg(long, env = "OPENROUTER_REASONING_EFFORT")]
     reasoning_effort: Option<String>,
@@ -493,6 +496,8 @@ pub struct Config {
     pub session_log_dir: Option<PathBuf>,
     /// Opt-in durable session log under the normal session-state directory.
     pub session_log_durable: bool,
+    /// Whether provider session-affinity headers are emitted.
+    pub session_headers: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -567,6 +572,7 @@ impl Config {
             checkpoint_dir: args.checkpoint_dir,
             session_log_dir: args.session_log_dir,
             session_log_durable: args.session_log_durable,
+            session_headers: args.session_headers,
         }
     }
 
@@ -715,6 +721,7 @@ mod tests {
             checkpoint_dir: None,
             session_log_dir: None,
             session_log_durable: false,
+            session_headers: true,
         }
     }
 

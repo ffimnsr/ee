@@ -197,9 +197,9 @@ pub(crate) fn extend_bounded(
 /// are inserted before the credential so a provider cannot override it.
 #[derive(Clone)]
 pub struct EndpointTransport {
-    profile: EndpointProfile,
-    token: TokenSource,
-    http: reqwest::Client,
+    pub(crate) profile: EndpointProfile,
+    pub(crate) token: TokenSource,
+    pub(crate) http: reqwest::Client,
 }
 
 impl EndpointTransport {
@@ -388,11 +388,8 @@ impl<'a> EndpointRequest<'a> {
     }
 }
 
-/// One buffered round trip's wire inputs.
-///
-/// The adapter builds these from a normalized [`ModelRequest`] so tool-call
-/// control travels with the request instead of being fixed at profile build
-/// time.
+/// One buffered round trip's wire inputs built from a normalized
+/// [`ModelRequest`], so tool-call control travels with the request.
 ///
 /// [`ModelRequest`]: ee_agent_orchestrator::ModelRequest
 #[derive(Debug, Clone, Default)]
@@ -407,6 +404,8 @@ pub struct ChatRequest {
     pub generation: Option<ee_agent_orchestrator::GenerationOptions>,
     /// Prompt size measured by the provider on the previous call, when known.
     pub prompt_tokens: Option<u64>,
+    /// Session affinity headers for this round trip; `None` emits none.
+    pub session: Option<ee_agent_orchestrator::SessionContext>,
 }
 
 /// One Chat Completions endpoint: profile, bearer-token source, HTTP client.
@@ -533,6 +532,7 @@ impl ChatCompletionsClient {
             tool_control: ToolCallControl::auto(),
             generation: None,
             prompt_tokens,
+            session: None,
         })
         .await
     }
@@ -547,9 +547,10 @@ impl ChatCompletionsClient {
         &self,
         request: &ChatRequest,
     ) -> Result<AssistantTurn, ProviderError> {
+        let transport = self.transport.with_session(request.session.as_ref())?;
         let body = self.body_for(request, false);
-        let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
-        let value = self.transport.read_json(&mut response, "response").await?;
+        let mut response = EndpointRequest::new(&transport, &body).send().await?;
+        let value = transport.read_json(&mut response, "response").await?;
         decode_message(&value).ok_or_else(|| {
             ProviderError::BackendFailure(format!(
                 "{} response did not include choices[0].message: {value}",
@@ -589,6 +590,7 @@ impl ChatCompletionsClient {
             tool_control: ToolCallControl::auto(),
             generation: None,
             prompt_tokens,
+            session: None,
         })
         .await
     }
@@ -642,6 +644,7 @@ impl ChatCompletionsClient {
                 tool_control: ToolCallControl::auto(),
                 generation: None,
                 prompt_tokens,
+                session: None,
             },
             sink,
         )
@@ -701,6 +704,7 @@ impl ChatCompletionsClient {
                 tool_control: ToolCallControl::auto(),
                 generation: None,
                 prompt_tokens,
+                session: None,
             },
             sink,
         )
@@ -731,11 +735,12 @@ impl ChatCompletionsClient {
     ) -> Result<AssistantTurn, ProviderError> {
         let profile = self.transport.profile();
         let label = profile.label.as_str();
+        let transport = self.transport.with_session(request.session.as_ref())?;
         let body = self.body_for(request, true);
-        let mut response = EndpointRequest::new(&self.transport, &body).send().await?;
+        let mut response = EndpointRequest::new(&transport, &body).send().await?;
         let headers = response.headers().clone();
         if !is_event_stream(&headers) {
-            let value = self.transport.read_json(&mut response, "streaming response").await?;
+            let value = transport.read_json(&mut response, "streaming response").await?;
             let answer = decode_message(&value).ok_or_else(|| {
                 ProviderError::BackendFailure(format!(
                     "{label} response did not include choices[0].message: {value}"
@@ -773,7 +778,6 @@ impl StreamAttempt<AssistantTurn> for HttpStreamAttempt<'_> {
     }
 }
 
-/// Maps one failed HTTP send onto a typed transport failure.
 /// Maps one failed HTTP send onto a typed transport failure.
 ///
 /// A connect failure never reached the provider; anything else may have, so the

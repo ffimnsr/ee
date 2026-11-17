@@ -362,6 +362,10 @@ pub struct ModelRequest {
     /// unset knob emits no body field at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<crate::generation::GenerationOptions>,
+    /// Session affinity for provider cache routing and per-session limits.
+    /// `None` emits no session headers and falls back to the profile cache key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::session_context::SessionContext>,
 }
 
 impl ModelRequest {
@@ -386,6 +390,7 @@ impl ModelRequest {
             response_format: None,
             allow_tool_list_updates: false,
             generation: None,
+            session: None,
         }
     }
 
@@ -442,119 +447,16 @@ impl ModelRequest {
         self.model_id = model_id;
         self
     }
-}
 
-/// Reported token usage for one model completion.
-///
-/// `None` fields mean the adapter did not report usage — treated as unknown
-/// (not zero) by the budget tracker when a token cap is configured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct ModelUsage {
-    /// Input tokens consumed; `None` when the provider did not report them.
-    pub input_tokens: Option<usize>,
-    /// Output tokens produced; `None` when the provider did not report them.
-    pub output_tokens: Option<usize>,
-    /// Input tokens served from the provider's prompt cache (cache read).
-    pub cached_input_tokens: Option<usize>,
-    /// Input tokens written to the provider's prompt cache (cache write).
-    pub cache_creation_input_tokens: Option<usize>,
-    /// Per-turn cost in integer micro-dollars; `None` when neither the provider
-    /// nor the catalog priced the turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_micros: Option<u64>,
-}
-
-impl ModelUsage {
-    /// Creates usage with no reported tokens.
+    /// Sets the session affinity carried by this request.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the reported input-token count.
-    #[must_use]
-    pub fn with_input_tokens(mut self, tokens: usize) -> Self {
-        self.input_tokens = Some(tokens);
+    pub fn with_session(mut self, session: Option<crate::session_context::SessionContext>) -> Self {
+        self.session = session;
         self
     }
-
-    /// Sets the reported output-token count.
-    #[must_use]
-    pub fn with_output_tokens(mut self, tokens: usize) -> Self {
-        self.output_tokens = Some(tokens);
-        self
-    }
-
-    /// Sets the reported prompt-cache read token count.
-    #[must_use]
-    pub fn with_cached_input_tokens(mut self, tokens: usize) -> Self {
-        self.cached_input_tokens = Some(tokens);
-        self
-    }
-
-    /// Sets the reported prompt-cache write token count.
-    #[must_use]
-    pub fn with_cache_creation_input_tokens(mut self, tokens: usize) -> Self {
-        self.cache_creation_input_tokens = Some(tokens);
-        self
-    }
-
-    /// Adds another round's usage, skipping unknown fields instead of counting
-    /// them as zero.
-    #[must_use]
-    pub fn accumulate(&self, other: &Self) -> Self {
-        Self {
-            input_tokens: add_tokens(self.input_tokens, other.input_tokens),
-            output_tokens: add_tokens(self.output_tokens, other.output_tokens),
-            cached_input_tokens: add_tokens(self.cached_input_tokens, other.cached_input_tokens),
-            cache_creation_input_tokens: add_tokens(
-                self.cache_creation_input_tokens,
-                other.cache_creation_input_tokens,
-            ),
-            cost_micros: add_cost(self.cost_micros, other.cost_micros),
-        }
-    }
-
-    /// Maps to the ACP per-turn usage when both input and output tokens are
-    /// known; unknown stays unknown (never counted as zero).
-    #[must_use]
-    pub(crate) fn acp_usage(&self) -> Option<ee_agent_protocol::Usage> {
-        let input_tokens = self.input_tokens?;
-        let output_tokens = self.output_tokens?;
-        let usage = ee_agent_protocol::Usage::new(
-            input_tokens.saturating_add(output_tokens) as u64,
-            input_tokens as u64,
-            output_tokens as u64,
-        );
-        Some(usage)
-            .map(|usage| match self.cached_input_tokens {
-                Some(tokens) => usage.cached_read_tokens(tokens as u64),
-                None => usage,
-            })
-            .map(|usage| match self.cache_creation_input_tokens {
-                Some(tokens) => usage.cached_write_tokens(tokens as u64),
-                None => usage,
-            })
-    }
 }
 
-/// Adds two optional token counters; unknown stays unknown.
-fn add_tokens(left: Option<usize>, right: Option<usize>) -> Option<usize> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.saturating_add(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-fn add_cost(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.saturating_add(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
+pub use crate::usage::ModelUsage;
 
 /// Builds an ACP prompt result, attaching reported token usage when known.
 pub(crate) fn prompt_result_with_usage(
@@ -709,6 +611,9 @@ pub struct Transcript {
     /// Durable log the transcript appends to, when one is wired.
     #[serde(skip)]
     pub(crate) log: Option<Arc<SessionLog>>,
+    /// Per-result bounds applied when a tool observation is admitted.
+    #[serde(default)]
+    pub(crate) tool_output: crate::tool_output::ToolOutputLimits,
     /// Parallel to `messages`; `None` when a message is not (yet) logged.
     #[serde(skip)]
     pub(crate) log_ids: Vec<Option<String>>,
@@ -724,7 +629,18 @@ impl Transcript {
     /// Creates an empty transcript.
     #[must_use]
     pub fn new() -> Self {
-        Self { messages: Vec::new(), truncation: None, log: None, log_ids: Vec::new() }
+        Self {
+            messages: Vec::new(),
+            truncation: None,
+            log: None,
+            log_ids: Vec::new(),
+            tool_output: crate::tool_output::ToolOutputLimits::default(),
+        }
+    }
+
+    /// Sets the per-result bounds applied when a tool observation is admitted.
+    pub fn set_tool_output_limits(&mut self, limits: crate::tool_output::ToolOutputLimits) {
+        self.tool_output = limits;
     }
 
     /// Converts ACP prompt content into one normalized user message.
@@ -827,7 +743,8 @@ impl Transcript {
     }
 
     /// Appends a tool observation carrying the stable tool-call id.
-    pub fn push_tool_result(&mut self, tool_call_id: impl Into<String>, result: ToolResult) {
+    pub fn push_tool_result(&mut self, tool_call_id: impl Into<String>, mut result: ToolResult) {
+        crate::tool_output::apply_to_result(&mut result, self.tool_output, self.log.as_deref());
         let tool_call_id = tool_call_id.into();
         self.messages.push(ModelMessage::tool_result(tool_call_id.clone(), result));
         let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
@@ -842,11 +759,12 @@ impl Transcript {
     pub fn push_tool_result_classified(
         &mut self,
         tool_call_id: impl Into<String>,
-        result: ToolResult,
+        mut result: ToolResult,
         tool_name: &str,
         side_effect: &str,
         path: Option<&str>,
     ) {
+        crate::tool_output::apply_to_result(&mut result, self.tool_output, self.log.as_deref());
         let mut entries = vec![
             (TOOL_NAME_METADATA_KEY.to_string(), tool_name.to_string()),
             (TOOL_SIDE_EFFECT_METADATA_KEY.to_string(), side_effect.to_string()),
@@ -1128,6 +1046,7 @@ mod tests {
             response_format: None,
             allow_tool_list_updates: false,
             generation: None,
+            session: None,
         }
     }
 

@@ -34,6 +34,30 @@ pub struct OrchestratorMetrics {
     output_tokens: u64,
     cached_input_tokens: u64,
     cache_creation_input_tokens: u64,
+    reasoning_tokens: u64,
+    cost_micros: u64,
+    /// Per-model usage totals, keyed by the adapter's registry id.
+    usage_by_model: BTreeMap<String, ModelUsageTotals>,
+}
+
+/// Counter-only token and cost totals for one model id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ModelUsageTotals {
+    /// Model calls that reported usage.
+    pub calls: u64,
+    /// Input tokens reported.
+    pub input_tokens: u64,
+    /// Output tokens reported.
+    pub output_tokens: u64,
+    /// Hidden reasoning tokens reported.
+    pub reasoning_tokens: u64,
+    /// Prompt-cache read tokens reported.
+    pub cached_input_tokens: u64,
+    /// Prompt-cache write tokens reported.
+    pub cache_creation_input_tokens: u64,
+    /// Per-turn cost in micro-dollars, from the provider or the catalog.
+    pub cost_micros: u64,
 }
 
 impl OrchestratorMetrics {
@@ -98,18 +122,48 @@ impl OrchestratorMetrics {
     /// (`None`) are skipped, never counted as zero. Prompt-cache read/write
     /// counters are tracked separately so cache hits stay visible in telemetry.
     pub fn record_usage(&mut self, usage: &ModelUsage) {
+        self.record_usage_for_model("unknown", usage);
+    }
+
+    /// Accumulates token usage for one model id.
+    ///
+    /// Counters saturate at `u64::MAX` with a warning instead of wrapping, so a
+    /// pathological session cannot corrupt telemetry.
+    pub fn record_usage_for_model(&mut self, model_id: &str, usage: &ModelUsage) {
+        let totals = self.usage_by_model.entry(model_id.to_string()).or_default();
+        totals.calls = totals.calls.saturating_add(1);
         if let Some(tokens) = usage.input_tokens {
-            self.input_tokens = self.input_tokens.saturating_add(tokens as u64);
+            let value = tokens as u64;
+            self.input_tokens = add_u64("input_tokens", self.input_tokens, value);
+            totals.input_tokens = add_u64("input_tokens", totals.input_tokens, value);
         }
         if let Some(tokens) = usage.output_tokens {
-            self.output_tokens = self.output_tokens.saturating_add(tokens as u64);
+            let value = tokens as u64;
+            self.output_tokens = add_u64("output_tokens", self.output_tokens, value);
+            totals.output_tokens = add_u64("output_tokens", totals.output_tokens, value);
         }
         if let Some(tokens) = usage.cached_input_tokens {
-            self.cached_input_tokens = self.cached_input_tokens.saturating_add(tokens as u64);
+            let value = tokens as u64;
+            self.cached_input_tokens =
+                add_u64("cached_input_tokens", self.cached_input_tokens, value);
+            totals.cached_input_tokens =
+                add_u64("cached_input_tokens", totals.cached_input_tokens, value);
         }
         if let Some(tokens) = usage.cache_creation_input_tokens {
+            let value = tokens as u64;
             self.cache_creation_input_tokens =
-                self.cache_creation_input_tokens.saturating_add(tokens as u64);
+                add_u64("cache_creation_input_tokens", self.cache_creation_input_tokens, value);
+            totals.cache_creation_input_tokens =
+                add_u64("cache_creation_input_tokens", totals.cache_creation_input_tokens, value);
+        }
+        if let Some(tokens) = usage.reasoning_tokens {
+            let value = tokens as u64;
+            self.reasoning_tokens = add_u64("reasoning_tokens", self.reasoning_tokens, value);
+            totals.reasoning_tokens = add_u64("reasoning_tokens", totals.reasoning_tokens, value);
+        }
+        if let Some(cost) = usage.cost_micros {
+            self.cost_micros = add_u64("cost_micros", self.cost_micros, cost);
+            totals.cost_micros = add_u64("cost_micros", totals.cost_micros, cost);
         }
     }
 
@@ -227,6 +281,41 @@ impl OrchestratorMetrics {
     pub fn cache_creation_input_tokens(&self) -> u64 {
         self.cache_creation_input_tokens
     }
+
+    /// Accumulated hidden-reasoning tokens (reported usage only).
+    #[must_use]
+    pub fn reasoning_tokens(&self) -> u64 {
+        self.reasoning_tokens
+    }
+
+    /// Accumulated per-turn cost in micro-dollars (reported or catalog-priced).
+    #[must_use]
+    pub fn cost_micros(&self) -> u64 {
+        self.cost_micros
+    }
+
+    /// Usage totals for one model id, when it reported any usage.
+    #[must_use]
+    pub fn usage_for_model(&self, model_id: &str) -> Option<ModelUsageTotals> {
+        self.usage_by_model.get(model_id).copied()
+    }
+
+    /// Model ids with at least one usage report, in stable order.
+    #[must_use]
+    pub fn usage_model_ids(&self) -> Vec<String> {
+        self.usage_by_model.keys().cloned().collect()
+    }
+}
+
+/// Adds two counters, warning once when the sum exceeds `u64`.
+fn add_u64(field: &'static str, left: u64, right: u64) -> u64 {
+    match left.checked_add(right) {
+        Some(total) => total,
+        None => {
+            tracing::warn!(field, "usage counter overflowed u64; saturating");
+            u64::MAX
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +396,35 @@ mod tests {
         assert_eq!(metrics.cached_input_tokens(), 85);
         assert_eq!(metrics.cache_creation_input_tokens(), 20);
         assert_eq!(metrics.input_tokens(), 100, "cache counters never inflate input tokens");
+    }
+
+    #[test]
+    fn reasoning_tokens_and_cost_are_counted_per_model() {
+        let mut metrics = OrchestratorMetrics::new();
+        metrics.record_usage_for_model(
+            "model-a",
+            &ModelUsage::new()
+                .with_output_tokens(50)
+                .with_reasoning_tokens(20)
+                .with_cost_micros(12),
+        );
+        metrics.record_usage_for_model("model-b", &ModelUsage::new().with_cost_micros(5));
+
+        assert_eq!(metrics.reasoning_tokens(), 20);
+        assert_eq!(metrics.cost_micros(), 17);
+        let first = metrics.usage_for_model("model-a").expect("model a totals");
+        assert_eq!(first.calls, 1);
+        assert_eq!(first.reasoning_tokens, 20);
+        assert_eq!(first.cost_micros, 12);
+        assert_eq!(metrics.usage_model_ids(), vec!["model-a", "model-b"]);
+    }
+
+    #[test]
+    fn counters_saturate_instead_of_wrapping() {
+        let mut metrics = OrchestratorMetrics::new();
+        metrics.record_usage(&ModelUsage::new().with_input_tokens(usize::MAX));
+        metrics.record_usage(&ModelUsage::new().with_input_tokens(usize::MAX));
+        assert_eq!(metrics.input_tokens(), u64::MAX);
     }
 
     #[test]

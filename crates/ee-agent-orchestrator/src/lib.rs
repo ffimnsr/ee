@@ -240,6 +240,7 @@ pub mod rubber_duck_trigger;
 pub mod runtime;
 pub mod semantic_memory;
 pub mod sensitive_data;
+pub mod session_context;
 pub mod session_log;
 mod session_log_sink;
 #[cfg(test)]
@@ -262,11 +263,13 @@ pub mod tasks;
 pub mod test_support;
 pub mod tool_cache;
 pub mod tool_dependencies;
+pub mod tool_output;
 pub mod tool_schemas;
 pub mod tools;
 pub mod trace;
 mod transcript_log;
 pub mod trust;
+mod usage;
 pub mod validation;
 pub mod workspace_isolation;
 pub mod workspace_scope;
@@ -498,11 +501,16 @@ pub use semantic_memory::{
     WorkspaceSemanticSidecarIdentity, WorkspaceSemanticSidecarMetadata,
     WorkspaceSemanticSidecarStaleness,
 };
+pub use session_context::SessionContext;
 pub use subagent_handoff::{
     GENERIC_HANDOFF_INSTRUCTIONS, HandoffOutputFormat, MAX_HANDOFF_EVIDENCE_ITEMS,
     MAX_HANDOFF_FINDING_CLAIM_CHARS, MAX_HANDOFF_FINDING_KEY_CHARS, MAX_HANDOFF_FINDINGS,
     MAX_HANDOFF_ITEM_CHARS, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_SUMMARY_CHARS,
     MAX_SUBAGENT_HANDOFF_BYTES, SUBAGENT_HANDOFF_SCHEMA_VERSION, SubagentHandoff, SubagentStatus,
+};
+pub use tool_output::{
+    BoundedToolOutput, DEFAULT_MAX_TOOL_OUTPUT_BYTES, DEFAULT_MAX_TOOL_OUTPUT_LINES,
+    ToolOutputLimits, bound_tool_output,
 };
 pub use workspace_isolation::{
     MAX_WORKTREE_PATCH_BYTES, WORKTREE_DIR, WorkspaceIsolation, WorkspaceIsolationConfig,

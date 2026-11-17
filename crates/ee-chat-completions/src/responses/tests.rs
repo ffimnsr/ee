@@ -580,6 +580,7 @@ fn body_with(control: &ee_agent_orchestrator::ToolCallControl, cache: &CacheDire
         generation: None,
         tool_control: control,
         cache,
+        session: None,
     })
 }
 
@@ -633,6 +634,7 @@ fn generated_body(generation: &ee_agent_orchestrator::GenerationOptions) -> Valu
         generation: Some(generation),
         tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
         cache: &cache,
+        session: None,
     })
 }
 

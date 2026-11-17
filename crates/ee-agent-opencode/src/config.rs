@@ -286,6 +286,9 @@ pub struct Args {
     /// Idle budget between streamed chunks, in milliseconds.
     #[arg(long, env = "OPENCODE_TIMEOUT_CHUNK_MS", value_parser = parse_positive_u64)]
     timeout_chunk_ms: Option<u64>,
+    /// Emit provider session-affinity headers (`OPENCODE_SESSION_HEADERS`).
+    #[arg(long, env = "OPENCODE_SESSION_HEADERS", default_value_t = true, action = clap::ArgAction::Set)]
+    session_headers: bool,
     /// Maximum tool-loop iterations, and model calls, per prompt turn.
     /// Omit for unlimited.
     #[arg(long, env = "OPENCODE_MAX_ITERATIONS", value_parser = parse_positive_usize)]
@@ -357,6 +360,7 @@ impl Args {
             timeout_total_ms: None,
             timeout_headers_ms: None,
             timeout_chunk_ms: None,
+            session_headers: true,
             max_iterations: None,
             context_window: None,
             max_output_tokens: None,
@@ -416,6 +420,8 @@ pub struct Config {
     pub session_log_dir: Option<PathBuf>,
     /// Opt-in durable session log under the normal session-state directory.
     pub session_log_durable: bool,
+    /// Whether provider session-affinity headers are emitted.
+    pub session_headers: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -566,6 +572,7 @@ impl Config {
             checkpoint_dir: args.checkpoint_dir,
             session_log_dir: args.session_log_dir,
             session_log_durable: args.session_log_durable,
+            session_headers: args.session_headers,
         })
     }
 
@@ -635,6 +642,10 @@ impl Config {
             .with_generation(self.generation.clone())
             .with_query(self.query.clone())
             .with_encoding(self.encoding);
+        profile = profile
+            .with_session_headers(self.session_headers)
+            .with_session_header_style(ee_chat_completions::SessionHeaderStyle::OpenCode)
+            .with_user_agent(format!("ee-agent-opencode/{}", env!("CARGO_PKG_VERSION")));
         if let Some(field) = self.route.max_tokens_field() {
             let parsed = ee_chat_completions::MaxTokensField::parse(field).map_err(|_| {
                 ConfigError::InvalidCatalogMetadata {

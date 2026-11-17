@@ -238,6 +238,15 @@ impl std::fmt::Debug for BearerToken {
 /// own environment variable and the setup step that fixes it.
 pub type TokenSource = Arc<dyn Fn() -> Result<BearerToken, String> + Send + Sync>;
 
+/// Request-scoped knobs that travel together into a streaming codec call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CallOptions<'a> {
+    /// Sampling knobs to write; `None` keeps the profile default.
+    pub generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+    /// Session affinity for headers and the prompt-cache key.
+    pub session: Option<&'a ee_agent_orchestrator::SessionContext>,
+}
+
 /// Everything a provider must supply for its Chat Completions endpoint.
 ///
 /// Provider attribution headers, provider-specific request shaping, environment
@@ -294,6 +303,28 @@ pub struct EndpointProfile {
     pub sampling: SamplingSupport,
     /// Session-default sampling knobs; a per-request value wins knob by knob.
     pub generation: GenerationOptions,
+    /// Whether session affinity headers are emitted when a request carries a
+    /// [`SessionContext`](ee_agent_orchestrator::SessionContext).
+    pub session_headers: bool,
+    /// Header naming dialect for session ids.
+    pub session_header_style: SessionHeaderStyle,
+    /// `User-Agent` sent with every request; binary name and version only.
+    pub user_agent: String,
+}
+
+/// How provider-specific session header names are spelled.
+///
+/// `OpenCode` copies the reference agent's `x-opencode-*` names exactly because
+/// OpenCode Zen keys caches and rate limits on them. `Ee` keeps the identical
+/// semantics under `x-ee-*` names so we never impersonate OpenCode on a
+/// provider that is not OpenCode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionHeaderStyle {
+    /// `x-opencode-*` session headers.
+    OpenCode,
+    /// `x-ee-*` session headers (default).
+    #[default]
+    Ee,
 }
 
 impl EndpointProfile {
@@ -330,7 +361,31 @@ impl EndpointProfile {
             reasoning_field: None,
             sampling: SamplingSupport::ALL,
             generation: GenerationOptions::none(),
+            session_headers: true,
+            session_header_style: SessionHeaderStyle::default(),
+            user_agent: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
         }
+    }
+
+    /// Enables or disables session affinity headers.
+    #[must_use]
+    pub fn with_session_headers(mut self, enabled: bool) -> Self {
+        self.session_headers = enabled;
+        self
+    }
+
+    /// Sets the session header naming dialect.
+    #[must_use]
+    pub fn with_session_header_style(mut self, style: SessionHeaderStyle) -> Self {
+        self.session_header_style = style;
+        self
+    }
+
+    /// Sets the `User-Agent` value; callers pass binary name and version only.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
     }
 
     /// Sets the system prompt prepended to normalized transcripts.

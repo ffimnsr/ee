@@ -32,6 +32,15 @@ use crate::trust::TrustLevel;
 
 pub use crate::session_log_sink::{FileSessionLogSink, InMemorySessionLogSink, SessionLogSink};
 
+/// One stored content-addressed artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredArtifact {
+    /// Lowercase SHA-256 of the stored bytes.
+    pub content_hash: String,
+    /// Durable path when the sink is file-backed; `None` for memory sinks.
+    pub path: Option<PathBuf>,
+}
+
 /// Current on-disk session-log format version.
 pub const SESSION_LOG_SCHEMA_VERSION: u32 = 1;
 /// File name of the append-only record stream inside one session directory.
@@ -382,6 +391,22 @@ impl SessionLog {
     #[must_use]
     pub fn sink(&self) -> Arc<dyn SessionLogSink> {
         self.sink.clone()
+    }
+
+    /// Stores one content-addressed artifact (tool-output overflow) and returns
+    /// its hash and durable path.
+    ///
+    /// Artifacts share the session's body directory, owner-only permissions,
+    /// and lifecycle, so nothing escapes the session state directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink failure when the body cannot be written.
+    pub fn store_artifact(&self, bytes: &[u8]) -> Result<StoredArtifact, OrchestratorError> {
+        let content_hash = hex(&Sha256::digest(bytes));
+        self.sink.put_body(&self.session_id, &content_hash, bytes)?;
+        let path = self.sink.body_path(&self.session_id, &content_hash);
+        Ok(StoredArtifact { content_hash, path })
     }
 
     /// Starts a new turn, resetting the recorded iteration.

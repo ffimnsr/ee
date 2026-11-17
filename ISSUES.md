@@ -1555,7 +1555,7 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
 **Reference:** `harness-example/opencode` — opencode v2.3.0 (`anomalyco/opencode`), inspected 2026-11-16.
 **Scope:** the model-calling layer only: provider catalog, endpoint/protocol routing, request bodies, streaming decode, retry/error classification, prompt cache, token budgeting, reasoning replay, variants, and usage/cost.
 **Non-goals:** TUI/desktop/server/web packages, plugin UI, LSP, worktree isolation, snapshots, skills discovery, and the harness tool surface (already implemented in `crates/ee-agent-orchestrator`). Those are tracked elsewhere in this file.
-**Status:** Gaps 1–13 implemented and tested (2026-11-17). Gap 14 and later (Part 5 second-pass findings) remain open.
+**Status:** Gaps 1–16 implemented and tested (2026-11-17). Gap 17 and later (Part 5 second-pass findings) remain open.
 
 ## Execution Overview
 
@@ -1980,18 +1980,19 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 14 — Session Affinity and Cache Routing Headers
 
-- [ ] Send stable session/project affinity so provider cache routing and per-session rate limits work.
-  - [ ] **Problem:**
+- [x] Send stable session/project affinity so provider cache routing and per-session rate limits work.
+  - [x] **Problem:**
     - The reference sends `x-opencode-session-id`, `x-opencode-parent-session-id`, `x-session-affinity`, `X-Session-Id`, `x-parent-session-id`, `User-Agent`, `x-opencode-project`, `x-opencode-session`, and `x-opencode-client`, and derives `promptCacheKey` from the affinity id after stripping the `ses_` prefix (`packages/core/src/session/model-request.ts:318-336`).
     - Affinity is deliberately group-scoped: children use the parent session id and forks use the fork source (`packages/core/src/session/affinity.ts`), so a whole agent tree shares one provider cache lineage.
     - Our Responses codec derives `prompt_cache_key` from a SHA-256 of `model + system prompt` (`crates/ee-agent-opencode/src/responses.rs::prompt_cache_key`): every session with the same model and prompt shares one cache key, which is the opposite scoping, and child sessions have no relationship at all.
     - No request carries a `User-Agent`, session id, or project id, so providers that key caches or rate limits on them cannot group our calls.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add `SessionContext { session_id, parent_session_id, project_id, client_name }` to `ModelRequest`, populated by the orchestrator runtime, and emit the reference header set from both provider crates (header names copied exactly; `x-opencode-*` only where we are actually impersonating OpenCode semantics — otherwise use `x-ee-*` and document the deviation).
     - Derive `prompt_cache_key` from session affinity (strip the id prefix form we use), keeping the existing hash as a fallback when no session id exists.
     - Send `User-Agent` with binary name and version; never include hostnames or usernames.
     - Make header emission opt-out for privacy-conscious deployments, with one config switch and a documented provider disclosure.
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 14):** new `ee-agent-orchestrator/src/session_context.rs` (`SessionContext`, `affinity()`, `cache_key()` stripping `ses_`), `ModelRequest.session` + `with_session`, populated by `loop_engine` from the active session id; new `ee-chat-completions/src/session.rs` (`session_headers`, `validate_session_value`, `prompt_cache_key`, `EndpointTransport::with_session`) and `EndpointProfile::{session_headers, session_header_style, user_agent}`. `SessionHeaderStyle::OpenCode` is selected only by `ee-agent-opencode`; `ee-agent-openrouter` uses `SessionHeaderStyle::Ee`, so OpenCode is never impersonated. Opt-outs: `--session-headers` / `OPENCODE_SESSION_HEADERS` and `--session-headers` / `OPENROUTER_SESSION_HEADERS`. Header values are restricted to an opaque-token allowlist, so a client id cannot carry a path or username.
+  - [x] **Acceptance criteria:**
     - A child session sends the parent's affinity value while carrying its own session id.
     - Two sessions with identical system prompts produce different cache keys.
     - No header contains a filesystem path, username, or credential material (test asserts on the assembled header map).
@@ -1999,18 +2000,19 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 15 — Usage Accounting Extension
 
-- [ ] Report reasoning tokens, context size, and monetary cost the way the reference does.
-  - [ ] **Problem:**
+- [x] Report reasoning tokens, context size, and monetary cost the way the reference does.
+  - [x] **Problem:**
     - The reference `Usage` carries `inputTokens`, `outputTokens`, `visibleOutputTokens`, `nonCachedInputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens`, `reasoningTokens`, `totalTokens`, `contextTokens`, and `cost`, with the raw provider payload preserved in `providerMetadata` (`packages/ai/src/schema/events.ts:20-120`).
     - Cost is authoritative when the provider reports it (`usage.cost`, including a reported zero), otherwise computed from catalog prices with context tiers (`packages/core/src/session/usage.ts:24-60`).
     - Session stats aggregate tokens and cost per provider/model/variant (`packages/core/src/session/stats.ts`).
     - Our `ModelUsage` has four fields — input, output, cached input, cache creation (`crates/ee-agent-orchestrator/src/model.rs:331-340`) — and no cost, reasoning, visible-output, or context-size reporting; nothing aggregates per model.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Extend `ModelUsage` with `reasoning_tokens`, `context_tokens`, and `cost_micros: Option<u64>` (integer micro-dollars to avoid float drift); keep the existing fields and their `None`-means-unknown contract.
     - Parse reasoning tokens from both dialects (`completion_tokens_details.reasoning_tokens`, `output_tokens_details.reasoning_tokens`, `reasoning_tokens` on Responses usage) and context size where reported.
     - Add catalog-price fallback with context tiers, keeping provider-reported cost authoritative including zero.
     - Surface totals through telemetry and the ACP usage update without changing the wire schema; aggregate per model id in metrics.
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 15):** `ModelUsage` moved to `ee-agent-orchestrator/src/usage.rs` with `reasoning_tokens`, `context_tokens`, `cost_micros`, saturating accumulation that warns on overflow, and `acp_usage` mapping reasoning tokens to `thought_tokens`. `ee-chat-completions/src/wire.rs` parses `completion_tokens_details.reasoning_tokens`, `output_tokens_details.reasoning_tokens`, `output_tokens_details.thinking_tokens`, top-level `reasoning_tokens`, and derives Anthropic context size from the non-overlapping input + cache breakdown. `OrchestratorMetrics` gained `reasoning_tokens`, `cost_micros`, and `usage_by_model` (`ModelUsageTotals`, `record_usage_for_model`, `usage_for_model`); `loop_engine` records each response under the routed model id. Provider-reported `usage.cost`, including zero, stays authoritative via the existing `cost_micros_of` and `apply_catalog_cost` fallback.
+  - [x] **Acceptance criteria:**
     - Reasoning tokens appear when reported and stay `None` when absent (never zero-filled).
     - Provider cost wins over catalog price, and a reported zero stays zero.
     - Tiered pricing picks the tier whose context threshold is crossed, deterministically for ties.
@@ -2018,17 +2020,18 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 16 — Tool-Result Bounding and Overflow Offload
 
-- [ ] Bound every tool result deterministically and keep the overflow readable.
-  - [ ] **Problem:**
+- [x] Bound every tool result deterministically and keep the overflow readable.
+  - [x] **Problem:**
     - The reference truncates at **2,000 lines / 50 KiB**, writes the overflow to a retained file under its state directory, and returns the path plus `truncated` metadata (`packages/core/src/tool-output.ts:13-145`). Overflow is therefore lossy for the model but recoverable for the agent.
     - Our compaction pipeline prunes by character count only when a result exceeds 8,192 chars, keeping 4,096 head + 1,024 tail plus a marker (`crates/ee-agent-orchestrator/src/model.rs:35-41,243-272`; call sites `crates/ee-agent-orchestrator/src/compaction/pipeline.rs:120,182`). It runs only during compaction, not when a tool result is admitted, so an oversized result is re-sent verbatim by every step until compaction triggers. There is no line-based cap, no byte cap, and no retained copy.
     - The turn-level `max_output_bytes` budget (`crates/ee-agent-orchestrator/src/config.rs:278`) is opt-in and fails the turn when exceeded instead of bounding a single result, so default behavior is effectively unbounded.
-  - [ ] **Fix:**
+  - [x] **Fix:**
     - Add a per-result bound (`max_lines` default 2,000, `max_bytes` default 50 KiB) applied before projection, configurable through `OrchestratorConfig` and per tool category.
     - Persist overflow to the session state directory through the existing content-addressed session log/store rather than a new ad-hoc directory, and return `output_path` + `truncated` in the tool result metadata.
     - Keep the existing head/tail prune as a second stage for already-bounded results, and keep the turn budget as the hard stop.
     - Redact secrets in the retained copy using the existing `SensitiveDataGuard` rules.
-  - [ ] **Acceptance criteria:**
+    - **Landed (Gap 16):** new `ee-agent-orchestrator/src/tool_output.rs` (`ToolOutputLimits`, `bound_tool_output`, `apply_to_result`) with default 2,000 lines / 50 KiB, line-and-byte cut at the first limit, and a grapheme-cluster-safe boundary via the existing `unicode-segmentation` workspace dependency. `OrchestratorConfig.tool_output` validates non-zero bounds; `Transcript` applies the bound in `push_tool_result` / `push_tool_result_classified`, so every admission path (including subagent/strategy paths) is bounded before projection. Overflow is redacted with `SensitiveDataGuard` and stored through the existing content-addressed session log (`SessionLog::store_artifact`, `SessionLogSink::body_path`); the tool result carries `truncated` and `output_path` in its structured metadata plus the reference-style marker. A memory-only log returns no path instead of writing outside the state directory.
+  - [x] **Acceptance criteria:**
     - A 5 MiB read returns a truncated result plus a path, and the retained file contains the full text with `0600`/`0700` permissions.
     - A 1,000-line, 40 KiB result is returned unchanged with `truncated: false`.
     - Line cuts never split a UTF-8 sequence or a grapheme cluster.

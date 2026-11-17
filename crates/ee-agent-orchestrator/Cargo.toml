@@ -33,6 +33,8 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
+# Grapheme-safe cuts for bounded tool output; already a workspace dependency.
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 ee-agent-acp-server = { workspace = true, features = ["test-utils"] }

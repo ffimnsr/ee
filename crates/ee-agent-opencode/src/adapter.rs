@@ -71,7 +71,7 @@ pub trait DialectCodec: Send + Sync + 'static {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         _prompt_tokens: Option<u64>,
-        _generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        _options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         let _ = tool_control;
         self.complete(transcript, tools)
@@ -85,7 +85,7 @@ pub trait DialectCodec: Send + Sync + 'static {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         _prompt_tokens: Option<u64>,
-        _generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        _options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         let _ = tool_control;
         self.complete_streaming(transcript, tools, sink)
@@ -120,7 +120,7 @@ impl DialectCodec for ResponsesCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(ResponsesCodec::complete_controlled(
             self,
@@ -128,7 +128,8 @@ impl DialectCodec for ResponsesCodec {
             tools,
             tool_control,
             prompt_tokens,
-            generation,
+            options.generation,
+            options.session,
         ))
     }
 
@@ -139,7 +140,7 @@ impl DialectCodec for ResponsesCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(ResponsesCodec::complete_streaming_controlled(
             self,
@@ -148,7 +149,7 @@ impl DialectCodec for ResponsesCodec {
             tool_control,
             sink,
             prompt_tokens,
-            generation,
+            options,
         ))
     }
 }
@@ -181,7 +182,7 @@ impl DialectCodec for MessagesCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(MessagesCodec::complete_controlled(
             self,
@@ -189,7 +190,8 @@ impl DialectCodec for MessagesCodec {
             tools,
             tool_control,
             prompt_tokens,
-            generation,
+            options.generation,
+            options.session,
         ))
     }
 
@@ -200,7 +202,7 @@ impl DialectCodec for MessagesCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(MessagesCodec::complete_streaming_controlled(
             self,
@@ -209,7 +211,7 @@ impl DialectCodec for MessagesCodec {
             tool_control,
             sink,
             prompt_tokens,
-            generation,
+            options,
         ))
     }
 }
@@ -242,7 +244,7 @@ impl DialectCodec for ChatCompletionsCodec {
         tools: &'a [ToolDefinition],
         tool_control: &'a ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(ChatCompletionsCodec::complete_controlled(
             self,
@@ -250,7 +252,8 @@ impl DialectCodec for ChatCompletionsCodec {
             tools,
             tool_control,
             prompt_tokens,
-            generation,
+            options.generation,
+            options.session,
         ))
     }
 
@@ -261,7 +264,7 @@ impl DialectCodec for ChatCompletionsCodec {
         tool_control: &'a ToolCallControl,
         sink: DeltaSink<'a>,
         prompt_tokens: Option<u64>,
-        generation: Option<&'a ee_agent_orchestrator::GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'a>,
     ) -> CodecFuture<'a> {
         Box::pin(ChatCompletionsCodec::complete_streaming_controlled(
             self,
@@ -270,7 +273,7 @@ impl DialectCodec for ChatCompletionsCodec {
             tool_control,
             sink,
             prompt_tokens,
-            generation,
+            options,
         ))
     }
 }
@@ -366,7 +369,10 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 &request.tools,
                 &request.tool_control,
                 request.prompt_tokens,
-                request.generation.as_ref(),
+                ee_chat_completions::CallOptions {
+                    generation: request.generation.as_ref(),
+                    session: request.session.as_ref(),
+                },
             );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),
@@ -404,7 +410,10 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 &request.tool_control,
                 &mut sink,
                 request.prompt_tokens,
-                request.generation.as_ref(),
+                ee_chat_completions::CallOptions {
+                    generation: request.generation.as_ref(),
+                    session: request.session.as_ref(),
+                },
             );
             tokio::select! {
                 response = completion => response.map_err(adapter_error),

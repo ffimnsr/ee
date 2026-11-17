@@ -41,6 +41,7 @@ use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
 use crate::prompt::context::TurnSystemContext;
 use crate::prompt::repeat_guard::{RepeatGuard, RepeatGuardConfig};
+use crate::session_context::SessionContext;
 use crate::session_log::SessionLog;
 use crate::stop_gate::{StopGate, StopGateConfig, StopGateOutcome, StopVeto};
 use crate::streaming::run_streaming_response;
@@ -132,6 +133,11 @@ pub(crate) struct LoopOptions {
     pub until: Option<UntilPredicate>,
     /// Structured-output request; the hidden forced tool is added per step.
     pub response_format: Option<crate::model_options::ResponseFormat>,
+    /// Provider/project/client affinity extras. The loop stamps the active
+    /// session id; providers that know a parent or project id seed it here.
+    pub session_context: Option<SessionContext>,
+    /// Runtime metrics sink for per-model usage aggregation; `None` disables it.
+    pub metrics: Option<Arc<Mutex<crate::metrics::OrchestratorMetrics>>>,
 }
 
 pub use crate::loop_hooks::{UntilFn, UntilPredicate};
@@ -162,6 +168,8 @@ impl Default for LoopOptions {
             approval_classifier: None,
             until: None,
             response_format: None,
+            session_context: None,
+            metrics: None,
         }
     }
 }
@@ -310,6 +318,7 @@ impl LoopEngine {
         if let Some(log) = &self.options.session_log {
             transcript.attach_session_log(log.clone());
         }
+        transcript.set_tool_output_limits(self.config.tool_output);
         let turn = self.run_loop(
             transcript,
             track.clone(),
@@ -435,6 +444,17 @@ impl LoopEngine {
         // First step's tool list; a mid-turn change is refused on routes that do
         // not advertise `tools.updates`.
         let mut first_tool_names: Option<Vec<String>> = None;
+        // Provider cache routing and per-session limits key on affinity; the
+        // runtime seeds provider/project extras and the loop stamps the session.
+        let session = self
+            .options
+            .session_context
+            .clone()
+            .map(|mut context| {
+                context.session_id = session_id.to_string();
+                context
+            })
+            .unwrap_or_else(|| SessionContext::new(session_id.to_string()));
 
         loop {
             if *cancel.borrow() {
@@ -524,7 +544,8 @@ impl LoopEngine {
                     .with_available_models(self.options.available_models.clone())
                     .with_model_id(self.options.model_id.clone())
                     .with_prompt_tokens(measured_prompt_tokens)
-                    .with_response_format(self.options.response_format.clone());
+                    .with_response_format(self.options.response_format.clone())
+                    .with_session(Some(session.clone()));
             // Structured output is protocol-independent: a hidden tool carries
             // the schema and the forced choice makes the model call it.
             crate::structured_output::prepare(&mut request)
@@ -581,7 +602,8 @@ impl LoopEngine {
                         .with_available_models(self.options.available_models.clone())
                         .with_model_id(self.options.model_id.clone())
                         .with_prompt_tokens(None)
-                        .with_response_format(self.options.response_format.clone());
+                        .with_response_format(self.options.response_format.clone())
+                        .with_session(Some(session.clone()));
                         crate::structured_output::prepare(&mut request)
                             .map_err(OrchestratorError::ModelFailure)?;
                     }
@@ -620,6 +642,12 @@ impl LoopEngine {
                 budget.emit(&self.events);
             }
             turn_usage = turn_usage.accumulate(&response.usage);
+            if let Some(metrics) = &self.options.metrics {
+                metrics.lock().expect("orchestrator metrics poisoned").record_usage_for_model(
+                    self.options.model_id.as_deref().unwrap_or("unknown"),
+                    &response.usage,
+                );
+            }
             // Report the context-window usage: the model call's input tokens
             // are the full context sent this round; the window size comes
             // from the configuration.  Unknown usage emits nothing.

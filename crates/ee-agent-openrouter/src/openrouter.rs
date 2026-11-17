@@ -117,6 +117,9 @@ pub(crate) fn openrouter_profile_with_options(
     let mut profile = EndpointProfile::new("OpenRouter", API_KEY_ENV, endpoint, model)
         .with_system_prompt(config.system_prompt.clone())
         .with_timeouts(config.timeouts)
+        .with_session_headers(config.session_headers)
+        .with_session_header_style(ee_chat_completions::SessionHeaderStyle::Ee)
+        .with_user_agent(format!("ee-agent-openrouter/{}", env!("CARGO_PKG_VERSION")))
         .with_query(options.query())
         .with_encoding(options.encoding())
         .with_generation(generation)
@@ -328,6 +331,7 @@ mod tests {
             checkpoint_dir: None,
             session_log_dir: None,
             session_log_durable: false,
+            session_headers: true,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
             max_iterations: None,
         }

@@ -1556,6 +1556,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]

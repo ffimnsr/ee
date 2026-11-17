@@ -32,6 +32,10 @@ pub trait SessionLogSink: Send + Sync + std::fmt::Debug {
         session_id: &str,
         content_hash: &str,
     ) -> Result<Option<Vec<u8>>, OrchestratorError>;
+    /// Filesystem path of one stored body, when the sink is durable.
+    fn body_path(&self, _session_id: &str, _content_hash: &str) -> Option<PathBuf> {
+        None
+    }
     /// Sessions with at least one record.
     fn session_ids(&self) -> Vec<String> {
         Vec::new()
@@ -225,6 +229,11 @@ impl SessionLogSink for FileSessionLogSink {
                 path.display()
             ))),
         }
+    }
+
+    fn body_path(&self, session_id: &str, content_hash: &str) -> Option<PathBuf> {
+        is_content_hash(content_hash)
+            .then(|| FileSessionLogSink::body_path(self, session_id, content_hash))
     }
 
     fn session_ids(&self) -> Vec<String> {

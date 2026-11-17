@@ -566,11 +566,21 @@ impl StreamDecoder {
                 // `message_delta`, so a placeholder is never recorded.
                 let usage = value.pointer("/message/usage").unwrap_or(&Value::Null);
                 let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
-                if input_tokens.is_some() {
+                let cached = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+                let creation = usage.get("cache_creation_input_tokens").and_then(Value::as_u64);
+                if input_tokens.is_some() || cached.is_some() || creation.is_some() {
+                    let context_tokens = input_tokens.map(|input| {
+                        input
+                            .saturating_add(cached.unwrap_or(0))
+                            .saturating_add(creation.unwrap_or(0))
+                    });
                     self.usage = Some(Usage {
                         input_tokens,
                         output_tokens: None,
                         total_tokens: None,
+                        cached_input_tokens: cached,
+                        cache_creation_input_tokens: creation,
+                        context_tokens,
                         ..Default::default()
                     });
                 }
@@ -658,6 +668,13 @@ impl StreamDecoder {
                 {
                     let usage = self.usage.get_or_insert(Usage::default());
                     usage.output_tokens = Some(output_tokens);
+                }
+                if let Some(reasoning) = value
+                    .pointer("/usage/output_tokens_details/thinking_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    let usage = self.usage.get_or_insert(Usage::default());
+                    usage.reasoning_tokens = Some(reasoning);
                 }
             }
             "message_stop" => return Ok(SseControl::Stop),
@@ -764,7 +781,7 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens, None).await
+        self.complete_controlled(transcript, tools, &control, prompt_tokens, None, None).await
     }
 
     /// Performs one buffered round trip with tool-call control.
@@ -775,8 +792,10 @@ impl MessagesCodec {
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
         generation: Option<&GenerationOptions>,
+        session: Option<&ee_agent_orchestrator::SessionContext>,
     ) -> Result<ModelResponse, ProviderError> {
-        let profile = self.transport.profile();
+        let transport = self.transport.with_session(session)?;
+        let profile = transport.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
@@ -800,7 +819,7 @@ impl MessagesCodec {
             prompt_tokens,
             generation,
         });
-        let transport = &self.transport;
+        let transport = &transport;
         let label = profile.label.as_str();
         with_buffered_retry(&profile.retry, || async {
             let mut response = EndpointRequest::new(transport, &body).send().await?;
@@ -839,8 +858,15 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens, None)
-            .await
+        self.complete_streaming_controlled(
+            transcript,
+            tools,
+            &control,
+            sink,
+            prompt_tokens,
+            ee_chat_completions::CallOptions::default(),
+        )
+        .await
     }
 
     /// Performs one streaming round trip with tool-call control.
@@ -851,9 +877,10 @@ impl MessagesCodec {
         tool_control: &ToolCallControl,
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
-        generation: Option<&GenerationOptions>,
+        options: ee_chat_completions::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let profile = self.transport.profile();
+        let transport = self.transport.with_session(options.session)?;
+        let profile = transport.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
@@ -861,7 +888,7 @@ impl MessagesCodec {
         let max_output_tokens = profile
             .fitted_output_limit_with(
                 prompt,
-                generation.and_then(|generation| generation.max_output_tokens),
+                options.generation.and_then(|generation| generation.max_output_tokens),
             )
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let body = messages_body(&MessagesBody {
@@ -875,10 +902,10 @@ impl MessagesCodec {
             tool_control,
             cache: &profile.cache,
             prompt_tokens,
-            generation,
+            generation: options.generation,
         });
-        let mut attempt = MessagesStreamAttempt { transport: &self.transport, body: &body };
-        with_stream_retry(&self.transport.profile().retry, sink, &mut attempt)
+        let mut attempt = MessagesStreamAttempt { transport: &transport, body: &body };
+        with_stream_retry(&transport.profile().retry, sink, &mut attempt)
             .await
             .map(|response| crate::dialect::finalize(response, profile))
     }

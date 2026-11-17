@@ -40,6 +40,7 @@ pub mod provider_options;
 mod reasoning_replay;
 mod request;
 pub mod responses;
+pub mod session;
 pub mod transport;
 pub mod wire;
 
@@ -60,13 +61,14 @@ pub use generation::{
 pub use merge::{MAX_MERGE_DEPTH, MAX_MERGE_NODES, deep_merge};
 pub use native::{CHAT_REPLAY_FIELDS, NATIVE_META_KEY, replayable, seal, seal_response};
 pub use profile::{
-    BearerToken, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy, Timeouts,
-    TokenSource,
+    BearerToken, CallOptions, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy,
+    SessionHeaderStyle, Timeouts, TokenSource,
 };
 pub use provider_options::{
     MAX_METADATA_ENTRIES, MAX_PROVIDER_OPTIONS_BYTES, ProviderOptions, REASONING_SUMMARY_VALUES,
     TEXT_VERBOSITY_VALUES, TRUNCATION_VALUES,
 };
+pub use session::{MAX_SESSION_HEADER_VALUE_BYTES, prompt_cache_key, session_headers};
 pub use transport::{
     ChatCompletionsClient, ChatRequest, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest,
     EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, chunk_timeout,

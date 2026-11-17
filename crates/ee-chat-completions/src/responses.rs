@@ -30,8 +30,8 @@ use crate::{
 };
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, ToolCallControl,
-    ToolChoice, ToolDefinition, estimate_prompt_tokens,
+    GenerationOptions, ModelContent, ModelMessage, ModelResponse, ModelRole, SessionContext,
+    ToolCallControl, ToolChoice, ToolDefinition, estimate_prompt_tokens,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -81,6 +81,8 @@ pub struct ResponsesBody<'a> {
     pub tool_control: &'a ToolCallControl,
     /// Prompt-cache policy, for the request-level lifetime only.
     pub cache: &'a CacheDirective,
+    /// Session affinity; the cache key derives from it when present.
+    pub session: Option<&'a SessionContext>,
 }
 
 /// Builds an OpenAI Responses request body.
@@ -111,6 +113,7 @@ pub fn request_body(
         generation: None,
         tool_control: &auto,
         cache: &cache,
+        session: None,
     })
 }
 
@@ -150,12 +153,15 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
     }
     if !input.system_prompt.is_empty() {
         body["instructions"] = Value::String(input.system_prompt.to_string());
-        // Deterministic, session-config-scoped cache key: stable across every
-        // turn of the session because it hashes only the model id and the
-        // stable system prompt. Routes that do not support the field ignore
-        // it; extensions may still override it last.
-        body["prompt_cache_key"] =
-            Value::String(prompt_cache_key(input.model, input.system_prompt));
+        // Session affinity wins: every turn of one session (and every child of
+        // it) reuses one provider cache lineage. Without a context the key
+        // falls back to a hash of the model id and stable system prompt.
+        let key = input
+            .session
+            .map(SessionContext::cache_key)
+            .filter(|key| !key.is_empty())
+            .unwrap_or_else(|| prompt_cache_key(input.model, input.system_prompt));
+        body["prompt_cache_key"] = Value::String(key);
     }
     if let Some(Value::Object(ttl)) = openai_request_ttl(input.cache)
         && let Some(object) = body.as_object_mut()
@@ -753,7 +759,7 @@ impl ResponsesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens, None).await
+        self.complete_controlled(transcript, tools, &control, prompt_tokens, None, None).await
     }
 
     /// Performs one buffered round trip with tool-call control and sampling
@@ -765,8 +771,10 @@ impl ResponsesCodec {
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
         generation: Option<&GenerationOptions>,
+        session: Option<&SessionContext>,
     ) -> Result<ModelResponse, ProviderError> {
-        let profile = self.transport.profile();
+        let transport = self.transport.with_session(session)?;
+        let profile = transport.profile();
         let transcript = guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
@@ -786,8 +794,9 @@ impl ResponsesCodec {
             generation,
             tool_control,
             cache: &profile.cache,
+            session,
         });
-        let transport = &self.transport;
+        let transport = &transport;
         let label = profile.label.as_str();
         with_buffered_retry(&profile.retry, || async {
             let mut response = EndpointRequest::new(transport, &body).send().await?;
@@ -826,8 +835,15 @@ impl ResponsesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_streaming_controlled(transcript, tools, &control, sink, prompt_tokens, None)
-            .await
+        self.complete_streaming_controlled(
+            transcript,
+            tools,
+            &control,
+            sink,
+            prompt_tokens,
+            crate::CallOptions::default(),
+        )
+        .await
     }
 
     /// Performs one streaming round trip with tool-call control and sampling
@@ -839,16 +855,17 @@ impl ResponsesCodec {
         tool_control: &ToolCallControl,
         sink: DeltaSink<'_>,
         prompt_tokens: Option<u64>,
-        generation: Option<&GenerationOptions>,
+        options: crate::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let profile = self.transport.profile();
+        let transport = self.transport.with_session(options.session)?;
+        let profile = transport.profile();
         let transcript = guarded_transcript(profile, transcript)?;
         let prompt = prompt_tokens.unwrap_or_else(|| {
             estimate_prompt_tokens(transcript.as_ref(), tools, &profile.system_prompt)
         });
         let max_output_tokens = profile.fitted_output_limit_with(
             prompt,
-            generation.and_then(|generation| generation.max_output_tokens),
+            options.generation.and_then(|generation| generation.max_output_tokens),
         );
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
@@ -858,12 +875,13 @@ impl ResponsesCodec {
             stream: true,
             max_output_tokens,
             extensions: profile.extensions.as_ref(),
-            generation,
+            generation: options.generation,
             tool_control,
             cache: &profile.cache,
+            session: options.session,
         });
-        let mut attempt = ResponsesStreamAttempt { transport: &self.transport, body: &body };
-        with_stream_retry(&self.transport.profile().retry, sink, &mut attempt)
+        let mut attempt = ResponsesStreamAttempt { transport: &transport, body: &body };
+        with_stream_retry(&transport.profile().retry, sink, &mut attempt)
             .await
             .map(|response| finalize(response, profile))
     }

@@ -324,6 +324,10 @@ pub struct OrchestratorConfig {
     /// Opt-in risk-tiered approval classifier; disabled by default.
     #[serde(default)]
     pub approval_classifier: crate::approval_classifier::ApprovalClassifierConfig,
+    /// Per-result line and byte bounds applied when a tool observation is
+    /// admitted, before projection and compaction.
+    #[serde(default)]
+    pub tool_output: crate::tool_output::ToolOutputLimits,
 }
 
 impl OrchestratorConfig {
@@ -366,6 +370,7 @@ impl OrchestratorConfig {
         }
         self.compaction.validate()?;
         self.session_log.validate()?;
+        self.tool_output.validate()?;
         self.approval_classifier.validate().map_err(OrchestratorError::InvalidState)?;
         Ok(())
     }
@@ -410,6 +415,7 @@ impl Default for OrchestratorConfig {
             stop_gate: StopGateConfig::default(),
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::default(),
+            tool_output: crate::tool_output::ToolOutputLimits::default(),
         }
     }
 }
@@ -576,6 +582,7 @@ mod tests {
             stop_gate: StopGateConfig::default(),
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::auto(),
+            tool_output: crate::tool_output::ToolOutputLimits::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");

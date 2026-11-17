@@ -154,6 +154,7 @@ impl OrchestratorRuntime {
                 session_log: self.session_logs.as_ref().map(|store| store.log_for(&session_id)),
                 stop_gate: self.config.stop_gate.enabled.then(|| self.config.stop_gate.bounded()),
                 workspace_instructions: self.workspace_instruction_tracker(),
+                metrics: Some(self.metrics.clone()),
                 ..LoopOptions::default()
             },
         );
@@ -329,6 +330,9 @@ impl OrchestratorRuntime {
         let model = self.models.default_adapter()?;
         let policy = self.policy();
         let mut options = options;
+        // Usage aggregation is a runtime-owned counter store; the loop writes
+        // per-model totals into it without holding content.
+        options.metrics = Some(self.metrics.clone());
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         options.truncation_flag = Some(truncation_flag.clone());
         options.transcript_out = Some(self.last_turn_transcript.clone());
