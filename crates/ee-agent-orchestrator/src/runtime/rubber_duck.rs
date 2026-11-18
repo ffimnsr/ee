@@ -138,7 +138,8 @@ impl OrchestratorRuntime {
             "You are root agent and final decision owner. Synthesize verified rubber-duck evidence into one concise user response. State finding counts, which findings you accept/reject/defer, and explicitly say how plan changed or why it did not. Critic opinion is not validation evidence. Do not request or call tools.",
         );
         let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
-        let request = ModelRequest::new(transcript.messages().to_vec(), Vec::new(), budget, root)
+        let messages = transcript.request_messages();
+        let request = ModelRequest::new(messages, Vec::new(), budget, root)
             .with_model_id(Some(DEFAULT_MODEL_ID.into()));
         let completion = self.models.default_adapter()?.complete(request, cancel.clone());
         let response = tokio::select! {

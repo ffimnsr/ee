@@ -79,7 +79,7 @@ pub fn build_review_request(
     budget: BudgetSnapshot,
     task: crate::tasks::TaskNode,
 ) -> ModelRequest {
-    let mut messages = transcript.messages().to_vec();
+    let mut messages = transcript.request_messages();
     messages.push(ModelMessage::text(ModelRole::User, review_prompt()));
     messages.push(review_context_message(context));
     // Review requests run through the injection guard. Assembled paths,
@@ -191,6 +191,37 @@ mod tests {
         assert!(context.changed_files.is_empty());
         assert!(context.validation_summaries.is_empty());
         assert!(context.task_state.is_empty());
+    }
+
+    #[test]
+    fn review_request_repairs_an_unanswered_tool_call() {
+        let mut transcript = Transcript::new();
+        transcript.messages.push(ModelMessage::tool_call(
+            "tc-1",
+            "read_file",
+            serde_json::json!({ "path": "a" }),
+        ));
+        let request = build_review_request(
+            &transcript,
+            &ReviewContext::default(),
+            Vec::new(),
+            BudgetSnapshot::default(),
+            crate::tasks::TaskNode::new(TaskId::new("task-1"), "implement", "implement"),
+        );
+        let synthesized = request
+            .transcript
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                crate::model::ModelContent::ToolResult { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(synthesized.len(), 1);
+        assert_eq!(
+            synthesized[0].text_output,
+            crate::transcript_normalize::MISSING_TOOL_RESULT_TEXT
+        );
     }
 
     #[test]

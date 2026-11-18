@@ -242,29 +242,31 @@ def validate_model(model_id: str, model: dict) -> None:
                 raise SystemExit(f"{model_id}: unknown tool choice {choice!r}")
 
 
-def _cache_format(model_id: str, compatibility: dict) -> str:
+def _cache_format(compatibility: dict) -> str:
+    """Marker format for one row.
+
+    The snapshot is authoritative: a row that needs the Alibaba marker shape
+    must declare `cache_format: alibaba`. There is deliberately no vendor or
+    model-id fallback, because that is the heuristic the capability matrix
+    exists to remove. The Qwen placeholder capability below names Alibaba
+    explicitly instead.
+    """
     declared = compatibility.get("cache_format")
     if declared:
         return declared
-    vendor = model_id.lstrip("~").split("/")[0].lower()
-    return "alibaba" if "qwen" in vendor else "anthropic"
+    return "anthropic"
 
 
-def _is_qwen_family(model_id: str, family: str) -> bool:
+def _is_qwen_family(family: str) -> bool:
     """Matches the reference cache-policy branch for Qwen-family routes.
 
     The models.dev snapshot does not declare a cache capability for OpenRouter
-    Qwen routes, but the reference agent still places breakpoints on them
-    (`qwen/` and `alibaba/qwen` ids resolve to the Qwen policy). The family
-    field is authoritative; the id prefix is the fallback the reference uses.
+    Qwen routes, but the reference agent still places breakpoints on them. The
+    `family` field is authoritative and covers every shipped Qwen row
+    (`qwen`, `qwen3.5`, `qwen3.6`, `qwen3.8-max`); no id-prefix fallback is
+    needed, so a missing family simply means the row is not Qwen.
     """
-    if family.lower() == "qwen":
-        return True
-    vendor, _, rest = model_id.lstrip("~").partition("/")
-    vendor = vendor.lower()
-    if vendor == "qwen":
-        return True
-    return vendor == "alibaba" and rest.lower().startswith("qwen")
+    return family.lower().startswith("qwen")
 
 
 def qwen_cache_literal() -> str:
@@ -285,12 +287,12 @@ def cache_literal(
     model_id: str, family: str, cache: dict, compatibility: dict
 ) -> str:
     if not cache:
-        return qwen_cache_literal() if _is_qwen_family(model_id, family) else "CacheCapability::NONE"
+        return qwen_cache_literal() if _is_qwen_family(family) else "CacheCapability::NONE"
     explicit = cache.get("explicit")
     implicit = cache.get("implicit")
     explicit_settings = explicit if isinstance(explicit, dict) else {}
     implicit_settings = implicit if isinstance(implicit, dict) else {}
-    format_id = _cache_format(model_id, compatibility)
+    format_id = _cache_format(compatibility)
     targets = explicit_settings.get("targets")
     if targets is None:
         targets = (
@@ -322,6 +324,7 @@ def cache_literal(
 
 def capabilities_literal(model: dict) -> str:
     capabilities = model.get("capabilities") or {}
+    cache = capabilities.get("cache") or {}
     api = model.get("api") or {}
     # The chat-completions entry describes the tool plane the request path uses;
     # fall back to the first declared kind when a model has no chat route.
@@ -330,31 +333,16 @@ def capabilities_literal(model: dict) -> str:
     api_capabilities = entry.get("capabilities") or {}
     tools = api_capabilities.get("tools") or {}
     choices = ", ".join(rust(str(item)) for item in tools.get("choice") or [])
-    cache = capabilities.get("cache") or {}
-    tiers = ", ".join(rust(str(item)) for item in capabilities.get("service_tier") or [])
-    system_updates = api_capabilities.get(
-        "system_updates", capabilities.get("system_updates")
-    )
-    reasoning_updates = api_capabilities.get(
-        "effort_updates", capabilities.get("effort_updates")
-    )
     return (
         "ModelCapabilities { tool_choices: &["
-        f"{choices}], tool_search: {'true' if tools.get('search') else 'false'}, "
+        f"{choices}], "
         f"tool_updates: {'true' if tools.get('updates') else 'false'}, "
         f"cache: {cache_literal(model['id'], model.get('family') or '', cache, compatibility)}, "
         # The snapshot declares no provider state for this provider, so the
         # declared routes decide: chat/responses stream usage and responses
-        # exposes store/prompt_cache_key.
+        # exposes store.
         f"store: {'true' if 'responses' in api else 'false'}, "
-        f"stream_usage: {'true' if 'chat-completions' in api or 'responses' in api else 'false'}, "
-        f"prompt_cache_key: {'true' if 'responses' in api else 'false'}, "
-        f"service_tiers: &[{tiers}], "
-        f"system_updates: {'true' if system_updates else 'false'}, "
-        f"reasoning_updates: {'true' if reasoning_updates else 'false'}, "
-        f"require_reasoning: {'true' if compatibility.get('require_reasoning') else 'false'}, "
-        f"require_finish_reason: {'true' if compatibility.get('require_finish_reason') else 'false'}, "
-        f"require_assistant_after_tool: {'true' if compatibility.get('require_assistant_after_tool') else 'false'} }}"
+        f"stream_usage: {'true' if 'chat-completions' in api or 'responses' in api else 'false'} }}"
     )
 
 

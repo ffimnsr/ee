@@ -64,7 +64,6 @@ fn capability_matrix_replaces_provider_heuristics() {
     assert!(!gpt.capabilities.cache.explicit);
     assert!(gpt.routes.responses);
     assert!(gpt.capabilities.store);
-    assert!(gpt.capabilities.prompt_cache_key);
 
     let qwen = find("qwen/qwen3-coder").expect("qwen row");
     assert!(qwen.capabilities.cache.explicit, "Qwen routes place breakpoints");
@@ -81,7 +80,6 @@ fn every_chat_row_records_release_and_capabilities() {
     for entry in models().filter(|entry| entry.kind == ModelKind::Chat) {
         assert!(!entry.release_date.is_empty(), "{entry}");
         assert!(entry.release_date.len() >= 7, "{entry} release date is partial");
-        assert!(!entry.capabilities.service_tiers.iter().any(|tier| tier.is_empty()), "{entry}");
     }
 }
 

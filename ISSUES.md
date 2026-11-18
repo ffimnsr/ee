@@ -2368,10 +2368,10 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 | 20 | Divergent | capability + lifecycle | compact body lacks `prompt_cache_options`; checkpoint not provider-gated; lost on resume |
 | 21 | Divergent | resolution | no deterministic default/small selection; `disabled` not checked on the small-model path |
 | 22 | Divergent | doc drift | code is correct; the plan and module doc URL omit the `/console` segment |
-| 23 | Divergent | security | redirect policy follows HTTPS→HTTP downgrades |
-| 24 | Divergent | declared-unused | half the matrix has no production reader; generator still vendor-sniffs `qwen` |
-| 25 | Divergent | shape | native state is message-level, not per part; hosted results never replayed; missing `finish_reason` keeps tail state |
-| 26 | Divergent | coverage | normalization bypassed by provider compaction, rubber-duck, and reflection |
+| 23 | Resolved (R3) | security | redirect policy re-checks HTTPS on every hop |
+| 24 | Resolved (R3) | declared-unused | dead capability fields removed; `tool_choices` and `stream_usage` now wired; generator vendor sniff gone |
+| 25 | Resolved (R3, one documented deviation) | shape | hosted results now replay verbatim; an absent `finish_reason` is a cut turn; per-call state stays inside the sealed envelope until the R4 split |
+| 26 | Resolved (R3) | coverage | every request projection normalizes, including provider compaction, rubber-duck, and reflection |
 | 27 | Divergent (minor) | coverage | dedupe misses image blobs inside `EmbeddedResource`; inline text header lacks a description |
 | 28 | Clean | — | titles host-owned, single compaction API, `until` tested |
 | 4.1 | Divergent | constraint | two files crossed 1,000 LOC during the parity series; plan's `routes.rs` LOC claim is wrong |
@@ -2436,6 +2436,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
   - `crates/ee-agent-orchestrator/src/reflection.rs:82` — `transcript.messages().to_vec()` before `prepare_request`.
 - **Impact:** a transcript with a missing tool result is repaired for the main loop but not for the three auxiliary calls, which is exactly where a partially executed turn is most likely to be re-sent.
 - **Fix direction:** normalize inside those three constructors (or at a shared `ModelRequest::from_transcript` helper) so no call path can bypass it.
+- **Landed (R3/Gap 26):** every projection now goes through `Transcript::request_messages`, which applies projection pruning plus `normalize_transcript`. Provider-native compaction normalizes `recent_messages` once on entry (`runtime/compact.rs`, covering both the strategy evidence and the `/compact` body), manual rubber-duck root synthesis uses `transcript.request_messages()` (`runtime/rubber_duck.rs`), `build_review_request` uses it (`reflection.rs`), and the strategy review-phase request that still called `transcript.messages()` directly (`strategy.rs`) was moved over as well. Raw `transcript.messages()` remains only where the durable transcript is stored (session log, resume snapshot, retained child transcript), which must stay unmodified. Test: `review_request_repairs_an_unanswered_tool_call`.
 
 #### 7.2.8 Gap 25 — native state is message-level and hosted replay is absent
 
@@ -2446,6 +2447,11 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
   - `model.rs:851-853` drops tail state only for `finish_reason ∈ {error, interrupted, cancelled}`; a missing finish reason keeps the state.
 - **Impact:** the per-part replay rules in the plan (same provider+model per part, same provider for hosted results) are approximated by one message-level blob. Hosted tools (Gap 19) have no replay path, so the two gaps' acceptance criteria are linked and both incomplete.
 - **Fix direction:** add the bounded `native` map to parts/intents/results, move per-call `extra_content` onto the call, and treat `finish_reason == None` as a cut turn.
+- **Landed (R3/Gap 25, partial by design):**
+  - **Hosted replay fixed.** `responses_encode::input_item` no longer drops a provider-executed result message; it replays the provider's own item verbatim through `hosted_result_item`, gated on `responses_wire::hosted_tool_name` so only documented hosted shapes travel (web search, file search, code interpreter, MCP). A local `function_call_output` is still never synthesized. Test: `a_provider_executed_result_replays_the_provider_item_verbatim` (exactly one item, byte-identical, no `function_call_output`).
+  - **Absent finish reason is now a cut turn.** `Transcript::cut_turn` treats `finish_reason == None` like `error`/`interrupted`/`cancelled`, so a stream that stopped before its terminal event does not replay unsigned tail state. Test: `a_turn_without_a_finish_reason_is_treated_as_cut`.
+  - **Per-part shape remains message-level, deliberately.** Per-call state is already keyed by call id inside the sealed `native.tool_calls` map (`wire.rs`), which gives per-part identity and producer gating without widening `ModelContent::ToolCall`, `ToolIntent`, and `ToolResult` — three structs that are themselves over the 1,000-LOC file cap and slated for the R4 split. The behavioural acceptance (byte-identical `extra_content`, `reasoning_details` with `index`, thinking signatures) is met by the current envelope; only the storage shape differs.
+  - **Residual deviation:** a hosted result item is replayed without re-checking the provider that produced it, because producer identity lives on the call's sealed state, not on the result message. Switching provider mid-session therefore leaves a hosted item the new provider did not emit. Fixing it needs a producer id on the result message; tracked with the R4 type split rather than guessed here.
 
 #### 7.2.9 Gap 1 — catalog translation fields are inert
 
@@ -2464,6 +2470,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual (heuristic):** `crates/ee-agent-openrouter/scripts/gen_catalog.py:250` still returns `alibaba` when `"qwen" in vendor` for rows that *do* declare a cache; the new Qwen placeholder path (Gap 6, R1) uses the snapshot `family` field first and only falls back to the reference's id prefixes. It is generator code rather than runtime code, but it is the exact heuristic the gap set out to remove.
 - **Impact:** Gap 24's grep-level acceptance ("no production code path decides a request field from a model-id substring") holds for runtime crates but is violated in data generation; several capabilities are declared with no consumer, which makes future gating look implemented when it is not.
 - **Fix direction:** finish the consumers or delete the fields; lift the cache-format decision into the snapshot (`cache_format` already exists as a compatibility key — make it mandatory for `alibaba` rows so the fallback disappears).
+- **Landed (R3/Gap 24):** finished-or-deleted per field. Deleted because the pinned snapshot declares no data and no consumer existed: `tool_search`, `system_updates`, `reasoning_updates`, `service_tiers`, `prompt_cache_key`, and the three `require_*` flags (`ModelCapabilities` now carries `tool_choices`, `tool_updates`, `cache`, `store`, `stream_usage`; the struct doc says a field may only return together with its reader). Wired: `tool_choices` reaches `EndpointProfile::tool_choices` (both provider profiles) and is enforced before any body is built through the shared `tool_choice_error` helper — in the Chat/Responses adapters and in the OpenCode Messages adapter — while an empty list still means "protocol default"; `stream_usage` now comes from the catalog row instead of a hardcoded `true` (OpenCode) or the option alone (OpenRouter). Generator: `_cache_format` lost its `qwen` vendor fallback and returns the declared format or `anthropic`, and `_is_qwen_family` now reads the snapshot `family` prefix only (`qwen`, `qwen3.5`, `qwen3.6`, `qwen3.8-max`; the id-prefix fallback is gone, all 46 Qwen rows still resolve). `ReasoningSupport::default` and cost multipliers stay unmodelled with a doc note rather than being added as new dead fields. Tests: `tool_choice_outside_the_catalog_list_is_rejected_before_sending`, `a_declared_tool_choice_reaches_the_route`, `an_empty_tool_choice_list_keeps_the_protocol_default`; both catalogs regenerate byte-identically under `--check`.
 
 #### 7.2.11 Gap 13 — timeout typing, budgets, and a lint escape
 
@@ -2489,6 +2496,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual:** `crates/ee-chat-completions/src/remote_instructions.rs:30` installs `reqwest::redirect::Policy::limited(REMOTE_INSTRUCTION_MAX_REDIRECTS)`; the initial URL is scheme-checked, but `Policy::limited` follows any scheme, so an HTTPS source that redirects to `http://…` is fetched in cleartext.
 - **Impact:** a compromised or misconfigured instruction host can force a downgrade; the content is then rendered at the untrusted-instruction trust level, so it is not an injection path, but it is a confidentiality and integrity regression against the stated contract.
 - **Fix direction:** replace `limited(n)` with a custom policy that re-checks `https` on every hop (and keeps the hop cap), plus a unit test using a two-hop redirect.
+- **Landed (R3/Gap 23):** `redirect_policy()` in `remote_instructions.rs` installs `reqwest::redirect::Policy::custom`, and `redirect_destination()` refuses any hop that is not `https` or that exceeds `REMOTE_INSTRUCTION_MAX_REDIRECTS`. The decision is a pure function so it is testable without a server; tests cover the `https` → `http` downgrade and the hop budget.
 
 #### 7.2.14 Gap 16 — the retained-overflow path is opt-in and unfalsifiable by default
 
@@ -2537,6 +2545,7 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 - [ ] `crates/ee-chat-completions/src/transport.rs` — 1,011 LOC. Split the SSE drive loop from the request sender.
 - [x] Plan's `routes.rs` LOC figure is stale (775 actual, still under the cap) — text fix tracked in 7.4.4.
 - Files already over the cap that the series modified anyway: `crates/ee-agent-orchestrator/src/loop_engine.rs` 2,651, `src/model.rs` 1,729, `src/tools.rs` 2,437. The rule says do not apply changes to a file at or over the threshold; these were modified repeatedly. Either split them or record an explicit exemption per file.
+  - R3 touched `model.rs` (+19: `cut_turn` and one test) and `loop_engine.rs` (+1: a fixture finish reason) because both fixes are behavioural and belong at the type that owns them. Both stay exempt only until the R4 split; no new logic was added to either.
 - Approaching the cap: `provider_adapter/agent_impl.rs` 995 (R1 extracted `SessionRuntime::new` to pull it back under after the session-identity wiring), `wire.rs` 982, `opencode/config.rs` 965. Any further growth must split first.
 
 #### 7.5.2 Lint escapes
@@ -2577,8 +2586,9 @@ Ordered by ratio of parity gained to risk. Each slice is independently shippable
 
 - [x] **Slice R1 — wire the dead paths.** Gap 19 store/continuation from catalog capability; Gap 14 session context population; Gap 7 `structured_output` + `tools.updates` gates; Gap 6 Qwen placement in the generator. Small diffs, all mechanical, all currently unreachable code. **Landed 2026-11-17:** all four; see the `Landed (R1/...)` notes above.
 - [x] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep. **Landed 2026-11-18:** see the `Landed (R2/...)` notes below.
-- [ ] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
-- [ ] **Slice R4 — file splits.** `messages.rs`, `transport.rs`, `acp_flows.rs`; record or remove the pre-existing oversized files; delete the `#[allow]` in `transport.rs`.
+- [x] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
+  - Landed: Gap 23, Gap 26, Gap 24, Gap 25 (see 7.2.13, 7.2.7, 7.2.10, 7.2.8). Open follow-up: producer id on a hosted result message (tracked inside the R4 type split).
+- [ ] **Slice R4 — file splits.** `messages.rs`, `transport.rs`, `acp_flows.rs`; record or remove the pre-existing oversized files; delete the `#[allow]` in `transport.rs`. (NOTE by user: include loop_engine.rs, tools.rs, model.rs, strategy.rs)
 - [ ] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture.
 
 Slices R1–R5 do not reopen Parts 1–6; they close the gap between "landed" and "observable". Update this section as each slice lands, and keep the audit date so a later pass can tell which findings were re-checked.

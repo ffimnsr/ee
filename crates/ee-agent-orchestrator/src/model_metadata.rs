@@ -99,6 +99,11 @@ pub struct CostTier {
 }
 
 /// Monetary cost per million tokens, in integer micro-dollars.
+///
+/// Multiplicative factors (the reference's time-window discounts) are not
+/// modelled: provider-reported `usage.cost` is authoritative, and the catalog
+/// fallback prices each call at the base or tiered rate. Adding a factor field
+/// without a consumer would repeat the decorative-capability problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCost {
     /// Input price per million tokens.
@@ -366,6 +371,13 @@ impl CacheCapability {
 
 /// Capability matrix declared by one catalog row.
 ///
+/// Only flags with a production consumer live here. The reference matrix also
+/// carries `service_tiers` and the `require_reasoning` / `require_finish_reason`
+/// / `require_assistant_after_tool` compatibility flags; the pinned models.dev
+/// snapshot declares none of them, so modelling them would produce dead fields
+/// that make future gating look implemented. Add one back only together with
+/// the code path that reads it.
+///
 /// Tool support, strict schemas, free-form formats, structured output, sampling,
 /// limits, and cost stay on the provider row because they predate this matrix;
 /// this struct carries the flags that replaced per-provider heuristics.
@@ -373,8 +385,6 @@ impl CacheCapability {
 pub struct ModelCapabilities {
     /// `tool_choice` values the route honours; empty means the protocol default.
     pub tool_choices: &'static [&'static str],
-    /// The route offers provider-executed search tools.
-    pub tool_search: bool,
     /// The tool list may change between steps in one conversation.
     pub tool_updates: bool,
     /// Prompt-cache capability.
@@ -383,39 +393,16 @@ pub struct ModelCapabilities {
     pub store: bool,
     /// Usage is reported in a streamed response.
     pub stream_usage: bool,
-    /// The route accepts a request-level prompt cache key.
-    pub prompt_cache_key: bool,
-    /// Service tiers the route accepts; empty means none are declared.
-    pub service_tiers: &'static [&'static str],
-    /// The system prompt may change mid-session.
-    pub system_updates: bool,
-    /// Reasoning effort may be updated mid-session.
-    pub reasoning_updates: bool,
-    /// Every assistant turn must carry the reasoning field.
-    pub require_reasoning: bool,
-    /// A stream that ends without a finish reason is a failure.
-    pub require_finish_reason: bool,
-    /// An assistant message is required between a tool result and the next
-    /// user message.
-    pub require_assistant_after_tool: bool,
 }
 
 impl ModelCapabilities {
     /// Nothing is declared; callers fall back to protocol defaults.
     pub const UNKNOWN: Self = Self {
         tool_choices: &[],
-        tool_search: false,
         tool_updates: false,
         cache: CacheCapability::NONE,
         store: false,
         stream_usage: false,
-        prompt_cache_key: false,
-        service_tiers: &[],
-        system_updates: false,
-        reasoning_updates: false,
-        require_reasoning: false,
-        require_finish_reason: false,
-        require_assistant_after_tool: false,
     };
 }
 
@@ -426,6 +413,10 @@ impl Default for ModelCapabilities {
 }
 
 /// Reasoning controls a model documents.
+///
+/// A `default` effort is not modelled: callers either configure an effort or
+/// send none, so an unconfigured request never guesses a value the route might
+/// reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReasoningSupport {
     /// Whether the model accepts any reasoning control.

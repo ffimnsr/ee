@@ -17,10 +17,15 @@ pub(crate) fn input_item(message: &ModelMessage) -> Option<Value> {
     // A provider-executed result is already part of the provider's response; a
     // synthetic `function_call_output` would reference a call it never saw as a
     // local function.
+    //
+    // The provider's own item is replayed verbatim instead: hosted search, file
+    // search, code interpreter, and MCP calls carry their state in that item, and
+    // dropping it makes the next turn ask the model to continue a call it can no
+    // longer see.
     if message.role == ModelRole::Tool
         && message.metadata.contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
     {
-        return None;
+        return hosted_result_item(message);
     }
     let text = content_text(&message.content);
     match message.role {
@@ -46,6 +51,22 @@ pub(crate) fn input_item(message: &ModelMessage) -> Option<Value> {
             }))
         }
     }
+}
+
+/// Replays the provider's own item for a provider-executed tool result.
+///
+/// Only documented hosted item types travel this path. Anything else (a future
+/// hosted kind, or a call the executor recorded locally) stays out of the
+/// request rather than being re-serialized into an item shape the provider did
+/// not send.
+fn hosted_result_item(message: &ModelMessage) -> Option<Value> {
+    let item = message.content.iter().find_map(|block| match block {
+        ModelContent::ToolResult { result, .. } => result.structured_output.as_ref(),
+        _ => None,
+    })?;
+    let kind = item.get("type").and_then(Value::as_str)?;
+    crate::responses_wire::hosted_tool_name(kind)?;
+    Some(item.clone())
 }
 
 /// Builds Responses content parts; text keeps the dialect's part names and

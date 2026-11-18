@@ -2677,6 +2677,7 @@ mod tests {
         let model = FakeModel::new(vec![
             ModelResponse::new()
                 .tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))])
+                .with_finish_reason(Some(String::from("tool_calls")))
                 .with_native(Some(native.clone())),
             ModelResponse::new().text("done").completed(),
         ]);

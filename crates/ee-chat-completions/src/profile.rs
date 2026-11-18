@@ -249,6 +249,12 @@ pub struct CallOptions<'a> {
     pub continuation: Option<&'a ee_agent_orchestrator::Continuation>,
 }
 
+/// `tool_choice` values a route honours (`auto`, `none`, `required`, `tool`).
+///
+/// Catalog data, never a model-id heuristic. An empty list means the protocol
+/// default applies, so an unadvertised route keeps today's bytes.
+pub type ToolChoices = &'static [&'static str];
+
 /// Everything a provider must supply for its Chat Completions endpoint.
 ///
 /// Provider attribution headers, provider-specific request shaping, environment
@@ -330,6 +336,9 @@ pub struct EndpointProfile {
     /// OpenCode uses this to enable its image processing lane without changing
     /// text-only request bytes.
     pub image_opt_in_header: Option<HeaderName>,
+    /// Capability flags that change request assembly: the `tool_choice` values
+    /// the route accepts. Defaults (empty) send the protocol default.
+    pub tool_choices: ToolChoices,
 }
 
 /// How provider-specific session header names are spelled.
@@ -345,6 +354,37 @@ pub enum SessionHeaderStyle {
     /// `x-ee-*` session headers (default).
     #[default]
     Ee,
+}
+
+/// Returns an actionable message when `control` names a `tool_choice` the
+/// route does not advertise.
+///
+/// Shared by every dialect so a Messages route validates the same rule as a
+/// Chat or Responses route. `choices` empty means the catalog declares nothing
+/// and the protocol default applies; no tools means the codecs omit the field.
+#[must_use]
+pub fn tool_choice_error(
+    model: &str,
+    choices: &[&str],
+    control: &ee_agent_orchestrator::ToolCallControl,
+    has_tools: bool,
+) -> Option<String> {
+    if choices.is_empty() || !has_tools {
+        return None;
+    }
+    let requested = match &control.choice {
+        ee_agent_orchestrator::ToolChoice::Auto => "auto",
+        ee_agent_orchestrator::ToolChoice::None => "none",
+        ee_agent_orchestrator::ToolChoice::Required => "required",
+        ee_agent_orchestrator::ToolChoice::Tool { .. } => "tool",
+    };
+    if choices.contains(&requested) {
+        return None;
+    }
+    Some(format!(
+        "model `{model}` does not accept tool_choice `{requested}`; its catalog entry declares: {}",
+        choices.join(", ")
+    ))
 }
 
 impl EndpointProfile {
@@ -389,7 +429,30 @@ impl EndpointProfile {
             raw_stream_events: false,
             compaction: false,
             image_opt_in_header: None,
+            tool_choices: &[],
         }
+    }
+
+    /// Declares the `tool_choice` values the route honours.
+    #[must_use]
+    pub fn with_tool_choices(mut self, choices: ToolChoices) -> Self {
+        self.tool_choices = choices;
+        self
+    }
+
+    /// Returns an actionable message when `control` names a `tool_choice` the
+    /// catalog does not advertise for this route.
+    ///
+    /// `None` means the request may be sent: either the route declares nothing
+    /// (protocol default) or it declares the requested value. With no tools the
+    /// codecs omit the field entirely, so there is nothing to validate.
+    #[must_use]
+    pub fn tool_choice_error(
+        &self,
+        control: &ee_agent_orchestrator::ToolCallControl,
+        has_tools: bool,
+    ) -> Option<String> {
+        tool_choice_error(&self.model, self.tool_choices, control, has_tools)
     }
 
     /// Sets the header sent only when the request carries an image part.

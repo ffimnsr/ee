@@ -126,6 +126,19 @@ fn ensure_structured_output(
     Ok(())
 }
 
+/// Rejects a tool-call control the catalog does not advertise for the route.
+///
+/// An empty capability list means the snapshot declares nothing, so the
+/// protocol default applies and the request is left alone. When the route does
+/// declare values, a mismatch is a configuration error: sending it anyway
+/// would turn an actionable mistake into a provider rejection.
+fn ensure_tool_choice(profile: &EndpointProfile, request: &ModelRequest) -> Result<(), ModelError> {
+    match profile.tool_choice_error(&request.tool_control, !request.tools.is_empty()) {
+        Some(detail) => Err(ModelError::Adapter(detail)),
+        None => Ok(()),
+    }
+}
+
 impl ModelAdapter for ChatCompletionsAdapter {
     fn complete(
         &self,
@@ -143,6 +156,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
             // message names the provider's own environment variable.
             token().map_err(ModelError::Adapter)?;
             ensure_structured_output(&profile, &request)?;
+            ensure_tool_choice(&profile, &request)?;
             let request = wire_request(&profile, &request)?;
             let answer = tokio::select! {
                 answer = completion(request) => {
@@ -185,6 +199,7 @@ impl ModelAdapter for ChatCompletionsAdapter {
             }
             token().map_err(ModelError::Adapter)?;
             ensure_structured_output(&profile, &request)?;
+            ensure_tool_choice(&profile, &request)?;
             let wire = wire_request(&profile, &request)?;
             let answer = tokio::select! {
                 answer = streaming(wire, events) => {
@@ -254,6 +269,7 @@ impl ModelAdapter for ResponsesAdapter {
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let profile = codec.profile();
             ensure_structured_output(profile, &request)?;
+            ensure_tool_choice(profile, &request)?;
             let generation = merged_generation(profile, &request)?;
             let completion = codec.complete_controlled(
                 &request.transcript,
@@ -288,6 +304,7 @@ impl ModelAdapter for ResponsesAdapter {
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
             let profile = codec.profile();
             ensure_structured_output(profile, &request)?;
+            ensure_tool_choice(profile, &request)?;
             let generation = merged_generation(profile, &request)?;
             let mut sink = |delta: StreamDelta| forward_delta(delta, &events);
             let completion = async move {
@@ -748,5 +765,88 @@ mod tests {
 
         adapter.complete(request, cancel).await.expect("declared route runs");
         assert_eq!(*seen.lock().expect("seen"), 1, "the client ran exactly once");
+    }
+
+    #[tokio::test]
+    async fn tool_choice_outside_the_catalog_list_is_rejected_before_sending() {
+        let completion: Arc<CompletionClient> = Arc::new(|_request: ChatRequest| {
+            Box::pin(async { panic!("the completion client must not run") })
+        });
+        let adapter = ChatCompletionsAdapter::with_completion(
+            profile().with_tool_choices(&["auto", "none"]),
+            token(),
+            completion,
+        );
+        let mut request = request();
+        request.tool_control = ee_agent_orchestrator::ToolCallControl::named("read_file");
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        let error = adapter.complete(request, cancel).await.expect_err("gate rejects");
+        let text = error.to_string();
+        assert!(text.contains("tool_choice `tool`"), "{text}");
+        assert!(text.contains("example-model"), "{text}");
+        assert!(text.contains("auto, none"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_declared_tool_choice_reaches_the_route() {
+        let seen = Arc::new(Mutex::new(0usize));
+        let recorder = seen.clone();
+        let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
+            let recorder = recorder.clone();
+            Box::pin(async move {
+                *recorder.lock().expect("seen") += 1;
+                Ok(AssistantTurn {
+                    content: String::from("ok"),
+                    reasoning: String::new(),
+                    raw: Value::Null,
+                    native_reasoning: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some(String::from("stop")),
+                    usage: None,
+                    response_id: None,
+                })
+            })
+        });
+        let adapter = ChatCompletionsAdapter::with_completion(
+            profile().with_tool_choices(&["auto", "tool"]),
+            token(),
+            completion,
+        );
+        let mut request = request();
+        request.tool_control = ee_agent_orchestrator::ToolCallControl::named("read_file");
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        adapter.complete(request, cancel).await.expect("declared choice runs");
+        assert_eq!(*seen.lock().expect("seen"), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_tool_choice_list_keeps_the_protocol_default() {
+        let seen = Arc::new(Mutex::new(0usize));
+        let recorder = seen.clone();
+        let completion: Arc<CompletionClient> = Arc::new(move |_request: ChatRequest| {
+            let recorder = recorder.clone();
+            Box::pin(async move {
+                *recorder.lock().expect("seen") += 1;
+                Ok(AssistantTurn {
+                    content: String::from("ok"),
+                    reasoning: String::new(),
+                    raw: Value::Null,
+                    native_reasoning: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: Some(String::from("stop")),
+                    usage: None,
+                    response_id: None,
+                })
+            })
+        });
+        let adapter = ChatCompletionsAdapter::with_completion(profile(), token(), completion);
+        let mut request = request();
+        request.tool_control = ee_agent_orchestrator::ToolCallControl::named("read_file");
+        let (_cancel_tx, cancel) = watch::channel(false);
+
+        adapter.complete(request, cancel).await.expect("undeclared route runs");
+        assert_eq!(*seen.lock().expect("seen"), 1);
     }
 }

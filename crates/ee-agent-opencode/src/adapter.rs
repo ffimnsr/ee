@@ -387,6 +387,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
         let credential = self.check_credential();
         let model_id = self.route.model_id;
         let sampling = self.route.entry.sampling;
+        let tool_choices = self.route.entry.capabilities.tool_choices;
         Box::pin(async move {
             if *cancel.borrow() {
                 return Err(ModelError::Cancelled);
@@ -395,6 +396,14 @@ impl ModelAdapter for OpenCodeModelAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            if let Some(detail) = ee_chat_completions::tool_choice_error(
+                model_id,
+                tool_choices,
+                &request.tool_control,
+                !request.tools.is_empty(),
+            ) {
+                return Err(ModelError::Adapter(detail));
+            }
             check_generation(model_id, sampling, &request)?;
             let completion = codec.complete_with_prompt(
                 &request.transcript,
@@ -424,6 +433,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
         let credential = self.check_credential();
         let model_id = self.route.model_id;
         let sampling = self.route.entry.sampling;
+        let tool_choices = self.route.entry.capabilities.tool_choices;
         Box::pin(async move {
             if *cancel.borrow() {
                 return Err(ModelError::Cancelled);
@@ -432,6 +442,14 @@ impl ModelAdapter for OpenCodeModelAdapter {
             ee_agent_orchestrator::validate_tool_names(&request.tools)
                 .map_err(ModelError::Adapter)?;
             request.tool_control.validate(&request.tools).map_err(ModelError::Adapter)?;
+            if let Some(detail) = ee_chat_completions::tool_choice_error(
+                model_id,
+                tool_choices,
+                &request.tool_control,
+                !request.tools.is_empty(),
+            ) {
+                return Err(ModelError::Adapter(detail));
+            }
             check_generation(model_id, sampling, &request)?;
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),

@@ -791,6 +791,52 @@ fn hosted_tool_items_become_provider_executed_calls() {
 }
 
 #[test]
+fn a_provider_executed_result_replays_the_provider_item_verbatim() {
+    let item = serde_json::json!({
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": { "type": "search", "query": "rust" }
+    });
+    let messages = vec![
+        ModelMessage::text(ModelRole::User, "search rust"),
+        ModelMessage::tool_result(
+            "ws_1",
+            ToolResult::success_structured(item.to_string(), item.clone()),
+        )
+        .with_metadata([(
+            ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY.to_string(),
+            String::from("true"),
+        )]),
+    ];
+    let body = responses_body(&ResponsesBody {
+        model: "gpt-5.5",
+        provider: None,
+        system_prompt: "system",
+        transcript: &messages,
+        tools: &[],
+        stream: false,
+        max_output_tokens: None,
+        extensions: None,
+        generation: None,
+        tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+        cache: &CacheDirective::disabled(),
+        session: None,
+        previous_response_id: None,
+        input_from: 0,
+    });
+    let items = body["input"].as_array().expect("input items");
+    let hosted: Vec<&Value> =
+        items.iter().filter(|item| item["type"] == "web_search_call").collect();
+    assert_eq!(hosted.len(), 1, "the hosted item is replayed exactly once");
+    assert_eq!(hosted[0], &item, "replayed byte-identically");
+    assert!(
+        !items.iter().any(|item| item["type"] == "function_call_output"),
+        "a hosted result never becomes a local function_call_output"
+    );
+}
+
+#[test]
 fn stale_continuation_is_classified_not_string_matched() {
     let mut decoder = super::StreamDecoder::new("test");
     let error = decoder

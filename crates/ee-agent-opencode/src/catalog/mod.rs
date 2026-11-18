@@ -295,7 +295,6 @@ mod tests {
     fn capability_matrix_replaces_provider_heuristics() {
         let gpt = find(OpenCodeSurface::Zen, "gpt-5.5").expect("gpt-5.5");
         assert!(gpt.capabilities.store, "Responses rows expose provider state");
-        assert!(gpt.capabilities.prompt_cache_key);
         assert!(gpt.capabilities.cache.implicit, "OpenAI caches prefixes implicitly");
         assert!(!gpt.capabilities.cache.explicit);
         assert_eq!(gpt.release_date.len(), 10, "release date is recorded");
@@ -312,7 +311,6 @@ mod tests {
     fn every_non_legacy_row_declares_a_capability_matrix() {
         for entry in models().filter(|entry| !entry.legacy) {
             assert_eq!(entry.release_date.len(), 10, "{entry}");
-            assert!(!entry.capabilities.service_tiers.iter().any(|tier| tier.is_empty()));
         }
     }
 

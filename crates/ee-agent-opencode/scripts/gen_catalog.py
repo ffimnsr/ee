@@ -273,14 +273,18 @@ def validate_model(model_id: str, model: dict) -> None:
                 raise SystemExit(f"{model_id}: unknown tool choice {choice!r}")
 
 
-def _cache_format(model_id: str, compatibility: dict, kind: str) -> str:
+def _cache_format(compatibility: dict) -> str:
+    """Marker format for one row.
+
+    The snapshot is authoritative: a row that needs the Alibaba marker shape
+    must declare `cache_format: alibaba`. There is deliberately no vendor or
+    model-id fallback, because that is the heuristic the capability matrix
+    exists to remove.
+    """
     declared = compatibility.get("cache_format")
     if declared:
         return declared
-    if kind == "messages":
-        return "anthropic"
-    vendor = model_id.split("/")[0].lower()
-    return "alibaba" if "qwen" in vendor else "anthropic"
+    return "anthropic"
 
 
 def cache_literal(model_id: str, model: dict, kind: str, compatibility: dict) -> str:
@@ -297,7 +301,7 @@ def cache_literal(model_id: str, model: dict, kind: str, compatibility: dict) ->
         return "CacheCapability::NONE"
     explicit_settings = explicit if isinstance(explicit, dict) else {}
     implicit_settings = implicit if isinstance(implicit, dict) else {}
-    format_id = _cache_format(model_id, compatibility, kind)
+    format_id = _cache_format(compatibility)
     targets = explicit_settings.get("targets")
     if targets is None:
         targets = (
@@ -328,33 +332,18 @@ def cache_literal(model_id: str, model: dict, kind: str, compatibility: dict) ->
 
 
 def capabilities_literal(model: dict, kind: str) -> str:
-    capabilities = model.get("capabilities") or {}
     api = (model.get("api") or {}).get(kind) or {}
     compatibility = api.get("compatibility") or {}
     api_capabilities = api.get("capabilities") or {}
     tools = api_capabilities.get("tools") or {}
     choices = ", ".join(rust(str(item)) for item in tools.get("choice") or [])
-    tiers = ", ".join(rust(str(item)) for item in capabilities.get("service_tier") or [])
-    system_updates = api_capabilities.get(
-        "system_updates", capabilities.get("system_updates")
-    )
-    reasoning_updates = api_capabilities.get(
-        "effort_updates", capabilities.get("effort_updates")
-    )
     return (
         "ModelCapabilities { tool_choices: &["
-        f"{choices}], tool_search: {'true' if tools.get('search') else 'false'}, "
+        f"{choices}], "
         f"tool_updates: {'true' if tools.get('updates') else 'false'}, "
         f"cache: {cache_literal(model['id'], model, kind, compatibility)}, "
         f"store: {'true' if kind == 'responses' else 'false'}, "
-        f"stream_usage: {'true' if kind in ('chat-completions', 'responses') else 'false'}, "
-        f"prompt_cache_key: {'true' if kind == 'responses' else 'false'}, "
-        f"service_tiers: &[{tiers}], "
-        f"system_updates: {'true' if system_updates else 'false'}, "
-        f"reasoning_updates: {'true' if reasoning_updates else 'false'}, "
-        f"require_reasoning: {'true' if compatibility.get('require_reasoning') else 'false'}, "
-        f"require_finish_reason: {'true' if compatibility.get('require_finish_reason') else 'false'}, "
-        f"require_assistant_after_tool: {'true' if compatibility.get('require_assistant_after_tool') else 'false'} }}"
+        f"stream_usage: {'true' if kind in ('chat-completions', 'responses') else 'false'} }}"
     )
 
 

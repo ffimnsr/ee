@@ -915,6 +915,9 @@ pub fn route_profile(
     // `response_format` request before it is built.
     .with_structured_output(route.entry.structured_output)
     .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
+    // Catalog-declared `tool_choice` values; an empty list keeps the protocol
+    // default, so a row that declares nothing sends today's body.
+    .with_tool_choices(route.entry.capabilities.tool_choices)
     // Reference opt-in: only sent when the request actually carries an image,
     // so text-only request bytes stay identical.
     .with_image_opt_in_header(Some(HeaderName::from_static("typesafe-danger-zone-images")))
@@ -922,7 +925,7 @@ pub fn route_profile(
     // may receive a `previous_response_id`. The Responses codec enforces the
     // rest, so a chat or Messages route ignores the flag.
     .with_store_responses(route.supports_store())
-    .with_stream_usage(true))
+    .with_stream_usage(route.entry.capabilities.stream_usage))
 }
 
 /// Resolves the exact route for `OPENCODE_SURFACE` and `OPENCODE_MODEL`.

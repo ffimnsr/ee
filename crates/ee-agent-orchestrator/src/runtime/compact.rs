@@ -232,6 +232,10 @@ impl OrchestratorRuntime {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
+        // Normalize once here so both consumers (the strategy plan's evidence and
+        // the provider-native compactor body) see a repaired transcript. The
+        // pipeline normalizes again as stage 0, which is idempotent.
+        let recent_messages = crate::transcript_normalize::normalize_transcript(&recent_messages);
         // Compaction changes the session summary; the next turn must resend a
         // full runtime snapshot rather than a delta against pre-compaction state.
         self.clear_runtime_plane(&ctx.session_id.to_string());

@@ -5,6 +5,12 @@
 //! only, one request per URL, a short wall-clock limit, at most three redirects,
 //! and a per-source byte cap. Errors are bounded strings that never include a
 //! response body.
+//!
+//! "HTTPS only" is enforced on every redirect hop, not just on the configured
+//! URL: `reqwest::redirect::Policy::limited` follows any scheme, so an HTTPS
+//! source could redirect to `http://` and downgrade the fetch to cleartext.
+//! [`redirect_policy`] re-checks the scheme after each hop and stops the chain
+//! when a redirect is not HTTPS or the hop budget is exhausted.
 
 use std::time::Duration;
 
@@ -23,11 +29,34 @@ pub fn http_instruction_fetcher() -> RemoteInstructionFetcher {
     RemoteInstructionFetcher::new(|url| fetch(url))
 }
 
+/// Redirect policy for instruction fetches: HTTPS on every hop, bounded hops.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        match redirect_destination(attempt.url(), attempt.previous().len()) {
+            Ok(()) => attempt.follow(),
+            Err(reason) => attempt.error(reason),
+        }
+    })
+}
+
+/// Decides whether `next` may be followed after `followed` previous hops.
+///
+/// Split from the policy closure so the rule is testable without a server.
+fn redirect_destination(next: &reqwest::Url, followed: usize) -> Result<(), &'static str> {
+    if followed >= REMOTE_INSTRUCTION_MAX_REDIRECTS {
+        return Err("too many redirects");
+    }
+    if next.scheme() != "https" {
+        return Err("redirect target is not https");
+    }
+    Ok(())
+}
+
 fn fetch(url: String) -> FetchFuture {
     Box::pin(async move {
         let client = reqwest::Client::builder()
             .timeout(REMOTE_INSTRUCTION_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::limited(REMOTE_INSTRUCTION_MAX_REDIRECTS))
+            .redirect(redirect_policy())
             .build()
             .map_err(|error| format!("client unavailable ({})", error.without_url()))?;
         let mut response = client
@@ -68,5 +97,21 @@ mod tests {
     fn fetcher_builds_without_performing_io() {
         let fetcher = http_instruction_fetcher();
         assert!(format!("{fetcher:?}").contains("injected"));
+    }
+
+    #[test]
+    fn redirect_to_http_is_refused_inside_the_hop_budget() {
+        let target = reqwest::Url::parse("http://example.com/instructions.md").unwrap();
+        assert_eq!(redirect_destination(&target, 1), Err("redirect target is not https"));
+    }
+
+    #[test]
+    fn redirect_to_https_is_followed_until_the_hop_budget_is_exhausted() {
+        let target = reqwest::Url::parse("https://example.com/instructions.md").unwrap();
+        assert_eq!(redirect_destination(&target, 0), Ok(()));
+        assert_eq!(
+            redirect_destination(&target, REMOTE_INSTRUCTION_MAX_REDIRECTS),
+            Err("too many redirects")
+        );
     }
 }

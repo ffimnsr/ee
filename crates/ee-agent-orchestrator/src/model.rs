@@ -846,10 +846,17 @@ impl Transcript {
     /// Whether a response ended without a usable finish marker.
     ///
     /// A transport error aborts the loop before the assistant message is pushed, so
-    /// this only sees a response that explicitly reports an error/cut stop reason.
-    /// Stored interrupted turns are repaired again by transcript normalization.
+    /// this only sees a response that explicitly reports an error/cut stop reason
+    /// **or** reports no finish reason at all: a stream that stopped before its
+    /// terminal event leaves the tail unsigned, and replaying that state makes the
+    /// provider reject the next turn. Stored interrupted turns are repaired again
+    /// by transcript normalization.
     fn cut_turn(response: &ModelResponse) -> bool {
-        matches!(response.finish_reason.as_deref(), Some("error" | "interrupted" | "cancelled"))
+        match response.finish_reason.as_deref() {
+            None => true,
+            Some("error" | "interrupted" | "cancelled") => true,
+            Some(_) => false,
+        }
     }
 
     /// Appends a tool observation carrying the stable tool-call id.
@@ -1663,6 +1670,22 @@ mod tests {
         let message = transcript.messages.first().expect("assistant message");
         assert!(message.native.is_none(), "a cut turn must not replay provider state");
         assert_eq!(message.reasoning_summary.as_deref(), Some("partial reasoning"));
+    }
+
+    #[test]
+    fn a_turn_without_a_finish_reason_is_treated_as_cut() {
+        let native = OpaqueProviderState::new(serde_json::json!({
+            "reasoning_items": [{ "id": "rs_1", "encrypted_content": "blob" }],
+        }))
+        .expect("fits");
+        let response = ModelResponse::new().with_native(Some(native)).with_finish_reason(None);
+        let mut transcript = Transcript::new();
+        transcript.push_assistant(&response);
+        let message = transcript.messages.first().expect("assistant message");
+        assert!(
+            message.native.is_none(),
+            "a stream that stopped without a finish marker must not replay its tail state"
+        );
     }
 
     #[test]

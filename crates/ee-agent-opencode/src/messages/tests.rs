@@ -612,6 +612,9 @@ fn streamed_thinking_signature_survives_into_the_next_request() {
         json!({ "type": "content_block_stop", "index": 0 }),
         json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "" } }),
         json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "answer" } }),
+        // Anthropic closes a stream with `message_delta.stop_reason`; without it
+        // the turn counts as cut and its tail state is never replayed.
+        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }),
         json!({ "type": "message_stop" }),
     ] {
         decoder.apply(&event.to_string(), &mut sink).expect("applies");

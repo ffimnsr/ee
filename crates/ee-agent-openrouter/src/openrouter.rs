@@ -143,7 +143,10 @@ pub(crate) fn openrouter_profile_with_options(
         ))
         .with_cache(cache_directive(entry, options, config.api_kind))
         .with_headers(headers)
-        .with_stream_usage(options.include_usage())
+        .with_stream_usage(
+            options.include_usage() && entry.is_none_or(|entry| entry.capabilities.stream_usage),
+        )
+        .with_tool_choices(entry.map_or(&[], |entry| entry.capabilities.tool_choices))
         .with_max_output_tokens(options.max_output_tokens())
         .with_max_tokens_field(max_tokens_field)
         .with_reasoning_field(reasoning_field)

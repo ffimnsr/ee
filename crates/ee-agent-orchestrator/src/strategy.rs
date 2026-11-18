@@ -699,7 +699,7 @@ impl StrategyExecutor {
             snapshot
         };
         let tools = self.tools.lock().expect("tool registry poisoned").definitions();
-        let prepared = crate::prompt_injection::prepare_request(transcript.messages());
+        let prepared = crate::prompt_injection::prepare_request(&transcript.request_messages());
         for detection in &prepared.detections {
             self.events.record(OrchestratorEvent::SuspiciousContentDetected {
                 trust: detection.trust,
