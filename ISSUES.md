@@ -2541,16 +2541,22 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 
 #### 7.5.1 1,000-LOC rule
 
-- [ ] `crates/ee-agent-opencode/src/messages.rs` — 1,058 LOC (was 981 before `8be1fb6`). Crossed during the parity series; split the Messages codec the way `routes.rs` was split.
-- [ ] `crates/ee-chat-completions/src/transport.rs` — 1,011 LOC. Split the SSE drive loop from the request sender.
+- [x] `crates/ee-agent-opencode/src/messages.rs` — split into `messages/{mod,body,decode,codec}.rs` (mod 49, body 427, decode 394, codec 235) plus the existing `messages/tests.rs` (834).
+- [x] `crates/ee-chat-completions/src/transport.rs` — split into `transport/{mod,sse,endpoint,client,retry}.rs` (mod 50, sse 139, endpoint 339, client 417, retry 132).
 - [x] Plan's `routes.rs` LOC figure is stale (775 actual, still under the cap) — text fix tracked in 7.4.4.
-- Files already over the cap that the series modified anyway: `crates/ee-agent-orchestrator/src/loop_engine.rs` 2,651, `src/model.rs` 1,729, `src/tools.rs` 2,437. The rule says do not apply changes to a file at or over the threshold; these were modified repeatedly. Either split them or record an explicit exemption per file.
-  - R3 touched `model.rs` (+19: `cut_turn` and one test) and `loop_engine.rs` (+1: a fixture finish reason) because both fixes are behavioural and belong at the type that owns them. Both stay exempt only until the R4 split; no new logic was added to either.
+- Files the series built over the cap are now split too:
+  - `loop_engine/` — `mod.rs` 411, `turn.rs` 693, `after_turn.rs` 263, `util.rs` 58, `tests/mod.rs` 633, `tests/budgets.rs` 680.
+  - `model/` — `mod.rs` 115, `message.rs` 303, `request.rs` 174, `response.rs` 126, `transcript.rs` 537, `error.rs` 34, `tests.rs` 527.
+  - `tools/` — `mod.rs` 27, `definition.rs` 443, `registry.rs` 703, `executor.rs` 433, `tests.rs` 879.
+  - `strategy/` — `mod.rs` 485, `executor.rs` 484, `tests.rs` 845.
+  - `tests/acp_flows/` — `main.rs` 378, `single_dialect.rs` 170, `dialects.rs` 217, `redaction.rs` 74, `critic.rs` 120, `capability.rs` 127.
+  - R3 touched `model.rs` (+19) and `loop_engine.rs` (+1) because both fixes are behavioural and belong at the type that owns them; the R4 split removes the exemption, and no new logic was added during the split.
+- Every R4 target file is now under the cap. Repo-wide oversized files outside the parity crates (`ee-agent-host/src/connection.rs`, `ee-cli` test modules, `xi-core-lib/*`) are pre-existing and out of R4 scope; `ee-chat-completions/src/wire.rs` (982) and `provider_adapter/agent_impl.rs` (995) stay under it.
 - Approaching the cap: `provider_adapter/agent_impl.rs` 995 (R1 extracted `SessionRuntime::new` to pull it back under after the session-identity wiring), `wire.rs` 982, `opencode/config.rs` 965. Any further growth must split first.
 
 #### 7.5.2 Lint escapes
 
-- [ ] `crates/ee-chat-completions/src/transport.rs:115` — `#[allow(clippy::needless_pass_by_value)]` on `drive_sse_with_chunk_timeout`, added by the parity series. Repository rule forbids using `allow` to evade a lint. Take the closure by reference or restructure the call site.
+- [x] `crates/ee-chat-completions/src/transport.rs:115` — the `#[allow(clippy::needless_pass_by_value)]` is gone: `drive_sse` and `drive_sse_with_chunk_timeout` take `on_event: &mut F`, and every call site passes `&mut` closure.
 - Pre-existing allows (`loop_engine.rs:408,455`, `runtime/compact.rs:220`) are out of scope for this audit but violate the same rule.
 
 #### 7.5.3 Test-gate claims
@@ -2558,7 +2564,7 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 - [ ] Part 4.1 claims every behaviour change ships "one integration test through the ACP adapter path". Actual coverage in `crates/ee-agent-opencode/tests/acp_flows.rs` and `crates/ee-agent-openrouter/tests/provider_flows.rs` touches Gaps 19 and 20 only; Gaps 7, 8, 9, 10, 12, 14, 21, 22, 23, 25, 26, and 27 have no ACP/provider-flow test.
 - [ ] Part 4.2 claims "a fixture replays one recorded request per dialect **and per provider**". `crates/ee-agent-opencode/tests/codec_fixtures.rs` covers the three OpenCode dialects; there is no OpenRouter recorded-request fixture.
 - [ ] Part 4.2 claims catalog reproducibility is enforced. Both `scripts/gen_catalog.py` implement `--check`, but no CI workflow or test invokes them; a stale `generated.rs` passes every automated gate.
-- [ ] `crates/ee-agent-opencode/tests/acp_flows.rs` is itself 1,064 LOC — over the cap for a file the series grew.
+- [x] `crates/ee-agent-opencode/tests/acp_flows.rs` is now `tests/acp_flows/` with six modules, each under 400 LOC; `tests/release_gate.rs` points at `tests/acp_flows/main.rs`.
 
 #### 7.5.4 Validation status of this audit
 
@@ -2588,7 +2594,7 @@ Ordered by ratio of parity gained to risk. Each slice is independently shippable
 - [x] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep. **Landed 2026-11-18:** see the `Landed (R2/...)` notes below.
 - [x] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
   - Landed: Gap 23, Gap 26, Gap 24, Gap 25 (see 7.2.13, 7.2.7, 7.2.10, 7.2.8). Open follow-up: producer id on a hosted result message (tracked inside the R4 type split).
-- [ ] **Slice R4 — file splits.** `messages.rs`, `transport.rs`, `acp_flows.rs`; record or remove the pre-existing oversized files; delete the `#[allow]` in `transport.rs`. (NOTE by user: include loop_engine.rs, tools.rs, model.rs, strategy.rs)
+- [x] **Slice R4 — file splits.** **Landed 2026-11-18:** `messages.rs` → `messages/{body,decode,codec}.rs`; `transport.rs` → `transport/{sse,endpoint,client,retry}.rs` with the `#[allow]` deleted; `tests/acp_flows.rs` → `tests/acp_flows/`; `loop_engine.rs` → `loop_engine/{turn,after_turn,util}.rs` plus `tests/`; `model.rs` → `model/{message,request,response,transcript,error}.rs`; `tools.rs` → `tools/{definition,registry,executor}.rs`; `strategy.rs` → `strategy/{mod,executor}.rs`. No behavioural change; gates re-run clean. The Gap 25 hosted-result producer-id follow-up remains open (R5).
 - [ ] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture.
 
 Slices R1–R5 do not reopen Parts 1–6; they close the gap between "landed" and "observable". Update this section as each slice lands, and keep the audit date so a later pass can tell which findings were re-checked.

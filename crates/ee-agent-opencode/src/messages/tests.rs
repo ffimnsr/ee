@@ -1,7 +1,12 @@
-use ee_agent_orchestrator::{ModelRole, SideEffectClass, ToolDefinition, ToolResult};
-use ee_chat_completions::{ChunkFuture, ChunkSource, StreamDelta, drive_sse};
+use ee_agent_acp_server::ProviderError;
+use ee_agent_orchestrator::{
+    ModelContent, ModelMessage, ModelResponse, ModelRole, SideEffectClass, ToolDefinition,
+    ToolResult,
+};
+use ee_chat_completions::{CacheDirective, ChunkFuture, ChunkSource, StreamDelta, drive_sse};
 use serde_json::{Value, json};
 
+use super::body::replay_thinking_blocks;
 use super::*;
 
 const LABEL: &str = "OpenCode go kimi-k3";
@@ -61,7 +66,7 @@ async fn decode_stream(
                 deltas.push(delta);
                 Ok(())
             };
-            drive_sse(LABEL, &mut source, |event| decoder.apply(event, &mut sink)).await?;
+            drive_sse(LABEL, &mut source, &mut |event| decoder.apply(event, &mut sink)).await?;
         }
         deltas
     };

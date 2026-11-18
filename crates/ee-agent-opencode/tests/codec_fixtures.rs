@@ -275,7 +275,7 @@ impl StreamAttempt<ModelResponse> for FixtureAttempt {
             self.runs.fetch_add(1, Ordering::SeqCst);
             let mut source = Chunks { chunks: self.chunks.clone() };
             let mut decoder = responses::StreamDecoder::new(LABEL);
-            drive_sse(LABEL, &mut source, |event| decoder.apply(event, sink)).await?;
+            drive_sse(LABEL, &mut source, &mut |event| decoder.apply(event, sink)).await?;
             decoder.finish()
         })
     }

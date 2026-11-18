@@ -800,7 +800,7 @@ impl crate::StreamAttempt<ModelResponse> for ResponsesStreamAttempt<'_> {
                 &label,
                 &mut response,
                 Some(transport.profile().timeouts.chunk),
-                |event| {
+                &mut |event| {
                     if raw {
                         sink(StreamDelta::Raw { frame: event.to_string() })?;
                     }

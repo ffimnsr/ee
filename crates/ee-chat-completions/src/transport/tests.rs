@@ -2,12 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use reqwest::header::HeaderName;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 use serde_json::json;
 
+use super::endpoint::request_contains_image;
+use super::sse::extend_bounded;
 use super::*;
 use crate::endpoint::TrustedEndpoint;
-use crate::wire::classify_http_error;
+use crate::profile::{BearerToken, EndpointProfile, RetryPolicy, TokenSource};
+use crate::wire::{AssistantTurn, StreamDelta, classify_http_error};
 
 fn policy(max_attempts: u32) -> RetryPolicy {
     RetryPolicy {
@@ -240,7 +243,7 @@ async fn missing_token_reports_the_provider_worded_error() {
     });
     let client = client(missing);
 
-    let error = client.transport.headers().expect_err("no credential");
+    let error = client.transport().headers().expect_err("no credential");
 
     assert!(
         matches!(
@@ -257,7 +260,7 @@ async fn header_errors_never_echo_the_credential() {
     let secret = "sk-secret\nwith-break";
     let client = client(static_token(secret));
 
-    let error = client.transport.headers().expect_err("invalid header value");
+    let error = client.transport().headers().expect_err("invalid header value");
 
     assert!(error.to_string().contains("EXAMPLE_API_KEY"), "{error}");
     assert!(!error.to_string().contains("sk-secret"), "{error}");
@@ -275,7 +278,7 @@ async fn headers_carry_the_bearer_token_and_provider_extensions() {
         reqwest::Client::new(),
     );
 
-    let headers = client.transport.headers().expect("headers build");
+    let headers = client.transport().headers().expect("headers build");
 
     assert_eq!(headers.get(AUTHORIZATION).expect("authorization"), "Bearer sk-secret");
     assert_eq!(headers.get("x-title").expect("title"), "ee-test");
@@ -305,7 +308,7 @@ async fn drive_sse_frames_events_and_stops_on_done() {
     };
     let mut events = Vec::new();
 
-    drive_sse("Test", &mut source, |event| {
+    drive_sse("Test", &mut source, &mut |event| {
         events.push(event.to_string());
         Ok(SseControl::Continue)
     })
@@ -321,7 +324,7 @@ async fn drive_sse_stops_when_the_consumer_asks() {
         ScriptedChunks { chunks: vec![b"data: first\n\ndata: second\n\n".to_vec()], failure: None };
     let mut events = Vec::new();
 
-    drive_sse("Test", &mut source, |event| {
+    drive_sse("Test", &mut source, &mut |event| {
         events.push(event.to_string());
         Ok(SseControl::Stop)
     })
@@ -338,7 +341,7 @@ async fn drive_sse_reports_body_failures_with_the_label() {
         failure: Some(String::from("connection reset")),
     };
 
-    let error = drive_sse("Test", &mut source, |_event| Ok(SseControl::Continue))
+    let error = drive_sse("Test", &mut source, &mut |_event| Ok(SseControl::Continue))
         .await
         .expect_err("body failed");
 
@@ -353,7 +356,7 @@ async fn drive_sse_flushes_trailing_events_without_a_terminator() {
     let mut source = ScriptedChunks { chunks: vec![b"data: tail".to_vec()], failure: None };
     let mut events = Vec::new();
 
-    drive_sse("Test", &mut source, |event| {
+    drive_sse("Test", &mut source, &mut |event| {
         events.push(event.to_string());
         Ok(SseControl::Continue)
     })

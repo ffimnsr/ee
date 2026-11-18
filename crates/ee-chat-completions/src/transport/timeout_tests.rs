@@ -46,7 +46,7 @@ async fn a_stall_inside_the_chunk_budget_completes() {
         "Test",
         &mut source,
         Some(Duration::from_secs(900)),
-        |_event| {
+        &mut |_event| {
             seen += 1;
             Ok(SseControl::Continue)
         },
@@ -66,7 +66,7 @@ async fn exceeding_the_chunk_budget_fails_with_the_chunk_phase() {
         "Test",
         &mut source,
         Some(Duration::from_secs(900)),
-        |_event| Ok(SseControl::Continue),
+        &mut |_event| Ok(SseControl::Continue),
     )
     .await
     .expect_err("the idle budget expired");
@@ -83,7 +83,7 @@ async fn no_budget_means_no_watchdog() {
         StallingChunks { chunks: vec![event("slow")], stall: Some(Duration::from_secs(7_200)) };
     let mut seen = 0usize;
 
-    drive_sse_with_chunk_timeout("Test", &mut source, None, |_event| {
+    drive_sse_with_chunk_timeout("Test", &mut source, None, &mut |_event| {
         seen += 1;
         Ok(SseControl::Continue)
     })

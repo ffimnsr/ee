@@ -221,7 +221,8 @@ fn catalog_is_bounded_and_every_row_is_reachable_by_exact_id() {
 fn fixture_directories_exist_for_offline_release_checks() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    for relative in ["tests/codec_fixtures.rs", "tests/acp_flows.rs", "tests/docs_examples.rs"] {
+    for relative in ["tests/codec_fixtures.rs", "tests/acp_flows/main.rs", "tests/docs_examples.rs"]
+    {
         assert!(manifest_dir.join(relative).is_file(), "{relative} keeps the release gate offline");
     }
 }

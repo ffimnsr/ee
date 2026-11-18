@@ -66,7 +66,7 @@ async fn decode_stream(
                 deltas.push(delta);
                 Ok(())
             };
-            drive_sse(LABEL, &mut source, |event| decoder.apply(event, &mut sink)).await?;
+            drive_sse(LABEL, &mut source, &mut |event| decoder.apply(event, &mut sink)).await?;
         }
         deltas
     };
@@ -504,7 +504,7 @@ async fn stream_stops_when_the_sink_is_closed() {
     let mut sink =
         |_delta: StreamDelta| -> Result<(), ProviderError> { Err(ProviderError::Cancellation) };
 
-    let error = drive_sse(LABEL, &mut source, |event| decoder.apply(event, &mut sink))
+    let error = drive_sse(LABEL, &mut source, &mut |event| decoder.apply(event, &mut sink))
         .await
         .expect_err("a closed consumer stops the stream");
 
