@@ -54,13 +54,14 @@ pub use types::{
     MAX_WORKSPACE_MEMORY_IMPORT_BYTES, OpenBufferEntry, OpenBuffersResult, PlannedFileEdit,
     PlannedTextEdit, ProjectInstructionSource, ProjectInstructionsResult, ReferenceEntry,
     ReferencesResult, RenamePreviewResult, ReviewContextResult, SearchFilesAllResult,
-    SearchFilesResult, SearchTextResult, SessionNoteResult, SessionNotesResult,
-    SymbolDependencyLocation, SymbolDependencyMapResult, SymbolDependencyModuleHint,
-    SymbolDependencyRelatedFile, SymbolDependencyRelation, SymbolDependencyTotals,
-    TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit, TextMatch, TextRange,
-    ToolManifestEntry, ToolOutputCap, ToolsManifestResult, WebSearchEntry, WebSearchRequest,
-    WebSearchResult, WorkspaceEditResult, WorkspaceFact, WorkspaceFactMutationResult,
-    WorkspaceFactProvenance, WorkspaceFactsResult, WorkspaceRootsResult,
+    SearchFilesResult, SearchTextResult, SessionNoteDeletion, SessionNoteResult,
+    SessionNotesResult, SymbolDependencyLocation, SymbolDependencyMapResult,
+    SymbolDependencyModuleHint, SymbolDependencyRelatedFile, SymbolDependencyRelation,
+    SymbolDependencyTotals, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult,
+    TextEdit, TextMatch, TextRange, ToolManifestEntry, ToolOutputCap, ToolsManifestResult,
+    WebSearchEntry, WebSearchRequest, WebSearchResult, WorkspaceEditResult, WorkspaceFact,
+    WorkspaceFactMutationResult, WorkspaceFactProvenance, WorkspaceFactsResult,
+    WorkspaceRootsResult,
 };
 
 /// An in-process MCP server exposing ee editor operations as MCP tools.

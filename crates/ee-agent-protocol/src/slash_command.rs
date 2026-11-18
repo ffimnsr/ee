@@ -35,6 +35,11 @@ pub const RESUME_COMMAND_NAME: &str = "resume";
 /// omitted the newest checkpoint is used.
 pub const BRANCH_COMMAND_NAME: &str = "branch";
 
+/// The advertised slash-command name for restoring the current session in
+/// place to a stored checkpoint. The optional argument is the checkpoint
+/// sequence; when omitted the newest checkpoint is used.
+pub const REVERT_COMMAND_NAME: &str = "revert";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -146,6 +151,25 @@ pub fn branch_available_command() -> AvailableCommand {
     AvailableCommand::new(
         BRANCH_COMMAND_NAME,
         "Fork the current session from a stored checkpoint, cloning task, memory, and budget state.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional checkpoint sequence (defaults to the newest checkpoint)",
+    )))
+}
+
+/// Whether the prompt is a `/revert` (or `/revert <checkpoint_seq>`) command.
+#[must_use]
+pub fn is_revert_command(text: &str) -> bool {
+    parse_slash_command(text).is_some_and(|command| command.name == REVERT_COMMAND_NAME)
+}
+
+/// The `/revert` command advertised by providers with checkpoint restore:
+/// restores the session in place to a stored checkpoint sequence.
+#[must_use]
+pub fn revert_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        REVERT_COMMAND_NAME,
+        "Restore the current session in place to a stored checkpoint. Task, memory, budget, and logged conversation state are restored; workspace files are not changed.",
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional checkpoint sequence (defaults to the newest checkpoint)",
@@ -271,6 +295,27 @@ mod tests {
             parse_slash_command("/branch 7").map(|parsed| parsed.name),
             Some(BRANCH_COMMAND_NAME.into())
         );
+    }
+
+    #[test]
+    fn revert_detection_matches_name_exactly() {
+        assert!(is_revert_command("/revert"));
+        assert!(is_revert_command("/revert 7"));
+        assert!(!is_revert_command("revert"));
+        assert!(!is_revert_command("/reverted"));
+        assert!(!is_revert_command("/branch"));
+    }
+
+    #[test]
+    fn advertised_revert_command_carries_name_description_and_sequence_hint() {
+        let command = revert_available_command();
+        assert_eq!(command.name, REVERT_COMMAND_NAME);
+        assert!(!command.description.is_empty(), "description advertised");
+        let hint = match command.input.as_ref().expect("input advertised") {
+            AvailableCommandInput::Unstructured(input) => input.hint.clone(),
+            _ => panic!("expected unstructured input"),
+        };
+        assert!(hint.contains("checkpoint sequence"), "{hint}");
     }
 
     #[test]

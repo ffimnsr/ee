@@ -495,6 +495,9 @@ impl OrchestratorRuntime {
             self.events.clone(),
             LoopOptions {
                 graph: Some(self.tasks.clone()),
+                plan: Some(self.todo_plan.clone()),
+                session_title: Some(self.pending_title.clone()),
+                read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 memory: Some(self.memory.clone()),

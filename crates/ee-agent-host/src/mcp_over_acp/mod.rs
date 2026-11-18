@@ -57,10 +57,10 @@ pub(crate) use ee_mcp::{
     FetchUrlResult, FileDependencyMapResult, FilesystemResult, GitDiffResult, GitStatusResult,
     ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProjectInstructionsResult,
     ProxyToolError, ReferencesResult, RenamePreviewResult, ReviewContextResult,
-    SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
-    SessionNotesResult, SymbolDependencyMapResult, TerminalOutputResult, TerminalWaitResult,
-    TextEdit, WebSearchRequest, WebSearchResult, WorkspaceEditResult, WorkspaceFact,
-    WorkspaceFactMutationResult, WorkspaceFactsResult, WorkspaceRootsResult,
+    SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteDeletion,
+    SessionNoteResult, SessionNotesResult, SymbolDependencyMapResult, TerminalOutputResult,
+    TerminalWaitResult, TextEdit, WebSearchRequest, WebSearchResult, WorkspaceEditResult,
+    WorkspaceFact, WorkspaceFactMutationResult, WorkspaceFactsResult, WorkspaceRootsResult,
 };
 pub(crate) use rmcp::model::{
     JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult,

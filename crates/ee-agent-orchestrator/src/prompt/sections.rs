@@ -89,6 +89,8 @@ pub(crate) const TOOL_SESSION_QUERY: Slot = Slot {
         "tool:session-memory",
         "tool:workspace-memory-write",
         "tool:turn-evidence",
+        "tool:todo",
+        "tool:session-management",
     ],
 };
 pub(crate) const TOOL_GOAL: Slot =

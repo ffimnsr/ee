@@ -22,6 +22,7 @@ pub mod inbound;
 pub mod manager;
 pub mod mcp_over_acp;
 pub mod permission;
+pub mod permission_rules;
 pub mod process;
 pub mod redact;
 pub mod reducer;
@@ -67,6 +68,11 @@ pub use manager::FakeTransportFactory;
 pub use manager::{AgentManager, AgentManagerConfig, build_context_pack_with_workspace_recaller};
 pub use mcp_over_acp::{EeProxyMode, EeProxyToolProfile, MCP_OVER_ACP_MAX_FRAME_BYTES};
 pub use permission::PermissionBroker;
+pub use permission_rules::{
+    PermissionEffect, PermissionRule, PermissionRuleError, PermissionRules, PermissionRuleset,
+    PermissionSideEffect, PermissionTarget, SAVED_PERMISSIONS_FILE, saved_permissions_path,
+    wildcard_match,
+};
 pub use process::{AgentProcessConfig, STDERR_MAX_LINE_BYTES, STDERR_MAX_LINES, StderrCapture};
 pub use reducer::{
     MessageKind, ReducedMessage, SessionState, ToolCallState, UsageInfo, apply_update,

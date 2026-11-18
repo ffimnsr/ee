@@ -1390,6 +1390,9 @@ Reason: Phase 4a creates the durable session log. Phase 3 projects the compactio
   - [x] **Acceptance criteria:**
     - `/branch` forks the current session from the target checkpoint sequence, clones task/memory/budget state, replays log prefix up to `checkpoint_seq` when `SessionLog` is available, and surfaces `conversation_unreplayed: true` when log is absent.
     - Missing checkpoint or cross-session sequence mismatch fails closed with a clear diagnostic without mutating active session state.
+- [x] Expose in-place checkpoint restore as the `/revert [checkpoint_seq]` ACP command.
+  - [x] **Fix:** define `REVERT_COMMAND_NAME`/`revert_available_command()`, advertise it, and handle it in `provider_adapter/checkpoint_command.rs` by restoring task/memory/budget state, truncating the model transcript to the logged prefix, and reporting `workspace_files_changed: false`.
+  - [x] **Acceptance criteria:** `/revert` keeps the session id, restores checkpoint state, and fails closed on a missing or malformed sequence.
 
 ### Gap 3 — Live Session History Truncates to 16 Text Messages Before Compaction & Turn Loop
 
@@ -2625,3 +2628,96 @@ Ordered by ratio of parity gained to risk. Each slice is independently shippable
 - [x] **Slice R6 — §7.3 reported-findings audit and fixes.** **Landed 2026-11-18:** every §7.3 item re-read against the reference and either fixed or reclassified (see the §7.3 table). Fixed: reasoning-budget fit, passthrough typing, output-limit floor, query encoding test, cost-only usage, context-token reporting, mid-stream usage retention, checkpoint producer gating and sealing, deterministic default model, disabled small model, nested `provider` config, resource-blob dedupe, empty `model#`, and the setup timeout default. Reclassified as false claims: `models` on `/responses`, `max_tokens_field` host list, compact cache TTL shape, `ToolInputError` naming. Accepted deviations: `service_tier` (no catalog data), checkpoint durability across restarts, attachment description (no ACP field), and discovery wording.
 
 Slices R1–R5 do not reopen Parts 1–6; they close the gap between "landed" and "observable". Update this section as each slice lands, and keep the audit date so a later pass can tell which findings were re-checked.
+
+# OpenCode Harness, Design, and Tool-Surface Parity Audit [L2628-]
+
+Audit date: 2026-11-18. Scope: the **harness layer** — tool surface, permission model, shell execution, session storage, frontend coupling, planning surfaces, and test infrastructure. Parts 1–7 covered the calling layer (request/response, retry, catalog, streaming); this part does not reopen them. Reference: `harness-example/opencode/packages/core/src` (tools in `tool/plugin/`, harness in `session/`, `permission.ts`, `agent.ts`, `snapshot.ts`, `persistent-pty/`, `codemode/`, `usage-limits.ts`).
+
+## Part 8 — Findings
+
+### 8.1 Tool-surface map (opencode → ee)
+
+Reference names from `packages/core/src/tool/plugin/*.ts`; ee names from `ee-agent-orchestrator/src/tools/registry.rs` (bridge builtins), `subagents/mod.rs` (`delegate_task`), and the MCP-over-ACP manifest `ee-mcp/src/proxy/all_tools.rs`.
+
+| opencode tool | ee counterpart | verdict |
+|---|---|---|
+| `read` | `read_file` (bridge) + `ee_read_text_file` + `ee_read_buffer`/`ee_read_buffer_lines` | parity; bridge duplicate hidden when the ee proxy is connected |
+| `edit` | `ee_replace_text` + `ee_apply_patch` | parity (MCP proxy only; no bridge builtin) |
+| `write` | `write_file` + `ee_write_text_file`/`ee_overwrite_text_file`/`ee_create_text_file` | parity; bridge duplicate hidden when the ee proxy is connected |
+| `shell` | `create_terminal`/`terminal_output`/`wait_for_terminal_exit`/`kill_terminal`/`release_terminal` | parity; ee splits one op into five calls |
+| `grep` | `ee_search_text`/`ee_search_text_regex`/`ee_search_text_in_files` | parity, richer |
+| `glob` | `ee_search_files`/`ee_search_files_all`/`ee_list_directory(_all)` | parity, richer |
+| `subagent` | `delegate_task` (+ `resume_child_id`, roles, verifier) | ee ahead |
+| `question` | `ask_user` | parity |
+| `skill` | `load_skill` (catalog advertised in prompt) | parity |
+| `patch` | `ee_apply_patch` | parity |
+| `webfetch` | `ee_fetch_url` | parity |
+| `websearch` | `ee_web_search` + `ee_browser_run_{content,json,markdown,scrape,screenshot,links}` | ee ahead |
+| `todowrite` | `todowrite` bridge builtin backed by `TodoPlan` (`tasks.rs` status state) | parity; full-list replace, prompt render, ACP plan update |
+| `artifact_create/read/update/delete` | `ee_save_note`/`ee_read_note`/`ee_read_notes`/`ee_update_note`/`ee_delete_note` | parity; update/delete fail closed on unknown keys |
+| `schedule_create/list/pause/resume/delete` | none | gap |
+| `worktree_create/list/remove` | `worktree_create`/`worktree_list`/`worktree_remove` over `workspace_isolation.rs` | parity; write-class, remove destructive, root-confined |
+| `models` | `models` runtime builtin over `model_registry` (public identity, capabilities, roles, tier, limits) | parity; no secrets or client handles |
+| `session_rename` / `session_move` | `session_rename` + `session_move` runtime builtins | parity; title emitted as ACP `session_info_update`, move confined to allowed roots and applied to later prompts |
+| `list_mcp_resources` / `read_mcp_resource` / `watch_mcp_event` | none — MCP-over-ACP proxy is tools-only | gap |
+| `experimental_image_generate` | none | gap (experimental upstream too; low priority) |
+
+ee-only extras with no opencode equivalent (keep): `cargo_check`; the LSP family `ee_document_symbols`, `ee_references`, `ee_list_code_actions`, `ee_apply_code_action`, `ee_rename_symbol`, `ee_preview_rename_symbol`, `ee_get_diagnostics`, `ee_get_file_diagnostics`, `ee_format_file` (opencode core has **no LSP**); git tools `ee_git_status`/`ee_git_diff(_file,_staged)`/`ee_changed_files`; workspace-memory fact tools (`ee_remember/read/recall/verify/retract/replace_workspace_fact`, export/import); `ee_turn_evidence_summary`, `ee_review_context`, `ee_file_dependency_map`, `ee_symbol_dependency_map`, `ee_tools_manifest`.
+
+### 8.2 Tool-name drift bug (immediate fix)
+
+`ee-agent-orchestrator/src/config.rs:235` (`fast_local_read_tool`) lists `list_files`, `ee_file_outline`, `ee_diagnostics`; `config.rs:240` (`write_and_edit_tool`) lists `ee_edit_apply`, `ee_format_buffer`, `ee_lsp_rename`; `loop_engine/util.rs:11` lists `edit_file`, `ee_edit_apply`, `ee_file_outline`. **None of these names exist in the manifest.** Real names: `ee_list_directory`, `ee_document_symbols`, `ee_get_diagnostics`, `ee_apply_patch`, `ee_replace_text`, `ee_format_file`, `ee_rename_symbol`. Consequence: per-tool timeout tiers and fast-read classification never fire for those tools; `config.rs:581` pins the stale name in a test. ee proxy tools keep their manifest names in the model-facing surface (`mcp/names.rs` — `ee_*` passes through unsanitized), so the fix is renaming the classification entries, not the manifest.
+
+### 8.3 Harness findings (ee behind)
+
+- **Permission model.** opencode `permission.ts` is declarative rulesets: `allow`/`ask`/`deny` per action with wildcard matching, saved-rule persistence (`permission/saved.ts`), and plugin hooks on every assert. ee now has the same shape for external ACP agents: `[agents.permissions]` rules are evaluated by the host broker before any `session/request_permission` round-trip, `allow_always` answers persist to `agent-permissions.json`, deny always wins, and malformed rules fail closed to deny-all. The typed `ToolPolicy` and approval classifier remain the ask-path gate for ee's own tools.
+- **Persistent PTY.** opencode keeps one PTY per working directory (`persistent-pty/` daemon) so shell cwd/env/history survive across tool calls and sessions. ee now reuses one persistent shell per `(session, requested cwd)` on Unix: `cd`, exported env, and shell state survive between `create_terminal` calls, output stays in the existing bounded ring, and shells are killed at session end. `release_terminal` only detaches a finished terminal; a still-running command kills the shared shell because one shell runs one foreground command.
+- **Per-message snapshot + revert.** opencode captures file snapshots per message and exposes revert (`snapshot.ts`, `session/revert.ts`). ee checkpoints conversation/task/memory/budget state only: `/branch <seq>` forks a session and `/revert <seq>` restores the current session in place (transcript prefix replayed when a session log exists, workspace files untouched). There is still no workspace file snapshot store.
+- **Codemode.** opencode has a read-only tool-catalog planning mode (`codemode/`). ee's `plan` ACP mode now advertises read-class tools only (writes/execute/delegate filtered from both the model request and prompt guidance), keeps the execution policy read-only, and renders the stable `PLAN_POLICY` planning section.
+- **Scheduling.** opencode `schedule_*` tools give the agent cron-style deferred work. ee has background terminals but no schedule surface.
+- **MCP resources/events.** opencode proxies MCP resources and server events as tools. ee now advertises `list_mcp_resources`, `read_mcp_resource`, and `watch_mcp_event` whenever the prompt has MCP servers. They run on the orchestrator's MCP client connections: listing/read are bounded (200 entries, 64 KiB reads), and `watch_mcp_event` opens `subscriptions/listen`, drains at most 16 notifications within a bounded wait, and keeps no background queue.
+- **Artifacts.** ee notes now have full model-facing CRUD: `ee_save_note` creates or replaces, `ee_update_note` replaces only an existing key, `ee_delete_note` removes one, and `ee_read_note`/`ee_read_notes` replay bounded content. All mutations share the write-class governance and approval entry of `ee_save_note`.
+- **Session management tools.** ee now registers `session_rename`, `session_move`, and `models` for every session. `session_rename` emits an ACP `session_info_update` after the call succeeds; `session_move` changes the session working directory used by later prompts and instruction discovery and fails closed outside the allowed workspace roots; `models` returns registry identity, capabilities, roles, tier, enabled state, and configured token limits.
+
+### 8.4 Design findings
+
+opencode strengths ee lacks:
+
+- **Effect service architecture** — every subsystem is a typed `Context.Service` + `Layer` with swappable test layers; plugin hooks intercept tools, events, permissions, and providers uniformly. ee is trait-based (`ServerTool`, `ClientBridge`) with a `plugin_runtime` (wasm) that covers fewer interception points.
+- **SQLite/drizzle durable store** — sessions, messages, parts in SQL plus a blob store; queryable history. ee uses a JSON session log + checkpoint store; history queries require full-scan replay.
+- **Global bus + SDK decoupling** — one event stream (`bus.ts`) serves TUI, desktop app, web client, and SDK from a single core. ee is coupled to the editor host via ACP updates.
+- **models.dev live catalog** with refresh plus a model-picker tool; ee refreshes via the generator script only.
+- **`simulation` + `http-recorder` packages** — deterministic whole-agent replay against recorded HTTP fixtures. ee has no record/replay harness; provider tests use hand-built fixtures.
+- **Credential/oauth surface** — per-provider credential service, oauth flows (`oauth/`, `github-copilot/`), keychain integration, console usage-limits reporting. ee reads keys from env/config only.
+
+### 8.5 ee strengths to keep (reference lacks these)
+
+- Fail-closed typed tool policy: side-effect class + destructive subclass + owned-terminal kill gate + workspace scope.
+- Loop discipline as events: budget tracker, stop gate, repetition guard, stuck detection, repair/recovery — every decision an `OrchestratorEvent`, assertable in tests.
+- Meta-cognition layer with no opencode equivalent: critique, rubber-duck evaluation, delegation quality, subagent verifier, evidence classification.
+- Security layer: prompt-injection defense, sensitive-data redaction, private FS, write transactions with conflict detection.
+- Semantic memory + verified workspace facts (opencode has only kv + session store).
+- Editor-native LSP tool family — opencode core has none.
+- Bounded parallel read tools; reference dispatches unbounded behind its gate.
+
+## Part 8 — Improvements (itemized)
+
+Ordered by parity-gained-per-risk. Each item independently shippable, lands with its own tests, and does not reopen Parts 1–7.
+
+- [x] **I1 — Fix tool-name drift (bug).** Rename classification entries in `config.rs` `fast_local_read_tool`/`write_and_edit_tool` and `loop_engine/util.rs` to manifest names (`ee_list_directory`, `ee_document_symbols`, `ee_get_diagnostics`, `ee_apply_patch`, `ee_replace_text`, `ee_format_file`, `ee_rename_symbol`); update the `config.rs:581` test; add a drift-guard test that asserts every classified name exists in the `all_tools.rs` manifest (parse the manifest list in the test or generate it) so this cannot regress silently.
+- [x] **I2 — Model-facing `todowrite`.** Expose a `todowrite` tool backed by the existing `plan_compiler`/`milestones`/`tasks.rs` state: create/update/reorder plan items, persist per session, render current plan into the prompt pack, and emit an update on every mutation. Reference: `tool/plugin/todo.ts` schema. Bridge builtin or ee-proxy tool — one surface, not both.
+- [x] **I3 — Declarative permission rulesets + saved approvals.** Config-level `allow`/`ask`/`deny` rules per tool name (wildcard + side-effect-class matching), persisted ask-once answers, honored by the host broker before any ACP `session/request_permission` round-trip; classifier and rules compose (classifier only consulted when rules say `ask`). Fail closed on parse errors. Reference: `permission.ts`, `permission/saved.ts`.
+- [x] **I4 — Persistent PTY.** Reuse one PTY per (session, cwd) across `create_terminal` calls: keep cwd/env across commands, `release_terminal` only on session end; bounded output history ring. Reference: `persistent-pty/`. Keep ee's owned-terminal kill gate.
+- [x] **I5 — MCP resources + event watch.** Extend `ee-agent-host/src/mcp_over_acp` with `list_mcp_resources`, `read_mcp_resource`, and a bounded `watch_mcp_event` (subscription with per-turn drain, no unbounded queue). Reference: `tool/plugin/mcp-resource.ts`, `mcp-events.ts`.
+- [x] **I6 — Consolidate duplicate read/write paths.** One canonical file surface: either route bridge `read_file`/`write_file` through the same executor as `ee_read/write_text_file` or hide the bridge duplicates when the ee proxy is connected; advertise exactly one read and one write name to the model. Update I1 drift-guard accordingly.
+- [x] **I7 — Worktree tools.** `worktree_create/list/remove` over the existing `workspace_isolation.rs` machinery, gated as write-class + destructive-subclass; pairs with Improvement 4 (subagent isolation) rather than duplicating it.
+- [x] **I8 — Session management tools.** `session_rename`, `session_move`, and a read-only `models` listing tool over `model_registry` (names, capabilities, limits — no secrets).
+- [x] **I9 — Artifact/note CRUD completion.** Add update/delete to the note store (`ee_update_note`, `ee_delete_note`) with the same approval class as `ee_save_note`.
+- [ ] **I10 — Schedule surface (defer unless needed).** `schedule_create/list/pause/resume/delete` with a persisted cron table and a wakeup path into the background-job poller; only if agent-deferred work is a product goal. **Deferred:** no product requirement for agent-deferred work; background terminals cover the current long-running-job need.
+- [x] **I11 — Codemode planning mode.** A mode whose advertised tool set is read-class only (already expressible via `ToolPolicy`: `allow_read=true`, everything else false) plus a planning prompt section; surface as an ACP mode option. Reuses policy, no new gate code.
+- [x] **I12 — Snapshot/revert surface.** Close Part 1 Gap 2 by exposing checkpoint branch/revert over ACP (this item is the client-surface half; the store already exists).
+- [ ] **I13 — Record/replay test harness (stretch).** A `http-recorder`-style fixture layer for `ee-chat-completions` transports: record real provider exchanges once, replay deterministically in CI. Highest effort; biggest flake reduction. Defer until after I1–I6. **Deferred:** provider transports funnel through `reqwest::Response` streaming, so a fixture layer needs an exchange abstraction refactor plus a mock-server dev-dependency; left as a follow-up rather than a risky in-place rewrite.
+
+Explicitly not adopted from the reference: Effect/Layer architecture rewrite, SQL session store migration, global bus re-architecture, oauth/console integration, and image generation. These are product-shape decisions, not parity debts; reopen only with an explicit design decision.
+
+Delivery gates for each item: `cargo fmt --all -- --check`; `cargo clippy -q -D warnings` on touched crates; targeted `cargo test --quiet -p <crate> <module>` per the escalation rules; mem-guarded full package only when the change is crate-wide.

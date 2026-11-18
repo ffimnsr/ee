@@ -161,6 +161,9 @@ pub(crate) struct AgentsToml {
     pub read_only_modes: Option<Vec<String>>,
     /// Bridge-approval alignment policy (`[agents.approval]` table).
     pub approval: Option<AgentApprovalToml>,
+    /// Declarative `allow`/`ask`/`deny` permission rules for external agent
+    /// `session/request_permission` calls (`[agents.permissions]` table).
+    pub permissions: Option<serde_json::Value>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
     /// Optional bounded critic policy.

@@ -130,11 +130,11 @@ struct McpDispatchTarget {
 }
 
 /// One live MCP connection (or a failed/skipped one).
-struct McpConnection {
-    descriptor: McpServerDescriptor,
+pub(super) struct McpConnection {
+    pub(super) descriptor: McpServerDescriptor,
     /// The running rmcp client service; `None` before connect, after
     /// shutdown, or when discovery failed.
-    running: Arc<Mutex<Option<RunningService<RoleClient, OrchestratorClientHandler>>>>,
+    pub(super) running: Arc<Mutex<Option<RunningService<RoleClient, OrchestratorClientHandler>>>>,
     /// The ACP connection id, when the server is ACP-native and
     /// `mcp/connect` succeeded; used for an explicit `mcp/disconnect` when
     /// the handshake fails before a service exists.
@@ -174,8 +174,8 @@ pub(crate) struct McpSessionManager {
     bridge: ClientBridge,
     cancel: watch::Receiver<bool>,
     policy: McpToolPolicy,
-    timeout: Duration,
-    connections: Vec<McpConnection>,
+    pub(super) timeout: Duration,
+    pub(super) connections: Vec<McpConnection>,
     dispatch: std::sync::Mutex<HashMap<String, McpDispatchTarget>>,
     shutdown: AtomicBool,
     #[cfg(feature = "test-utils")]
@@ -1204,6 +1204,60 @@ mod fake_server_tests {
         let _ = stop.send(());
         task.await.expect("host joins");
         host_log.lock().expect("log poisoned").clone()
+    }
+
+    #[tokio::test]
+    async fn lists_and_reads_mcp_resources() {
+        let (descriptors, cancel) = ee_entries();
+        let (host, bridge) = acp_host(
+            &[
+                ("server/discover", discover_result()),
+                ("tools/list", tools_result(json!([]))),
+                (
+                    "resources/list",
+                    json!({
+                        "resources": [{ "uri": "file:///a", "name": "A" }],
+                        "resultType": "complete",
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                    }),
+                ),
+                (
+                    "resources/templates/list",
+                    json!({
+                        "resourceTemplates": [],
+                        "resultType": "complete",
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                    }),
+                ),
+                (
+                    "resources/read",
+                    json!({
+                        "contents": [{ "uri": "file:///a", "text": "hello" }],
+                        "resultType": "complete",
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                    }),
+                ),
+            ],
+            &[],
+        );
+        let log = host.log.clone();
+        let (host_task, stop) = spawn_host(host).await;
+        let mut manager =
+            McpSessionManager::new(descriptors, bridge, cancel, McpToolPolicy::default());
+        let diagnostics = manager.discover_all().await;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let listed = manager.list_mcp_resources(None).await.expect("resources list");
+        assert_eq!(listed["resources"][0]["uri"], "file:///a", "{listed}");
+        let server = listed["resources"][0]["server"].as_str().expect("server name").to_string();
+        let read = manager.read_mcp_resource(&server, "file:///a").await.expect("resource read");
+        assert!(read.to_string().contains("hello"), "{read}");
+
+        manager.shutdown().await;
+        let _ = stop_host(host_task, stop, log).await;
     }
 
     #[tokio::test]

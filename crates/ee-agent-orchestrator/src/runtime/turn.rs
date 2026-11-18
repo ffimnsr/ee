@@ -87,17 +87,13 @@ impl OrchestratorRuntime {
             return Ok(TurnOutcome::Completed(result));
         }
         let (title, description) = task_summary(&ctx);
-        let (task, entries) = {
-            let mut tasks = self.tasks.lock().expect("task graph poisoned");
-            let task = tasks.create_root(&title, &description);
-            let entries = tasks.plan_entries();
-            (task, entries)
-        };
-        sink.plan_replace(entries).map_err(|error| {
+        let task =
+            { self.tasks.lock().expect("task graph poisoned").create_root(&title, &description) };
+        sink.plan_replace(self.plan_entries_for_emission()).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
         let session_id = ctx.session_id.to_string();
-        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let definitions = self.advertised_definitions();
         let strategy_context = StrategyContext {
             prompt_text: prompt_text.clone(),
             has_code_changes: false,
@@ -115,7 +111,8 @@ impl OrchestratorRuntime {
         });
         let mut prompt = prompt;
         let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
-        append_turn_guidance(&mut prompt, &guidance.text, Some(&budget));
+        let guidance_text = turn_guidance_with_plan(&guidance.text, self.todo_plan_prompt());
+        append_turn_guidance(&mut prompt, &guidance_text, Some(&budget));
         let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
             .with_capture_metadata(
                 metadata.checkpoint_context.clone(),
@@ -141,6 +138,9 @@ impl OrchestratorRuntime {
                     read_first: guidance.decision.strategy
                         == crate::strategy::TurnStrategy::ResearchThenEdit,
                     graph: Some(self.tasks.clone()),
+                    plan: Some(self.todo_plan.clone()),
+                    session_title: Some(self.pending_title.clone()),
+                    read_only_tools: self.read_only_tools(),
                     available_models: self.models.advertised(),
                     model_id: Some(DEFAULT_MODEL_ID.to_string()),
                     memory: Some(self.memory.clone()),
@@ -225,16 +225,12 @@ impl OrchestratorRuntime {
                 .await;
         }
         let (title, description) = task_summary(&ctx);
-        let (task, entries) = {
-            let mut tasks = self.tasks.lock().expect("task graph poisoned");
-            let task = tasks.create_root(&title, &description);
-            let entries = tasks.plan_entries();
-            (task, entries)
-        };
-        sink.plan_replace(entries).map_err(|error| {
+        let task =
+            { self.tasks.lock().expect("task graph poisoned").create_root(&title, &description) };
+        sink.plan_replace(self.plan_entries_for_emission()).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
-        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let definitions = self.advertised_definitions();
         let strategy_context = StrategyContext {
             prompt_text,
             has_code_changes: false,
@@ -252,7 +248,8 @@ impl OrchestratorRuntime {
         });
         let mut prompt = prompt;
         let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
-        append_turn_guidance(&mut prompt, &guidance.text, Some(&budget));
+        let guidance_text = turn_guidance_with_plan(&guidance.text, self.todo_plan_prompt());
+        append_turn_guidance(&mut prompt, &guidance_text, Some(&budget));
         self.run_loop_with_options(
             ctx,
             sink,
@@ -267,6 +264,9 @@ impl OrchestratorRuntime {
                 read_first: guidance.decision.strategy
                     == crate::strategy::TurnStrategy::ResearchThenEdit,
                 graph: Some(self.tasks.clone()),
+                plan: Some(self.todo_plan.clone()),
+                session_title: Some(self.pending_title.clone()),
+                read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 until: self.until_hook(),
@@ -275,6 +275,14 @@ impl OrchestratorRuntime {
             },
         )
         .await
+    }
+}
+
+/// Appends the current todo plan to strategy guidance when one exists.
+fn turn_guidance_with_plan(guidance: &str, plan: Option<String>) -> String {
+    match plan.filter(|text| !text.trim().is_empty()) {
+        Some(plan) => format!("{guidance}\n\n{plan}"),
+        None => guidance.to_string(),
     }
 }
 

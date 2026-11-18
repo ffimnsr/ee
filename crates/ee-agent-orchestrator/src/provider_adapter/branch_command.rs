@@ -162,7 +162,9 @@ pub(super) fn handle_branch_command(ctx: BranchCommand<'_>) -> Result<PromptResu
 
 /// Parses the optional `/branch <checkpoint_seq>` argument. Absence means "use
 /// the newest checkpoint"; anything else must be a sequence number.
-fn parse_checkpoint_sequence(instructions: Option<&str>) -> Result<Option<u64>, ProviderError> {
+pub(super) fn parse_checkpoint_sequence(
+    instructions: Option<&str>,
+) -> Result<Option<u64>, ProviderError> {
     let Some(text) = instructions.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(None);
     };
@@ -176,7 +178,7 @@ fn parse_checkpoint_sequence(instructions: Option<&str>) -> Result<Option<u64>, 
 
 /// Projects normalized model messages onto the ACP replay conversation. Tool,
 /// system, and subagent-only records have no client-visible text counterpart.
-fn messages_to_conversation(messages: &[ModelMessage]) -> Vec<ConversationMessage> {
+pub(super) fn messages_to_conversation(messages: &[ModelMessage]) -> Vec<ConversationMessage> {
     messages
         .iter()
         .filter_map(|message| {

@@ -23,11 +23,25 @@ use crate::tools::{
     SideEffectClass, ToolDefinition, ToolExecutor, ToolIntent, ToolRegistry, ToolResult,
 };
 
+/// Read-class tools that still mutate shared session state and must never join
+/// a concurrent wave. `todowrite` replaces the session plan wholesale, so two
+/// calls in one batch would race and the last writer would be nondeterministic;
+/// `session_rename`/`session_move` mutate the title and working directory the
+/// loop emits after each call.
+const SERIAL_READ_TOOL_NAMES: &[&str] = &["todowrite", "session_rename", "session_move"];
+
+/// Whether `name` is a read-class tool that must run serially.
+#[must_use]
+pub(crate) fn is_serial_read_tool(name: &str) -> bool {
+    SERIAL_READ_TOOL_NAMES.contains(&name)
+}
+
 /// Whether every intent in the batch is read-class and safe to run as one
 /// concurrent wave.
 #[must_use]
 pub(crate) fn all_read_only(intents: &[ToolIntent], tools: &Arc<Mutex<ToolRegistry>>) -> bool {
     !intents.is_empty()
+        && !intents.iter().any(|intent| is_serial_read_tool(&intent.name))
         && intents.iter().all(|intent| {
             tools
                 .lock()
@@ -130,9 +144,10 @@ impl ParallelToolRunner {
                     tool_name: planned[index].intent.name.clone(),
                 });
             }
-            let read_only_wave = wave
-                .iter()
-                .all(|&index| planned[index].definition.side_effect_class == SideEffectClass::Read);
+            let read_only_wave = wave.iter().all(|&index| {
+                planned[index].definition.side_effect_class == SideEffectClass::Read
+                    && !is_serial_read_tool(&planned[index].intent.name)
+            });
             if read_only_wave && wave.len() > 1 {
                 for chunk in wave.chunks(self.max_parallel) {
                     let outcomes = futures::future::join_all(chunk.iter().map(|&index| {
@@ -354,6 +369,26 @@ mod tests {
             vec!["done", "done"],
             "results stay in original intent order"
         );
+    }
+
+    #[tokio::test]
+    async fn session_mutating_read_tools_are_serialized() {
+        for name in ["todowrite", "session_rename", "session_move"] {
+            assert!(is_serial_read_tool(name), "{name} mutates session state");
+        }
+        let (runner, state, tools) = harness(2, PolicyEngine::default());
+        let probe = state.clone();
+        register(&tools, ProbeTool::new("todowrite", SideEffectClass::Read, "todo", probe.clone()));
+        register(&tools, ProbeTool::new("read_a", SideEffectClass::Read, "a", probe));
+        let (sink, client, _rx) = plumbing();
+
+        let batch = intents(&[("tc-t", "todowrite"), ("tc-a", "read_a")]);
+        assert!(!all_read_only(&batch, &tools), "serial read tools block the parallel wave");
+        let results = run_batch(&runner, &sink, &client, &batch).await;
+        assert_all_success(&results);
+        let state = state.lock().expect("probe");
+        assert_eq!(state.max_active, 1, "session-mutating read tools never overlap");
+        assert_eq!(state.order, vec!["todo", "a"]);
     }
 
     #[tokio::test]

@@ -504,6 +504,19 @@ impl EditorSettings {
         if let Some(approval) = &patch.approval {
             merge_agent_approval(&mut self.agents.approval, approval, kind);
         }
+        if let Some(permissions) = &patch.permissions {
+            // Host-global config owns the full ruleset. Repository layers may
+            // only add deny rules: allowing or asking from a checked-in file
+            // would let the repository widen external-agent authority.
+            if kind.is_host_global() || permissions_are_deny_only(permissions) {
+                self.agents.permissions = Some(permissions.clone());
+            } else {
+                eprintln!(
+                    "ee: warning: {kind} agents.permissions may only deny; ignoring layer",
+                    kind = kind.label()
+                );
+            }
+        }
         for (id, server) in &patch.servers {
             let existing = self.agents.servers.get(id);
             match merge_agent_server(id, server, existing, kind) {
@@ -613,5 +626,26 @@ impl EditorSettings {
                 Err(error) => eprintln!("ee: warning: invalid mcp server `{id}`: {error}"),
             }
         }
+    }
+}
+
+/// Whether a raw `[agents.permissions]` value contains only deny effects.
+///
+/// Repository layers use this to prevent a checked-in config from granting
+/// external agents permission. Unknown shapes return `false` (fail closed).
+fn permissions_are_deny_only(value: &Value) -> bool {
+    match value {
+        Value::String(effect) => effect == "deny",
+        Value::Object(map) => map.values().all(|entry| match entry {
+            Value::String(effect) => effect == "deny",
+            Value::Object(resources) => {
+                resources.values().all(|effect| effect.as_str() == Some("deny"))
+            }
+            _ => false,
+        }),
+        Value::Array(items) => {
+            items.iter().all(|item| item.get("effect").and_then(Value::as_str) == Some("deny"))
+        }
+        _ => false,
     }
 }

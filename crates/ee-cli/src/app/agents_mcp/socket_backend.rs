@@ -640,6 +640,21 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         proxy_value(&self.call_value(ProxyCall::ReadNote { key }), "read_note")
     }
 
+    fn update_note(
+        &self,
+        key: String,
+        content: String,
+    ) -> Result<ee_mcp::SessionNoteResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::UpdateNote { key, content }), "update_note")
+    }
+
+    fn delete_note(
+        &self,
+        key: String,
+    ) -> Result<ee_mcp::SessionNoteDeletion, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::DeleteNote { key }), "delete_note")
+    }
+
     fn file_dependency_map(
         &self,
         path: String,

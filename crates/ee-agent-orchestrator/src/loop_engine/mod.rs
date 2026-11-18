@@ -26,7 +26,7 @@ use std::{
 };
 
 use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
-use ee_agent_protocol::{SessionId, SessionUpdate, StopReason, UsageUpdate};
+use ee_agent_protocol::{SessionId, SessionInfoUpdate, SessionUpdate, StopReason, UsageUpdate};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
@@ -99,6 +99,12 @@ pub(crate) struct LoopOptions {
     /// Optional owning task store feeding the stuck detector's no-progress
     /// tracking.
     pub graph: Option<Arc<Mutex<TaskGraph>>>,
+    /// Optional session todo plan; after each successful `todowrite` call the
+    /// loop emits an ACP plan update from it.
+    pub plan: Option<Arc<Mutex<crate::todo_plan::TodoPlan>>>,
+    /// Optional pending session title; after each successful `session_rename`
+    /// call the loop emits an ACP `session_info_update` carrying it.
+    pub session_title: Option<Arc<Mutex<Option<String>>>>,
     /// Advertised model list handed to the delegating model so subagent
     /// selections can name a registry id; empty when no registry is wired.
     pub available_models: Vec<ModelInfo>,
@@ -108,6 +114,9 @@ pub(crate) struct LoopOptions {
     /// Exact model-visible tool names. `None` exposes normal registry surface;
     /// a critic supplies a filtered set mirrored by execution policy.
     pub visible_tool_names: Option<HashSet<String>>,
+    /// When true the loop advertises read-class tools only. Plan mode sets it
+    /// so the model never sees a mutation the mode policy would deny.
+    pub read_only_tools: bool,
     /// Optional memory store for checkpoint captures; required (along with
     /// `checkpoint`) for recovery.
     pub memory: Option<Arc<Mutex<MemoryStore>>>,
@@ -169,9 +178,12 @@ impl Default for LoopOptions {
             read_first: false,
             execution_log: None,
             graph: None,
+            plan: None,
+            session_title: None,
             available_models: Vec::new(),
             model_id: None,
             visible_tool_names: None,
+            read_only_tools: false,
             memory: None,
             checkpoint: None,
             resume_state: None,

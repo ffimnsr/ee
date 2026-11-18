@@ -58,6 +58,7 @@ use crate::events::{AgentConnectionState, AgentEvent, ConnectionCloseReason, Per
 use crate::inbound::{ClientRequest, ClientRequestHandler, HandlerCapabilities};
 use crate::mcp_over_acp::{EeProxyMode, EeProxyToolProfile, McpOverAcpRegistry};
 use crate::permission::PermissionBroker;
+use crate::permission_rules::PermissionRules;
 use crate::process::{AgentProcess, AgentProcessConfig, spawn_stderr_reader};
 use crate::session::{AgentThread, ThreadShared};
 use crate::workspace_memory::WorkspaceMemoryHost;
@@ -316,6 +317,13 @@ impl std::fmt::Debug for AgentConnection {
     }
 }
 
+/// Non-option host stores threaded into one connection bootstrap.
+struct ConnectionStores {
+    process: Option<AgentProcess>,
+    workspace_memory: Arc<WorkspaceMemoryHost>,
+    permission_rules: Arc<PermissionRules>,
+}
+
 impl AgentConnection {
     /// Spawns the agent subprocess and starts the ACP v1 handshake.
     ///
@@ -347,22 +355,26 @@ impl AgentConnection {
 
         Self::start_connection(
             agent_id,
-            Some(process),
+            ConnectionStores {
+                process: Some(process),
+                workspace_memory: WorkspaceMemoryHost::disabled(),
+                permission_rules: Arc::new(PermissionRules::default()),
+            },
             handler,
             events,
             options,
-            WorkspaceMemoryHost::disabled(),
             transport,
         )
     }
 
-    pub(crate) async fn connect_with_workspace_memory(
+    pub(crate) async fn connect_with_workspace_memory_and_rules(
         agent_id: String,
         config: AgentProcessConfig,
         handler: Arc<dyn ClientRequestHandler>,
         events: mpsc::UnboundedSender<AgentEvent>,
         options: AgentConnectionOptions,
         workspace_memory: Arc<WorkspaceMemoryHost>,
+        permission_rules: Arc<PermissionRules>,
     ) -> Result<Self, AgentError> {
         let mut process = AgentProcess::spawn(&config).await?;
         let stderr = process.take_stderr();
@@ -374,11 +386,10 @@ impl AgentConnection {
         );
         Self::start_connection(
             agent_id,
-            Some(process),
+            ConnectionStores { process: Some(process), workspace_memory, permission_rules },
             handler,
             events,
             options,
-            workspace_memory,
             transport,
         )
     }
@@ -396,11 +407,14 @@ impl AgentConnection {
     ) -> Result<Self, AgentError> {
         Self::start_connection(
             agent_id,
-            None,
+            ConnectionStores {
+                process: None,
+                workspace_memory: WorkspaceMemoryHost::disabled(),
+                permission_rules: Arc::new(PermissionRules::default()),
+            },
             handler,
             events,
             options,
-            WorkspaceMemoryHost::disabled(),
             transport,
         )
     }
@@ -412,15 +426,15 @@ impl AgentConnection {
         events: mpsc::UnboundedSender<AgentEvent>,
         options: AgentConnectionOptions,
         workspace_memory: Arc<WorkspaceMemoryHost>,
+        permission_rules: Arc<PermissionRules>,
         transport: impl ee_agent_protocol::ConnectTo<ClientRole> + 'static,
     ) -> Result<Self, AgentError> {
         Self::start_connection(
             agent_id,
-            None,
+            ConnectionStores { process: None, workspace_memory, permission_rules },
             handler,
             events,
             options,
-            workspace_memory,
             transport,
         )
     }
@@ -428,19 +442,19 @@ impl AgentConnection {
     /// Shared connection bootstrap: channels, state, driver, and handshake.
     fn start_connection(
         agent_id: String,
-        process: Option<AgentProcess>,
+        stores: ConnectionStores,
         handler: Arc<dyn ClientRequestHandler>,
         events: mpsc::UnboundedSender<AgentEvent>,
         options: AgentConnectionOptions,
-        workspace_memory: Arc<WorkspaceMemoryHost>,
         transport: impl ee_agent_protocol::ConnectTo<ClientRole> + 'static,
     ) -> Result<Self, AgentError> {
+        let ConnectionStores { process, workspace_memory, permission_rules } = stores;
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         let (state_tx, _state_rx) = watch::channel(AgentConnectionState::Starting);
         let (terminate_tx, terminate_rx) = watch::channel(false);
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let handler_capabilities = handler.capabilities();
-        let broker = PermissionBroker::new();
+        let broker = PermissionBroker::with_rules(permission_rules);
         let process = Arc::new(Mutex::new(process));
         let threads = Arc::new(Mutex::new(HashMap::new()));
         let mcp = McpOverAcpRegistry::new(
@@ -2415,6 +2429,12 @@ fn handle_permission_request(
     inner: &Arc<AgentConnectionInner>,
 ) -> Result<(), RpcError> {
     let session_id = request.session_id.clone();
+    // Declarative allow/deny rules settle the request before any client
+    // round-trip; only an `ask` verdict reaches the UI.
+    if let Some(outcome) = inner.broker.preflight(&request.tool_call, &request.options) {
+        let _ = responder.respond(RequestPermissionResponse::new(outcome));
+        return Ok(());
+    }
     let (request_id, info, rx) =
         inner.broker.request(session_id.clone(), request.tool_call, request.options);
     let _ = inner.events.send(AgentEvent::PermissionRequested {
@@ -2465,11 +2485,18 @@ fn handle_permission_request_v2(
         request.subject.as_ref(),
         &format!("permission-{}", request.session_id.0),
     );
-    let options = request
+    let options: Vec<ee_agent_protocol::PermissionOption> = request
         .options
         .iter()
         .filter_map(|option| serde_json::from_value(serde_json::to_value(option).ok()?).ok())
         .collect();
+    if let Some(outcome) = inner.broker.preflight(&tool_call, &options) {
+        let v2_outcome: v2::RequestPermissionOutcome =
+            serde_json::from_value(serde_json::to_value(outcome).expect("outcome"))
+                .expect("permission outcome maps between versions");
+        let _ = responder.respond(v2::RequestPermissionResponse::new(v2_outcome));
+        return Ok(());
+    }
     let (request_id, info, rx) = inner.broker.request(session_id.clone(), tool_call, options);
     let _ = inner.events.send(AgentEvent::PermissionRequested {
         session_id: session_id.clone(),

@@ -132,7 +132,7 @@ pub const DEFAULT_AUTO_RESUME_MAX: u32 = 1;
 /// clamped to `terminal_max` instead of the flat category ceiling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolTimeoutPolicy {
-    /// Fast local reads (`read_file`, `list_files`, outlines, diagnostics).
+    /// Fast local reads (`read_file`, directory listing, document symbols, diagnostics).
     pub fast_local_read: Duration,
     /// Search and external MCP reads.
     pub search_and_mcp: Duration,
@@ -229,15 +229,30 @@ fn terminal_tool_name(name: &str) -> bool {
     ) || name.contains("terminal")
 }
 
+/// ee-manifest tools whose latency must stay in the fast local read tier.
+///
+/// Keep every entry in sync with [`ee_mcp::STABLE_TOOL_NAMES`]; the
+/// `classified_tool_names_exist_in_ee_manifest` test fails when one drifts.
+const FAST_LOCAL_READ_TOOL_NAMES: &[&str] =
+    &["ee_list_directory", "ee_document_symbols", "ee_get_diagnostics", "ee_workspace_roots"];
+
+/// Bridge-manifest tools in the fast local read tier. Bridge tools are not part
+/// of the ee proxy manifest, so they are tracked separately.
+const FAST_LOCAL_READ_BRIDGE_NAMES: &[&str] = &["read_file"];
+
 fn fast_local_read_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read_file" | "list_files" | "ee_file_outline" | "ee_diagnostics" | "ee_workspace_roots"
-    )
+    FAST_LOCAL_READ_TOOL_NAMES.contains(&name) || FAST_LOCAL_READ_BRIDGE_NAMES.contains(&name)
 }
 
+/// ee-manifest tools whose latency gets the write/edit tier.
+const WRITE_AND_EDIT_TOOL_NAMES: &[&str] =
+    &["ee_apply_patch", "ee_replace_text", "ee_format_file", "ee_rename_symbol"];
+
+/// Bridge-manifest tools in the write/edit tier.
+const WRITE_AND_EDIT_BRIDGE_NAMES: &[&str] = &["write_file", "edit_file"];
+
 fn write_and_edit_tool(name: &str) -> bool {
-    matches!(name, "write_file" | "ee_edit_apply" | "ee_format_buffer" | "ee_lsp_rename")
+    WRITE_AND_EDIT_TOOL_NAMES.contains(&name) || WRITE_AND_EDIT_BRIDGE_NAMES.contains(&name)
 }
 
 /// Shared configuration for one [`crate::OrchestratorRuntime`] instance.
@@ -578,8 +593,32 @@ mod tests {
             Duration::from_secs(15)
         );
         assert_eq!(
-            policy.timeout_for_tool("ee_file_outline", SideEffectClass::Read),
+            policy.timeout_for_tool("ee_document_symbols", SideEffectClass::Read),
             Duration::from_secs(15)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_list_directory", SideEffectClass::Read),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_get_diagnostics", SideEffectClass::Read),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_apply_patch", SideEffectClass::Write),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_replace_text", SideEffectClass::Write),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_format_file", SideEffectClass::Write),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            policy.timeout_for_tool("ee_rename_symbol", SideEffectClass::Write),
+            Duration::from_secs(60)
         );
         assert_eq!(
             policy.timeout_for_tool("search_text", SideEffectClass::Read),
@@ -601,6 +640,33 @@ mod tests {
             policy.effective_timeout("ee_terminal_wait", SideEffectClass::Execute, None),
             Duration::from_secs(120)
         );
+    }
+
+    /// Drift guard: every classified ee tool must exist in the canonical proxy
+    /// manifest, so a rename cannot silently disable a timeout tier again.
+    #[test]
+    fn classified_tool_names_exist_in_ee_manifest() {
+        for name in FAST_LOCAL_READ_TOOL_NAMES.iter().chain(WRITE_AND_EDIT_TOOL_NAMES.iter()) {
+            assert!(name.starts_with("ee_"), "ee classification must stay namespaced: {name}");
+            assert!(
+                ee_mcp::STABLE_TOOL_NAMES.contains(name),
+                "classified tool {name} is missing from the ee tool manifest"
+            );
+            assert!(ee_mcp::governance(name).is_some(), "classified tool {name} lacks governance");
+        }
+        for name in FAST_LOCAL_READ_TOOL_NAMES {
+            assert!(fast_local_read_tool(name), "{name}");
+        }
+        for name in WRITE_AND_EDIT_TOOL_NAMES {
+            assert!(write_and_edit_tool(name), "{name}");
+        }
+        for name in FAST_LOCAL_READ_BRIDGE_NAMES.iter().chain(WRITE_AND_EDIT_BRIDGE_NAMES.iter()) {
+            assert!(
+                !name.starts_with("ee_"),
+                "bridge classification must stay unnamespaced: {name}"
+            );
+            assert!(fast_local_read_tool(name) || write_and_edit_tool(name), "{name}");
+        }
     }
 
     #[test]

@@ -56,6 +56,8 @@ mod app_write;
 mod approval;
 mod approval_always;
 mod bridge_ui;
+#[cfg(unix)]
+mod persistent_shell;
 mod prompt;
 mod pump;
 mod read;

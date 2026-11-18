@@ -301,6 +301,15 @@ pub enum ClientRequest {
         scope: String,
         key: String,
     },
+    ProxyUpdateNote {
+        scope: String,
+        key: String,
+        content: String,
+    },
+    ProxyDeleteNote {
+        scope: String,
+        key: String,
+    },
     ProxyFileDependencyMap {
         path: String,
     },
@@ -381,6 +390,8 @@ impl ClientRequest {
             Self::ProxySaveNote { .. } => "_ee/save_note",
             Self::ProxyReadNotes { .. } => "_ee/read_notes",
             Self::ProxyReadNote { .. } => "_ee/read_note",
+            Self::ProxyUpdateNote { .. } => "_ee/update_note",
+            Self::ProxyDeleteNote { .. } => "_ee/delete_note",
             Self::ProxyFileDependencyMap { .. } => "_ee/file_dependency_map",
             Self::ProxySymbolDependencyMap { .. } => "_ee/symbol_dependency_map",
             Self::ProxyWebSearch { .. } => "_ee/web_search",
@@ -537,6 +548,8 @@ impl ClientRequest {
             | Self::ProxySaveNote { .. }
             | Self::ProxyReadNotes { .. }
             | Self::ProxyReadNote { .. }
+            | Self::ProxyUpdateNote { .. }
+            | Self::ProxyDeleteNote { .. }
             | Self::ProxyFileDependencyMap { .. }
             | Self::ProxySymbolDependencyMap { .. }
             | Self::ProxyWebSearch { .. }

@@ -15,6 +15,7 @@ use crate::connection::{AgentConnection, AgentConnectionOptions};
 use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::inbound::ClientRequestHandler;
+use crate::permission_rules::PermissionRules;
 use crate::process::AgentProcessConfig;
 use crate::session::AgentThread;
 use crate::turn_evidence::TurnEvidence;
@@ -61,6 +62,9 @@ pub struct AgentManagerConfig {
     /// Resolved workspace-memory settings. The editor enables memory by
     /// default via `[agents.workspace_memory]`; hosts may opt out explicitly.
     pub workspace_memory: WorkspaceMemoryHostConfig,
+    /// Declarative permission rules honored before any ACP
+    /// `session/request_permission` round-trip. Empty rules ask every time.
+    pub permission_rules: Arc<PermissionRules>,
     /// Test-only: agent id → fake transport factory.  When present for an
     /// agent, the manager connects over the fake transport instead of
     /// spawning a subprocess.
@@ -74,6 +78,7 @@ impl Default for AgentManagerConfig {
             agents: BTreeMap::new(),
             ee_proxy_enabled: true,
             workspace_memory: WorkspaceMemoryHostConfig::default(),
+            permission_rules: Arc::new(PermissionRules::default()),
             #[cfg(feature = "test-utils")]
             fake_transports: BTreeMap::new(),
         }
@@ -382,6 +387,7 @@ impl AgentManager {
                 self.events.clone(),
                 options,
                 self.workspace_memory.clone(),
+                self.config.permission_rules.clone(),
                 factory.build(),
             )?;
             self.connections
@@ -390,13 +396,14 @@ impl AgentManager {
                 .insert(agent_id.to_string(), connection.clone());
             return Ok(connection);
         }
-        let connection = AgentConnection::connect_with_workspace_memory(
+        let connection = AgentConnection::connect_with_workspace_memory_and_rules(
             agent_id.to_string(),
             config,
             self.handler.clone(),
             self.events.clone(),
             options,
             self.workspace_memory.clone(),
+            self.config.permission_rules.clone(),
         )
         .await?;
         self.connections
@@ -550,6 +557,7 @@ impl AgentManager {
             agents: BTreeMap::from([(agent_id.to_string(), process)]),
             ee_proxy_enabled: self.config.ee_proxy_enabled,
             workspace_memory: self.config.workspace_memory.clone(),
+            permission_rules: self.config.permission_rules.clone(),
             #[cfg(feature = "test-utils")]
             fake_transports: self
                 .config

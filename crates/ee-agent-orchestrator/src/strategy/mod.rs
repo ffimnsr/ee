@@ -479,7 +479,10 @@ pub(crate) struct StrategyExecutor {
     budget: Arc<Mutex<BudgetTracker>>,
     policy: PolicyEngine,
     tasks: Arc<Mutex<TaskGraph>>,
+    plan: Arc<Mutex<crate::todo_plan::TodoPlan>>,
     events: EventRecorder,
+    /// Whether the loop advertises read-class tools only (plan mode).
+    read_only_tools: bool,
     /// Provider-facing session affinity stamped on every request this turn.
     session_context: crate::session_context::SessionContext,
 }

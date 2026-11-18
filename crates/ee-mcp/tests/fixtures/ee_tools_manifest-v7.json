@@ -1,5 +1,5 @@
 {
-  "manifestVersion": 6,
+  "manifestVersion": 7,
   "tools": [
     {
       "approval": "none",
@@ -29,7 +29,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -73,7 +73,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -117,7 +117,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -161,7 +161,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -205,7 +205,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -249,7 +249,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -296,7 +296,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -345,7 +345,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -402,7 +402,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -459,7 +459,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -516,7 +516,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -573,7 +573,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -630,7 +630,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -693,7 +693,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -756,7 +756,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -813,7 +813,7 @@
         "web_context",
         "ExternalNetwork"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -867,7 +867,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -931,7 +931,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -980,7 +980,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1029,7 +1029,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1074,7 +1074,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1119,7 +1119,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1169,7 +1169,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1219,7 +1219,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1263,7 +1263,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1317,7 +1317,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1352,7 +1352,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1389,7 +1389,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1435,7 +1435,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1481,7 +1481,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1537,7 +1537,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1593,7 +1593,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1642,7 +1642,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1686,7 +1686,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1747,7 +1747,7 @@
       "requiredCapabilities": [
         "language_server"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1806,7 +1806,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1856,7 +1856,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -1905,7 +1905,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -1968,7 +1968,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "execute",
       "transportAvailability": [
         "stdio",
@@ -2017,7 +2017,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "acp"
@@ -2071,7 +2071,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "acp"
@@ -2119,7 +2119,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "acp"
@@ -2173,7 +2173,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "acp"
@@ -2221,7 +2221,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "execute",
       "transportAvailability": [
         "acp"
@@ -2269,7 +2269,7 @@
       "requiredCapabilities": [
         "terminal"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "execute",
       "transportAvailability": [
         "acp"
@@ -2306,7 +2306,7 @@
       "requiredCapabilities": [
         "git"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2344,7 +2344,7 @@
       "requiredCapabilities": [
         "git"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2382,7 +2382,7 @@
       "requiredCapabilities": [
         "git"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2429,7 +2429,7 @@
       "requiredCapabilities": [
         "git"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2465,7 +2465,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2501,7 +2501,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2549,7 +2549,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "acp"
@@ -2584,7 +2584,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2634,7 +2634,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -2670,7 +2670,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2715,8 +2715,103 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "content": "example",
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "ee_update_note",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 7,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "ee_delete_note",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 7,
+      "sideEffect": "write",
       "transportAvailability": [
         "stdio",
         "acp"
@@ -2769,7 +2864,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -2823,7 +2918,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -2883,7 +2978,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "acp"
@@ -2929,7 +3024,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -2976,7 +3071,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3023,7 +3118,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -3070,7 +3165,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3117,7 +3212,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -3162,7 +3257,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3209,7 +3304,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -3245,7 +3340,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "write",
       "transportAvailability": [
         "stdio",
@@ -3292,7 +3387,7 @@
       "requiredCapabilities": [
         "dependency_index"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3353,7 +3448,7 @@
       "requiredCapabilities": [
         "dependency_index"
       ],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3389,7 +3484,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",
@@ -3424,7 +3519,7 @@
       ],
       "replacement": null,
       "requiredCapabilities": [],
-      "schemaVersion": 6,
+      "schemaVersion": 7,
       "sideEffect": "read",
       "transportAvailability": [
         "stdio",

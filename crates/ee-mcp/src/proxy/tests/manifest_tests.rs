@@ -298,7 +298,7 @@ fn manifest_snapshot_matches_versioned_contract() {
     let actual =
         canonical_json(serde_json::to_value(proxy.tools_manifest()).expect("manifest serializes"));
     let expected = canonical_json(
-        serde_json::from_str(include_str!("../../../tests/fixtures/ee_tools_manifest-v6.json"))
+        serde_json::from_str(include_str!("../../../tests/fixtures/ee_tools_manifest-v7.json"))
             .expect("manifest fixture parses"),
     );
     assert_eq!(actual, expected);
@@ -312,7 +312,7 @@ fn regenerate_manifest_snapshot() {
         canonical_json(serde_json::to_value(proxy.tools_manifest()).expect("manifest serializes"));
     let snapshot = serde_json::to_string_pretty(&value).expect("canonical manifest serializes");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/ee_tools_manifest-v6.json");
+        .join("tests/fixtures/ee_tools_manifest-v7.json");
     std::fs::write(path, format!("{snapshot}\n")).expect("write manifest fixture");
 }
 
@@ -640,6 +640,24 @@ fn filesystem_tools_validate_absolute_paths_and_dispatch_structured_results() {
         assert!(proxy.dispatch_tool(&request).is_err(), "{name}");
         assert_eq!(backend.calls().len(), before, "{name} must fail before dispatch");
     }
+}
+
+#[test]
+fn note_update_and_delete_reject_unexpected_arguments_before_dispatch() {
+    let backend = Arc::new(ScriptedBackend::default());
+    let proxy = EeMcpProxy::new(backend.clone());
+
+    let update = CallToolRequestParams::new("ee_update_note").with_arguments(arguments(json!({
+        "key": "plan",
+        "content": "ship it",
+        "path": "/etc/passwd",
+    })));
+    assert!(proxy.dispatch_tool(&update).is_err());
+
+    let delete = CallToolRequestParams::new("ee_delete_note")
+        .with_arguments(arguments(json!({ "key": "plan", "content": "ship it" })));
+    assert!(proxy.dispatch_tool(&delete).is_err());
+    assert!(backend.calls().is_empty(), "invalid note arguments never dispatch");
 }
 
 #[test]

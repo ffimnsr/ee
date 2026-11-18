@@ -195,6 +195,10 @@ pub(super) fn start_proxy_call_to_bridge(
         }
         ProxyCall::ReadNotes => ProxyToolCall::ReadNotes { scope: scope.to_owned() },
         ProxyCall::ReadNote { key } => ProxyToolCall::ReadNote { scope: scope.to_owned(), key },
+        ProxyCall::UpdateNote { key, content } => {
+            ProxyToolCall::UpdateNote { scope: scope.to_owned(), key, content }
+        }
+        ProxyCall::DeleteNote { key } => ProxyToolCall::DeleteNote { scope: scope.to_owned(), key },
         ProxyCall::FileDependencyMap { path } => ProxyToolCall::FileDependencyMap { path },
         ProxyCall::SymbolDependencyMap { path, line, character } => {
             ProxyToolCall::SymbolDependencyMap { path, line, character }

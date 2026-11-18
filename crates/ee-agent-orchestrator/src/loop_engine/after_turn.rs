@@ -26,19 +26,17 @@ impl LoopEngine {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
-        let tools: Vec<ToolDefinition> = self
-            .tools
-            .lock()
-            .expect("tool registry poisoned")
-            .definitions()
-            .into_iter()
-            .filter(|tool| {
-                self.options
-                    .visible_tool_names
-                    .as_ref()
-                    .is_none_or(|allowed| allowed.contains(&tool.name))
-            })
-            .collect();
+        let tools = {
+            let definitions = crate::tools::canonical_tool_definitions(
+                self.tools.lock().expect("tool registry poisoned").definitions(),
+                self.options.visible_tool_names.as_ref(),
+            );
+            if self.options.read_only_tools {
+                crate::tools::read_only_definitions(definitions)
+            } else {
+                definitions
+            }
+        };
         transcript.push_message(ModelMessage::text(ModelRole::Assistant, MAX_STEPS_PROMPT));
         let request_messages =
             crate::compaction::prune_redundant_readonly_tool_outputs(transcript.request_messages());
@@ -109,6 +107,54 @@ impl LoopEngine {
             advertised_tool_count: 0,
         });
         Ok(prompt_result_with_usage(StopReason::MaxTurnRequests, turn_usage))
+    }
+
+    /// Emits the current ACP plan after a successful `todowrite` mutation.
+    ///
+    /// Emission is best-effort: a closed sink is recorded as an event instead
+    /// of failing an otherwise completed tool call.
+    pub(super) fn emit_plan_update(&self, sink: &UpdateSink) {
+        let Some(plan) = self.options.plan.as_ref() else { return };
+        let entries = plan.lock().expect("todo plan poisoned").plan_entries();
+        if let Err(error) = sink.plan_replace(entries) {
+            self.events.record(OrchestratorEvent::Error {
+                error: format!("plan emission failed: {error}"),
+            });
+        }
+    }
+
+    /// Emits a queued session title after a successful `session_rename`.
+    ///
+    /// The title is consumed only when the update was queued, so a closed
+    /// sink leaves it pending for the next turn instead of losing it.
+    pub(super) fn emit_pending_title(&self, sink: &UpdateSink) {
+        let Some(pending) = self.options.session_title.as_ref() else { return };
+        let title = pending.lock().expect("pending title poisoned").clone();
+        let Some(title) = title else { return };
+        let update = SessionInfoUpdate::new().title(title.clone());
+        match sink.session_info_update(update) {
+            Ok(()) => {
+                let mut pending = pending.lock().expect("pending title poisoned");
+                if pending.as_deref() == Some(title.as_str()) {
+                    *pending = None;
+                }
+            }
+            Err(error) => {
+                self.events.record(OrchestratorEvent::Error {
+                    error: format!("session title emission failed: {error}"),
+                });
+            }
+        }
+    }
+
+    /// Emits the ACP updates a successful tool call may have produced.
+    pub(super) fn emit_session_updates(&self, tool_name: &str, sink: &UpdateSink) {
+        if tool_name == "todowrite" {
+            self.emit_plan_update(sink);
+        }
+        if tool_name == "session_rename" {
+            self.emit_pending_title(sink);
+        }
     }
 
     /// Injects nested workspace instructions discovered under a touched path.

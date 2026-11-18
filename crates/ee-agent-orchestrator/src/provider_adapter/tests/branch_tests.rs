@@ -86,6 +86,74 @@ async fn branch_command_forks_session_and_reports_unreplayed_conversation() {
 }
 
 #[tokio::test]
+async fn revert_command_restores_in_place_and_reports_workspace_unchanged() {
+    let provider = OrchestratorProvider::new(
+        OrchestratorProviderConfig::default(),
+        Arc::new(FakeModel::new(Vec::new())),
+    );
+    let init = provider.new_session(NewSessionContext::new("/work")).await.expect("session");
+    let session_id = init.session_id;
+    save_checkpoint(&provider, &session_id.to_string());
+
+    let (sink, client, mut rx) = plumbing(&session_id);
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let result = provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/revert 1"))],
+            ),
+            sink,
+            client,
+            cancel,
+        )
+        .await
+        .expect("revert succeeds");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert!(provider.session_state(&session_id.to_string()).is_some(), "session id is unchanged");
+
+    let mut summary = None;
+    while let Ok(OutboundEvent::Update { update, .. }) = rx.try_recv() {
+        if let SessionUpdate::AgentMessageChunk(chunk) = *update
+            && chunk.message_id.as_ref().is_some_and(|id| id.0.as_ref() == "revert")
+            && let ContentBlock::Text(text) = &chunk.content
+        {
+            summary = Some(text.text.clone());
+        }
+    }
+    let summary = summary.expect("revert summary emitted");
+    assert!(summary.contains("\"checkpoint_seq\":1"), "{summary}");
+    assert!(summary.contains("\"workspace_files_changed\":false"), "{summary}");
+}
+
+#[tokio::test]
+async fn revert_command_rejects_missing_checkpoint_without_mutation() {
+    let provider = OrchestratorProvider::new(
+        OrchestratorProviderConfig::default(),
+        Arc::new(FakeModel::new(Vec::new())),
+    );
+    let init = provider.new_session(NewSessionContext::new("/work")).await.expect("session");
+    let session_id = init.session_id;
+
+    let (sink, client, _rx) = plumbing(&session_id);
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let error = provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/revert 9"))],
+            ),
+            sink,
+            client,
+            cancel,
+        )
+        .await
+        .expect_err("missing checkpoint is rejected");
+    assert!(error.to_string().contains("not found"), "{error}");
+    assert!(provider.session_state(&session_id.to_string()).is_some());
+}
+
+#[tokio::test]
 async fn prompt_retains_normalized_transcript_without_prompt_planes() {
     let provider = OrchestratorProvider::new(
         OrchestratorProviderConfig::default(),

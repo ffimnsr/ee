@@ -240,6 +240,7 @@ async fn spawn_manager_host_with_memory_at(
             database_path: Some(database_path),
             ..Default::default()
         },
+        permission_rules: Arc::new(ee_agent_host::PermissionRules::default()),
         fake_transports: BTreeMap::from([(
             agent_id.to_string(),
             factory as Arc<dyn FakeTransportFactory>,

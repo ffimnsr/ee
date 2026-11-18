@@ -11,7 +11,7 @@ use crate::classify::SideEffectClass;
 ///
 /// Bump only when adding a compatible manifest field or tool. An incompatible
 /// argument or result change must use a new tool name instead.
-pub const EE_TOOL_SCHEMA_VERSION: u64 = 6;
+pub const EE_TOOL_SCHEMA_VERSION: u64 = 7;
 
 /// MCP routes over which one tool is implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,7 +293,9 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_format_file"
         | "ee_rename_symbol"
         | "ee_write_text_file"
-        | "ee_save_note" => write(),
+        | "ee_save_note"
+        | "ee_update_note"
+        | "ee_delete_note" => write(),
         "ee_remember_workspace_fact"
         | "ee_replace_workspace_fact"
         | "ee_forget_workspace_fact"
@@ -407,6 +409,8 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_save_note",
     "ee_read_notes",
     "ee_read_note",
+    "ee_update_note",
+    "ee_delete_note",
     "ee_remember_workspace_fact",
     "ee_replace_workspace_fact",
     "ee_verify_workspace_fact",

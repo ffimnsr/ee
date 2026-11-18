@@ -15,6 +15,8 @@ use ee_agent_protocol::{
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 
+#[cfg(unix)]
+use super::persistent_shell::{PersistentCommandHandle, PersistentShellPool};
 use crate::policy::match_profile_entry;
 
 /// Editor-side hard cap on retained terminal output bytes.
@@ -313,6 +315,9 @@ pub(crate) struct AgentTerminalTrack {
     output_readers: Vec<thread::JoinHandle<()>>,
     child: Option<Child>,
     pub(crate) exit_status: Option<TerminalExitStatus>,
+    /// Reusable shell command handle; `None` for a per-command process.
+    #[cfg(unix)]
+    persistent: Option<PersistentCommandHandle>,
     started_at: Instant,
     pub(crate) released: bool,
     validation: Option<TerminalValidationRun>,
@@ -328,6 +333,9 @@ struct AgentTerminalRegistry {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentTerminals {
     inner: Arc<Mutex<AgentTerminalRegistry>>,
+    /// Reusable shells, one per `(session, cwd)`; killed only at session end.
+    #[cfg(unix)]
+    shells: Arc<PersistentShellPool>,
 }
 
 impl AgentTerminals {
@@ -359,31 +367,22 @@ impl AgentTerminals {
             .unwrap_or(BRIDGE_TERMINAL_OUTPUT_CAP);
         let terminal_id = self.allocate_terminal_id();
 
-        let cwd = request.cwd.as_deref().unwrap_or_else(|| Path::new("."));
         let command_line = terminal_command_line(request);
-        let mut command = crate::terminal::shell_command(&command_line, cwd);
-        command.envs(terminal_child_env(request));
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| AgentError::Io(format!("terminal spawn failed: {error}")))?;
-
-        let output = Arc::new(Mutex::new(BoundedOutput::new(cap)));
-        let output_readers = [
-            spawn_output_reader(
-                child.stdout.take(),
-                Arc::clone(&output),
-                TerminalOutputStream::Stdout,
-            ),
-            spawn_output_reader(
-                child.stderr.take(),
-                Arc::clone(&output),
-                TerminalOutputStream::Stderr,
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        // Reuse a persistent shell for this `(session, cwd)` when one is idle;
+        // fall back to a per-command process when the key already has the
+        // maximum busy shells.
+        #[cfg(unix)]
+        let (output, output_readers, child, persistent) =
+            match self.shells.submit(request, &command_line, cap)? {
+                Some((handle, output)) => (output, Vec::new(), None, Some(handle)),
+                None => {
+                    let (output, readers, child) =
+                        spawn_terminal_process(request, &command_line, cap)?;
+                    (output, readers, Some(child), None)
+                }
+            };
+        #[cfg(not(unix))]
+        let (output, output_readers, child) = spawn_terminal_process(request, &command_line, cap)?;
 
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
@@ -396,7 +395,9 @@ impl AgentTerminals {
             cwd: request.cwd.clone(),
             output,
             output_readers,
-            child: Some(child),
+            child,
+            #[cfg(unix)]
+            persistent,
             exit_status: None,
             started_at: Instant::now(),
             released: false,
@@ -642,6 +643,14 @@ impl AgentTerminals {
             ));
         }
         self.refresh_exit(track);
+        #[cfg(unix)]
+        if let Some(handle) = track.persistent.as_ref() {
+            if handle.is_running() {
+                handle.kill();
+                return Ok(OwnedTerminalStop::StopRequested);
+            }
+            return Ok(OwnedTerminalStop::AlreadyExited);
+        }
         let Some(child) = track.child.as_mut() else {
             return Ok(OwnedTerminalStop::AlreadyExited);
         };
@@ -650,6 +659,17 @@ impl AgentTerminals {
     }
 
     fn kill_track(&self, track: &mut AgentTerminalTrack) -> Result<(), AgentError> {
+        #[cfg(unix)]
+        if let Some(handle) = track.persistent.as_ref() {
+            // Only a still-running command needs the shared shell killed; a
+            // finished command leaves the shell alive for the next call.
+            if handle.is_running() {
+                handle.kill();
+                track.exit_status = handle.exit_status();
+            }
+            Self::join_output_readers(track);
+            return Ok(());
+        }
         if let Some(child) = track.child.as_mut() {
             child
                 .kill()
@@ -679,7 +699,7 @@ impl AgentTerminals {
             total_bytes: output.total(),
             truncated: output.truncated(),
             exit_status: track.exit_status.clone(),
-            running: track.child.is_some(),
+            running: track.exit_status.is_none(),
             elapsed_ms: track.started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
@@ -693,8 +713,15 @@ impl AgentTerminals {
     /// Reaps the child when it exited, waits for output readers to drain, and
     /// caches the exit status.
     fn refresh_exit(&self, track: &mut AgentTerminalTrack) {
-        if track.exit_status.is_none()
-            && let Some(child) = track.child.as_mut()
+        if track.exit_status.is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(handle) = track.persistent.as_ref() {
+            track.exit_status = handle.exit_status();
+            return;
+        }
+        if let Some(child) = track.child.as_mut()
             && let Ok(Some(status)) = child.try_wait()
         {
             track.exit_status = Some(exit_status_of(&status));
@@ -721,12 +748,18 @@ impl AgentTerminals {
     pub(crate) fn kill_all(&self) {
         let registry = std::mem::take(&mut *self.inner.lock().expect("terminals poisoned"));
         for (_, mut track) in registry.active.into_iter().chain(registry.released) {
+            #[cfg(unix)]
+            if let Some(handle) = track.persistent.as_ref() {
+                handle.kill();
+            }
             if let Some(mut child) = track.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
             Self::join_output_readers(&mut track);
         }
+        #[cfg(unix)]
+        self.shells.kill_all();
     }
 
     /// Number of tracked terminals (tests and status lines).
@@ -745,6 +778,32 @@ fn tail_at_char_boundary(text: &str, max_bytes: usize) -> String {
         start += 1;
     }
     format!("[tail]\n{}", &text[start..])
+}
+
+/// One per-command process plus its bounded output and reader threads.
+type TerminalProcessSpawn = (Arc<Mutex<BoundedOutput>>, Vec<thread::JoinHandle<()>>, Child);
+
+fn spawn_terminal_process(
+    request: &CreateTerminalRequest,
+    command_line: &str,
+    cap: usize,
+) -> Result<TerminalProcessSpawn, AgentError> {
+    let cwd = request.cwd.as_deref().unwrap_or_else(|| Path::new("."));
+    let mut command = crate::terminal::shell_command(command_line, cwd);
+    command.envs(terminal_child_env(request));
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| AgentError::Io(format!("terminal spawn failed: {error}")))?;
+    let output = Arc::new(Mutex::new(BoundedOutput::new(cap)));
+    let readers = [
+        spawn_output_reader(child.stdout.take(), Arc::clone(&output), TerminalOutputStream::Stdout),
+        spawn_output_reader(child.stderr.take(), Arc::clone(&output), TerminalOutputStream::Stderr),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok((output, readers, child))
 }
 
 fn spawn_output_reader(

@@ -11,10 +11,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ee_agent_protocol::{PermissionOption, RequestPermissionOutcome, SessionId, ToolCallUpdate};
+use ee_agent_protocol::{
+    PermissionOption, PermissionOptionKind, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionId, ToolCallUpdate,
+};
 use tokio::sync::oneshot;
 
 use crate::events::{PermissionRequestId, PermissionRequestInfo};
+use crate::permission_rules::{PermissionEffect, PermissionRules, PermissionTarget};
 
 /// Outcome channel for one pending permission request.
 pub(crate) type PermissionResponse = oneshot::Sender<RequestPermissionOutcome>;
@@ -23,6 +27,8 @@ pub(crate) type PermissionResponse = oneshot::Sender<RequestPermissionOutcome>;
 pub(crate) struct PendingPermission {
     pub session_id: SessionId,
     pub respond: PermissionResponse,
+    target: PermissionTarget,
+    options: Vec<PermissionOption>,
 }
 
 #[derive(Debug, Default)]
@@ -38,13 +44,59 @@ struct BrokerState {
 #[derive(Debug, Clone, Default)]
 pub struct PermissionBroker {
     state: Arc<Mutex<BrokerState>>,
+    rules: Arc<Mutex<Arc<PermissionRules>>>,
 }
 
 impl PermissionBroker {
-    /// Creates an empty broker.
+    /// Creates an empty broker (every request asks).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a broker that settles `allow`/`deny` rules before notifying the
+    /// client and remembers `allow_always` answers.
+    #[must_use]
+    pub fn with_rules(rules: Arc<PermissionRules>) -> Self {
+        Self { state: Arc::default(), rules: Arc::new(Mutex::new(rules)) }
+    }
+
+    /// Replaces the active ruleset. Safe to call while requests are pending;
+    /// only requests evaluated afterwards use the new rules.
+    pub fn set_rules(&self, rules: Arc<PermissionRules>) {
+        *self.rules.lock().expect("permission rules poisoned") = rules;
+    }
+
+    /// Snapshot of the active rules (configured rules plus saved approvals).
+    #[must_use]
+    pub fn rules(&self) -> Arc<PermissionRules> {
+        self.rules.lock().expect("permission rules poisoned").clone()
+    }
+
+    /// Evaluates the configured rules for `tool_call` without asking the
+    /// client. `None` means the request must follow the normal approval path.
+    #[must_use]
+    pub fn preflight(
+        &self,
+        tool_call: &ToolCallUpdate,
+        options: &[PermissionOption],
+    ) -> Option<RequestPermissionOutcome> {
+        let target = PermissionTarget::from_tool_call(tool_call);
+        let rules = self.rules.lock().expect("permission rules poisoned").clone();
+        match rules.decide(&target) {
+            PermissionEffect::Allow => select_option(
+                options,
+                &[PermissionOptionKind::AllowOnce, PermissionOptionKind::AllowAlways],
+            ),
+            // A deny with no reject option still fails closed as cancelled;
+            // never fabricate an option id the agent did not offer.
+            PermissionEffect::Deny => select_option(
+                options,
+                &[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways],
+            )
+            .or(Some(RequestPermissionOutcome::Cancelled)),
+            PermissionEffect::Ask => None,
+        }
     }
 
     /// Registers a pending permission request and returns its id, a
@@ -58,12 +110,18 @@ impl PermissionBroker {
     ) -> (PermissionRequestId, PermissionRequestInfo, oneshot::Receiver<RequestPermissionOutcome>)
     {
         let (respond_tx, respond_rx) = oneshot::channel::<RequestPermissionOutcome>();
+        let target = PermissionTarget::from_tool_call(&tool_call);
         let mut state = self.state.lock().expect("permission broker poisoned");
         let request_id = PermissionRequestId(state.next_id);
         state.next_id += 1;
         state.pending.insert(
             request_id,
-            PendingPermission { session_id: session_id.clone(), respond: respond_tx },
+            PendingPermission {
+                session_id: session_id.clone(),
+                respond: respond_tx,
+                target,
+                options: options.clone(),
+            },
         );
         let info = PermissionRequestInfo { request_id, session_id, tool_call, options };
         (request_id, info, respond_rx)
@@ -86,6 +144,12 @@ impl PermissionBroker {
         let Some(pending) = pending else {
             return false;
         };
+        if selected_option_kind(&outcome, &pending.options)
+            == Some(PermissionOptionKind::AllowAlways)
+        {
+            let mut rules = self.rules.lock().expect("permission rules poisoned");
+            Arc::make_mut(&mut *rules).remember_allow(&pending.target);
+        }
         pending.respond.send(outcome).is_ok()
     }
 
@@ -147,9 +211,32 @@ impl PermissionBroker {
     }
 }
 
+fn select_option(
+    options: &[PermissionOption],
+    kinds: &[PermissionOptionKind],
+) -> Option<RequestPermissionOutcome> {
+    options.iter().find(|option| kinds.contains(&option.kind)).map(|option| {
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone()))
+    })
+}
+
+fn selected_option_kind(
+    outcome: &RequestPermissionOutcome,
+    options: &[PermissionOption],
+) -> Option<PermissionOptionKind> {
+    match outcome {
+        RequestPermissionOutcome::Selected(selected) => options
+            .iter()
+            .find(|option| option.option_id == selected.option_id)
+            .map(|option| option.kind),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission_rules::{PermissionRule, PermissionRuleset};
     use ee_agent_protocol::{PermissionOptionKind, ToolCallUpdateFields};
 
     fn tool_call_update() -> ToolCallUpdate {
@@ -217,6 +304,102 @@ mod tests {
         assert_eq!(broker.pending_count(), 1);
         assert!(broker.session_of(id_a).is_none());
         assert_eq!(broker.session_of(id_b), Some(SessionId::new("s2")));
+    }
+
+    #[test]
+    fn rules_settle_allow_and_deny_before_request() {
+        let rules = Arc::new(PermissionRules::new(PermissionRuleset::new(vec![
+            PermissionRule::new("bash", "*", PermissionEffect::Allow),
+            PermissionRule::new("bash", "rm *", PermissionEffect::Deny),
+        ])));
+        let broker = PermissionBroker::with_rules(rules);
+        let options = vec![
+            PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject_once", "Reject", PermissionOptionKind::RejectOnce),
+        ];
+
+        let allow = ToolCallUpdate::new(
+            "call-allow",
+            ToolCallUpdateFields::new()
+                .name("bash")
+                .kind(ee_agent_protocol::ToolKind::Execute)
+                .raw_input(serde_json::json!({ "command": "cargo test" })),
+        );
+        assert_eq!(
+            broker.preflight(&allow, &options),
+            Some(RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow_once")))
+        );
+        assert_eq!(broker.pending_count(), 0, "allow never registers a pending request");
+
+        let deny = ToolCallUpdate::new(
+            "call-deny",
+            ToolCallUpdateFields::new()
+                .name("bash")
+                .kind(ee_agent_protocol::ToolKind::Execute)
+                .raw_input(serde_json::json!({ "command": "rm -rf /" })),
+        );
+        assert_eq!(
+            broker.preflight(&deny, &options),
+            Some(RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("reject_once")))
+        );
+        assert_eq!(broker.pending_count(), 0, "deny never registers a pending request");
+
+        let ask = ToolCallUpdate::new(
+            "call-ask",
+            ToolCallUpdateFields::new().kind(ee_agent_protocol::ToolKind::Edit),
+        );
+        assert_eq!(broker.preflight(&ask, &options), None);
+    }
+
+    #[test]
+    fn deny_without_a_reject_option_fails_closed_as_cancelled() {
+        let rules = Arc::new(PermissionRules::new(PermissionRuleset::deny_all()));
+        let broker = PermissionBroker::with_rules(rules);
+        let tool_call = ToolCallUpdate::new(
+            "call-1",
+            ToolCallUpdateFields::new().name("bash").kind(ee_agent_protocol::ToolKind::Execute),
+        );
+        let only_allow = vec![PermissionOption::new(
+            "allow_once",
+            "Allow once",
+            PermissionOptionKind::AllowOnce,
+        )];
+        assert_eq!(
+            broker.preflight(&tool_call, &only_allow),
+            Some(RequestPermissionOutcome::Cancelled)
+        );
+    }
+
+    #[test]
+    fn allow_always_records_a_saved_approval() {
+        let broker = PermissionBroker::with_rules(Arc::new(PermissionRules::new(
+            PermissionRuleset::empty(),
+        )));
+        let tool_call = ToolCallUpdate::new(
+            "call-1",
+            ToolCallUpdateFields::new()
+                .name("bash")
+                .kind(ee_agent_protocol::ToolKind::Execute)
+                .raw_input(serde_json::json!({ "command": "cargo test" })),
+        );
+        let options = vec![
+            PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("allow_always", "Always", PermissionOptionKind::AllowAlways),
+        ];
+        let (id, _info, _rx) = broker.request(SessionId::new("s1"), tool_call, options);
+        assert!(broker.respond(
+            id,
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow_always")),
+        ));
+
+        let target = PermissionTarget::from_tool_call(&ToolCallUpdate::new(
+            "call-2",
+            ToolCallUpdateFields::new()
+                .name("bash")
+                .kind(ee_agent_protocol::ToolKind::Execute)
+                .raw_input(serde_json::json!({ "command": "cargo test" })),
+        ));
+        assert_eq!(broker.rules().decide(&target), PermissionEffect::Allow);
     }
 
     #[test]

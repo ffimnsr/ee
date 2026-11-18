@@ -50,16 +50,15 @@ impl OrchestratorRuntime {
         events: EventRecorder,
     ) -> Result<TurnResult, OrchestratorError> {
         let (title, description) = task_summary(&ctx);
-        let (task, entries, task_graph) = {
+        let (task, task_graph) = {
             let mut tasks = self.tasks.lock().expect("task graph poisoned");
             let task = tasks.create_root(&title, &description);
-            let entries = tasks.plan_entries();
             let graph = tasks.clone();
-            (task, entries, graph)
+            (task, graph)
         };
-        // Plan emission precedes any tool work: the client sees the task
-        // graph before the first execution.
-        sink.plan_replace(entries).map_err(|error| {
+        // Plan emission precedes any tool work: the client sees the active
+        // plan before the first execution.
+        sink.plan_replace(self.plan_entries_for_emission()).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
         // Fresh slice: strategic turns re-anchor the deadline too.
@@ -126,6 +125,8 @@ impl OrchestratorRuntime {
             self.tasks.clone(),
             events.clone(),
         )
+        .with_plan(self.todo_plan.clone())
+        .with_read_only_tools(self.read_only_tools())
         .with_session_context(self.session_context_snapshot());
         let (prompt_result, reflection) = executor
             .execute(decision.strategy, ctx, memory, context_plan.as_ref(), run, &mut validation)

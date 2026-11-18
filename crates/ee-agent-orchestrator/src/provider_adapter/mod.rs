@@ -39,10 +39,10 @@ use ee_agent_acp_server::{
 };
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
-    DISCARD_COMMAND_NAME, Implementation, MessageId, RUBBER_DUCK_COMMAND_NAME, SessionId,
-    SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
-    branch_available_command, compact_available_command, discard_available_command,
-    is_resume_command, parse_slash_command, resume_available_command,
+    DISCARD_COMMAND_NAME, Implementation, MessageId, REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME,
+    SessionId, SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason,
+    TextContent, branch_available_command, compact_available_command, discard_available_command,
+    is_resume_command, parse_slash_command, resume_available_command, revert_available_command,
     rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
@@ -574,6 +574,7 @@ impl Clone for OrchestratorProvider {
 mod agent_impl;
 mod branch_command;
 mod builder;
+mod checkpoint_command;
 mod conversation;
 
 #[cfg(test)]

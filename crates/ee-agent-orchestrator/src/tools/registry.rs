@@ -1,8 +1,8 @@
 //! The server-side tool trait, the tool registry, and built-in tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ee_agent_acp_server::{ClientBridge, ProviderError};
@@ -16,12 +16,56 @@ use tokio::sync::watch;
 
 use crate::destructive_policy::SideEffectSubclass;
 use crate::error::OrchestratorError;
+use crate::todo_plan::{TodoItem, TodoPlan, TodoStatus};
 use crate::tool_dependencies::{ToolDataClass, ToolDependency};
 
 use super::definition::{
     SideEffectClass, TerminalWaitLimits, ToolCallContext, ToolDefinition, ToolErrorKind,
     ToolFuture, ToolResult,
 };
+
+/// Removes duplicate bridge file tools once the ee proxy advertises the
+/// canonical text-file tools.
+///
+/// The bridge builtins and the ee proxy both reach the same editor
+/// `fs/read_text_file` / `fs/write_text_file` path, so advertising both names
+/// forces the model to choose arbitrarily. When `ee_read_text_file` or
+/// `ee_write_text_file` is registered, the matching bridge builtin is hidden.
+/// An explicit `visible` set still wins, so a critic that names `read_file`
+/// keeps it.
+pub(crate) fn canonical_tool_definitions(
+    definitions: Vec<ToolDefinition>,
+    visible: Option<&HashSet<String>>,
+) -> Vec<ToolDefinition> {
+    let has_ee_read = definitions.iter().any(|tool| tool.name == "ee_read_text_file");
+    let has_ee_write = definitions.iter().any(|tool| tool.name == "ee_write_text_file");
+    definitions
+        .into_iter()
+        .filter(|tool| {
+            let explicitly_visible = visible.is_some_and(|allowed| allowed.contains(&tool.name));
+            if !explicitly_visible {
+                if has_ee_read && tool.name == "read_file" {
+                    return false;
+                }
+                if has_ee_write && tool.name == "write_file" {
+                    return false;
+                }
+            }
+            visible.is_none_or(|allowed| allowed.contains(&tool.name))
+        })
+        .collect()
+}
+
+/// Keeps only read-class tool definitions.
+///
+/// Plan mode advertises read-class tools only so the model never sees a
+/// mutation it cannot execute; execution policy still denies writes.
+pub(crate) fn read_only_definitions(definitions: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    definitions
+        .into_iter()
+        .filter(|definition| definition.side_effect_class == SideEffectClass::Read)
+        .collect()
+}
 
 /// A server-side tool the orchestrator can execute.
 ///
@@ -122,6 +166,17 @@ impl ToolRegistry {
             self.register(tool)?;
         }
         Ok(())
+    }
+
+    /// Registers the model-facing `todowrite` tool backed by the session plan.
+    ///
+    /// Kept separate from [`Self::register_builtins`] because the plan store is
+    /// owned by the runtime, not the client bridge.
+    pub fn register_todo_tool(
+        &mut self,
+        plan: Arc<Mutex<TodoPlan>>,
+    ) -> Result<(), OrchestratorError> {
+        self.register(Arc::new(TodowriteTool::new(plan)))
     }
 }
 
@@ -519,6 +574,107 @@ impl ServerTool for LoadSkillTool {
             }
         })
     }
+}
+
+/// Model-facing session todo list.
+///
+/// Mutates only ephemeral session state, never the workspace, so it stays
+/// read-class and needs no host approval. The loop emits an ACP plan update
+/// from the stored plan after every successful call.
+#[derive(Clone)]
+struct TodowriteTool {
+    plan: Arc<Mutex<TodoPlan>>,
+}
+
+impl TodowriteTool {
+    fn new(plan: Arc<Mutex<TodoPlan>>) -> Self {
+        Self { plan }
+    }
+}
+
+impl ServerTool for TodowriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "todowrite",
+            "Create and update the session todo list shown to the user. Send the full ordered list on every call; it replaces the previous list. Use it when a task has three or more distinct steps, and update statuses as work progresses.",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string" },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            },
+                        },
+                        "required": ["content", "status"],
+                        "additionalProperties": false,
+                    },
+                },
+            },
+            "required": ["todos"],
+            "additionalProperties": false,
+        }))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _client: ClientBridge,
+        _cancel: watch::Receiver<bool>,
+        _context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        let plan = self.plan.clone();
+        Box::pin(async move {
+            let items = match parse_todo_items(&arguments) {
+                Ok(items) => items,
+                Err(reason) => return invalid_args(reason),
+            };
+            let mut plan = plan.lock().expect("todo plan poisoned");
+            if let Err(error) = plan.replace(&items) {
+                return invalid_args(error.to_string());
+            }
+            let summary = plan.summary();
+            let todos = plan.items();
+            ToolResult::success_structured(summary, serde_json::json!({ "todos": todos }))
+        })
+    }
+}
+
+fn parse_todo_items(arguments: &serde_json::Value) -> Result<Vec<TodoItem>, String> {
+    let todos = arguments
+        .get("todos")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "todowrite requires a todos array".to_string())?;
+    let mut items = Vec::with_capacity(todos.len());
+    for (index, value) in todos.iter().enumerate() {
+        let content = value
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("todos[{index}].content must be a string"))?;
+        let raw_status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("todos[{index}].status must be a string"))?;
+        let status = match raw_status {
+            "pending" => TodoStatus::Pending,
+            "in_progress" => TodoStatus::InProgress,
+            "completed" => TodoStatus::Completed,
+            "cancelled" => TodoStatus::Cancelled,
+            other => {
+                return Err(format!(
+                    "todos[{index}].status must be pending, in_progress, completed, or cancelled; got {other}"
+                ));
+            }
+        };
+        items.push(TodoItem::new(content, status));
+    }
+    Ok(items)
 }
 
 /// All built-in tools, bound to the given session.

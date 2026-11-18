@@ -614,6 +614,26 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
+                "ee_update_note",
+                "Replace the content of an existing bounded non-secret note for current proxy connection only. Fails when the key does not exist; use ee_save_note to create one.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "key": { "type": "string" }, "content": { "type": "string" } },
+                    "required": ["key", "content"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_delete_note",
+                "Delete one existing bounded non-secret note for current proxy connection only. Fails when the key does not exist.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "key": { "type": "string" } },
+                    "required": ["key"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
                 "ee_remember_workspace_fact",
                 "Persist one approved non-secret workspace fact (decisions, conventions, constraints) that should survive this session and be recalled later. Accepts exact key and value only; key is capped at 128 UTF-8 bytes and value at 65536 UTF-8 bytes.",
                 schema(json!({

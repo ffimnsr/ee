@@ -362,6 +362,22 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         unavailable_proxy_tool("Session notes")
     }
 
+    /// Replaces the content of an existing note; missing keys fail closed.
+    fn update_note(
+        &self,
+        key: String,
+        content: String,
+    ) -> Result<SessionNoteResult, ProxyToolError> {
+        let _ = (key, content);
+        unavailable_proxy_tool("Session notes")
+    }
+
+    /// Deletes one existing note; missing keys fail closed.
+    fn delete_note(&self, key: String) -> Result<SessionNoteDeletion, ProxyToolError> {
+        let _ = key;
+        unavailable_proxy_tool("Session notes")
+    }
+
     /// Persists one approved workspace fact. Default implementation fails closed.
     fn remember_workspace_fact(
         &self,

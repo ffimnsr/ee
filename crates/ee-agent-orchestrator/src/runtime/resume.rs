@@ -145,6 +145,9 @@ impl OrchestratorRuntime {
             self.events.clone(),
             LoopOptions {
                 graph: Some(self.tasks.clone()),
+                plan: Some(self.todo_plan.clone()),
+                session_title: Some(self.pending_title.clone()),
+                read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 memory: Some(self.memory.clone()),
@@ -276,14 +279,10 @@ impl OrchestratorRuntime {
                 .await;
         }
         let (title, description) = task_summary(&ctx);
-        let (task, entries) = {
-            let mut tasks = self.tasks.lock().expect("task graph poisoned");
-            let task = tasks.create_root(&title, &description);
-            let entries = tasks.plan_entries();
-            (task, entries)
-        };
-        // Keep the client's plan view in sync with the task graph.
-        sink.plan_replace(entries).map_err(|error| {
+        let task =
+            { self.tasks.lock().expect("task graph poisoned").create_root(&title, &description) };
+        // Keep the client's plan view in sync with the active plan source.
+        sink.plan_replace(self.plan_entries_for_emission()).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
         self.run_loop_with_options(
@@ -298,6 +297,9 @@ impl OrchestratorRuntime {
             events,
             LoopOptions {
                 graph: Some(self.tasks.clone()),
+                plan: Some(self.todo_plan.clone()),
+                session_title: Some(self.pending_title.clone()),
+                read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 session_context: Some(self.session_context_snapshot()),

@@ -366,8 +366,15 @@ impl AgentProvider for OrchestratorProvider {
             let telemetry_turn =
                 format!("turn-{}", next_telemetry_turn.fetch_add(1, Ordering::Relaxed));
             // Mid-turn nested instruction discovery needs the session scope;
-            // the adapter owns it, so record it before the turn starts.
+            // the adapter owns it, so record it before the turn starts. A
+            // model-requested `session_move` outlives the turn, so it also
+            // drives this prompt's cwd and workspace discovery.
+            let workspace = runtime.session_workspace_override().unwrap_or(workspace);
             runtime.set_workspace_scope(workspace.clone(), workspace_roots.clone());
+            // Plan mode advertises read-class tools only; the mode policy
+            // already denies writes, so the model never sees a tool it cannot
+            // call.
+            runtime.set_read_only_tools(mode.to_string() == PLAN_MODE_ID);
             let telemetry_started_at = Instant::now();
             let telemetry_event_start = runtime.event_snapshot().len();
             let _ = telemetry
@@ -513,8 +520,23 @@ impl AgentProvider for OrchestratorProvider {
             // branched instead of continued. Missing checkpoints fail closed
             // without touching the active session.
             if let Some(command) = parse_slash_command(&prompt_text)
-                && command.name == BRANCH_COMMAND_NAME
+                && matches!(command.name.as_str(), BRANCH_COMMAND_NAME | REVERT_COMMAND_NAME)
             {
+                if command.name == REVERT_COMMAND_NAME {
+                    return super::checkpoint_command::handle_revert_command(
+                        super::checkpoint_command::RevertCommand {
+                            runtime: &runtime,
+                            sessions: &sessions,
+                            sink: &sink,
+                            session_id: &session_id,
+                            instructions: command.instructions.as_deref(),
+                            telemetry: &telemetry,
+                            telemetry_turn: &telemetry_turn,
+                            telemetry_started_at,
+                            telemetry_event_start,
+                        },
+                    );
+                }
                 return super::branch_command::handle_branch_command(
                     super::branch_command::BranchCommand {
                         runtime: &runtime,
@@ -661,6 +683,7 @@ impl AgentProvider for OrchestratorProvider {
             // registry for this prompt.  The manager is per prompt (the
             // `ClientBridge` is per prompt), while the validated descriptors
             // stay per session.
+            let has_mcp_servers = !mcp_servers.is_empty();
             let mut manager =
                 McpSessionManager::new(mcp_servers, client.clone(), cancel.clone(), mcp_policy);
             let mut diagnostics = manager.discover_all().await;
@@ -708,6 +731,22 @@ impl AgentProvider for OrchestratorProvider {
                 }
             }
             drop(host_turn);
+            if has_mcp_servers {
+                // Resource and bounded-event tools share the prompt's MCP
+                // connections; they are read-class and never mutate state.
+                for tool in crate::mcp::resource_tools(manager.clone()) {
+                    let name = tool.definition().name;
+                    match runtime.register_tool(tool) {
+                        Ok(()) => registered.push(name),
+                        Err(error) => diagnostics.push(McpDiscoveryDiagnostic {
+                            server_id: "mcp".to_string(),
+                            message: format!(
+                                "failed to register MCP resource tool {name:?}: {error}"
+                            ),
+                        }),
+                    }
+                }
+            }
             emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
             // Rebuild the stable prompt now that prompt-scoped MCP tools are
             // registered: guidance must name only tools the model can call.

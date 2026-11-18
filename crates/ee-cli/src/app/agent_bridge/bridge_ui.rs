@@ -523,6 +523,26 @@ impl ClientRequestHandler for BridgeUiHandler {
                     })
                     .await
                 }
+                ClientRequest::ProxyUpdateNote { scope, key, content } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: crate::app::agents_mcp::ProxyToolCall::UpdateNote {
+                            scope,
+                            key,
+                            content,
+                        },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyDeleteNote { scope, key } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: crate::app::agents_mcp::ProxyToolCall::DeleteNote { scope, key },
+                        reply,
+                    })
+                    .await
+                }
                 ClientRequest::ProxyFileDependencyMap { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,

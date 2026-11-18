@@ -4,15 +4,37 @@
 use super::*;
 
 /// citation evidence without injecting the same untrusted body again.
+/// ee-manifest tools whose file access may reveal nested workspace instructions.
+///
+/// Keep every entry in sync with [`ee_mcp::STABLE_TOOL_NAMES`]; the
+/// `classified_workspace_instruction_tools_exist_in_ee_manifest` test fails on drift.
+pub(super) const WORKSPACE_INSTRUCTION_TOOL_NAMES: &[&str] = &[
+    "ee_read_text_file",
+    "ee_write_text_file",
+    "ee_apply_patch",
+    "ee_replace_text",
+    "ee_document_symbols",
+];
+
+/// Bridge-manifest tools whose file access may reveal nested instructions.
+const WORKSPACE_INSTRUCTION_BRIDGE_NAMES: &[&str] = &["read_file", "write_file", "edit_file"];
+
+/// Namespaced MCP spellings, for example `server__ee_document_symbols`.
+const WORKSPACE_INSTRUCTION_TOOL_SUFFIXES: &[&str] = &[
+    "_apply_patch",
+    "_replace_text",
+    "_document_symbols",
+    "_read_text_file",
+    "_write_text_file",
+    "_read_file",
+    "_write_file",
+];
+
 /// Tools whose file access may reveal nested workspace instructions.
 pub(super) fn touches_workspace_instructions(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_file" | "write_file" | "edit_file" | "ee_edit_apply" | "ee_file_outline"
-    ) || tool_name.ends_with("_edit_apply")
-        || tool_name.ends_with("_file_outline")
-        || tool_name.ends_with("_read_file")
-        || tool_name.ends_with("_write_file")
+    WORKSPACE_INSTRUCTION_TOOL_NAMES.contains(&tool_name)
+        || WORKSPACE_INSTRUCTION_BRIDGE_NAMES.contains(&tool_name)
+        || WORKSPACE_INSTRUCTION_TOOL_SUFFIXES.iter().any(|suffix| tool_name.ends_with(suffix))
 }
 
 pub(super) fn compact_repeated_web_fetch(
@@ -54,4 +76,30 @@ pub(super) fn compact_repeated_web_fetch(
         format!("untrusted external source reused: {source_id}; refer to earlier fetched evidence"),
         source,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drift guard: every classified ee tool must exist in the canonical proxy
+    /// manifest, so a rename cannot silently stop instruction discovery again.
+    #[test]
+    fn classified_workspace_instruction_tools_exist_in_ee_manifest() {
+        for name in WORKSPACE_INSTRUCTION_TOOL_NAMES {
+            assert!(name.starts_with("ee_"), "ee classification must stay namespaced: {name}");
+            assert!(
+                ee_mcp::STABLE_TOOL_NAMES.contains(name),
+                "classified tool {name} is missing from the ee tool manifest"
+            );
+            assert!(touches_workspace_instructions(name), "{name}");
+        }
+        for name in WORKSPACE_INSTRUCTION_BRIDGE_NAMES {
+            assert!(
+                !name.starts_with("ee_"),
+                "bridge classification must stay unnamespaced: {name}"
+            );
+            assert!(touches_workspace_instructions(name), "{name}");
+        }
+    }
 }

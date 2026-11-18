@@ -19,9 +19,26 @@ impl StrategyExecutor {
             budget,
             policy,
             tasks,
+            plan: Arc::new(Mutex::new(crate::todo_plan::TodoPlan::new())),
             events,
+            read_only_tools: false,
             session_context: crate::session_context::SessionContext::default(),
         }
+    }
+
+    /// Restricts the advertised tool set to read-class tools (plan mode).
+    #[must_use]
+    pub(crate) fn with_read_only_tools(mut self, enabled: bool) -> Self {
+        self.read_only_tools = enabled;
+        self
+    }
+
+    /// Shares the session todo plan with the loop engine so a `todowrite` call
+    /// emits an ACP plan update.
+    #[must_use]
+    pub(crate) fn with_plan(mut self, plan: Arc<Mutex<crate::todo_plan::TodoPlan>>) -> Self {
+        self.plan = plan;
+        self
     }
 
     /// Seeds the provider-facing session affinity for every request the turn
@@ -57,6 +74,11 @@ impl StrategyExecutor {
             transcript.prepend_system(format!("Memory facts:\n{facts}"));
         }
         let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let definitions = if self.read_only_tools {
+            crate::tools::read_only_definitions(definitions)
+        } else {
+            definitions
+        };
         if strategy == TurnStrategy::ResearchThenEdit && has_web_context_tools(&definitions) {
             transcript.prepend_system(WEB_RESEARCH_GUIDANCE);
         }
@@ -136,8 +158,10 @@ impl StrategyExecutor {
         let options = LoopOptions {
             mode,
             read_first,
+            read_only_tools: self.read_only_tools,
             execution_log: Some(run.execution_log.clone()),
             graph: Some(self.tasks.clone()),
+            plan: Some(self.plan.clone()),
             session_context: Some(self.session_context.clone()),
             ..LoopOptions::default()
         };

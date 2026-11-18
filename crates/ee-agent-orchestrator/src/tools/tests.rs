@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -184,6 +185,38 @@ fn tool_result_shapes() {
 }
 
 #[test]
+fn canonical_definitions_hide_bridge_read_and_write_duplicates() {
+    let definition = |name: &str| ToolDefinition::new(name, "x");
+    let names = |definitions: Vec<ToolDefinition>| {
+        definitions.into_iter().map(|definition| definition.name).collect::<Vec<_>>()
+    };
+    let all = vec![
+        definition("read_file"),
+        definition("write_file"),
+        definition("ee_read_text_file"),
+        definition("ee_write_text_file"),
+        definition("ee_replace_text"),
+    ];
+    assert_eq!(
+        names(canonical_tool_definitions(all.clone(), None)),
+        vec!["ee_read_text_file", "ee_write_text_file", "ee_replace_text"]
+    );
+
+    // Without the ee proxy tools, the bridge builtins stay visible.
+    assert_eq!(
+        names(canonical_tool_definitions(
+            vec![definition("read_file"), definition("write_file")],
+            None
+        )),
+        vec!["read_file", "write_file"]
+    );
+
+    // An explicit visible set keeps a named bridge tool (critic profiles).
+    let visible = HashSet::from([String::from("read_file")]);
+    assert_eq!(names(canonical_tool_definitions(all, Some(&visible))), vec!["read_file"]);
+}
+
+#[test]
 fn builtin_tools_register_under_session() {
     let mut registry = ToolRegistry::new();
     registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
@@ -204,6 +237,56 @@ fn builtin_tools_register_under_session() {
         ]
     );
     assert_eq!(registry.len(), 10);
+}
+
+#[tokio::test]
+async fn todo_tool_replaces_plan_and_reports_statuses() {
+    let mut registry = ToolRegistry::new();
+    let plan = Arc::new(Mutex::new(crate::todo_plan::TodoPlan::new()));
+    registry.register_todo_tool(plan.clone()).expect("registers");
+    let tool = registry.get("todowrite").expect("todowrite registered");
+    let (sink, client, _rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: None,
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+
+    let result = tool
+        .execute(
+            json!({
+                "todos": [
+                    { "content": "first", "status": "in_progress" },
+                    { "content": "second", "status": "pending" },
+                ]
+            }),
+            client.clone(),
+            watch::channel(false).1,
+            context.clone(),
+        )
+        .await;
+    assert!(result.success, "{}", result.text_output);
+    let stored = plan.lock().expect("plan").items();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].content, "first");
+    assert_eq!(stored[0].status, crate::todo_plan::TodoStatus::InProgress);
+    assert_eq!(result.structured_output.expect("structured")["todos"][0]["status"], "in_progress");
+
+    let invalid = tool
+        .execute(
+            json!({ "todos": [{ "content": "x", "status": "blocked" }] }),
+            client,
+            watch::channel(false).1,
+            context,
+        )
+        .await;
+    assert!(!invalid.success);
+    assert_eq!(invalid.error_kind, Some(ToolErrorKind::InvalidArguments));
+    assert_eq!(plan.lock().expect("plan").items().len(), 2, "failed update keeps prior plan");
 }
 
 #[tokio::test]

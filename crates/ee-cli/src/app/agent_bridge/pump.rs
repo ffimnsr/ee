@@ -632,6 +632,21 @@ impl App {
                 });
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
+            crate::app::agents_mcp::ProxyToolCall::UpdateNote { scope, key, content } => {
+                let result =
+                    self.project_knowledge.update_note(&scope, &key, &content).and_then(|result| {
+                        serde_json::to_value(result)
+                            .map_err(|error| AgentError::HandlerError(error.to_string()))
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            crate::app::agents_mcp::ProxyToolCall::DeleteNote { scope, key } => {
+                let result = self.project_knowledge.delete_note(&scope, &key).and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|error| AgentError::HandlerError(error.to_string()))
+                });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
             crate::app::agents_mcp::ProxyToolCall::FileDependencyMap { path } => {
                 let result = self.proxy_file_dependency_map(Path::new(&path));
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));

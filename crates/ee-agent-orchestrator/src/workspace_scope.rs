@@ -7,11 +7,16 @@
 //! [`WorkspaceScope::narrow`]: children never widen roots or globs.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::tools::SideEffectClass;
+
+/// Shared runtime slot holding the session working directory and workspace
+/// roots. The adapter seeds it per prompt; `session_move` updates it.
+pub(crate) type WorkspaceScopeSlot = Arc<Mutex<Option<(PathBuf, Vec<PathBuf>)>>>;
 
 /// Allowed workspace roots and file globs for tool paths.
 ///

@@ -268,6 +268,7 @@ pub mod subagents;
 pub mod tasks;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
+pub mod todo_plan;
 pub mod tool_cache;
 pub mod tool_dependencies;
 pub mod tool_output;
@@ -521,6 +522,10 @@ pub use subagent_handoff::{
     MAX_HANDOFF_FINDING_CLAIM_CHARS, MAX_HANDOFF_FINDING_KEY_CHARS, MAX_HANDOFF_FINDINGS,
     MAX_HANDOFF_ITEM_CHARS, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_SUMMARY_CHARS,
     MAX_SUBAGENT_HANDOFF_BYTES, SUBAGENT_HANDOFF_SCHEMA_VERSION, SubagentHandoff, SubagentStatus,
+};
+pub use todo_plan::{
+    MAX_PROMPT_TODO_CONTENT_CHARS, MAX_PROMPT_TODO_ITEMS, MAX_TODO_CONTENT_CHARS, MAX_TODO_ITEMS,
+    TodoItem, TodoPlan, TodoStatus,
 };
 pub use tool_output::{
     BoundedToolOutput, DEFAULT_MAX_TOOL_OUTPUT_BYTES, DEFAULT_MAX_TOOL_OUTPUT_LINES,

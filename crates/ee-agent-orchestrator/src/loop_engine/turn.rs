@@ -140,19 +140,17 @@ impl LoopEngine {
                 budget.emit(&self.events);
                 snapshot
             };
-            let tools: Vec<ToolDefinition> = self
-                .tools
-                .lock()
-                .expect("tool registry poisoned")
-                .definitions()
-                .into_iter()
-                .filter(|tool| {
-                    self.options
-                        .visible_tool_names
-                        .as_ref()
-                        .is_none_or(|allowed| allowed.contains(&tool.name))
-                })
-                .collect();
+            let tools: Vec<ToolDefinition> = {
+                let definitions = crate::tools::canonical_tool_definitions(
+                    self.tools.lock().expect("tool registry poisoned").definitions(),
+                    self.options.visible_tool_names.as_ref(),
+                );
+                if self.options.read_only_tools {
+                    crate::tools::read_only_definitions(definitions)
+                } else {
+                    definitions
+                }
+            };
             let evidence_capabilities = crate::stop_gate::evidence_capabilities_for(&tools);
             crate::model_options::validate_tool_names(&tools)
                 .map_err(OrchestratorError::ModelFailure)?;
@@ -564,6 +562,7 @@ impl LoopEngine {
                     );
                     if succeeded {
                         self.inject_nested_instructions(transcript, &intent.name, path.as_deref());
+                        self.emit_session_updates(&intent.name, sink);
                     }
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;
@@ -677,6 +676,7 @@ impl LoopEngine {
                     }
                     if succeeded {
                         self.inject_nested_instructions(transcript, &intent.name, path.as_deref());
+                        self.emit_session_updates(&intent.name, sink);
                     }
                     repeat_guard.observe_and_push(transcript, &intent.name, &intent.arguments);
                     self.capture_checkpoint(transcript, track, task, false).await;

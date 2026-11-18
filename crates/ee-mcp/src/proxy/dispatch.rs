@@ -607,6 +607,27 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
+            "ee_update_note" => {
+                let arguments = require_arguments(request)?;
+                require_exact_argument_keys(arguments, &["key", "content"])?;
+                let key = require_nonempty_string(arguments, "key")?;
+                let content = require_nonempty_string(arguments, "content")?;
+                Ok(self
+                    .backend
+                    .update_note(key.to_owned(), content.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_delete_note" => {
+                let arguments = require_arguments(request)?;
+                require_exact_argument_keys(arguments, &["key"])?;
+                let key = require_nonempty_string(arguments, "key")?;
+                Ok(self
+                    .backend
+                    .delete_note(key.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
             "ee_remember_workspace_fact" | "ee_replace_workspace_fact" => {
                 let arguments = require_arguments(request)?;
                 require_exact_argument_keys(arguments, &["key", "value"])?;

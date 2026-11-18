@@ -126,6 +126,9 @@ pub(crate) struct AgentsSettings {
     pub servers: BTreeMap<String, AgentServerSettings>,
     /// Bridge-approval alignment with the agent's own permission prompt.
     pub approval: AgentApprovalSettings,
+    /// Declarative permission rules for external agent permission requests.
+    /// `None` keeps the default ask-every-time behavior.
+    pub permissions: Option<serde_json::Value>,
     /// Frontend-resolved critic policy; translated to backend policy on use.
     pub rubber_duck: RubberDuckSettings,
     /// Durable workspace memory with persistence. Enabled by default when
@@ -149,6 +152,7 @@ impl Default for AgentsSettings {
                 .collect(),
             servers: BTreeMap::new(),
             approval: AgentApprovalSettings::default(),
+            permissions: None,
             rubber_duck: RubberDuckSettings::default(),
             workspace_memory: WorkspaceMemorySettings::default(),
             #[cfg(any(feature = "agents", test))]
@@ -249,6 +253,7 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
         approval: Some(AgentApprovalToml {
             alignment: Some(agents.approval.alignment.label().to_string()),
         }),
+        permissions: agents.permissions.clone(),
         workspace_memory: Some(WorkspaceMemoryToml {
             enabled: Some(agents.workspace_memory.enabled),
             persist_notes: Some(agents.workspace_memory.persist_notes),

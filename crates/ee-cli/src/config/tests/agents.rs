@@ -97,6 +97,52 @@ fn agents_approval_alignment_parses_and_fails_closed_on_unknown_values() {
     assert_eq!(settings.agents.approval.alignment, AgentAlignmentMode::Heuristic);
 }
 #[test]
+fn agents_permissions_parse_into_the_merged_layer() {
+    let raw: EeToml = toml::from_str(
+        r#"
+[agents]
+
+[agents.permissions]
+edit = "ask"
+bash = { "cargo *" = "allow", "rm *" = "deny" }
+"#,
+    )
+    .unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+
+    let permissions = settings.agents.permissions.expect("permissions parsed");
+    let table = permissions.as_object().expect("permissions is a table");
+    assert_eq!(table.get("edit"), Some(&serde_json::json!("ask")));
+    assert_eq!(
+        table.get("bash").and_then(|bash| bash.get("cargo *")),
+        Some(&serde_json::json!("allow"))
+    );
+}
+
+#[test]
+fn repository_permissions_cannot_grant_allow() {
+    let host: EeToml = toml::from_str("[agents.permissions]\nbash = \"allow\"\n").unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&host, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.agents.permissions, Some(serde_json::json!({ "bash": "allow" })));
+
+    // A checked-in repository layer cannot widen authority with allow/ask.
+    let repo: EeToml = toml::from_str("[agents.permissions]\nbash = \"ask\"\n").unwrap();
+    settings.merge_toml(&repo, ConfigLayerKind::Ancestor);
+    assert_eq!(
+        settings.agents.permissions,
+        Some(serde_json::json!({ "bash": "allow" })),
+        "repository allow/ask rules are ignored"
+    );
+
+    // Deny-only repository rules are accepted.
+    let deny: EeToml = toml::from_str("[agents.permissions]\nbash = \"deny\"\n").unwrap();
+    settings.merge_toml(&deny, ConfigLayerKind::Ancestor);
+    assert_eq!(settings.agents.permissions, Some(serde_json::json!({ "bash": "deny" })));
+}
+
+#[test]
 fn repository_config_cannot_enable_heuristic_alignment() {
     // Host-global config may broaden approval reuse; repository (ancestor)
     // config may only restrict it.

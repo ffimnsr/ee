@@ -573,6 +573,24 @@ impl EeProxyBackend for HostProxyBackend {
         )
     }
 
+    fn update_note(
+        &self,
+        key: String,
+        content: String,
+    ) -> Result<SessionNoteResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyUpdateNote { scope: self.scope.clone(), key, content })?,
+            "update_note",
+        )
+    }
+
+    fn delete_note(&self, key: String) -> Result<SessionNoteDeletion, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyDeleteNote { scope: self.scope.clone(), key })?,
+            "delete_note",
+        )
+    }
+
     fn remember_workspace_fact(
         &self,
         key: String,

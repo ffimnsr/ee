@@ -2,6 +2,52 @@
 use super::*;
 
 #[tokio::test]
+async fn permission_allow_rule_settles_without_a_ui_round_trip() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::request_permission(
+            "s1",
+            "call_1",
+            "Run tests",
+            json!([
+                { "optionId": "allow_once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+            ]),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection.permission_broker().set_rules(Arc::new(PermissionRules::new(
+        PermissionRuleset::new(vec![PermissionRule::new("*", "*", PermissionEffect::Allow)]),
+    )));
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let response = thread
+        .send_prompt(vec![ContentBlock::Text(TextContent::new("run tests"))])
+        .await
+        .expect("turn completes");
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+
+    // The rule selected the offered allow option without asking the UI.
+    let permission_response = await_response(&fake, 100).await;
+    assert_eq!(permission_response["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(permission_response["result"]["outcome"]["optionId"], "allow_once");
+
+    let mut saw_ui_prompt = false;
+    while let Ok(event) = host.events.try_recv() {
+        if matches!(event, AgentEvent::PermissionRequested { .. }) {
+            saw_ui_prompt = true;
+        }
+    }
+    assert!(!saw_ui_prompt, "allow rules must not surface a permission request");
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn permission_request_flows_through_broker_and_back() {
     let script = base_script()
         .wait_for("session/prompt")

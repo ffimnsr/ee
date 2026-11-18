@@ -161,6 +161,13 @@ pub(crate) enum ProxyCall {
     ReadNote {
         key: String,
     },
+    UpdateNote {
+        key: String,
+        content: String,
+    },
+    DeleteNote {
+        key: String,
+    },
     FileDependencyMap {
         path: String,
     },
@@ -423,6 +430,15 @@ pub(crate) enum ProxyToolCall {
         scope: String,
     },
     ReadNote {
+        scope: String,
+        key: String,
+    },
+    UpdateNote {
+        scope: String,
+        key: String,
+        content: String,
+    },
+    DeleteNote {
         scope: String,
         key: String,
     },

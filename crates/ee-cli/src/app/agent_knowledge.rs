@@ -170,6 +170,53 @@ impl ProjectKnowledge {
         validate_note_content(content)?;
         Ok(note_result(key, content))
     }
+
+    /// Replaces the content of an existing note. Missing keys fail closed so a
+    /// typo never silently creates a new scratch artifact; use [`Self::save_note`]
+    /// to create one.
+    pub(crate) fn update_note(
+        &mut self,
+        scope: &str,
+        key: &str,
+        content: &str,
+    ) -> Result<ee_mcp::SessionNoteResult, AgentError> {
+        validate_note_key(key)?;
+        validate_note_content(content)?;
+        let Some(notes) = self.notes.get(scope) else {
+            return Err(AgentError::invalid_params("session note not found"));
+        };
+        let Some(existing) = notes.get(key) else {
+            return Err(AgentError::invalid_params("session note not found"));
+        };
+        let total = notes.values().map(String::len).sum::<usize>();
+        if total.saturating_sub(existing.len()).saturating_add(content.len()) > NOTES_TOTAL_BYTES {
+            return Err(AgentError::invalid_params("session note byte limit reached"));
+        }
+        self.notes
+            .get_mut(scope)
+            .expect("scope checked above")
+            .insert(key.to_owned(), content.to_owned());
+        self.persist_notes();
+        Ok(note_result(key, content))
+    }
+
+    /// Deletes one existing note. Missing keys fail closed.
+    pub(crate) fn delete_note(
+        &mut self,
+        scope: &str,
+        key: &str,
+    ) -> Result<ee_mcp::SessionNoteDeletion, AgentError> {
+        validate_note_key(key)?;
+        let removed = self.notes.get_mut(scope).and_then(|notes| notes.remove(key));
+        if removed.is_none() {
+            return Err(AgentError::invalid_params("session note not found"));
+        }
+        if self.notes.get(scope).is_some_and(BTreeMap::is_empty) {
+            self.notes.remove(scope);
+        }
+        self.persist_notes();
+        Ok(ee_mcp::SessionNoteDeletion { key: key.to_owned(), deleted: true })
+    }
 }
 
 pub(crate) fn project_instructions(
@@ -355,6 +402,29 @@ mod tests {
             reloaded_again.read_note("scope-a", "decision").expect("decision").content,
             "reconsider bounded memory"
         );
+    }
+
+    #[test]
+    fn notes_update_and_delete_require_existing_keys_and_persist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent-notes.json");
+        {
+            let mut knowledge = ProjectKnowledge::new(Some(path.clone()));
+            assert!(knowledge.update_note("scope-a", "missing", "x").is_err());
+            assert!(knowledge.delete_note("scope-a", "missing").is_err());
+            knowledge.save_note("scope-a", "plan", "first").expect("save");
+            assert_eq!(
+                knowledge.update_note("scope-a", "plan", "second").expect("update").content,
+                "second"
+            );
+            assert!(knowledge.update_note("scope-a", "plan", "TOKEN=secret").is_err());
+        }
+        let reloaded = ProjectKnowledge::new(Some(path.clone()));
+        assert_eq!(reloaded.read_note("scope-a", "plan").expect("plan").content, "second");
+
+        let mut deleting = ProjectKnowledge::new(Some(path));
+        assert!(deleting.delete_note("scope-a", "plan").expect("delete").deleted);
+        assert!(deleting.read_note("scope-a", "plan").is_err());
     }
 
     #[test]

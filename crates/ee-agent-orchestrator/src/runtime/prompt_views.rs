@@ -58,7 +58,7 @@ impl OrchestratorRuntime {
     #[must_use]
     pub(crate) fn advertised_tool_names(&self) -> Vec<String> {
         let policy = self.policy.read().expect("policy poisoned");
-        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let definitions = self.advertised_definitions();
         definitions
             .into_iter()
             .filter(|definition| policy.check(definition, PolicyContext::default()).allow)
@@ -79,6 +79,37 @@ mod tests {
             Arc::new(FakeModel::new(Vec::new())),
             PolicyEngine::default(),
         )
+    }
+
+    #[test]
+    fn read_only_advertisement_hides_write_tools() {
+        let runtime = OrchestratorRuntime::with_policy(
+            OrchestratorConfig::default(),
+            Arc::new(FakeModel::new(Vec::new())),
+            PolicyEngine::new(crate::policy::ToolPolicy {
+                allow_write: true,
+                ..crate::policy::ToolPolicy::default()
+            }),
+        );
+        for (name, class) in [
+            ("test_read", crate::tools::SideEffectClass::Read),
+            ("test_write", crate::tools::SideEffectClass::Write),
+        ] {
+            runtime
+                .register_tool(Arc::new(crate::test_support::FakeTool::new(
+                    crate::tools::ToolDefinition::new(name, "test").side_effect_class(class),
+                    crate::tools::ToolResult::success("ok"),
+                )))
+                .expect("registers tool");
+        }
+        let names = runtime.advertised_tool_names();
+        assert!(names.contains(&"test_read".to_string()));
+        assert!(names.contains(&"test_write".to_string()));
+
+        runtime.set_read_only_tools(true);
+        let names = runtime.advertised_tool_names();
+        assert!(names.contains(&"test_read".to_string()));
+        assert!(!names.contains(&"test_write".to_string()));
     }
 
     fn snapshot(cwd: &str) -> crate::prompt::context::RuntimeSnapshot {

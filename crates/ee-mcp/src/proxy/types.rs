@@ -488,6 +488,14 @@ pub struct SessionNotesResult {
     pub truncated: bool,
 }
 
+/// Result of deleting one session note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNoteDeletion {
+    pub key: String,
+    pub deleted: bool,
+}
+
 /// Stable provenance attached to one durable workspace fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

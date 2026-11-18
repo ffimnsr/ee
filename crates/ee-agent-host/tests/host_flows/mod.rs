@@ -14,7 +14,8 @@ pub(crate) use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentError, AgentEvent, AgentManager,
     AgentManagerConfig, AgentProcessConfig, ClientRequest, ClientRequestHandler,
     ClientRequestResponse, ClientRequestResult, DenyAllHandler, HandlerCapabilities,
-    RecordingHandler, SafeFollowUp, ThreadCloseReason, TurnBlocker,
+    PermissionEffect, PermissionRule, PermissionRules, PermissionRuleset, RecordingHandler,
+    SafeFollowUp, ThreadCloseReason, TurnBlocker,
 };
 pub(crate) use ee_agent_protocol::{
     AudioContent, ContentBlock, CreateElicitationResponse, CreateTerminalResponse,

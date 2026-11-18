@@ -11,6 +11,30 @@ use super::super::*;
 use super::host::AgentHostBridge;
 use super::state::{PendingFork, PendingSession};
 use super::thread_ui::ThreadUiState;
+
+/// Builds the host permission rules from the merged `[agents.permissions]`
+/// layer. A malformed ruleset fails closed to deny-all so it can never
+/// silently allow external agent permission requests.
+fn host_permission_rules(raw: Option<&serde_json::Value>) -> Arc<ee_agent_host::PermissionRules> {
+    let configured = match raw {
+        Some(value) => match ee_agent_host::PermissionRuleset::from_value(value) {
+            Ok(rules) => rules,
+            Err(error) => {
+                eprintln!(
+                    "ee: warning: invalid agents.permissions: {error}; denying external agent permission requests until fixed"
+                );
+                ee_agent_host::PermissionRuleset::deny_all()
+            }
+        },
+        None => ee_agent_host::PermissionRuleset::default(),
+    };
+    let rules = ee_agent_host::PermissionRules::new(configured);
+    let rules = match crate::config::xi_core_config_dir() {
+        Some(dir) => rules.with_persistence(ee_agent_host::saved_permissions_path(&dir)),
+        None => rules,
+    };
+    Arc::new(rules)
+}
 impl App {
     /// Phase 7 shutdown orchestration, called before the app exits:
     /// cancels running turns, resolves pending approvals/elicitations as
@@ -181,6 +205,7 @@ impl App {
             .map(|(id, server)| (id.clone(), server.clone()))
             .collect();
         let mut config = AgentManagerConfig::default();
+        config.permission_rules = host_permission_rules(self.config.agents.permissions.as_ref());
         // Host-local workspace trust: workspace-layer `secret://` references
         // resolve only for an explicitly trusted workspace (fail closed for
         // undecided, unreadable, or revoked decisions).

@@ -118,6 +118,7 @@ fn manager(root: &ScriptedFake, critic: &ScriptedFake) -> (AgentManager, Arc<Rec
         ]),
         ee_proxy_enabled: true,
         workspace_memory: Default::default(),
+        permission_rules: Arc::new(ee_agent_host::PermissionRules::default()),
         fake_transports: BTreeMap::new(),
     };
     config.fake_transports.insert("root".into(), Arc::new(root.clone()));

@@ -180,6 +180,10 @@ pub struct OrchestratorRuntime {
     models: Arc<ModelRegistry>,
     tools: Arc<Mutex<ToolRegistry>>,
     tasks: Arc<Mutex<TaskGraph>>,
+    /// Ordered session todo list backing the model-facing `todowrite` tool.
+    /// Kept separate from the execution task graph so replacing the plan never
+    /// removes the root task the loop is running on.
+    todo_plan: Arc<Mutex<crate::todo_plan::TodoPlan>>,
     memory: Arc<Mutex<MemoryStore>>,
     budget: Arc<Mutex<BudgetTracker>>,
     policy: Arc<RwLock<PolicyEngine>>,
@@ -220,8 +224,19 @@ pub struct OrchestratorRuntime {
     /// calls and results) across prompts instead of a text-only tail.
     last_turn_transcript: Arc<Mutex<Vec<ModelMessage>>>,
     /// Session working directory and workspace roots used for mid-turn nested
-    /// instruction discovery. Set by the provider adapter per session.
-    workspace_scope: Mutex<Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
+    /// instruction discovery. Set by the provider adapter per session and
+    /// updated by `session_move`.
+    workspace_scope: crate::workspace_scope::WorkspaceScopeSlot,
+    /// Session working directory requested by `session_move`. It outlives the
+    /// tool call so later prompts and instruction discovery keep using the
+    /// moved directory instead of the adapter's original workspace.
+    session_move_target: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Title requested by `session_rename`, emitted by the loop as an ACP
+    /// `session_info_update` right after the call succeeds.
+    pending_title: Arc<Mutex<Option<String>>>,
+    /// Plan mode advertises read-class tools only; the provider adapter sets
+    /// this before each turn from the session mode.
+    read_only_tools: std::sync::atomic::AtomicBool,
     /// Provider/project/client affinity for this session. The loop stamps the
     /// active session id; providers key caches and per-session limits on the
     /// resulting affinity.

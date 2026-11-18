@@ -135,6 +135,7 @@ impl OrchestratorRuntime {
         budget: BudgetTracker,
     ) -> Self {
         let budget = Arc::new(Mutex::new(budget));
+        let todo_plan = Arc::new(Mutex::new(crate::todo_plan::TodoPlan::new()));
         let tools = Arc::new(Mutex::new(ToolRegistry::new()));
         let checkpoints = Arc::new(CheckpointStore::new(&config.recovery));
         let events = EventRecorder::new();
@@ -178,6 +179,7 @@ impl OrchestratorRuntime {
             models,
             tools,
             tasks,
+            todo_plan,
             memory,
             budget,
             policy: Arc::new(RwLock::new(policy)),
@@ -199,7 +201,10 @@ impl OrchestratorRuntime {
             runtime_snapshots: Mutex::new(HashMap::new()),
             session_logs,
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
-            workspace_scope: Mutex::new(None),
+            workspace_scope: Arc::new(Mutex::new(None)),
+            session_move_target: Arc::new(Mutex::new(None)),
+            pending_title: Arc::new(Mutex::new(None)),
+            read_only_tools: std::sync::atomic::AtomicBool::new(false),
             session_context: Mutex::new(crate::session_context::SessionContext::default()),
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
             workspace_instruction_known: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -228,9 +233,50 @@ impl OrchestratorRuntime {
     }
     /// Records the session working directory and workspace roots for mid-turn
     /// nested `AGENTS.md`/`CLAUDE.md` discovery. Called once per prompt by the
-    /// provider adapter before the turn starts.
+    /// provider adapter before the turn starts; a model-requested
+    /// `session_move` takes precedence over the adapter's original workspace.
     pub fn set_workspace_scope(&self, cwd: std::path::PathBuf, roots: Vec<std::path::PathBuf>) {
+        let cwd = self
+            .session_move_target
+            .lock()
+            .expect("session move target poisoned")
+            .clone()
+            .unwrap_or(cwd);
         *self.workspace_scope.lock().expect("workspace scope poisoned") = Some((cwd, roots));
+    }
+
+    /// Working directory requested by `session_move`, when the model moved this
+    /// session. Providers use it as the prompt cwd instead of the workspace
+    /// captured at `session/new`.
+    #[must_use]
+    pub fn session_workspace_override(&self) -> Option<std::path::PathBuf> {
+        self.session_move_target.lock().expect("session move target poisoned").clone()
+    }
+
+    /// Restricts the advertised tool set to read-class tools for following
+    /// turns. Plan mode sets this; execution policy still denies mutations.
+    pub fn set_read_only_tools(&self, enabled: bool) {
+        self.read_only_tools.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the advertised tool set is restricted to read-class tools.
+    #[must_use]
+    pub(crate) fn read_only_tools(&self) -> bool {
+        self.read_only_tools.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Canonical advertised tool definitions for this session, with the
+    /// read-class restriction applied when plan mode is active.
+    pub(crate) fn advertised_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
+        let definitions = crate::tools::canonical_tool_definitions(
+            self.tools.lock().expect("tool registry poisoned").definitions(),
+            None,
+        );
+        if self.read_only_tools() {
+            crate::tools::read_only_definitions(definitions)
+        } else {
+            definitions
+        }
     }
 
     /// Snapshot of the session workspace scope, when one was recorded.
@@ -438,8 +484,47 @@ impl OrchestratorRuntime {
         &self,
         session_id: &ee_agent_protocol::SessionId,
     ) -> Result<(), OrchestratorError> {
-        self.tools.lock().expect("tool registry poisoned").register_builtins(session_id)
+        let mut tools = self.tools.lock().expect("tool registry poisoned");
+        tools.register_builtins(session_id)?;
+        tools.register_todo_tool(self.todo_plan.clone())?;
+        for tool in crate::tools::session_tools(Arc::new(crate::tools::SessionToolContext {
+            models: self.models.clone(),
+            config: self.config.clone(),
+            workspace_scope: self.workspace_scope.clone(),
+            session_move_target: self.session_move_target.clone(),
+            pending_title: self.pending_title.clone(),
+        })) {
+            tools.register(tool)?;
+        }
+        if self.config.workspace_isolation.enabled {
+            for tool in crate::tools::worktree_tools(
+                self.worktrees.clone(),
+                self.config.workspace_isolation.clone(),
+            ) {
+                tools.register(tool)?;
+            }
+        }
+        Ok(())
     }
+    /// ACP plan entries for the current session plan.
+    ///
+    /// A model-written todo list owns the user-visible plan; otherwise the
+    /// execution task graph remains the plan, preserving prior behavior.
+    #[must_use]
+    pub(crate) fn plan_entries_for_emission(&self) -> Vec<ee_agent_protocol::PlanEntry> {
+        let plan = self.todo_plan.lock().expect("todo plan poisoned");
+        if plan.is_empty() {
+            self.tasks.lock().expect("task graph poisoned").plan_entries()
+        } else {
+            plan.plan_entries()
+        }
+    }
+    /// Bounded prompt section for the current todo plan, when non-empty.
+    #[must_use]
+    pub(crate) fn todo_plan_prompt(&self) -> Option<String> {
+        self.todo_plan.lock().expect("todo plan poisoned").render_prompt()
+    }
+
     /// Records the provider-facing affinity for this session.
     ///
     /// Providers key prompt caches and per-session rate limits on the affinity,
@@ -491,5 +576,38 @@ impl OrchestratorRuntime {
             return Ok(Vec::new());
         };
         store.log_for(session_id).replay_messages()
+    }
+
+    /// Replays the logged conversation prefix ending at `checkpoint_seq`.
+    ///
+    /// Returns `None` when the session log is disabled or has no record for
+    /// that checkpoint, so a revert can report `conversation_reverted: false`
+    /// instead of silently keeping post-checkpoint messages.
+    pub fn replay_session_messages_until(
+        &self,
+        session_id: &str,
+        checkpoint_seq: u64,
+    ) -> Result<Option<Vec<(String, ModelMessage)>>, OrchestratorError> {
+        let Some(store) = &self.session_logs else {
+            return Ok(None);
+        };
+        let log = store.log_for(session_id);
+        let records = log.records()?;
+        let Some(position) = records.iter().position(|record| {
+            matches!(
+                record,
+                crate::session_log::SessionLogRecord::Checkpoint { checkpoint_seq: seq, .. }
+                    if *seq == checkpoint_seq
+            )
+        }) else {
+            return Ok(None);
+        };
+        let message_count = records[..=position]
+            .iter()
+            .filter(|record| matches!(record, crate::session_log::SessionLogRecord::Message(_)))
+            .count();
+        let mut messages = log.replay_messages()?;
+        messages.truncate(message_count);
+        Ok(Some(messages))
     }
 }

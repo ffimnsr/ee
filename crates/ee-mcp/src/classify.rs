@@ -132,8 +132,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_schema_version_is_six() {
-        assert_eq!(EE_TOOL_SCHEMA_VERSION, 6);
+    fn manifest_schema_version_is_seven() {
+        assert_eq!(EE_TOOL_SCHEMA_VERSION, 7);
     }
 
     #[test]

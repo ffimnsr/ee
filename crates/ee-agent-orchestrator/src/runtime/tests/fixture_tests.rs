@@ -30,6 +30,44 @@ async fn fixture_simple_answer_produces_stable_event_sequence() {
 }
 
 #[tokio::test]
+async fn session_rename_emits_a_session_info_update() {
+    let script = vec![
+        ModelResponse::new().tool_intents(vec![ToolIntent::new(
+            "tc-1",
+            "session_rename",
+            json!({ "title": "Audit run" }),
+        )]),
+        ModelResponse::new().text("renamed").completed(),
+    ];
+    let model = Arc::new(FakeModel::new(script));
+    let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), model);
+    runtime.register_builtins(&SessionId::new("s-1")).expect("registers session tools");
+    assert!(runtime.tool_names().iter().any(|name| name == "models"));
+    let (sink, client, mut rx) = plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+    let result = runtime
+        .run_turn_recording(
+            prompt("rename this session"),
+            sink,
+            client,
+            cancel_rx,
+            EventRecorder::new(),
+        )
+        .await
+        .expect("turn succeeds");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+    let mut titles = Vec::new();
+    while let Ok(OutboundEvent::Update { update, .. }) = rx.try_recv() {
+        if let SessionUpdate::SessionInfoUpdate(info) = *update {
+            titles.extend(info.title.value().cloned());
+        }
+    }
+    assert_eq!(titles, vec!["Audit run".to_string()]);
+}
+
+#[tokio::test]
 async fn fixture_tool_then_answer_produces_stable_event_sequence() {
     let model = Arc::new(FakeModel::new(tool_then_answer_script()));
     let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), model.clone());

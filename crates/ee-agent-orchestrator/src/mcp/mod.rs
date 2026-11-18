@@ -36,6 +36,7 @@ mod descriptor;
 mod manager;
 mod names;
 mod policy;
+mod resource_tools;
 mod schema;
 
 pub(crate) use descriptor::McpServerDescriptor;
@@ -44,3 +45,4 @@ pub(crate) use manager::{McpBackedTool, McpDiscoveryDiagnostic, McpSessionManage
 /// Provider-facing MCP tool classification knobs (also re-exported from the
 /// crate root for provider configuration).
 pub use policy::{McpToolClassSpec, McpToolPolicy};
+pub(crate) use resource_tools::resource_tools;
