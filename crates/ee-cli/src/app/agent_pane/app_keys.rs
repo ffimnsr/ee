@@ -182,6 +182,9 @@ impl App {
             crate::keymap::Action::AgentToggleTranscriptRaw => {
                 self.agents_transcript_command("toggle")
             }
+            crate::keymap::Action::AgentForkSelectedResponse => {
+                self.agents_fork_selected_response()
+            }
             crate::keymap::Action::ToggleAgentsPane => {
                 if self.agents_modal_blocked() {
                     return false;

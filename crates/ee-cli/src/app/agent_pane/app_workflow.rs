@@ -505,19 +505,9 @@ impl App {
             return;
         };
         let thread = &self.agents.threads[active];
-        let mut groups = BTreeSet::new();
-        for item in &thread.transcript {
-            if let TranscriptItem::Message {
-                kind: MessageRenderKind::Assistant,
-                response_group: Some(group),
-                ..
-            } = item
-                && thread.active_response_group != Some(*group)
-            {
-                groups.insert(*group);
-            }
-        }
-        let Some(group) = groups.into_iter().rev().nth(position - 1) else {
+        let Some(group) =
+            thread.completed_assistant_response_groups().into_iter().rev().nth(position - 1)
+        else {
             self.backend.status_message =
                 Some(String::from("no completed assistant response to copy"));
             return;

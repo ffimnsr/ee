@@ -11,7 +11,8 @@ use ee_agent_protocol::{
 };
 
 use super::thread_ui::{
-    AgentContextFile, AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem,
+    AgentContextFile, AgentThreadUi, MessageRenderKind, ResponseGroupId, ThreadUiState,
+    TranscriptItem,
 };
 
 // ── Rendering helpers ────────────────────────────────────────────────────────
@@ -477,8 +478,14 @@ pub(super) const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/clear", "clear visible local scrollback; provider context stays"),
     ("/archive", "hide idle local session; use /archive list|restore <N>"),
     ("/delete", "confirm local transcript deletion; provider session stays"),
-    ("/fork", "create non-active seeded session from redacted visible transcript"),
-    ("/branch", "create and switch to seeded session"),
+    (
+        "/fork [agent_id] [N]",
+        "create non-active seeded session; N limits seed to the Nth-last response",
+    ),
+    (
+        "/branch [agent_id] [N]",
+        "create and switch to seeded session; N limits seed to the Nth-last response",
+    ),
     ("/sessions", "switch session"),
     ("/export", "write redacted Markdown transcript"),
     ("/stop [terminal-id|all]", "cancel turn or stop owned direct-child terminal"),
@@ -565,12 +572,37 @@ pub(super) fn thread_state_label(state: ThreadUiState) -> &'static str {
     }
 }
 
-pub(super) fn fork_seed(thread: &AgentThreadUi, secrets: &[String]) -> Vec<ContentBlock> {
+/// Response group a transcript item belongs to, if any. User messages and
+/// notices carry no group; assistant/thought messages and tool calls do.
+fn transcript_item_response_group(item: &TranscriptItem) -> Option<ResponseGroupId> {
+    match item {
+        TranscriptItem::Message { response_group, .. } => *response_group,
+        TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+        _ => None,
+    }
+}
+
+pub(super) fn fork_seed(
+    thread: &AgentThreadUi,
+    secrets: &[String],
+    cutoff_group: Option<ResponseGroupId>,
+) -> Vec<ContentBlock> {
     const FORK_SEED_MAX_BYTES: usize = 48 * 1024;
     let mut transcript = String::from(
         "This is a locally seeded fork. Treat following redacted visible messages as prior context; it is not provider-side session cloning.\n\n",
     );
-    for item in &thread.transcript {
+    // A cutoff group bounds the seed at that response's last transcript item
+    // (inclusive), so forking from response N drops everything said after it.
+    // An unknown group keeps the whole-transcript behavior.
+    let cutoff_bound = cutoff_group
+        .and_then(|group| {
+            thread
+                .transcript
+                .iter()
+                .rposition(|item| transcript_item_response_group(item) == Some(group))
+        })
+        .map_or(thread.transcript.len(), |index| index + 1);
+    for item in thread.transcript.iter().take(cutoff_bound) {
         let TranscriptItem::Message { nick, text, kind, .. } = item else { continue };
         let role = match kind {
             MessageRenderKind::User => "User",
@@ -589,6 +621,28 @@ pub(super) fn fork_seed(thread: &AgentThreadUi, secrets: &[String]) -> Vec<Conte
         transcript.push_str("\n\n[local fork seed truncated]\n");
     }
     vec![ContentBlock::Text(TextContent::new(transcript))]
+}
+
+/// Parses `/fork`/`/branch` arguments: an optional agent id followed by an
+/// optional 1-based response position counted most-recent-first (the same
+/// numbering `/copy [N]` uses). A lone numeric token is a position, so
+/// `/fork 2` works without restating the parent's agent id.
+pub(super) fn parse_fork_args(args: &str) -> Result<(String, Option<usize>), ()> {
+    let mut tokens = args.split_whitespace();
+    let (agent_id, position) = match (tokens.next(), tokens.next(), tokens.next()) {
+        (None, None, _) => (String::new(), None),
+        (Some(token), None, _) => match token.parse::<usize>() {
+            Ok(position) if position > 0 => (String::new(), Some(position)),
+            Ok(_) => return Err(()),
+            Err(_) => (token.to_owned(), None),
+        },
+        (Some(agent_id), Some(position), None) => match position.parse::<usize>() {
+            Ok(position) if position > 0 => (agent_id.to_owned(), Some(position)),
+            _ => return Err(()),
+        },
+        _ => return Err(()),
+    };
+    Ok((agent_id, position))
 }
 
 pub(super) fn sanitize_session_name(raw: &str) -> Option<String> {

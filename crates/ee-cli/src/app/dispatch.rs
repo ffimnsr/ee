@@ -13,6 +13,7 @@ impl App {
             | Action::AgentDraftExternalEdit
             | Action::AgentToggleTranscriptDetails
             | Action::AgentToggleTranscriptRaw
+            | Action::AgentForkSelectedResponse
             | Action::SetPrefix(_)
             | Action::PendingCharFind { .. }
             | Action::SetOperator(_)
@@ -32,7 +33,8 @@ impl App {
             | Action::AgentDraftRestore
             | Action::AgentDraftExternalEdit
             | Action::AgentToggleTranscriptDetails
-            | Action::AgentToggleTranscriptRaw => {}
+            | Action::AgentToggleTranscriptRaw
+            | Action::AgentForkSelectedResponse => {}
             #[cfg(feature = "agents")]
             Action::ToggleAgentsPane => self.agents_toggle_focus(),
             #[cfg(not(feature = "agents"))]

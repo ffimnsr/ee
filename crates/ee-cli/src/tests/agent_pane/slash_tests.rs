@@ -319,6 +319,149 @@ fn fork_with_agent_id_starts_seeded_session_under_target_agent() {
     app.shutdown_agents();
 }
 
+fn push_transcript_message(
+    app: &mut App,
+    nick: &str,
+    text: &str,
+    kind: MessageRenderKind,
+    response_group: Option<u64>,
+) {
+    let Some(active) = app.agents.active_thread_index() else {
+        panic!("no active agent session");
+    };
+    app.agents.threads[active].transcript.push(TranscriptItem::Message {
+        nick: String::from(nick),
+        text: String::from(text),
+        kind,
+        message_id: None,
+        response_group,
+        at: SystemTime::now(),
+    });
+}
+
+#[test]
+fn fork_with_response_position_truncates_seed_at_target_response() {
+    let script = base_script()
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    push_transcript_message(&mut app, "you", "early question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "first answer",
+        MessageRenderKind::Assistant,
+        Some(1),
+    );
+    push_transcript_message(&mut app, "you", "later question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "second answer",
+        MessageRenderKind::Assistant,
+        Some(2),
+    );
+
+    // Position 2 = second-most-recent completed assistant response: the seed
+    // must keep everything up to and including it and drop nothing after.
+    type_text(&mut app, "/fork 2");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "positioned fork ready", |app| app.agents.threads.len() == 2);
+    assert_eq!(app.agents.active_thread, Some(0), "fork keeps parent active");
+    wait_until(&mut app, "positioned fork seed sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let prompts = fake.agent().requests_by_method("session/prompt");
+    let seed = prompts[0]["params"]["prompt"][0]["text"].as_str().expect("fork seed text");
+    assert!(seed.contains("early question"));
+    assert!(seed.contains("first answer"));
+    assert!(!seed.contains("later question"), "messages after the target response must be dropped");
+    assert!(!seed.contains("second answer"), "messages after the target response must be dropped");
+}
+
+#[test]
+fn fork_response_position_rejects_invalid_arguments_without_creating_threads() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    for draft in ["/fork 0", "/fork beta nope", "/fork beta 2 extra"] {
+        type_text(&mut app, draft);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            app.backend.status_message.as_deref(),
+            Some("usage: /fork [agent_id] [response number]"),
+            "draft {draft} must fail with usage guidance"
+        );
+        assert_eq!(app.agents.threads.len(), 1, "failed fork must not create a thread");
+    }
+
+    type_text(&mut app, "/fork 9");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("no completed assistant response to fork from")
+    );
+    assert_eq!(app.agents.threads.len(), 1);
+}
+
+#[test]
+fn agent_fork_selected_response_action_seeds_from_selected_group() {
+    let script = base_script()
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    push_transcript_message(&mut app, "you", "early question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "first answer",
+        MessageRenderKind::Assistant,
+        Some(1),
+    );
+    push_transcript_message(&mut app, "you", "later question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "second answer",
+        MessageRenderKind::Assistant,
+        Some(2),
+    );
+    app.agents.threads[0].selected_response_group = Some(1);
+
+    assert!(
+        app.handle_agent_keybinding_action(crate::keymap::Action::AgentForkSelectedResponse),
+        "agent-mode action must be handled"
+    );
+    wait_until(&mut app, "selected-response fork ready", |app| app.agents.threads.len() == 2);
+    assert_eq!(app.agents.active_thread, Some(0), "keymap fork keeps parent active");
+    wait_until(&mut app, "selected-response fork seed sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let prompts = fake.agent().requests_by_method("session/prompt");
+    let seed = prompts[0]["params"]["prompt"][0]["text"].as_str().expect("fork seed text");
+    assert!(seed.contains("first answer"));
+    assert!(!seed.contains("second answer"), "seed must stop at the selected response");
+    assert!(!seed.contains("later question"));
+
+    // Without a selection the action explains how to pick a response.
+    app.agents.threads[0].selected_response_group = None;
+    assert!(app.handle_agent_keybinding_action(crate::keymap::Action::AgentForkSelectedResponse));
+    assert!(
+        app.backend.status_message.as_deref().is_some_and(|message| message.contains("Ctrl+Left"))
+    );
+    assert_eq!(app.agents.threads.len(), 2, "guided failure must not create a thread");
+}
+
 #[test]
 fn approval_slash_command_scopes_modes_to_active_session_and_confirms_bypass() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());

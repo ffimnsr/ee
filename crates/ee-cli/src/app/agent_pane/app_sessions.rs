@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use super::super::*;
 use crate::app::agent_export::{format_agent_transcript_markdown, write_agent_transcript_export};
 
-use super::format::{agent_connection_state_label, fork_seed};
+use super::format::{agent_connection_state_label, fork_seed, parse_fork_args};
 use super::state::{AgentPaneLayout, PendingFork, SessionDeletionConfirmation};
 use super::thread_ui::ThreadUiState;
 impl App {
@@ -289,8 +289,70 @@ impl App {
     /// Starts a fresh provider session seeded with redacted visible parent messages.
     /// This is deliberately not presented as an ACP/provider-side clone.
     /// An explicit `requested_agent_id` forks under a different configured
-    /// agent; empty keeps the parent's agent (previous behavior).
-    pub(super) fn agents_fork_session(&mut self, activate_child: bool, requested_agent_id: &str) {
+    /// agent; empty keeps the parent's agent (previous behavior). An optional
+    /// 1-based response position (most-recent-first, `/copy` numbering) bounds
+    /// the seed at that assistant response.
+    pub(super) fn agents_fork_session(&mut self, activate_child: bool, args: &str) {
+        let (requested_agent_id, position) = match parse_fork_args(args) {
+            Ok(parsed) => parsed,
+            Err(()) => {
+                self.backend.status_message =
+                    Some(String::from("usage: /fork [agent_id] [response number]"));
+                return;
+            }
+        };
+        let cutoff_group = match position {
+            None => None,
+            Some(position) => {
+                let Some(active) = self.agents.active_thread_index() else {
+                    self.backend.status_message =
+                        Some(String::from("no active agent session to fork"));
+                    return;
+                };
+                match self.agents.threads[active]
+                    .completed_assistant_response_groups()
+                    .into_iter()
+                    .rev()
+                    .nth(position - 1)
+                {
+                    Some(group) => Some(group),
+                    None => {
+                        self.backend.status_message =
+                            Some(String::from("no completed assistant response to fork from"));
+                        return;
+                    }
+                }
+            }
+        };
+        self.agents_fork_session_with_cutoff(activate_child, &requested_agent_id, cutoff_group);
+    }
+
+    /// Keymap action `agent_fork_selected_response`: fork from the response
+    /// group currently selected in the transcript (Ctrl+Left/Ctrl+Right)
+    /// instead of a numeric position.
+    pub(super) fn agents_fork_selected_response(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session to fork"));
+            return;
+        };
+        let Some(group) = self.agents.threads[active].selected_response_group else {
+            self.backend.status_message =
+                Some(String::from("no response selected; Ctrl+Left/Ctrl+Right selects one"));
+            return;
+        };
+        if !self.agents.threads[active].has_response_group(group) {
+            self.backend.status_message = Some(String::from("selected response no longer exists"));
+            return;
+        }
+        self.agents_fork_session_with_cutoff(false, "", Some(group));
+    }
+
+    fn agents_fork_session_with_cutoff(
+        &mut self,
+        activate_child: bool,
+        requested_agent_id: &str,
+        cutoff_group: Option<ResponseGroupId>,
+    ) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session to fork"));
             return;
@@ -305,12 +367,13 @@ impl App {
         }
         let requested_agent_id = requested_agent_id.trim();
         if requested_agent_id.contains(char::is_whitespace) {
-            self.backend.status_message = Some(String::from("usage: /fork [agent_id]"));
+            self.backend.status_message =
+                Some(String::from("usage: /fork [agent_id] [response number]"));
             return;
         }
         let parent = &self.agents.threads[active];
         let parent_session_id = parent.session_id.clone();
-        let seed = fork_seed(parent, &self.agents_secret_values());
+        let seed = fork_seed(parent, &self.agents_secret_values(), cutoff_group);
         let agent_id = if requested_agent_id.is_empty() {
             parent.agent_id.clone()
         } else if self.config.agents.servers.contains_key(requested_agent_id) {

@@ -17,6 +17,9 @@ pub(crate) enum Action {
     AgentDraftExternalEdit,
     AgentToggleTranscriptDetails,
     AgentToggleTranscriptRaw,
+    /// Fork a seeded session from the response group selected in the agents
+    /// pane transcript (Ctrl+Left/Ctrl+Right navigation).
+    AgentForkSelectedResponse,
     /// Toggle between the agents pane and the editor from any mode (the
     /// agents-pane equivalent of `:agents` / `:agents_close`).
     ToggleAgentsPane,

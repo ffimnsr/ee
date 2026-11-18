@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::app::{App, Mode};
 use crate::buffer::BufferManager;
-use crate::keymap::{Action, BindingKey, bindings};
+use crate::keymap::{Action, BindingKey, bindings, format_action_spec, parse_action_spec};
 use crate::picker::{PickerKind, PickerState};
 use crate::quickfix::{QfEntry, QfList};
 use crate::tests::helpers::{CurrentDirGuard, cwd_test_lock, seed_lsp_commands};
@@ -802,4 +802,14 @@ fn gd_binds_declaration_like_vim() {
         })
         .cloned();
     assert_eq!(lookup, Some(Action::plugin("lsp.declaration")));
+}
+
+#[test]
+fn agent_fork_selected_response_action_roundtrips_through_spec() {
+    let spec = format_action_spec(&Action::AgentForkSelectedResponse);
+    assert_eq!(spec, "agent_fork_selected_response");
+    assert_eq!(
+        parse_action_spec("agent_fork_selected_response").unwrap(),
+        Action::AgentForkSelectedResponse
+    );
 }

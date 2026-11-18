@@ -465,6 +465,37 @@ impl AgentThreadUi {
             .collect()
     }
 
+    /// Whether any transcript item still belongs to `group`. Used to reject a
+    /// stale selection before forking from it.
+    pub(crate) fn has_response_group(&self, group: ResponseGroupId) -> bool {
+        self.transcript.iter().any(|item| match item {
+            TranscriptItem::Message { response_group: Some(item_group), .. } => {
+                *item_group == group
+            }
+            TranscriptItem::ToolCall { response_group: item_group, .. } => *item_group == group,
+            _ => false,
+        })
+    }
+
+    /// Completed assistant response groups, oldest first, excluding the group
+    /// still streaming. Shared numbering source for `/copy [N]` and fork
+    /// cutoffs (both count positions most-recent-first).
+    pub(crate) fn completed_assistant_response_groups(&self) -> Vec<ResponseGroupId> {
+        let mut groups = BTreeSet::new();
+        for item in &self.transcript {
+            if let TranscriptItem::Message {
+                kind: MessageRenderKind::Assistant,
+                response_group: Some(group),
+                ..
+            } = item
+                && self.active_response_group != Some(*group)
+            {
+                groups.insert(*group);
+            }
+        }
+        groups.into_iter().collect()
+    }
+
     pub(crate) fn response_group_counts(&self, group: ResponseGroupId) -> (usize, usize) {
         self.transcript.iter().fold((0, 0), |(thoughts, tools), item| match item {
             TranscriptItem::Message {
