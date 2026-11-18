@@ -1102,6 +1102,8 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_save_note",
             "ee_read_notes",
             "ee_read_note",
+            "ee_update_note",
+            "ee_delete_note",
             "ee_remember_workspace_fact",
             "ee_replace_workspace_fact",
             "ee_recall_workspace_facts",
@@ -1136,7 +1138,10 @@ async fn mcp_over_acp_manifest_round_trips_complete_governance_metadata() {
         .expect("session starts");
 
     let manifest = await_response(&fake, 202).await;
-    assert_eq!(manifest["result"]["structuredContent"]["manifestVersion"], json!(6));
+    assert_eq!(
+        manifest["result"]["structuredContent"]["manifestVersion"],
+        json!(ee_mcp::EE_TOOL_SCHEMA_VERSION)
+    );
     let tools =
         manifest["result"]["structuredContent"]["tools"].as_array().expect("manifest tool list");
     assert!(!tools.is_empty());
