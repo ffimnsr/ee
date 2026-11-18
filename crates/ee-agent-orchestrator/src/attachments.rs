@@ -35,6 +35,10 @@ pub fn normalize_attachments(transcript: &[ModelMessage]) -> Option<Vec<ModelMes
     let mut rewritten = transcript.to_vec();
     let mut changed = false;
     let mut seen_images: BTreeSet<(String, Option<String>, String)> = BTreeSet::new();
+    // Blob payloads carried by an embedded resource dedupe on content, so the
+    // same image attached twice (once as an image part, once as a resource) is
+    // sent once.
+    let mut seen_blobs: BTreeSet<(String, String)> = BTreeSet::new();
     let mut noticed_mimes: BTreeSet<String> = BTreeSet::new();
 
     for message in &mut rewritten {
@@ -63,22 +67,35 @@ pub fn normalize_attachments(transcript: &[ModelMessage]) -> Option<Vec<ModelMes
                         continue;
                     }
                     if mime == "application/pdf" {
-                        if blob.is_some() {
-                            content.push(ModelContent::EmbeddedResource {
-                                uri,
-                                mime_type,
-                                text: None,
-                                blob,
-                            });
-                        } else {
-                            content.push(ModelContent::Text(format!(
-                                "[pdf omitted: {uri} carried no payload]"
-                            )));
-                            changed = true;
+                        match blob {
+                            Some(payload) => {
+                                if seen_blobs.insert((mime.to_string(), payload.clone())) {
+                                    content.push(ModelContent::EmbeddedResource {
+                                        uri,
+                                        mime_type,
+                                        text: None,
+                                        blob: Some(payload),
+                                    });
+                                } else {
+                                    changed = true;
+                                }
+                            }
+                            None => {
+                                content.push(ModelContent::Text(format!(
+                                    "[pdf omitted: {uri} carried no payload]"
+                                )));
+                                changed = true;
+                            }
                         }
                         continue;
                     }
                     if is_supported_media(mime) {
+                        if let Some(payload) = blob.as_ref()
+                            && !seen_blobs.insert((mime.to_string(), payload.clone()))
+                        {
+                            changed = true;
+                            continue;
+                        }
                         content.push(ModelContent::EmbeddedResource { uri, mime_type, text, blob });
                         continue;
                     }
@@ -186,6 +203,56 @@ mod tests {
             .filter(|block| matches!(block, ModelContent::Image { .. }))
             .count();
         assert_eq!(images, 1);
+    }
+
+    #[test]
+    fn duplicate_resource_images_are_sent_once() {
+        let messages = vec![
+            ModelMessage::new(ModelRole::User).with_content(vec![resource(
+                "file:///a.png",
+                "image/png",
+                None,
+                Some("AAAA"),
+            )]),
+            ModelMessage::new(ModelRole::User).with_content(vec![resource(
+                "file:///b.png",
+                "image/png",
+                None,
+                Some("AAAA"),
+            )]),
+        ];
+        let normalized = normalize_attachments(&messages).expect("rewritten");
+        let resources = normalized
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter(|block| matches!(block, ModelContent::EmbeddedResource { .. }))
+            .count();
+        assert_eq!(resources, 1, "identical payloads are carried once");
+    }
+
+    #[test]
+    fn duplicate_pdfs_are_sent_once() {
+        let messages = vec![
+            ModelMessage::new(ModelRole::User).with_content(vec![resource(
+                "file:///a.pdf",
+                "application/pdf",
+                None,
+                Some("JVBERi0="),
+            )]),
+            ModelMessage::new(ModelRole::User).with_content(vec![resource(
+                "file:///b.pdf",
+                "application/pdf",
+                None,
+                Some("JVBERi0="),
+            )]),
+        ];
+        let normalized = normalize_attachments(&messages).expect("rewritten");
+        let pdfs = normalized
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter(|block| matches!(block, ModelContent::EmbeddedResource { .. }))
+            .count();
+        assert_eq!(pdfs, 1, "an identical document is carried once");
     }
 
     #[test]

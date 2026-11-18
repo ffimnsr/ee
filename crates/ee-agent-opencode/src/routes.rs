@@ -284,6 +284,25 @@ pub fn catalog() -> impl Iterator<Item = OpenCodeRoute> {
     catalog::models().map(|entry| route_for(entry, None))
 }
 
+/// Active chat model ids for one surface, in deterministic id order.
+///
+/// The default selection walks this list and takes the first entry the caller
+/// has not disabled, so startup never depends on generated-table order.
+#[must_use]
+pub fn chat_model_ids(surface: OpenCodeSurface) -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = catalog()
+        .filter(|route| {
+            route.surface == surface
+                && route.entry.kind == crate::catalog::ModelKind::Chat
+                && route.entry.status.is_empty()
+        })
+        .map(|route| route.model_id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Resolves the exact route for one `(surface, model)` pair.
 ///
 /// `model_id` is matched by exact string equality against the catalog after

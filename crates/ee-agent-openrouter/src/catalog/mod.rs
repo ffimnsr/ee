@@ -101,6 +101,22 @@ pub fn find(model_id: &str) -> Option<&'static CatalogModel> {
     generated::MODELS.iter().find(|entry| entry.id == model_id)
 }
 
+/// Active chat model ids, in deterministic id order.
+///
+/// The default selection walks this list and takes the first entry the caller
+/// has not disabled, so startup never depends on generated-table order.
+#[must_use]
+pub fn chat_model_ids() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = generated::MODELS
+        .iter()
+        .filter(|entry| entry.is_chat() && entry.status.is_empty() && entry.routes.chat)
+        .map(|entry| entry.id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Upstream source URL the generated table came from.
 #[must_use]
 pub fn snapshot_source() -> &'static str {

@@ -77,7 +77,7 @@ fn decode_returns_a_byte_identical_checkpoint_and_summary() {
     // The replacement re-encodes the same encrypted payload, byte for byte.
     let body = compact_body(&CompactBody {
         model: "gpt-5.5",
-        provider: None,
+        provider: Some("OpenAI"),
         system_prompt: "",
         transcript: &outcome.replacement,
         tools: &[],
@@ -89,6 +89,26 @@ fn decode_returns_a_byte_identical_checkpoint_and_summary() {
     assert_eq!(body["input"][0]["type"], "compaction");
     assert_eq!(body["input"][0]["encrypted_content"], checkpoint.encrypted());
     assert_eq!(body["input"][0]["id"], "cmp-1");
+}
+
+#[test]
+fn a_checkpoint_never_replays_to_another_provider() {
+    let outcome = decode_compaction("OpenAI", "gpt-5.5", &checkpoint_payload()).expect("decodes");
+    let body = compact_body(&CompactBody {
+        model: "gpt-5.5",
+        provider: Some("OpenRouter"),
+        system_prompt: "",
+        transcript: &outcome.replacement,
+        tools: &[],
+        extensions: None,
+        generation: None,
+        cache: &CacheDirective::disabled(),
+        session: None,
+    });
+    assert!(
+        !body["input"].as_array().expect("items").iter().any(|item| item["type"] == "compaction"),
+        "a provider that did not emit the checkpoint never receives it"
+    );
 }
 
 #[test]

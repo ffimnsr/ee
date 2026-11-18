@@ -14,13 +14,18 @@
 //!   "base_url": "https://openrouter.ai/api/v1/chat/completions",
 //!   "responses_url": "https://openrouter.ai/api/v1/responses",
 //!   "compaction_mode": "local",
-//!   "headers": { "x-request-source": "ee" },
-//!   "body": { "provider": { "sort": "throughput" } },
+//!   "provider": {
+//!     "headers": { "x-request-source": "ee" },
+//!     "body": { "provider": { "sort": "throughput" } }
+//!   },
 //!   "models": {
 //!     "anthropic/claude-sonnet-5": { "disabled": true, "variant": "high", "body": {} }
 //!   }
 //! }
 //! ```
+//!
+//! Provider-wide overlays live under `provider`; a top-level `headers` or `body`
+//! is rejected so one file cannot have two meanings for the same key.
 //!
 //! `${VAR}` resolves only against [`ALLOWED_ENV`]; an unresolved reference fails
 //! startup with the variable name. Unknown keys are ignored so a new upstream
@@ -63,6 +68,11 @@ pub enum ConfigError {
         /// Model id.
         model_id: String,
     },
+    /// A `model#` selector carried an empty variant id.
+    MissingVariant {
+        /// Model id before the `#`.
+        model_id: String,
+    },
     /// An environment or configuration value is malformed.
     InvalidOption {
         /// Variable or option name.
@@ -90,6 +100,11 @@ impl std::fmt::Display for ConfigError {
                 formatter,
                 "model {model_id:?} is disabled in the agent configuration: enable it or pick \
                  another model"
+            ),
+            Self::MissingVariant { model_id } => write!(
+                formatter,
+                "model {model_id:?} ends with an empty #variant selector: name a variant or drop \
+                 the trailing #"
             ),
             Self::InvalidOption { variable, detail } => {
                 write!(formatter, "invalid {variable}: {detail}")
@@ -239,15 +254,29 @@ pub fn load_from(
 /// Returns a diagnostic naming the offending key path.
 pub fn parse(value: &Value) -> Result<FileConfig, String> {
     let object = value.as_object().ok_or_else(|| String::from("expected a JSON object"))?;
+    if object.contains_key("headers") || object.contains_key("body") {
+        return Err(String::from(
+            "headers/body must be nested under the \"provider\" object, not at the top level",
+        ));
+    }
     Ok(FileConfig {
         default_model: optional_string(object, "default_model")?,
         small_model: optional_string(object, "small_model")?,
         base_url: optional_string(object, "base_url")?,
         responses_url: optional_string(object, "responses_url")?,
         compaction_mode: optional_string(object, "compaction_mode")?,
-        provider: overlay(object, "")?,
+        provider: provider_overlay(object)?,
         models: models(object)?,
     })
+}
+
+/// Parses the nested `provider` header/body overlay.
+fn provider_overlay(object: &serde_json::Map<String, Value>) -> Result<Overlay, String> {
+    let Some(value) = object.get("provider") else {
+        return Ok(Overlay::default());
+    };
+    let block = value.as_object().ok_or_else(|| String::from("provider must be an object"))?;
+    overlay(block, "provider.")
 }
 
 fn models(object: &serde_json::Map<String, Value>) -> Result<BTreeMap<String, ModelEntry>, String> {

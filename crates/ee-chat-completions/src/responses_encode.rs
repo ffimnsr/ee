@@ -177,12 +177,20 @@ pub(crate) fn tools_array(tools: &[ToolDefinition]) -> Value {
 }
 
 /// Top-level `compaction` input items carried by one transcript message.
-pub(crate) fn compaction_items(message: &ModelMessage) -> Vec<Value> {
+///
+/// A checkpoint is opaque provider state: it replays only to the provider that
+/// produced it. Without a named route every checkpoint is skipped, because
+/// sending one to a provider that did not emit it is rejected or degrades the
+/// turn.
+pub(crate) fn compaction_items(message: &ModelMessage, provider: Option<&str>) -> Vec<Value> {
+    let Some(provider) = provider.filter(|provider| !provider.is_empty()) else {
+        return Vec::new();
+    };
     message
         .content
         .iter()
         .filter_map(|block| match block {
-            ModelContent::CompactionCheckpoint(checkpoint) => {
+            ModelContent::CompactionCheckpoint(checkpoint) if checkpoint.provider == provider => {
                 let mut item = json!({
                     "type": "compaction",
                     "encrypted_content": checkpoint.encrypted(),

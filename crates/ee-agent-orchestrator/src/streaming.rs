@@ -11,6 +11,13 @@
 //! Cancellation stops consumption at the next chunk boundary: chunks already
 //! emitted stay, later chunks are dropped, and the merged turn records that
 //! it was cancelled.
+//!
+//! Two deltas have no ACP counterpart and are consumed without an update:
+//! `ToolInputEnd` closes the wire-side argument stream (the host already has
+//! the pending call and its incremental `raw_input`), and `Raw` frames are
+//! debug-only wire diagnostics that are redacted and never rendered. Hosted
+//! events that do have a counterpart (`TextChunk`, `ReasoningChunk`,
+//! `ToolInputStart`, `ToolInputDelta`, `Usage`) are forwarded as they arrive.
 
 use ee_agent_acp_server::UpdateSink;
 use ee_agent_protocol::{SessionUpdate, ToolCallUpdate, ToolCallUpdateFields, ToolKind};
@@ -186,11 +193,17 @@ pub struct StreamedTurn {
 impl StreamedTurn {
     /// Converts the merged turn into a normalized response whose text and
     /// reasoning equal the merged chunks (transcript consistency).
+    ///
+    /// A usage report observed mid-stream is preserved, so a consumer that
+    /// merges chunks itself cannot lose the provider's token counters.
     #[must_use]
     pub fn into_model_response(self) -> ModelResponse {
         let mut response = ModelResponse::new().text(self.text);
         if !self.reasoning.is_empty() {
             response = response.reasoning(self.reasoning);
+        }
+        if let Some(usage) = self.usage {
+            response = response.with_usage(usage);
         }
         response
     }
@@ -630,5 +643,22 @@ mod tests {
         let response = empty.into_model_response();
         assert_eq!(response.text, "");
         assert_eq!(response.reasoning, None);
+    }
+
+    #[test]
+    fn merged_turn_keeps_a_mid_stream_usage_report() {
+        let turn = StreamedTurn {
+            text: "answer".into(),
+            reasoning: String::new(),
+            text_chunks: 1,
+            reasoning_chunks: 0,
+            cancelled: false,
+            usage: Some(
+                crate::model::ModelUsage::new().with_input_tokens(12).with_output_tokens(4),
+            ),
+        };
+        let response = turn.into_model_response();
+        assert_eq!(response.usage.input_tokens, Some(12));
+        assert_eq!(response.usage.output_tokens, Some(4));
     }
 }

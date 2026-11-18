@@ -89,9 +89,9 @@ impl LoopEngine {
             );
             budget.emit(&self.events);
         }
-        if let Some(input_tokens) = response.usage.input_tokens {
+        if let Some(used) = response.usage.context_tokens.or(response.usage.input_tokens) {
             let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
-                input_tokens as u64,
+                used as u64,
                 self.config.context_window_tokens,
             )));
         }

@@ -148,7 +148,7 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         // A provider compaction checkpoint replaces the conversation prefix, so
         // it is replayed as its own top-level item and the message carrying it
         // renders nothing else.
-        let checkpoints = compaction_items(message);
+        let checkpoints = compaction_items(message, input.provider);
         if !checkpoints.is_empty() {
             items.extend(checkpoints);
             continue;

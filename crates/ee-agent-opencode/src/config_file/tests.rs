@@ -19,8 +19,10 @@ fn parses_selection_overlays_and_model_blocks() {
         "default_model": "gpt-5.5",
         "small_model": "gpt-5.5-mini",
         "org_id": "org-1",
-        "headers": { "x-request-source": "ee" },
-        "body": { "safety_identifier": "ee-agent" },
+        "provider": {
+            "headers": { "x-request-source": "ee" },
+            "body": { "safety_identifier": "ee-agent" }
+        },
         "models": {
             "gpt-5.5": {
                 "variant": "high",
@@ -44,7 +46,7 @@ fn parses_selection_overlays_and_model_blocks() {
 #[test]
 fn provider_body_is_preserved_when_a_model_adds_fields() {
     let value = json!({
-        "body": { "metadata": { "tier": "primary", "team": "ee" } },
+        "provider": { "body": { "metadata": { "tier": "primary", "team": "ee" } } },
         "models": { "m": { "body": { "metadata": { "tier": "critic" } } } }
     });
     let config = parse(&value).expect("parses");
@@ -78,8 +80,11 @@ fn wrong_types_name_the_key() {
     let error = parse(&json!({ "default_model": 5 })).expect_err("rejected");
     assert!(error.contains("default_model"), "{error}");
 
-    let error = parse(&json!({ "headers": { "x": 5 } })).expect_err("rejected");
-    assert!(error.contains("headers.x"), "{error}");
+    let error = parse(&json!({ "provider": { "headers": { "x": 5 } } })).expect_err("rejected");
+    assert!(error.contains("provider.headers.x"), "{error}");
+
+    let error = parse(&json!({ "headers": { "x": "v" } })).expect_err("rejected");
+    assert!(error.contains("nested under"), "{error}");
 }
 
 #[test]

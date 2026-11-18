@@ -108,6 +108,23 @@ fn provider_reported_cost_is_decoded_and_absent_cost_stays_unknown() {
 }
 
 #[test]
+fn a_cost_only_usage_payload_is_not_discarded() {
+    let openai = json!({
+        "choices": [{ "message": { "content": "hi" } }],
+        "usage": { "cost": 0.5 }
+    });
+    let usage =
+        decode_message(&openai).unwrap().usage.expect("a cost-only payload still reports cost");
+    assert_eq!(usage.cost_micros, Some(500_000));
+    assert_eq!(usage.input_tokens, None, "unknown counters stay unknown");
+
+    let responses = usage_from_tokens(&json!({ "cost": 0.25 }))
+        .expect("the neutral decoder keeps a cost-only payload");
+    assert_eq!(responses.cost_micros, Some(250_000));
+    assert_eq!(responses.output_tokens, None);
+}
+
+#[test]
 fn cache_usage_is_parsed_from_both_provider_shapes() {
     let anthropic = json!({
         "usage": {

@@ -1841,7 +1841,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
   - [x] **Fix:**
     - Add `--list-models` (and `--list-models --json`) to both binaries, sourced from the generated catalog: id, kind, protocol, context/output limits, modalities, reasoning support, cost, status.
     - Parse OpenRouter `usage.cost` when present; otherwise compute cost from catalog prices including cache read/write and context-tier overrides, and expose it through `ModelUsage`/metrics without changing ACP wire compatibility.
-    - Keep discovery strictly local and display-only; never let listing output select an endpoint or a credential.
+    - Keep the listing local and display-only: `--list-models` performs no network call and never lets listing output select an endpoint or a credential. The separate `--discover-models` probe is explicit, read-only, and bounded; it is not part of listing.
   - [x] **Acceptance criteria:**
     - `--list-models --json` is stable, sorted, and includes every resolvable catalog row with limits and cost.
     - Cost accounting prefers provider-reported cost and falls back to catalog prices; unknown prices stay unknown, never zero.
@@ -2515,20 +2515,37 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Fix direction:** always write `truncated: false` on the unchanged path; surface a bounded notice when the artifact cannot be stored; add a session-end sweep for artifacts under the session directory, or make the default sink durable when a state dir exists.
 - **Landed (R2/Gap 16):** `apply_to_result` now merges `truncated: false` on the unchanged path, distinguishes a memory-only log from a failed write in the marker, and records `output_save_error: true` plus a `tracing::warn!` when the sink rejects the artifact. The session-end sweep is `SessionLog::purge_artifacts`, which deletes only bodies no `Message` record references — message bodies survive, retained overflow does not — through `SessionLogSink::prune_bodies` (`FileSessionLogSink` removes only content-hash-named files inside the session directory). `OrchestratorRuntime::purge_session_artifacts` calls it from the provider-adapter session-close hook, so it runs where the log root is configured. The default sink stays memory-only (`session_log_durable` is still an explicit opt-in); the difference is that a degraded path is now observable instead of silent.
 
-### 7.3 Reported findings (not re-read line by line)
+### 7.3 Reported findings — audited and remediated (R6)
 
-- **Gap 2** — `crates/ee-agent-openrouter/src/options.rs:573-578` applies the 1024-token reasoning floor to every model rather than only Anthropic-upstream models; `:290-291` inserts `models` on the `/responses` route although the plan scopes it to chat; `openrouter.rs:222-228` derives `max_tokens_field` from endpoint host only, ignoring the vendor list; `options.rs:466-475` validates only top-level option keys, so `OPENROUTER_OPTIONS_JSON={"provider": 5}` reaches the body instead of failing at startup.
-- **Gap 3** — `crates/ee-agent-orchestrator/src/context_budget.rs:86` floors the fitted output limit at 1 token when the remaining window is smaller than 1024, not at the planned 1024; the surrounding doc says this is deliberate so the request never exceeds the window. Decide which rule wins and record it.
-- **Gap 10** — `crates/ee-agent-orchestrator/src/model_metadata.rs:684-736` rewrites undeclared PDF/audio/video to a placeholder, while the Gap 10 acceptance demands a pre-request failure (see 7.4.1). The same section's "Landed" note names `modality_violation`, which does not exist; the real helper is `sanitize_modalities`.
-- **Gap 12** — `crates/ee-chat-completions/src/provider_options.rs:155,174` emits `service_tier` without consulting catalog `service_tiers`; `profile.rs:469-472` keeps the first of duplicate query keys instead of rejecting them, and `profile/extra_tests.rs:48` has no `?`/`&` injection test even though encoding itself (`transport.rs:286-296`) is correct.
-- **Gap 15** — `crates/ee-chat-completions/src/wire.rs:330-336` returns early when the four legacy counters are absent, so a payload carrying only `cost` loses its cost; `context_tokens` is parsed but never surfaced by `metrics.rs` or the ACP usage update (`loop_engine.rs:733`).
-- **Gap 18** — no `ToolInputError` variant exists anywhere; malformed arguments are surfaced through `ToolCall::argument_error` (`wire.rs:80`, `:208-222`), which satisfies the behaviour but not the named API. `streaming.rs:260-289` forwards Start/Delta, turns End into a no-op, stores `Usage` without emitting it, and redacts-then-discards `Raw`.
-- **Gap 20** — `cache_policy.rs:489-499` emits `{ttl}` but not `prompt_cache_options {mode, ttl}` for the compact request; `responses_compact.rs:176-206` relies on injected `extensions` for `service_tier`; `responses_encode.rs:145-160` replays `compaction_items` without checking the checkpoint's producer provider; `responses_compact.rs:272` seals checkpoint reasoning with `seal` instead of `seal_with_provider`; the checkpoint lives in an in-memory per-session map (`runtime/mod.rs:249`) and is stripped from the session log (`session_log.rs:885-900`), so it does not survive resume.
-- **Gap 21** — no deterministic default selection: OpenCode errors `MissingModel` (`config.rs:540-545`) and OpenRouter falls back to a constant (`config.rs:574-580`); `disabled` is not checked on the `small_model` → critic/rubber-duck path (`opencode/config.rs:622-626`, `openrouter/config.rs:632,647`); the config schema reads top-level `headers`/`body` into a provider block rather than accepting a nested `provider` object (`config_file.rs:214` / `:248`).
-- **Gap 27** — dedupe only walks `ModelContent::Image` (`attachments.rs:44-51,81-83`), so an identical image carried as `EmbeddedResource` is sent twice; the inline text header omits the description component the plan specifies (`:110-117`).
-- **Gap 8** — `model#` (empty variant) is an error on OpenCode (`routes.rs:341`) and silently ignored on OpenRouter (`config.rs:742`); pick one.
-- **Gap 9** — `crates/ee-agent-opencode/src/discovery.rs:1-13` still performs a network `/models` fetch under `--discover-models`. Listing is local, so the acceptance row holds; the wording "keep discovery strictly local" does not.
-- **Gap 13 (config)** — `ee-agent-opencode/src/config.rs:78` plus `ee-cli/src/agent_setup.rs:531-535` write `OPENCODE_TIMEOUT_MS=120000` into setup-installed manifests, so "total unbounded unless configured" does not hold for installed agents.
+Every item below was re-read line by line against the reference before any edit. `Fixed` means the code changed; `False claim` means the reference or the code already behaved correctly and only the plan text was wrong; `Accepted deviation` means the behaviour is deliberate and now documented.
+
+| Item | Audit verdict | Action |
+|---|---|---|
+| **Gap 2a** reasoning floor | Partly false: the reference applies the 1,024 minimum to every OpenRouter model, not only Anthropic upstreams (`openrouter.ts:171-176`). The real defect was the fit formula: we clamped to `output-1` and failed startup, the reference halves the output bound (`fitThinkingBudget`). | **Fixed** in `options.rs`: keep a budget at or below half the bound, otherwise `max(1024, output/2)`; no startup failure. Test: `a_reasoning_budget_is_fitted_to_half_the_output_bound`. |
+| **Gap 2b** `models` on `/responses` | False claim: `OpenRouterResponsesBody` spreads `SharedOptions`, which includes `models` (`openrouter.ts:88-95,229-233`). | No change; plan text corrected here. |
+| **Gap 2c** `max_tokens_field` host list | False claim for catalog rows: the generated row's field wins (`openrouter.rs:98-104`); the host list is only the unknown-model fallback. | No change; documented as fallback-only in the code doc. |
+| **Gap 2d** passthrough typing | Verified: any JSON object passed, so `{"provider": 5}` reached the body. | **Fixed**: `validate_passthrough` type-checks documented keys at startup, unknown keys still pass through. Test: `passthrough_known_keys_are_type_checked_at_startup`. |
+| **Gap 3** output-limit floor | Verified: floored at 1, plan and reference floor at 1,024 (`OUTPUT_TOKEN_MIN`). | **Fixed**: `fit_output_limit` floors at `OUTPUT_LIMIT_MIN`; test renamed to `output_limit_caps_fits_and_floors_at_the_provider_minimum`. |
+| **Gap 10** placeholder vs failure | Already decided for placeholders in 7.4.1; the `modality_violation` name was corrected in R5. | No code change. |
+| **Gap 12** service tier | Claim outdated: R3 removed the unused catalog `service_tiers` field; the snapshot declares no tier data, and the reference protocols emit `service_tier` whenever the option is supplied. | Accepted deviation; emission matches the protocol docs. |
+| **Gap 12** query keys | Duplicates cannot come from the JSON config (object keys are unique); `with_query` keeps the first programmatic duplicate. Encoding was already correct. | **Fixed** with a testable helper `endpoint_with_query` and two tests: exact-once encoding plus `&key=…` injection. |
+| **Gap 15** cost-only usage | Verified in both chat and neutral decoders. | **Fixed**: cost is part of the "is there usage?" guard. Test: `a_cost_only_usage_payload_is_not_discarded`. |
+| **Gap 15** context tokens | Verified: parsed but unused by the ACP update. | **Fixed**: the `UsageUpdate` reports `context_tokens` when present, else input tokens. Test: `reported_context_size_wins_over_the_input_subset`. |
+| **Gap 18** `ToolInputError` | Behaviour is already correct via `argument_error`; the named API does not exist in the reference wire either. | Accepted naming deviation. |
+| **Gap 18** stream deltas | Verified partially: `Use` was merged and dropped by `into_model_response`; `End`/`Raw` have no ACP counterpart. | **Fixed** usage retention (`merged_turn_keeps_a_mid_stream_usage_report`) and documented `End`/`Raw` in the module doc. |
+| **Gap 20** compact cache fields | False claim: `{prompt_cache_options:{ttl}}` matches the reference schema (`mode` is optional and unset there too). | No change. |
+| **Gap 20** compact `service_tier` | Verified shape, but equivalent: provider options land in `extensions`, which the compact body merges last, exactly where `generation.service_tier` lands in the reference. | No change; documented. |
+| **Gap 20** checkpoint producer | Verified. | **Fixed**: `compaction_items` takes the route and drops a foreign checkpoint. Tests: `a_checkpoint_never_replays_to_another_provider` (plus the existing round-trip test now names its provider). |
+| **Gap 20** checkpoint sealing | Verified. | **Fixed**: `decode_compaction` seals reasoning with `seal_with_provider`. |
+| **Gap 20** checkpoint durability | Verified: the checkpoint lives in a per-session map and is stripped from the session log. | **Accepted deviation**: persisting provider-encrypted checkpoints across process restarts needs its own storage and retention review; the log stays checkpoint-free by design. |
+| **Gap 21** default selection | Verified. | **Fixed**: both agents pick the first active, non-disabled chat model in catalog id order (`chat_model_ids`); the OpenRouter constant is now only an empty-catalog fallback. Tests: `an_unconfigured_model_resolves_to_the_first_catalog_chat_model`, `missing_and_unknown_selectors_fail_before_any_request`. |
+| **Gap 21** disabled small model | Verified. | **Fixed**: a disabled small model is skipped on both critic paths. Tests: `a_disabled_small_model_never_becomes_the_critic` (both crates). |
+| **Gap 21** nested `provider` block | Verified. | **Fixed**: both config parsers require `provider.headers`/`provider.body` and reject top-level `headers`/`body` with guidance; docs and tests updated. |
+| **Gap 27** resource dedupe | Verified. | **Fixed**: embedded image/PDF blobs dedupe by content across both content kinds. Tests: `duplicate_resource_images_are_sent_once`, `duplicate_pdfs_are_sent_once`. |
+| **Gap 27** description in header | Not actionable: the ACP content block carries no description field, so there is nothing to render. | Accepted deviation. |
+| **Gap 8** empty variant | Verified. | **Fixed**: OpenRouter now rejects `model#` with `ConfigError::MissingVariant`, matching OpenCode. Test: `an_empty_variant_selector_is_rejected`. |
+| **Gap 9** discovery wording | Verified: listing is local; `--discover-models` is the explicit network probe. | Plan text corrected (Gap 9 fix bullet). |
+| **Gap 13 (config)** setup timeout | Verified: the manifest supplied `120000` as the accepted default. | **Fixed**: the setup input has no default (blank = phase budgets, unbounded total) and a test asserts it. |
 
 ### 7.4 Plan-internal contradictions
 
@@ -2557,7 +2574,10 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
   - `tests/acp_flows/` — `main.rs` 378, `single_dialect.rs` 170, `dialects.rs` 217, `redaction.rs` 74, `critic.rs` 120, `capability.rs` 127.
   - R3 touched `model.rs` (+19) and `loop_engine.rs` (+1) because both fixes are behavioural and belong at the type that owns them; the R4 split removes the exemption, and no new logic was added during the split.
 - Every R4 target file is now under the cap. Repo-wide oversized files outside the parity crates (`ee-agent-host/src/connection.rs`, `ee-cli` test modules, `xi-core-lib/*`) are pre-existing and out of R4 scope; `ee-chat-completions/src/wire.rs` (982) and `provider_adapter/agent_impl.rs` (995) stay under it.
-- Approaching the cap: `provider_adapter/agent_impl.rs` 995 (R1 extracted `SessionRuntime::new` to pull it back under after the session-identity wiring), `wire.rs` 982, `opencode/config.rs` 965. Any further growth must split first.
+- R6 grew two modules close to the cap, so both were split first:
+  - `crates/ee-agent-opencode/src/config.rs` 873 + `config/manifest.rs` 142 (setup manifest moved out at 998).
+  - `crates/ee-chat-completions/src/wire.rs` 859 + `wire/usage.rs` 166 (usage decoding moved out at 988).
+- Approaching the cap: `provider_adapter/agent_impl.rs` 995 (R1 extracted `SessionRuntime::new` to pull it back under after the session-identity wiring), `opencode/config.rs` 873, `wire.rs` 859. Any further growth must split first.
 
 #### 7.5.2 Lint escapes
 
@@ -2573,7 +2593,7 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 
 #### 7.5.4 Validation status of this audit
 
-No build, test, clippy, or fmt run was performed for Part 7 itself; findings are static. The gates below were re-run and pass after the R5 slice:
+No build, test, clippy, or fmt run was performed for Part 7 itself; findings are static. The gates below were re-run and pass after the R5 and R6 slices:
 
 - [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-chat-completions`
 - [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-opencode`
@@ -2602,5 +2622,6 @@ Ordered by ratio of parity gained to risk. Each slice is independently shippable
 - [x] **Slice R4 — file splits.** **Landed 2026-11-18:** `messages.rs` → `messages/{body,decode,codec}.rs`; `transport.rs` → `transport/{sse,endpoint,client,retry}.rs` with the `#[allow]` deleted; `tests/acp_flows.rs` → `tests/acp_flows/`; `loop_engine.rs` → `loop_engine/{turn,after_turn,util}.rs` plus `tests/`; `model.rs` → `model/{message,request,response,transcript,error}.rs`; `tools.rs` → `tools/{definition,registry,executor}.rs`; `strategy.rs` → `strategy/{mod,executor}.rs`. No behavioural change; gates re-run clean. The Gap 25 hosted-result producer-id follow-up was closed by the R5 residual.
 - [x] **R5 residual — Gap 25 hosted-result producer id.** Landed 2026-11-18 (see 7.2.8): `ToolIntent::provider` records the route, `push_provider_tool_result` stamps the result message, and Responses replay drops a hosted item whose recorded route differs from the outgoing route. Remaining R5 work is text and gate wiring (below).
 - [x] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture. **Landed 2026-11-18:** §7.4.1–7.4.7 resolved as text; Part 4.1's `routes.rs` figure corrected to 792; `catalog` CI job added; `tests/provider_flows/fixtures.rs` records one Chat and one Responses request/answer through the real adapter. The §7.5.3 coverage claim is now an accurate inventory (some gaps still unit-only), not a blanket pass.
+- [x] **Slice R6 — §7.3 reported-findings audit and fixes.** **Landed 2026-11-18:** every §7.3 item re-read against the reference and either fixed or reclassified (see the §7.3 table). Fixed: reasoning-budget fit, passthrough typing, output-limit floor, query encoding test, cost-only usage, context-token reporting, mid-stream usage retention, checkpoint producer gating and sealing, deterministic default model, disabled small model, nested `provider` config, resource-blob dedupe, empty `model#`, and the setup timeout default. Reclassified as false claims: `models` on `/responses`, `max_tokens_field` host list, compact cache TTL shape, `ToolInputError` naming. Accepted deviations: `service_tier` (no catalog data), checkpoint durability across restarts, attachment description (no ACP field), and discovery wording.
 
 Slices R1–R5 do not reopen Parts 1–6; they close the gap between "landed" and "observable". Update this section as each slice lands, and keep the audit date so a later pass can tell which findings were re-checked.

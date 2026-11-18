@@ -66,8 +66,9 @@ impl ModelLimits {
 /// the field instead of guessing. The requested bound is the catalog output
 /// limit capped at [`OUTPUT_LIMIT_MAX`]; when the prompt size is known the
 /// result also leaves [`PROMPT_ESTIMATE_MARGIN_PERCENT`] of headroom. A window
-/// with no room yields a one-token bound rather than a value that would exceed
-/// the window.
+/// with no room yields [`OUTPUT_LIMIT_MIN`] rather than zero, matching the
+/// reference agent: every provider rejects a tiny bound, and the prompt-size
+/// estimate is approximate anyway.
 #[must_use]
 pub fn fit_output_limit(limits: Option<ModelLimits>, prompt_tokens: Option<u64>) -> Option<u64> {
     let limits = limits?;
@@ -82,8 +83,7 @@ pub fn fit_output_limit(limits: Option<ModelLimits>, prompt_tokens: Option<u64>)
     let headroom = limits.context.saturating_div(100);
     let room =
         limits.context.saturating_sub(headroom).saturating_sub(prompt).saturating_sub(margin);
-    let fitted = room.min(requested);
-    Some(if fitted >= OUTPUT_LIMIT_MIN { fitted } else { fitted.max(1) })
+    Some(room.min(requested).max(OUTPUT_LIMIT_MIN))
 }
 
 /// Estimates prompt tokens from the normalized transcript, tools, and system

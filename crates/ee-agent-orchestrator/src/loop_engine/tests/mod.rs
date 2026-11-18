@@ -240,6 +240,40 @@ async fn one_model_response_turn_emits_assistant_update_and_stops() {
 }
 
 #[tokio::test]
+async fn reported_context_size_wins_over_the_input_subset() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().text("final answer").completed().with_usage(
+            ModelUsage::new()
+                .with_input_tokens(120)
+                .with_output_tokens(30)
+                .with_context_tokens(400),
+        ),
+    ]);
+    let (sink, client, mut rx) = plumbing();
+    let events = EventRecorder::new();
+    let engine =
+        engine_with(OrchestratorConfig::default(), Arc::new(model.clone()), echo_tool(), events);
+
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    engine
+        .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+        .await
+        .expect("turn succeeds");
+
+    let mut usage = None;
+    while let Ok(event) = rx.try_recv() {
+        if let OutboundEvent::Update { update, .. } = event
+            && let SessionUpdate::UsageUpdate(update) = *update
+        {
+            usage = Some(update);
+        }
+    }
+    let usage = usage.expect("context usage update emitted");
+    assert_eq!(usage.used, 400, "the provider-reported context size wins");
+    assert_eq!(usage.size, crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS);
+}
+
+#[tokio::test]
 async fn model_usage_emits_context_usage_update() {
     let model = FakeModel::new(vec![
         ModelResponse::new()

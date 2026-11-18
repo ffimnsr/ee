@@ -24,7 +24,7 @@ use crate::{
         REASONING_ITEMS, compaction_items, function_call_items, input_item, tools_array,
     },
     responses_wire::{error_detail, prompt_cache_key},
-    seal, usage_from_tokens, with_buffered_retry,
+    seal_with_provider, usage_from_tokens, with_buffered_retry,
 };
 
 /// Path appended to a Responses endpoint for native compaction.
@@ -154,7 +154,7 @@ pub struct CompactBody<'a> {
 pub fn compact_body(input: &CompactBody<'_>) -> Value {
     let mut items = Vec::new();
     for message in input.transcript {
-        let checkpoints = compaction_items(message);
+        let checkpoints = compaction_items(message, input.provider);
         if !checkpoints.is_empty() {
             items.extend(checkpoints);
             continue;
@@ -269,7 +269,11 @@ pub fn decode_compaction(
                             .join("\n")
                     })
                     .unwrap_or_default();
-                let native = seal(json!({ REASONING_ITEMS: [item.clone()] }), model);
+                let native = seal_with_provider(
+                    json!({ REASONING_ITEMS: [item.clone()] }),
+                    Some(provider),
+                    model,
+                );
                 let mut message = ModelMessage::new(ModelRole::Assistant);
                 if !summary.is_empty() {
                     message = message.with_reasoning_summary(summary);

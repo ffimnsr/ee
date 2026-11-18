@@ -421,12 +421,12 @@ async fn empty_script_exhaustion_returns_empty_response() {
 }
 
 #[test]
-fn output_limit_caps_fits_and_never_exceeds_the_window() {
+fn output_limit_caps_fits_and_floors_at_the_provider_minimum() {
     let limits = ModelLimits::new(200_000, 500_000);
     assert_eq!(fit_output_limit(Some(limits), None), Some(OUTPUT_LIMIT_MAX));
 
     let fitted = fit_output_limit(Some(limits), Some(150_000)).expect("fits");
-    assert!(fitted >= 1, "fitted {fitted}");
+    assert!(fitted >= OUTPUT_LIMIT_MIN, "fitted {fitted}");
     assert!(
         fitted + 150_000 * 116 / 100 + 2_000 <= 200_000,
         "output plus prompt margin must fit the window: {fitted}"
@@ -434,7 +434,11 @@ fn output_limit_caps_fits_and_never_exceeds_the_window() {
 
     let small = ModelLimits::new(200_000, 4_096);
     assert_eq!(fit_output_limit(Some(small), Some(1_000)), Some(4_096));
-    assert_eq!(fit_output_limit(Some(small), Some(199_999)), Some(1));
+    assert_eq!(
+        fit_output_limit(Some(small), Some(199_999)),
+        Some(OUTPUT_LIMIT_MIN),
+        "a full window still asks for the provider minimum, never zero or one"
+    );
     assert_eq!(fit_output_limit(None, Some(1_000)), None);
 }
 

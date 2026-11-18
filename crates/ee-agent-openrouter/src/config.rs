@@ -577,10 +577,18 @@ impl Config {
             .or_else(|| Self::env_or_dotenv("OPENROUTER_MODEL", dotenv))
             .filter(|value| !value.trim().is_empty())
             .or_else(|| file.default_model.clone())
-            .unwrap_or_else(|| String::from(DEFAULT_MODEL));
+            .unwrap_or_else(|| default_model_for(&file));
         let base = base_model_id(&selected).to_string();
         if file.resolve(&base).disabled {
             return Err(ConfigError::DisabledModel { model_id: base });
+        }
+        // An empty `model#` selector is a configuration mistake, not "no
+        // variant": OpenCode already fails closed on it and both agents must
+        // agree.
+        if selected.contains('#')
+            && selected.rsplit_once('#').is_some_and(|(_, variant)| variant.trim().is_empty())
+        {
+            return Err(ConfigError::MissingVariant { model_id: base });
         }
         let model = match file.resolve(&base).variant {
             Some(variant) if !selected.contains('#') => {
@@ -623,16 +631,23 @@ impl Config {
             .context_window
             .or_else(|| catalog_limits.map(|limits| limits.context))
             .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
+        // A disabled small model never becomes the critic: skip it here so the
+        // provider reports "no critic configured" instead of routing to a model
+        // the caller removed from service.
+        let small_model = args
+            .rubber_duck_model
+            .clone()
+            .or_else(|| file.small_model.clone())
+            .filter(|id| !file.resolve(base_model_id(id)).disabled);
+        let has_small_model = small_model.is_some();
         let resolved = file.resolve(base_model_id(&model));
         Ok(Self {
             model,
             model_family: args.model_family,
             rubber_duck: RubberDuckConfig {
                 mode: args.rubber_duck_mode,
-                backend: args.rubber_duck_model.as_ref().or(file.small_model.as_ref()).map(|_| {
-                    RubberDuckBackend::InternalModel {
-                        model_id: ee_agent_orchestrator::RUBBER_DUCK_ROLE.to_string(),
-                    }
+                backend: has_small_model.then(|| RubberDuckBackend::InternalModel {
+                    model_id: ee_agent_orchestrator::RUBBER_DUCK_ROLE.to_string(),
                 }),
 
                 max_calls: args.rubber_duck_max_calls,
@@ -644,7 +659,7 @@ impl Config {
                 timeout: Duration::from_millis(args.rubber_duck_timeout_ms),
             },
 
-            rubber_duck_model: args.rubber_duck_model.or(file.small_model.clone()),
+            rubber_duck_model: small_model,
 
             rubber_duck_model_family: args.rubber_duck_model_family,
 
@@ -762,6 +777,20 @@ pub(crate) fn base_model_id(model: &str) -> &str {
         Some((base, _)) => base.trim(),
         None => model.trim(),
     }
+}
+
+/// Picks a deterministic default model when none was configured.
+///
+/// Walks the catalog's active chat models in id order and takes the first the
+/// configuration file has not disabled. Falls back to [`DEFAULT_MODEL`] when the
+/// catalog is empty, which keeps a generated-table defect from making startup
+/// impossible.
+fn default_model_for(file: &crate::config_file::FileConfig) -> String {
+    crate::catalog::chat_model_ids()
+        .into_iter()
+        .find(|id| !file.resolve(id).disabled)
+        .map(str::to_string)
+        .unwrap_or_else(|| String::from(DEFAULT_MODEL))
 }
 
 #[cfg(test)]

@@ -186,7 +186,8 @@ impl std::fmt::Display for ConfigError {
             ),
             Self::MissingModel => write!(
                 formatter,
-                "{MODEL_ENV} is required: set an exact documented model id for the selected surface"
+                "no model is configured and the selected surface has no enabled chat model: set \
+                 {MODEL_ENV} to an exact documented model id"
             ),
             Self::UnknownModel { surface, model_id } => write!(
                 formatter,

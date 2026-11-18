@@ -123,6 +123,44 @@ fn model_id_variant_suffix_is_split_and_the_base_id_resolves() {
 }
 
 #[test]
+fn an_empty_variant_selector_is_rejected() {
+    let mut parsed = args();
+    parsed.model = Some(String::from("deepseek/deepseek-v4-flash#"));
+    let error =
+        Config::from_args_and_dotenv(parsed, &BTreeMap::new()).expect_err("empty variant rejected");
+    assert!(matches!(error, ConfigError::MissingVariant { .. }), "{error}");
+}
+
+#[test]
+fn an_unconfigured_model_resolves_to_the_first_catalog_chat_model() {
+    let ids = crate::catalog::chat_model_ids();
+    let expected = ids.first().copied().expect("the catalog has chat models");
+    let mut parsed = args();
+    parsed.model = None;
+    let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new()).expect("config resolves");
+    assert_eq!(config.base_model(), expected, "deterministic catalog default");
+}
+
+#[test]
+fn a_disabled_small_model_never_becomes_the_critic() {
+    let mut file = crate::config_file::FileConfig {
+        small_model: Some(String::from("anthropic/claude-haiku-4.5")),
+        ..crate::config_file::FileConfig::default()
+    };
+    file.models.insert(
+        String::from("anthropic/claude-haiku-4.5"),
+        crate::config_file::ModelEntry {
+            disabled: true,
+            ..crate::config_file::ModelEntry::default()
+        },
+    );
+    let config = Config::from_args_and_dotenv_with_file(args(), &BTreeMap::new(), file)
+        .expect("config resolves");
+    assert!(config.rubber_duck_model.is_none(), "a disabled small model is skipped");
+    assert!(config.rubber_duck.backend.is_none());
+}
+
+#[test]
 fn api_kind_parses_the_documented_routes() {
     assert_eq!(OpenRouterApiKind::parse("chat"), Ok(OpenRouterApiKind::Chat));
     assert_eq!(OpenRouterApiKind::parse("RESPONSES"), Ok(OpenRouterApiKind::Responses));
@@ -359,7 +397,7 @@ fn native_compaction_is_refused_because_no_route_advertises_it() {
 #[test]
 fn config_file_body_overlay_reaches_the_profile() {
     let file = crate::config_file::parse(&serde_json::json!({
-        "body": { "provider": { "sort": "throughput" } }
+        "provider": { "body": { "provider": { "sort": "throughput" } } }
     }))
     .expect("file parses");
     let config = Config::from_args_and_dotenv_with_file(args(), &BTreeMap::new(), file)

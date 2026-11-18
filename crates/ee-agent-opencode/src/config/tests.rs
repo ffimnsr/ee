@@ -117,11 +117,15 @@ fn missing_and_unknown_selectors_fail_before_any_request() {
             .expect_err("missing surface"),
         ConfigError::MissingSurface
     );
-    assert_eq!(
-        Config::from_args_and_dotenv(args(Some("go"), None), &BTreeMap::new())
-            .expect_err("missing model"),
-        ConfigError::MissingModel
-    );
+    // No configured model resolves to the first active chat model on the
+    // surface, deterministically.
+    let default = crate::routes::chat_model_ids(OpenCodeSurface::Go)
+        .first()
+        .copied()
+        .expect("the go surface has active chat models");
+    let config = Config::from_args_and_dotenv(args(Some("go"), None), &BTreeMap::new())
+        .expect("deterministic default model");
+    assert_eq!(config.route.model_id, default);
     assert_eq!(
         Config::from_args_and_dotenv(
             args(Some("zen"), Some("kimi-k4")),
@@ -164,6 +168,10 @@ fn setup_manifest_requires_explicit_selectors_and_a_secret_key() {
     assert_eq!(model.config.env, MODEL_ENV);
     assert!(surface.default.is_none(), "no surface is chosen by default");
     assert!(model.default.is_none(), "no model is chosen by default");
+    // An installed agent must not pin a whole-turn timeout: the reference
+    // defaults to unbounded total with phase budgets.
+    let timeout = manifest.inputs.iter().find(|input| input.key == "timeout_ms").expect("timeout");
+    assert!(timeout.default.is_none(), "a whole-turn timeout is opt-in, not a manifest default");
     let serialized = serde_json::to_string(&manifest).expect("manifest serializes");
     assert!(!serialized.contains("sk-"), "the manifest never carries a key");
 }
@@ -389,7 +397,8 @@ fn config_error_messages_are_deterministic() {
     );
     assert_eq!(
         ConfigError::MissingModel.to_string(),
-        "OPENCODE_MODEL is required: set an exact documented model id for the selected surface"
+        "no model is configured and the selected surface has no enabled chat model: set \
+         OPENCODE_MODEL to an exact documented model id"
     );
     assert_eq!(
         ConfigError::UnsupportedSurface { value: String::from("opencode") }.to_string(),
@@ -522,6 +531,22 @@ fn unsupported_mode_and_effort_values_fail_before_any_request() {
         .expect_err("unsupported effort is rejected at startup");
     assert!(error.to_string().contains("expected \"none\", \"minimal\", \"low\""), "{error}");
     assert!(!error.to_string().contains("sk-"), "{error}");
+}
+
+#[test]
+fn a_disabled_small_model_never_becomes_the_critic() {
+    let file = crate::config_file::parse(&serde_json::json!({
+        "small_model": "kimi-k3",
+        "models": { "kimi-k3": { "disabled": true } }
+    }))
+    .expect("file parses");
+    let config = Config::from_args_and_dotenv_with_file(
+        args(Some("zen"), Some("gpt-5.5")),
+        &BTreeMap::new(),
+        file,
+    )
+    .expect("config resolves");
+    assert!(config.critic_model.is_none(), "a disabled small model is skipped");
 }
 
 #[test]
@@ -778,7 +803,7 @@ fn free_models_are_refused_when_the_switch_is_on() {
 #[test]
 fn config_file_headers_reach_the_profile_but_credentials_do_not() {
     let file = crate::config_file::parse(&serde_json::json!({
-        "headers": { "x-request-source": "ee" }
+        "provider": { "headers": { "x-request-source": "ee" } }
     }))
     .expect("file parses");
     let config = Config::from_args_and_dotenv_with_file(
@@ -796,7 +821,7 @@ fn config_file_headers_reach_the_profile_but_credentials_do_not() {
     );
 
     let file = crate::config_file::parse(&serde_json::json!({
-        "headers": { "authorization": "Bearer override" }
+        "provider": { "headers": { "authorization": "Bearer override" } }
     }))
     .expect("file parses");
     let config = Config::from_args_and_dotenv_with_file(

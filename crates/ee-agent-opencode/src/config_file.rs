@@ -14,13 +14,18 @@
 //!   "small_model": "gpt-5.5-mini",
 //!   "disable_free_models": false,
 //!   "org_id": "${OPENCODE_ORG_ID}",
-//!   "headers": { "x-request-source": "ee" },
-//!   "body": { "safety_identifier": "ee-agent" },
+//!   "provider": {
+//!     "headers": { "x-request-source": "ee" },
+//!     "body": { "safety_identifier": "ee-agent" }
+//!   },
 //!   "models": {
 //!     "gpt-5.5": { "disabled": false, "variant": "high", "headers": {}, "body": {} }
 //!   }
 //! }
 //! ```
+//!
+//! Provider-wide overlays live under `provider`; a top-level `headers` or `body`
+//! is rejected so one file cannot have two meanings for the same key.
 //!
 //! Unknown keys are ignored so an upstream option does not require an ee
 //! release. `baseURL` is deliberately rejected: OpenCode endpoints are
@@ -205,15 +210,30 @@ pub fn load_from(
 pub fn parse(value: &Value) -> Result<FileConfig, String> {
     let object = value.as_object().ok_or_else(|| String::from("expected a JSON object"))?;
     reject_base_url(object, "")?;
+    if object.contains_key("headers") || object.contains_key("body") {
+        return Err(String::from(
+            "headers/body must be nested under the \"provider\" object, not at the top level",
+        ));
+    }
     Ok(FileConfig {
         default_surface: optional_string(object, "default_surface")?,
         default_model: optional_string(object, "default_model")?,
         small_model: optional_string(object, "small_model")?,
         disable_free_models: optional_bool(object, "disable_free_models")?.unwrap_or(false),
         org_id: optional_string(object, "org_id")?,
-        provider: overlay(object, "")?,
+        provider: provider_overlay(object)?,
         models: models(object)?,
     })
+}
+
+/// Parses the nested `provider` header/body overlay.
+fn provider_overlay(object: &serde_json::Map<String, Value>) -> Result<Overlay, String> {
+    let Some(value) = object.get("provider") else {
+        return Ok(Overlay::default());
+    };
+    let block = value.as_object().ok_or_else(|| String::from("provider must be an object"))?;
+    reject_base_url(block, "provider.")?;
+    overlay(block, "provider.")
 }
 
 /// Parses the per-model map.

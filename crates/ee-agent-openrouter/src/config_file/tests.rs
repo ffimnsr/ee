@@ -19,8 +19,10 @@ fn parses_selection_endpoints_and_overrides() {
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
         "responses_url": "https://openrouter.ai/api/v1/responses",
         "compaction_mode": "auto",
-        "headers": { "x-request-source": "ee" },
-        "body": { "provider": { "sort": "throughput" } },
+        "provider": {
+            "headers": { "x-request-source": "ee" },
+            "body": { "provider": { "sort": "throughput" } }
+        },
         "models": {
             "deepseek/deepseek-v4-flash": {
                 "variant": "high",
@@ -51,8 +53,11 @@ fn wrong_types_name_the_key() {
     let error = parse(&json!({ "default_model": 5 })).expect_err("rejected");
     assert!(error.contains("default_model"), "{error}");
 
-    let error = parse(&json!({ "body": [] })).expect_err("rejected");
-    assert!(error.contains("body"), "{error}");
+    let error = parse(&json!({ "provider": { "body": [] } })).expect_err("rejected");
+    assert!(error.contains("provider.body"), "{error}");
+
+    let error = parse(&json!({ "body": {} })).expect_err("rejected");
+    assert!(error.contains("nested under"), "{error}");
 }
 
 #[test]
@@ -78,7 +83,8 @@ fn missing_file_is_not_an_error() {
 fn loaded_file_interpolates_before_parsing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("agent-openrouter.json");
-    std::fs::write(&path, r#"{"headers":{"x-key":"${OPENROUTER_API_KEY}"}}"#).expect("write");
+    std::fs::write(&path, r#"{"provider":{"headers":{"x-key":"${OPENROUTER_API_KEY}"}}}"#)
+        .expect("write");
     let config = load_from(&path, &mut lookup).expect("loads");
     assert_eq!(config.provider.headers[0].1, "sk-or-test");
 }

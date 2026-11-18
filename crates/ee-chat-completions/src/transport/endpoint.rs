@@ -16,6 +16,30 @@ use super::sse::{extend_bounded, next_chunk};
 /// Maximum bytes read from one JSON response body (success or error).
 pub const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Builds the request URL with the profile's query parameters appended.
+///
+/// Every pair is percent-encoded exactly once by the URL API, so a value that
+/// contains `?`, `&`, or `=` cannot introduce another parameter. Callers keep
+/// keys unique (the profile builder does), so the result never carries a
+/// duplicate parameter.
+///
+/// # Errors
+///
+/// Returns the URL parser diagnostic when the endpoint is not a URL.
+fn endpoint_with_query(
+    endpoint: &str,
+    query: &[(String, String)],
+) -> Result<url::Url, url::ParseError> {
+    let mut url = url::Url::parse(endpoint)?;
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
+    Ok(url)
+}
+
 /// An authorized endpoint: the only place a bearer credential is attached.
 ///
 /// The endpoint comes from the provider's validated profile, so no caller can
@@ -129,16 +153,9 @@ impl EndpointTransport {
     /// Endpoint URL with the profile's query parameters appended.
     fn endpoint_url(&self) -> Result<url::Url, ProviderError> {
         let label = self.profile.label.as_str();
-        let mut url = url::Url::parse(self.profile.endpoint.as_str()).map_err(|error| {
+        endpoint_with_query(self.profile.endpoint.as_str(), &self.profile.query).map_err(|error| {
             ProviderError::BackendFailure(format!("{label} endpoint is not a URL: {error}"))
-        })?;
-        if !self.profile.query.is_empty() {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in &self.profile.query {
-                pairs.append_pair(key, value);
-            }
-        }
-        Ok(url)
+        })
     }
 
     /// Reads a response body as JSON, bounded by [`MAX_JSON_BODY_BYTES`].
@@ -335,5 +352,43 @@ pub(crate) fn request_contains_image(value: &Value) -> bool {
         Value::Array(items) => items.iter().any(request_contains_image),
         Value::String(text) => text.starts_with("data:image/"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_values_are_encoded_exactly_once() {
+        let url = endpoint_with_query(
+            "https://example.test/v1/chat/completions",
+            &[(String::from("trace"), String::from("a&b=c?d"))],
+        )
+        .expect("valid");
+        assert_eq!(url.as_str(), "https://example.test/v1/chat/completions?trace=a%26b%3Dc%3Fd");
+        let pairs: Vec<(String, String)> =
+            url.query_pairs().map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
+        assert_eq!(pairs, vec![(String::from("trace"), String::from("a&b=c?d"))]);
+    }
+
+    #[test]
+    fn a_query_value_cannot_inject_another_parameter() {
+        let url = endpoint_with_query(
+            "https://example.test/v1/chat/completions",
+            &[(String::from("a"), String::from("1&key=secret"))],
+        )
+        .expect("valid");
+        let pairs: Vec<(String, String)> =
+            url.query_pairs().map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "a");
+        assert!(pairs.iter().all(|(key, _)| key != "key"));
+    }
+
+    #[test]
+    fn an_endpoint_without_query_stays_unchanged() {
+        let url = endpoint_with_query("https://example.test/v1/models", &[]).expect("valid");
+        assert_eq!(url.as_str(), "https://example.test/v1/models");
     }
 }

@@ -340,12 +340,13 @@ impl LoopEngine {
                     &response.usage,
                 );
             }
-            // Report the context-window usage: the model call's input tokens
-            // are the full context sent this round; the window size comes
-            // from the configuration.  Unknown usage emits nothing.
-            if let Some(input_tokens) = response.usage.input_tokens {
+            // Report the context-window usage. The provider's own context size
+            // (input plus cache read/write on Anthropic-style payloads) is the
+            // truest measure; otherwise the round's input tokens stand in. The
+            // window size comes from the configuration.
+            if let Some(used) = response.usage.context_tokens.or(response.usage.input_tokens) {
                 let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
-                    input_tokens as u64,
+                    used as u64,
                     self.config.context_window_tokens,
                 )));
             }

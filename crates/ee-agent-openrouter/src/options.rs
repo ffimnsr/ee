@@ -144,6 +144,9 @@ impl OpenRouterOptions {
             .filter(|value| !value.trim().is_empty())
             .map(|value| parse_object("OPENROUTER_OPTIONS_JSON", value))
             .transpose()?;
+        if let Some(value) = passthrough.as_ref() {
+            validate_passthrough(value)?;
+        }
         let include_usage =
             include_usage.as_deref().map(parse_boolish).transpose()?.unwrap_or(true);
         let max_output_tokens = max_output_tokens
@@ -475,6 +478,40 @@ fn parse_object(name: &str, raw: &str) -> Result<Value, String> {
     Ok(value)
 }
 
+/// Type-checks the documented keys of the free-form `OPENROUTER_OPTIONS_JSON`.
+///
+/// Unknown keys pass through, mirroring the reference provider, but a known key
+/// with the wrong JSON type fails at startup instead of reaching the request
+/// body: `{"provider": 5}` would otherwise replace provider routing with a
+/// scalar and make every call fail at the endpoint.
+fn validate_passthrough(value: &Value) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for (key, value) in object {
+        let valid = match key.as_str() {
+            "provider" | "reasoning" | "web_search_options" | "stream_options" => value.is_object(),
+            "plugins" => value
+                .as_array()
+                .is_some_and(|entries| entries.iter().all(|entry| entry.is_object())),
+            "models" => value
+                .as_array()
+                .is_some_and(|models| models.iter().all(|model| model.as_str().is_some())),
+            "usage" => value.is_boolean() || value.is_object(),
+            "user" | "session_id" => value.is_string(),
+            "debug" => value.is_boolean() || value.is_object(),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!(
+                "OPENROUTER_OPTIONS_JSON.{key} has the wrong type; see the OpenRouter chat \
+                 request fields"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_plugins(raw: &str) -> Result<Value, String> {
     if raw.len() > MAX_OPTION_JSON_BYTES {
         return Err(format!("OPENROUTER_PLUGINS must be at most {MAX_OPTION_JSON_BYTES} bytes"));
@@ -565,17 +602,18 @@ fn reasoning_object(
         object.insert("effort".into(), json!(effort));
     }
     if let Some(max_tokens) = max_tokens {
-        // The thinking budget must stay below the output bound; Anthropic
-        // upstreams reject anything below 1,024 tokens.
+        // OpenRouter forwards the budget as the upstream thinking allowance.
+        // Match the reference fit: keep the request when it is at most half the
+        // output bound, otherwise halve the bound with the provider minimum as
+        // the floor. A small output bound never fails startup, because the
+        // provider still receives a legal body.
         let fitted = match max_output_tokens {
             Some(output) => {
-                let ceiling = output.saturating_sub(1).max(1);
-                if ceiling < 1_024 {
-                    return Err(String::from(
-                        "OPENROUTER_MAX_OUTPUT_TOKENS must exceed the reasoning budget floor of 1024",
-                    ));
+                if max_tokens <= output / 2 {
+                    max_tokens
+                } else {
+                    (output / 2).max(1_024)
                 }
-                max_tokens.clamp(1_024, ceiling)
             }
             None => max_tokens,
         };
@@ -690,6 +728,51 @@ mod tests {
         assert!(
             responses.get("usage").is_none(),
             "the responses route receives no chat-only field"
+        );
+    }
+
+    #[test]
+    fn a_reasoning_budget_is_fitted_to_half_the_output_bound() {
+        let keep = reasoning_object(None, Some(String::from("4000")), Some(20_000))
+            .expect("valid")
+            .expect("budget");
+        assert_eq!(keep["max_tokens"], 4_000, "half the bound keeps the request as-is");
+
+        let halved = reasoning_object(None, Some(String::from("12000")), Some(20_000))
+            .expect("valid")
+            .expect("budget");
+        assert_eq!(halved["max_tokens"], 10_000, "the reference halves the output bound");
+
+        let floored = reasoning_object(None, Some(String::from("12000")), Some(1_000))
+            .expect("valid")
+            .expect("budget");
+        assert_eq!(floored["max_tokens"], 1_024, "the provider minimum is the floor");
+
+        let unbounded = reasoning_object(None, Some(String::from("12000")), None)
+            .expect("valid")
+            .expect("budget");
+        assert_eq!(unbounded["max_tokens"], 12_000, "no output bound means no fit");
+    }
+
+    #[test]
+    fn passthrough_known_keys_are_type_checked_at_startup() {
+        let mut raw = sources();
+        raw.passthrough = Some(String::from(r#"{"provider": 5}"#));
+        let error = OpenRouterOptions::parse(raw, None).expect_err("rejected");
+        assert!(error.contains("OPENROUTER_OPTIONS_JSON.provider"), "{error}");
+
+        let mut raw = sources();
+        raw.passthrough = Some(String::from(r#"{"models": [1, 2]}"#));
+        let error = OpenRouterOptions::parse(raw, None).expect_err("rejected");
+        assert!(error.contains("OPENROUTER_OPTIONS_JSON.models"), "{error}");
+
+        let mut raw = sources();
+        raw.passthrough =
+            Some(String::from(r#"{"provider":{"sort":"throughput"},"unknown_key":17}"#));
+        let options = OpenRouterOptions::parse(raw, None).expect("unknown keys pass through");
+        assert_eq!(
+            options.body_extensions_for(OpenRouterApiKind::Chat)["provider"]["sort"],
+            "throughput"
         );
     }
 }

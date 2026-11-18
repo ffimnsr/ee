@@ -29,6 +29,7 @@ use crate::reasoning::{self, ReasoningEffort};
 use crate::routes::{self, OpenCodeRoute, OpenCodeSurface};
 
 mod error;
+mod manifest;
 mod options;
 
 pub use error::ConfigError;
@@ -89,130 +90,7 @@ pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 pub const MISSING_API_KEY: &str = "OPENCODE_API_KEY is not set; export it before starting ee";
 
 /// Builds the setup manifest emitted by `ee-agent-opencode --ee-config`.
-///
-/// Neither surface nor model carries a default: the manifest requires an
-/// explicit choice so no billable model is selected implicitly.
-#[must_use]
-pub fn setup_manifest() -> SetupManifest {
-    SetupManifest {
-        schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
-        agent: SetupAgent { id: String::from("opencode"), display_name: String::from("OpenCode") },
-        env_vars: vec![
-            SetupEnvVar {
-                name: String::from(API_KEY_ENV),
-                required: true,
-                secret: true,
-                description: String::from(API_KEY_DESCRIPTION),
-            },
-            SetupEnvVar {
-                name: String::from("OPENCODE_ORG_ID"),
-                required: false,
-                secret: false,
-                description: String::from(
-                    "Optional OpenCode workspace organization id used only by --usage to read subscription budgets and the Go meter; never inferred from the API key.",
-                ),
-            },
-        ],
-        inputs: vec![
-            SetupInput {
-                key: String::from("surface"),
-                label: String::from(SURFACE_LABEL),
-                default: None,
-                config: SetupInputConfig { env: String::from(SURFACE_ENV) },
-            },
-            SetupInput {
-                key: String::from("model"),
-                label: String::from(MODEL_LABEL),
-                default: None,
-                config: SetupInputConfig { env: String::from(MODEL_ENV) },
-            },
-            SetupInput {
-                key: String::from("critic_model"),
-                label: String::from(CRITIC_LABEL),
-                default: None,
-                config: SetupInputConfig { env: String::from(CRITIC_MODEL_ENV) },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_mode"),
-                label: String::from("Rubber duck mode (off, manual, automatic)"),
-                default: Some(String::from("manual")),
-                config: SetupInputConfig { env: String::from(RUBBER_DUCK_MODE_ENV) },
-            },
-            SetupInput {
-                key: String::from("reasoning_effort"),
-                label: String::from(
-                    "Reasoning effort (low, medium, high; leave empty to send the dialect default)",
-                ),
-                default: None,
-                config: SetupInputConfig { env: String::from(REASONING_EFFORT_ENV) },
-            },
-            SetupInput {
-                key: String::from("system_prompt"),
-                label: String::from("System prompt"),
-                default: Some(String::from(DEFAULT_SYSTEM_PROMPT)),
-                config: SetupInputConfig { env: String::from("OPENCODE_SYSTEM_PROMPT") },
-            },
-            SetupInput {
-                key: String::from("timeout_ms"),
-                label: String::from("Request timeout in milliseconds"),
-                default: Some(DEFAULT_TIMEOUT_MS.to_string()),
-                config: SetupInputConfig { env: String::from("OPENCODE_TIMEOUT_MS") },
-            },
-            SetupInput {
-                key: String::from("max_iterations"),
-                label: String::from(
-                    "Maximum tool-loop iterations per prompt turn (blank = unlimited)",
-                ),
-                default: None,
-                config: SetupInputConfig { env: String::from("OPENCODE_MAX_ITERATIONS") },
-            },
-            SetupInput {
-                key: String::from("context_window"),
-                label: String::from(
-                    "Model context-window size in tokens (blank = catalog limit or default)",
-                ),
-                default: None,
-                config: SetupInputConfig { env: String::from("OPENCODE_CONTEXT_WINDOW") },
-            },
-            SetupInput {
-                key: String::from("max_output_tokens"),
-                label: String::from("Maximum output tokens per model call (blank = catalog limit)"),
-                default: None,
-                config: SetupInputConfig { env: String::from("OPENCODE_MAX_OUTPUT_TOKENS") },
-            },
-            SetupInput {
-                key: String::from("retry_max_attempts"),
-                label: String::from("Maximum transient retries per model call"),
-                default: Some(DEFAULT_RETRY_MAX_ATTEMPTS.to_string()),
-                config: SetupInputConfig { env: String::from("OPENCODE_RETRY_MAX_ATTEMPTS") },
-            },
-            SetupInput {
-                key: String::from("retry_base_delay_ms"),
-                label: String::from("Initial retry backoff in milliseconds"),
-                default: Some(DEFAULT_RETRY_BASE_DELAY_MS.to_string()),
-                config: SetupInputConfig { env: String::from("OPENCODE_RETRY_BASE_DELAY_MS") },
-            },
-            SetupInput {
-                key: String::from("retry_max_delay_ms"),
-                label: String::from("Retry backoff cap in milliseconds"),
-                default: Some(DEFAULT_RETRY_MAX_DELAY_MS.to_string()),
-                config: SetupInputConfig { env: String::from("OPENCODE_RETRY_MAX_DELAY_MS") },
-            },
-            SetupInput {
-                key: String::from("checkpoint_dir"),
-                label: String::from("Durable checkpoint directory for recovery (optional)"),
-                default: None,
-                config: SetupInputConfig { env: String::from("EE_CHECKPOINT_DIR") },
-            },
-            SetupInput {
-                key: String::from("session_log_dir"),
-                label: String::from("Durable session-log directory (optional)"),
-                default: None,
-                config: SetupInputConfig { env: String::from("EE_SESSION_LOG_DIR") },
-            },
-        ],
-    }
-}
+pub use manifest::setup_manifest;
 
 fn parse_positive_u64(value: &str) -> Result<u64, String> {
     let value = value.parse::<u64>().map_err(|_| String::from("must be a positive integer"))?;
@@ -233,6 +111,31 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
 /// Whether a catalog cost declares the model free.
 fn is_free_model(cost: Option<crate::catalog::ModelCost>) -> bool {
     cost.is_some_and(|cost| cost.input_micros == 0 && cost.output_micros == 0)
+}
+
+/// Picks a deterministic default model when none was configured.
+///
+/// Walks the surface's active chat models in id order and takes the first the
+/// caller has not disabled (and that is not free when the free-model filter is
+/// on), so two runs never disagree about the default.
+fn default_model_for(
+    surface: &OpenCodeSurface,
+    file: &crate::config_file::FileConfig,
+    disable_free_models: bool,
+) -> Result<String, ConfigError> {
+    for id in routes::chat_model_ids(*surface) {
+        if file.resolve(id).disabled {
+            continue;
+        }
+        let Ok(route) = routes::resolve_route(*surface, id) else {
+            continue;
+        };
+        if disable_free_models && is_free_model(route.cost()) {
+            continue;
+        }
+        return Ok(id.to_string());
+    }
+    Err(ConfigError::MissingModel)
 }
 
 /// Parses the rubber-duck mode selector.
@@ -537,12 +440,17 @@ impl Config {
             Some(value) => OpenCodeSurface::parse(&value)?,
             None => return Err(ConfigError::MissingSurface),
         };
-        let model = args
+        let model = match args
             .model
             .or_else(|| env_or_dotenv(MODEL_ENV, dotenv))
             .filter(|value| !value.trim().is_empty())
             .or_else(|| file.default_model.clone())
-            .ok_or(ConfigError::MissingModel)?;
+        {
+            Some(model) => model,
+            // Deterministic fallback: the first active chat model the caller has
+            // not disabled, in catalog id order.
+            None => default_model_for(&surface, &file, disable_free_models)?,
+        };
         let base_id = model.rsplit_once('#').map_or(model.trim(), |(base, _)| base.trim());
         if file.resolve(base_id).disabled {
             return Err(ConfigError::DisabledModel { model_id: base_id.to_string() });
@@ -616,14 +524,21 @@ impl Config {
                 maximum: limits.output,
             });
         }
+        // A disabled small model never becomes the critic; the critic builder
+        // then reports "no critic model configured" instead of routing to it.
+        let critic_model = args
+            .critic_model
+            .or_else(|| env_or_dotenv(CRITIC_MODEL_ENV, dotenv))
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| file.small_model.clone())
+            .filter(|id| {
+                let base = id.rsplit_once('#').map_or(id.trim(), |(base, _)| base.trim());
+                !file.resolve(base).disabled
+            });
         Ok(Self {
             route,
             api_key: env_or_dotenv(API_KEY_ENV, dotenv),
-            critic_model: args
-                .critic_model
-                .or_else(|| env_or_dotenv(CRITIC_MODEL_ENV, dotenv))
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| file.small_model.clone()),
+            critic_model,
             rubber_duck: RubberDuckConfig {
                 mode: match args
                     .rubber_duck_mode
