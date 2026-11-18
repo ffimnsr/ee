@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "label": "openrouter-retry-rate-limited",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "authorization", "value": "<redacted>" }
+        ],
+        "body": "{\"model\":\"example/model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}],\"stream\":false}"
+      },
+      "response": {
+        "status": 429,
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "retry-after", "value": "0" },
+          { "name": "x-ratelimit-limit", "value": "20" },
+          { "name": "x-ratelimit-remaining", "value": "0" }
+        ],
+        "body": "{\"error\":{\"message\":\"rate limited, retry later\",\"type\":\"rate_limit_error\"}}"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "authorization", "value": "<redacted>" }
+        ],
+        "body": "{\"model\":\"example/model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}],\"stream\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          { "name": "content-type", "value": "application/json" }
+        ],
+        "body": "{\"id\":\"chatcmpl-openrouter-1\",\"object\":\"chat.completion\",\"created\":1763500001,\"model\":\"example/model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}"
+      }
+    }
+  ]
+}

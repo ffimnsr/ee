@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "label": "gemini-chat-stream",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "authorization", "value": "<redacted>" }
+        ],
+        "body": "{\"model\":\"gemini-2.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}],\"stream\":true}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          { "name": "content-type", "value": "text/event-stream" },
+          { "name": "x-request-id", "value": "gemini-request-7f2" }
+        ],
+        "body": "data: {\"id\":\"chatcmpl-gemini-7f2\",\"object\":\"chat.completion.chunk\",\"created\":1763500000,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-gemini-7f2\",\"object\":\"chat.completion.chunk\",\"created\":1763500000,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pong\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-gemini-7f2\",\"object\":\"chat.completion.chunk\",\"created\":1763500000,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1,\"total_tokens\":10}}\n\ndata: [DONE]\n\n"
+      }
+    }
+  ]
+}

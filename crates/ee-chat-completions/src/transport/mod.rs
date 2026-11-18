@@ -8,11 +8,16 @@
 //! the same transport and retry boundary.
 //!
 //! Layout: [`sse`] frames server-sent events, [`endpoint`] owns the authorized
-//! exchange, [`client`] is the Chat Completions codec, and [`retry`] is the shared
-//! retry boundary.
+//! exchange, [`client`] is the Chat Completions codec, [`retry`] is the shared
+//! retry boundary, and the record/replay backends let a test run the same codec
+//! against a recorded provider exchange instead of the network.
 
+mod backend;
+mod cassette;
 mod client;
 mod endpoint;
+mod recording;
+mod replay;
 mod retry;
 mod sse;
 
@@ -28,8 +33,18 @@ use ee_agent_acp_server::ProviderError;
 
 use crate::wire::StreamDelta;
 
+pub use backend::{
+    BackendFuture, DEFAULT_REPLAY_CHUNK_BYTES, HttpBackend, HttpResponse, PreparedRequest,
+};
+pub use cassette::{
+    CASSETTE_VERSION, Cassette, MAX_CASSETTE_BYTES, MAX_CASSETTE_EXCHANGES,
+    MAX_RECORDED_BODY_BYTES, MAX_RECORDED_HEADERS, REDACTED, RecordedExchange, RecordedHeader,
+    RecordedRequest, RecordedResponse,
+};
 pub use client::{ChatCompletionsClient, ChatRequest};
 pub use endpoint::{EndpointRequest, EndpointTransport, MAX_JSON_BODY_BYTES};
+pub use recording::{Recorder, RecordingBackend, recording_backend};
+pub use replay::Replay;
 pub use retry::{with_buffered_retry, with_stream_retry};
 pub use sse::{ChunkFuture, ChunkSource, SseControl, drive_sse, drive_sse_with_chunk_timeout};
 

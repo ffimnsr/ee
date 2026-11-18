@@ -46,7 +46,7 @@ impl crate::EndpointTransport {
     pub fn with_endpoint(&self, endpoint: TrustedEndpoint) -> Self {
         let mut profile = self.profile.clone();
         profile.endpoint = endpoint;
-        Self { profile, token: self.token.clone(), http: self.http.clone() }
+        self.with_profile(profile)
     }
 }
 

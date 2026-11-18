@@ -141,7 +141,7 @@ impl EndpointTransport {
         let headers = session_headers(&self.profile, context)?;
         let mut profile = self.profile.clone();
         profile.headers.extend(headers);
-        Ok(Self { profile, token: self.token.clone(), http: self.http.clone() })
+        Ok(self.with_profile(profile))
     }
 }
 

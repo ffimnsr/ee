@@ -1,17 +1,18 @@
 //! Authorized endpoint exchange: credential attachment, bounded bodies, phase
 //! budgets.
 
-use std::future::Future;
-use std::time::Duration;
+use std::sync::Arc;
 
-use ee_agent_acp_server::{Delivery, ProviderError};
+use ee_agent_acp_server::ProviderError;
 use reqwest::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::profile::{BearerToken, EndpointProfile, RequestEncoding, TokenSource};
 use crate::wire::classify_status_error;
 
-use super::sse::{extend_bounded, next_chunk};
+use super::backend::{HttpBackend, HttpResponse, LiveBackend, PreparedRequest};
+use super::recording::{Recorder, recording_backend};
+use super::sse::{ChunkSource, extend_bounded, next_chunk};
 
 /// Maximum bytes read from one JSON response body (success or error).
 pub const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -50,6 +51,7 @@ pub struct EndpointTransport {
     pub(crate) profile: EndpointProfile,
     pub(crate) token: TokenSource,
     pub(crate) http: reqwest::Client,
+    pub(crate) backend: Arc<dyn HttpBackend>,
 }
 
 impl EndpointTransport {
@@ -75,7 +77,60 @@ impl EndpointTransport {
     /// Builds a transport over an existing HTTP client (shared pools, tests).
     #[must_use]
     pub fn with_http(profile: EndpointProfile, token: TokenSource, http: reqwest::Client) -> Self {
-        Self { profile, token, http }
+        let backend: Arc<dyn HttpBackend> = Arc::new(LiveBackend::new(
+            http.clone(),
+            profile.timeouts.headers,
+            profile.label.clone(),
+        ));
+        Self { profile, token, http, backend }
+    }
+
+    /// Builds a transport over an injected backend (replay, recording, tests).
+    ///
+    /// `http_client` still returns a live client for callers that issue their own
+    /// requests through it; the injected backend serves the transport's own
+    /// model exchanges.
+    #[must_use]
+    pub fn with_backend(
+        profile: EndpointProfile,
+        token: TokenSource,
+        backend: Arc<dyn HttpBackend>,
+    ) -> Self {
+        Self { profile, token, http: reqwest::Client::new(), backend }
+    }
+
+    /// Builds a transport that records every exchange it sends.
+    ///
+    /// The returned transport still talks to the live endpoint; the recorder is
+    /// the handle that writes the cassette once the run finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the HTTP client construction failure as a diagnostic string.
+    pub fn recording(
+        profile: EndpointProfile,
+        token: TokenSource,
+    ) -> Result<(Self, Arc<Recorder>), String> {
+        let live = Self::new(profile, token)?;
+        let label = live.profile.label.clone();
+        let chunk = live.profile.timeouts.chunk;
+        let (backend, recorder) = recording_backend(live.backend.clone(), label, chunk);
+        Ok((Self { backend, ..live }, recorder))
+    }
+
+    /// Returns a transport with `profile` but the same credential and backend.
+    ///
+    /// Used for sibling operations under the same route and for per-request
+    /// session headers without rebuilding the endpoint or losing a replay or
+    /// recording backend.
+    #[must_use]
+    pub(crate) fn with_profile(&self, profile: EndpointProfile) -> Self {
+        Self {
+            profile,
+            token: self.token.clone(),
+            http: self.http.clone(),
+            backend: self.backend.clone(),
+        }
     }
 
     /// Returns the provider profile this transport was built for.
@@ -85,6 +140,10 @@ impl EndpointTransport {
     }
 
     /// Returns the shared HTTP client.
+    ///
+    /// Only the live backend uses it; a replay transport carries an unused
+    /// client because [`EndpointTransport::http_client`] stays infallible for
+    /// callers that issue their own non-model requests.
     #[must_use]
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http
@@ -136,7 +195,7 @@ impl EndpointTransport {
     /// Returns a typed error when the credential is missing, a header is
     /// invalid, the body cannot be encoded, the header budget expires, or the
     /// request cannot be sent.
-    pub async fn send_json(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
+    pub async fn send_json(&self, body: &Value) -> Result<HttpResponse, ProviderError> {
         let mut headers = self.headers()?;
         if let Some(header) = &self.profile.image_opt_in_header
             && request_contains_image(body)
@@ -146,8 +205,13 @@ impl EndpointTransport {
         let url = self.endpoint_url()?;
         let label = self.profile.label.as_str();
         let payload = encode_body(body, &mut headers, self.profile.encoding, label)?;
-        let request = self.http.post(url).headers(headers).body(payload);
-        send_with_deadline(request.send(), self.profile.timeouts.headers, label).await
+        let request = PreparedRequest {
+            method: String::from("POST"),
+            url: url.to_string(),
+            headers,
+            body: payload,
+        };
+        self.backend.send(request).await
     }
 
     /// Endpoint URL with the profile's query parameters appended.
@@ -161,6 +225,8 @@ impl EndpointTransport {
     /// Reads a response body as JSON, bounded by [`MAX_JSON_BODY_BYTES`].
     ///
     /// `context` names the body in diagnostics (`response`, `error response`).
+    /// Any chunk source works, so a live `reqwest::Response` and a replayed body
+    /// share one reader.
     ///
     /// # Errors
     ///
@@ -168,7 +234,7 @@ impl EndpointTransport {
     /// is not JSON.
     pub async fn read_json(
         &self,
-        response: &mut reqwest::Response,
+        response: &mut dyn ChunkSource,
         context: &str,
     ) -> Result<Value, ProviderError> {
         let label = self.profile.label.as_str();
@@ -224,7 +290,7 @@ impl<'a> EndpointRequest<'a> {
     ///
     /// Returns a typed error when the credential is missing, a header is
     /// invalid, the request cannot be sent, or the status is not successful.
-    pub async fn send(&self) -> Result<reqwest::Response, ProviderError> {
+    pub async fn send(&self) -> Result<HttpResponse, ProviderError> {
         let mut response = self.transport.send_json(self.body).await?;
         let status = response.status();
         if !status.is_success() {
@@ -233,39 +299,6 @@ impl<'a> EndpointRequest<'a> {
             return Err(self.transport.status_error(status, &headers, &value));
         }
         Ok(response)
-    }
-}
-
-/// Maps one failed HTTP send onto a typed transport failure.
-///
-/// A connect failure never reached the provider; anything else may have, so the
-/// delivery stays ambiguous and a billable retry is not attempted blindly.
-fn transport_error(label: &str, error: &reqwest::Error) -> ProviderError {
-    let code = if error.is_timeout() { Some(String::from("Timeout")) } else { io_code(error) };
-    let delivery = if error.is_connect() { Delivery::NotSent } else { Delivery::Ambiguous };
-    ProviderError::Transport { delivery, code, detail: format!("{label} request failed: {error}") }
-}
-
-/// Awaits one request phase under its own budget.
-///
-/// The header phase is bounded separately from the whole request so a provider
-/// that accepts the connection but never answers is distinguishable from a
-/// stream that stalls after the headers arrived.
-async fn send_with_deadline<F, T>(
-    future: F,
-    limit: Duration,
-    label: &str,
-) -> Result<T, ProviderError>
-where
-    F: Future<Output = Result<T, reqwest::Error>>,
-{
-    match tokio::time::timeout(limit, future).await {
-        Ok(result) => result.map_err(|error| transport_error(label, &error)),
-        Err(_) => Err(ProviderError::Transport {
-            delivery: Delivery::Ambiguous,
-            code: Some(String::from("TimeoutHeaders")),
-            detail: format!("{label} response headers did not arrive within the header budget"),
-        }),
     }
 }
 
@@ -304,31 +337,6 @@ fn encode_body(
     };
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding_name));
     Ok(compressed)
-}
-
-/// Network error code of the underlying I/O failure, when one is available.
-fn io_code(error: &reqwest::Error) -> Option<String> {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    while let Some(current) = source {
-        if let Some(io) = current.downcast_ref::<std::io::Error>() {
-            let code = match io.kind() {
-                std::io::ErrorKind::NotFound => Some("ENOTFOUND"),
-                std::io::ErrorKind::ConnectionRefused => Some("ECONNREFUSED"),
-                std::io::ErrorKind::NetworkUnreachable => Some("ENETUNREACH"),
-                std::io::ErrorKind::HostUnreachable => Some("EHOSTUNREACH"),
-                std::io::ErrorKind::NetworkDown => Some("ENETDOWN"),
-                std::io::ErrorKind::TimedOut => Some("Timeout"),
-                _ => None,
-            };
-            if let Some(code) = code {
-                return Some(code.to_string());
-            }
-        }
-        source = current.source();
-    }
-    // A connect failure without an errno is a name-resolution failure, which is
-    // this machine having no path to the provider.
-    error.is_connect().then(|| String::from("ENOTFOUND"))
 }
 
 /// Whether a request body carries an inline image part.

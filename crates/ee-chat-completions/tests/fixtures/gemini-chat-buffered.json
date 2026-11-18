@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "label": "gemini-chat-buffered",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "authorization", "value": "<redacted>" }
+        ],
+        "body": "{\"model\":\"gemini-2.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: pong\"}],\"stream\":false}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "x-request-id", "value": "gemini-request-7f2" }
+        ],
+        "body": "{\"id\":\"chatcmpl-gemini-7f2\",\"object\":\"chat.completion\",\"created\":1763500000,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1,\"total_tokens\":10}}"
+      }
+    }
+  ]
+}

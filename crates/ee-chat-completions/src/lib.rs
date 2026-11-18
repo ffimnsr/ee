@@ -87,9 +87,13 @@ pub use responses_compact::{COMPACT_PATH_SUFFIX, CompactBody, compact_body, deco
 pub use session::{MAX_SESSION_HEADER_VALUE_BYTES, prompt_cache_key, session_headers};
 pub use stream_meta::{chunk_timeout, is_event_stream};
 pub use transport::{
-    ChatCompletionsClient, ChatRequest, ChunkFuture, ChunkSource, DeltaSink, EndpointRequest,
-    EndpointTransport, MAX_JSON_BODY_BYTES, SseControl, StreamAttempt, StreamFuture, drive_sse,
-    drive_sse_with_chunk_timeout, with_buffered_retry, with_stream_retry,
+    BackendFuture, CASSETTE_VERSION, Cassette, ChatCompletionsClient, ChatRequest, ChunkFuture,
+    ChunkSource, DEFAULT_REPLAY_CHUNK_BYTES, DeltaSink, EndpointRequest, EndpointTransport,
+    HttpBackend, HttpResponse, MAX_CASSETTE_BYTES, MAX_CASSETTE_EXCHANGES, MAX_JSON_BODY_BYTES,
+    MAX_RECORDED_BODY_BYTES, MAX_RECORDED_HEADERS, PreparedRequest, REDACTED, RecordedExchange,
+    RecordedHeader, RecordedRequest, RecordedResponse, Recorder, RecordingBackend, Replay,
+    SseControl, StreamAttempt, StreamFuture, drive_sse, drive_sse_with_chunk_timeout,
+    recording_backend, with_buffered_retry, with_stream_retry,
 };
 pub use wire::{
     AssistantTurn, ChatRequestParts, RequestBodyOptions, StreamDelta, ToolCall, Usage,
