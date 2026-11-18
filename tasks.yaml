@@ -15,6 +15,10 @@ tasks:
     commands:
       - cargo +stable test --workspace --all-features
     description: Run tests using the stable Rust toolchain.
+  test:
+    commands:
+      - cargo test --quiet --workspace --locked
+    description: Run all workspace tests (CI parity; builds xi-lsp-plugin bin the ee-cli plugin tests install).
   ci:
     commands:
       - cargo fmt --all --check
