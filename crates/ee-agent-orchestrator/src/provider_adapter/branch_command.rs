@@ -40,6 +40,8 @@ pub(super) struct BranchCommand<'a> {
     pub(super) workspace_roots: &'a [std::path::PathBuf],
     pub(super) provider_label: &'a str,
     pub(super) model_label: &'a str,
+    /// Explicit session model id to carry into the branch, when set.
+    pub(super) selected_model: Option<String>,
     pub(super) mcp_servers: &'a [McpServerDescriptor],
     pub(super) implementation_name: &'a str,
     pub(super) telemetry: &'a Arc<Mutex<TelemetryRecorder>>,
@@ -85,6 +87,10 @@ pub(super) fn handle_branch_command(ctx: BranchCommand<'_>) -> Result<PromptResu
         )?
         .with_plugin_observer(ctx.plugins.bridge().observer(outcome.session_id.clone())),
     );
+    if let Some(model_id) = ctx.selected_model.clone() {
+        // The fork keeps the source session's route, not the process default.
+        branch_runtime.set_selected_model(Some(model_id));
+    }
     // The branch keeps its own session id but inherits the source session's
     // affinity, so the whole fork tree shares one provider cache lineage.
     session_identity::register(

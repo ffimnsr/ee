@@ -22,6 +22,7 @@ impl SubagentManager {
         tools: Arc<Mutex<ToolRegistry>>,
         state: SubagentState,
         observability: SubagentObservability,
+        background_jobs: crate::background_jobs::SharedBackgroundJobs,
     ) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_parallel_subagents));
         let quarantine = Arc::new(Mutex::new(SubagentQuarantine::default()));
@@ -38,6 +39,7 @@ impl SubagentManager {
             children: state.children,
             worktrees: state.worktrees,
             transcripts: state.transcripts,
+            background_jobs,
         }
     }
 
@@ -612,6 +614,7 @@ impl SubagentManager {
                 client,
                 cancel,
                 child.clone(),
+                None,
             )
             .await;
         let tool_call_count =

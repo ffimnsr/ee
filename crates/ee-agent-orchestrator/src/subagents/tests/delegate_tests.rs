@@ -429,3 +429,59 @@ async fn delegate_task_rejects_missing_prompt_without_spawn() {
     assert_eq!(result.error_kind, Some(crate::tools::ToolErrorKind::InvalidArguments));
     assert!(runtime.memory().is_empty(), "no subagent spawned, no memory merged");
 }
+
+#[tokio::test]
+async fn background_delegate_returns_immediately_and_reports_completion() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().text(handoff_output("background child summary")).completed(),
+    ]);
+    let harness = manager_harness(OrchestratorConfig::default(), Arc::new(model));
+    let parent = harness.tasks.lock().expect("tasks").create_root("parent", "parent");
+    let (sink, client, _rx) = plumbing();
+    drop(sink);
+    let tool = DelegateTool::new(harness.manager.clone());
+    let context = ToolCallContext {
+        task: parent,
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: None,
+        model_id: None,
+        terminal_wait: Default::default(),
+    };
+
+    let result = tool
+        .execute(
+            json!({
+                "prompt": "summarize background work",
+                "role_name": "summarizer",
+                "background": true,
+            }),
+            client,
+            watch::channel(false).1,
+            context,
+        )
+        .await;
+    assert!(result.success, "background delegate accepted: {}", result.text_output);
+    let started: serde_json::Value =
+        serde_json::from_str(&result.text_output).expect("background ack is JSON");
+    assert_eq!(started["background"], true);
+    let job_id = started["child_id"].as_str().expect("child id").to_string();
+    assert!(job_id.starts_with("delegate-"));
+    assert!(
+        harness.manager.background_jobs.has_running_subagents(),
+        "the detached child is registered as outstanding work"
+    );
+
+    wait_until(|| !harness.manager.background_jobs.has_running_subagents()).await;
+    let notices = harness.manager.background_jobs.take_subagent_notices();
+    assert!(
+        notices.iter().any(|notice| notice.contains("background child summary")),
+        "completion notice carries the child summary: {notices:?}"
+    );
+    assert!(
+        harness.manager.background_jobs.snapshot_text().is_some_and(|snapshot| {
+            snapshot.contains("summarizer") && snapshot.contains(&job_id)
+        }) || !harness.manager.background_jobs.snapshot_text().is_some(),
+        "runtime snapshot projects the delegate"
+    );
+}

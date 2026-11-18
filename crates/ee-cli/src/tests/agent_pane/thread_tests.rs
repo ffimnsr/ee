@@ -119,14 +119,26 @@ fn stop_all_cancels_every_thread_and_clears_queues() {
 }
 
 #[test]
-fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
+fn steer_injects_into_the_running_turn_and_queue_runs_follow_up_after_turn_finishes() {
     let script = base_script()
-        .wait_for("session/prompt")
-        .wait_for("session/cancel")
-        .wait_for("session/prompt")
-        .respond(json!({ "stopReason": "end_turn" }))
-        .wait_for("session/prompt")
-        .respond(json!({ "stopReason": "end_turn" }));
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "original_id")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "steer_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "original_id" },
+            "result": { "stopReason": "end_turn" }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "steer_id" },
+            "result": { "stopReason": "end_turn" }
+        }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "follow_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "follow_id" },
+            "result": { "stopReason": "end_turn" }
+        }));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -143,10 +155,16 @@ fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     type_text(&mut app, "/steer use additional user context");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(app.agents.threads[0].queued_prompts.len(), 2);
-    assert_eq!(app.agents.threads[0].queued_prompts[0].text, "use additional user context");
-    assert_eq!(app.agents.threads[0].queued_prompts[1].text, "follow up after steer");
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 1);
+    assert_eq!(app.agents.threads[0].queued_prompts[0].text, "follow up after steer");
+    assert!(app.agents.pending_cancels.is_empty(), "steer does not cancel the turn");
 
+    wait_until(&mut app, "steer delivered while the turn runs", |_| {
+        fake.agent()
+            .requests_by_method("session/prompt")
+            .iter()
+            .any(|prompt| prompt["params"]["_meta"]["delivery"] == "steer")
+    });
     wait_until(&mut app, "steered and queued prompts complete", |app| {
         app.agents.threads[0].state == ThreadUiState::Ready
             && fake.agent().requests_by_method("session/prompt").len() == 3
@@ -154,6 +172,7 @@ fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
     let prompts = fake.agent().requests_by_method("session/prompt");
     assert_eq!(prompts[0]["params"]["prompt"][0]["text"], "original task");
     assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "use additional user context");
+    assert_eq!(prompts[1]["params"]["_meta"]["delivery"], "steer");
     assert_eq!(prompts[2]["params"]["prompt"][0]["text"], "follow up after steer");
 }
 

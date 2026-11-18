@@ -21,6 +21,7 @@ fn manager_with(
             Arc::new(Mutex::new(OrchestratorMetrics::new())),
             Arc::new(Mutex::new(DecisionLog::default())),
         ),
+        Arc::new(crate::background_jobs::BackgroundJobRegistry::new()),
     ));
     (manager, tasks)
 }

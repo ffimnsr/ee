@@ -21,6 +21,7 @@ use tokio::sync::watch;
 
 use crate::client::ClientBridge;
 use crate::error::ProviderError;
+use crate::inbox::SteerInbox;
 use crate::updates::UpdateSink;
 
 /// Boxed future returned by provider trait methods.
@@ -124,14 +125,24 @@ pub struct PromptContext {
     pub prompt: Vec<ContentBlock>,
     /// Raw `_meta` from the `session/prompt` request, if present.
     pub metadata: Option<Meta>,
+    /// Mid-turn steer channel.  The provider drains it at each step boundary;
+    /// `None` means the server's prompt inbox is disabled.
+    pub steer: Option<SteerInbox>,
 }
 
 impl PromptContext {
     /// Creates a context with the given session id and prompt content and no
-    /// metadata.
+    /// metadata or steer channel.
     #[must_use]
     pub fn new(session_id: impl Into<SessionId>, prompt: Vec<ContentBlock>) -> Self {
-        Self { session_id: session_id.into(), prompt, metadata: None }
+        Self { session_id: session_id.into(), prompt, metadata: None, steer: None }
+    }
+
+    /// Attaches the running turn's steer channel.
+    #[must_use]
+    pub fn with_steer(mut self, steer: SteerInbox) -> Self {
+        self.steer = Some(steer);
+        self
     }
 }
 
@@ -152,6 +163,26 @@ impl SetModeContext {
     #[must_use]
     pub fn new(session_id: impl Into<SessionId>, mode_id: impl Into<SessionModeId>) -> Self {
         Self { session_id: session_id.into(), mode_id: mode_id.into(), metadata: None }
+    }
+}
+
+/// Validated input for [`AgentProvider::set_model`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetModelContext {
+    /// Session whose model changes.
+    pub session_id: SessionId,
+    /// Registry id of the target model.
+    pub model_id: String,
+    /// Raw `_meta` from the `session/set_model` request, if present.
+    pub metadata: Option<Meta>,
+}
+
+impl SetModelContext {
+    /// Creates a context with the target model and no metadata.
+    #[must_use]
+    pub fn new(session_id: impl Into<SessionId>, model_id: impl Into<String>) -> Self {
+        Self { session_id: session_id.into(), model_id: model_id.into(), metadata: None }
     }
 }
 
@@ -303,6 +334,16 @@ pub trait AgentProvider: Send + Sync + 'static {
         Box::pin(async {
             Err(ProviderError::InvalidRequest(
                 "session/set_mode is not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Switches the session's model on an idle session. Providers that do not
+    /// support mid-session switching keep the default rejection.
+    fn set_model(&self, _ctx: SetModelContext) -> ProviderFuture<Result<(), ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::InvalidRequest(
+                "session/set_model is not supported by this provider".to_string(),
             ))
         })
     }

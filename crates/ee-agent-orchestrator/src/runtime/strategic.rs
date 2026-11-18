@@ -485,7 +485,7 @@ impl OrchestratorRuntime {
         let mut config = self.config.clone();
         config.turn_timeout = remaining;
         let handle = CheckpointHandle::new(self.checkpoints.clone(), session_id, provider);
-        let model = self.models.default_adapter()?;
+        let model = self.model_for_turn()?;
         let engine = LoopEngine::new(
             config,
             model,

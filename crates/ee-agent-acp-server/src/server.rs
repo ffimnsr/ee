@@ -31,6 +31,7 @@ use crate::config::AcpAgentServerConfig;
 use crate::dispatch::{DispatchOutcome, RequestDispatcher};
 use crate::error::{AcpServerError, ProviderError};
 use crate::ids::{MessageIdGenerator, RequestIdGenerator};
+use crate::inbox::PromptInbox;
 use crate::provider::AgentProvider;
 use crate::session::SessionStore;
 use crate::transport::{AcpTransport, JsonRpcFrame, StdioTransport};
@@ -229,6 +230,7 @@ pub struct AcpAgentServer<P> {
     config: std::sync::Arc<AcpAgentServerConfig>,
     sessions: std::sync::Arc<SessionStore>,
     active_prompts: std::sync::Arc<ActivePrompts>,
+    inbox: std::sync::Arc<PromptInbox>,
     outbound_tx: Option<mpsc::UnboundedSender<OutboundEvent>>,
     outbound_rx: Option<mpsc::UnboundedReceiver<OutboundEvent>>,
     /// Pending agent → client requests; the run loop routes inbound client
@@ -250,6 +252,11 @@ impl<P: AgentProvider> AcpAgentServer<P> {
     pub fn new(provider: P, config: AcpAgentServerConfig) -> Self {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let negotiated: Arc<OnceLock<ProtocolVersion>> = Arc::new(OnceLock::new());
+        let inbox = Arc::new(PromptInbox::new(
+            config.prompt_inbox_enabled,
+            config.max_pending_prompts,
+            config.max_prompt_bytes,
+        ));
         // v2 foreground-state reporting: while an agent → client request is
         // pending the turn is blocked on the user (`requires_action`); once it
         // resolves, foreground work runs again.  v1 connections emit nothing.
@@ -283,6 +290,7 @@ impl<P: AgentProvider> AcpAgentServer<P> {
             config: std::sync::Arc::new(config),
             sessions: std::sync::Arc::new(SessionStore::new()),
             active_prompts: std::sync::Arc::new(ActivePrompts::new()),
+            inbox,
             outbound_tx: Some(outbound_tx),
             outbound_rx: Some(outbound_rx),
             pending,
@@ -552,6 +560,7 @@ impl<P: AgentProvider> AcpAgentServer<P> {
             self.config.clone(),
             self.sessions.clone(),
             self.active_prompts.clone(),
+            self.inbox.clone(),
             self.outbound_tx.as_ref().expect("server is running").clone(),
             self.client_factory.clone(),
             self.negotiated.clone(),

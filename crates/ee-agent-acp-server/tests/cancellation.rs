@@ -130,7 +130,7 @@ async fn session_close_cancels_active_prompt() {
 // ── Concurrency rules ────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn second_same_session_prompt_is_rejected_while_first_is_active() {
+async fn second_same_session_prompt_steers_into_the_running_turn() {
     let (provider, log) = FakeProvider::new(&["session-a"]);
     let behaviors = provider.behaviors.clone();
     provider.set_prompt_behavior("session-a", PromptBehavior::AwaitCancelThenCancelled);
@@ -140,19 +140,19 @@ async fn second_same_session_prompt_is_rejected_while_first_is_active() {
     handle.send(request(2, "session/prompt", prompt_params("session-a")));
     wait_for_log(&log, |calls| calls.iter().any(|c| c == "prompt:session-a:started")).await;
 
-    // Second prompt on the same session is rejected with a clear error.
+    // A second prompt defaults to `steer`: it is accepted into the running
+    // turn instead of being rejected, and joins that turn's terminal result.
     handle.send(request(3, "session/prompt", prompt_params("session-a")));
-    let error = request_error(handle.next_frame().await);
-    assert_eq!(i32::from(error.code), -32602);
-    assert!(common::error_reason(&error).contains("already active"));
 
     // Exactly one provider prompt ran for the session.
     assert_eq!(log.calls().iter().filter(|c| c == &"prompt:session-a:started").count(), 1);
 
-    // Cleanup: after cancellation a new prompt is accepted.
     handle.send(notification("session/cancel", json!({ "sessionId": "session-a" })));
-    let result = request_result(handle.next_frame().await);
-    assert_eq!(result["stopReason"], "cancelled");
+    let frames = handle.next_frames(2).await;
+    for frame in frames {
+        let result = request_result(frame);
+        assert_eq!(result["stopReason"], "cancelled");
+    }
     behaviors.lock().expect("behaviors").insert("session-a".to_string(), PromptBehavior::Return);
     handle.send(request(4, "session/prompt", prompt_params("session-a")));
     let result = request_result(handle.next_frame().await);

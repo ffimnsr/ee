@@ -141,12 +141,13 @@ pub enum ClientRequestMethod {
     SessionClose,
     SessionSetMode,
     SessionSetConfigOption,
+    SessionSetModel,
     SessionPrompt,
 }
 
 impl ClientRequestMethod {
     /// All client→agent request methods, in registry order.
-    pub const ALL: [ClientRequestMethod; 12] = [
+    pub const ALL: [ClientRequestMethod; 13] = [
         ClientRequestMethod::Initialize,
         ClientRequestMethod::Authenticate,
         ClientRequestMethod::Logout,
@@ -158,6 +159,7 @@ impl ClientRequestMethod {
         ClientRequestMethod::SessionClose,
         ClientRequestMethod::SessionSetMode,
         ClientRequestMethod::SessionSetConfigOption,
+        ClientRequestMethod::SessionSetModel,
         ClientRequestMethod::SessionPrompt,
     ];
 
@@ -176,6 +178,7 @@ impl ClientRequestMethod {
             Self::SessionClose => SESSION_CLOSE_METHOD_NAME,
             Self::SessionSetMode => SESSION_SET_MODE_METHOD_NAME,
             Self::SessionSetConfigOption => SESSION_SET_CONFIG_OPTION_METHOD_NAME,
+            Self::SessionSetModel => crate::session_model::SESSION_SET_MODEL_METHOD_NAME,
             Self::SessionPrompt => SESSION_PROMPT_METHOD_NAME,
         }
     }
@@ -195,6 +198,7 @@ impl ClientRequestMethod {
             Self::SessionClose => "CloseSessionRequest",
             Self::SessionSetMode => "SetSessionModeRequest",
             Self::SessionSetConfigOption => "SetSessionConfigOptionRequest",
+            Self::SessionSetModel => "SetSessionModelRequest",
             Self::SessionPrompt => "PromptRequest",
         }
     }
@@ -214,6 +218,7 @@ impl ClientRequestMethod {
             Self::SessionClose => "CloseSessionResponse",
             Self::SessionSetMode => "SetSessionModeResponse",
             Self::SessionSetConfigOption => "SetSessionConfigOptionResponse",
+            Self::SessionSetModel => "SetSessionModelResponse",
             Self::SessionPrompt => "PromptResponse",
         }
     }
@@ -263,6 +268,9 @@ impl ClientRequestMethod {
             }
             Self::SessionSetConfigOption => {
                 serde_json::from_value::<SetSessionConfigOptionRequest>(params.clone()).map(|_| ())
+            }
+            Self::SessionSetModel => {
+                serde_json::from_value::<crate::SetSessionModelRequest>(params.clone()).map(|_| ())
             }
             Self::SessionPrompt => {
                 serde_json::from_value::<PromptRequest>(params.clone()).map(|_| ())
@@ -551,7 +559,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_method_names_match_acp_v1_exactly() {
+    fn registry_method_names_match_acp_v1_plus_ee_extensions() {
         let client_expected = [
             "initialize",
             "authenticate",
@@ -564,6 +572,8 @@ mod tests {
             "session/close",
             "session/set_mode",
             "session/set_config_option",
+            // ee extension: mid-session model switch.
+            "session/set_model",
             "session/prompt",
         ];
         let actual: Vec<_> = ClientRequestMethod::ALL.iter().map(|m| m.name()).collect();

@@ -168,7 +168,9 @@ pub mod dispatch;
 pub mod dotenv;
 pub mod error;
 pub mod ids;
+mod inbox;
 pub mod provider;
+mod runner;
 pub mod server;
 pub mod session;
 pub mod transport;
@@ -183,9 +185,10 @@ pub use config::AcpAgentServerConfig;
 pub use dotenv::{env_or_dotenv, load_dotenv, parse_dotenv};
 pub use error::{AcpServerError, Delivery, ProviderError, RateLimitInfo, Recovery};
 pub use ids::{RequestIdGenerator, SessionIdGenerator};
+pub use inbox::{SteerInbox, SteerSendError, SteerSender};
 pub use provider::{
     AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,
-    PromptResult, ProviderFuture, SessionInit, SetModeContext,
+    PromptResult, ProviderFuture, SessionInit, SetModeContext, SetModelContext,
 };
 pub use server::AcpAgentServer;
 pub use session::{ServerSession, SessionStore, SessionStoreError};

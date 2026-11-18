@@ -93,6 +93,7 @@ impl OrchestratorRuntime {
             resumed_count: resumed.resumed_count,
         });
         let mut transcript = Transcript::new();
+        let steer = ctx.steer.clone();
         let mut prompt_messages = Vec::new();
         // Durable checkpoints omit transcript content. A non-empty prompt is
         // therefore required after crash recovery; `/resume` alone fails above.
@@ -133,7 +134,7 @@ impl OrchestratorRuntime {
         .apply_to_transcript(&mut transcript, prompt_messages);
         let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
             .with_capture_metadata(metadata.checkpoint_context, metadata.evidence_refs);
-        let model = self.models.default_adapter()?;
+        let model = self.model_for_turn()?;
         let policy = self.policy();
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine = LoopEngine::new(
@@ -173,7 +174,7 @@ impl OrchestratorRuntime {
             ))
         })?;
         let outcome = engine
-            .run_transcript(&mut transcript, session_id.clone(), sink, client, cancel, task)
+            .run_transcript(&mut transcript, session_id.clone(), sink, client, cancel, task, steer)
             .await;
         if outcome.is_ok()
             && !truncation_flag.load(std::sync::atomic::Ordering::Relaxed)
@@ -331,7 +332,7 @@ impl OrchestratorRuntime {
             .expect("budget tracker poisoned")
             .reset_deadline(self.config.turn_timeout);
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
-        let model = self.models.default_adapter()?;
+        let model = self.model_for_turn()?;
         let policy = self.policy();
         let mut options = options;
         // Usage aggregation is a runtime-owned counter store; the loop writes

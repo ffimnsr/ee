@@ -114,7 +114,7 @@ impl OrchestratorRuntime {
             execution_log: execution_log.clone(),
         };
         let mut validation = ValidationRecorder::new();
-        let model = self.models.default_adapter()?;
+        let model = self.model_for_turn()?;
         let policy = self.policy();
         let executor = StrategyExecutor::new(
             self.config.clone(),
@@ -315,7 +315,7 @@ impl OrchestratorRuntime {
             events.record(OrchestratorEvent::ModelRequested { iteration: 1 });
             let request = ModelRequest::new(messages, Vec::new(), budget_snapshot, task)
                 .with_model_id(Some(DEFAULT_MODEL_ID.to_string()));
-            let model = self.models.default_adapter()?;
+            let model = self.model_for_turn()?;
             let call = model.compact(request, cancel.clone());
             let compacted = match if let Some(limit) = self.config.turn_timeout {
                 tokio::time::timeout(limit, call).await
@@ -415,7 +415,7 @@ impl OrchestratorRuntime {
             "compact session",
             "LLM session compaction summary",
         );
-        let model = self.models.default_adapter()?;
+        let model = self.model_for_turn()?;
         // Fresh slice: the compaction model call gets the full per-turn
         // timeout, regardless of how long the session idled.
         self.budget

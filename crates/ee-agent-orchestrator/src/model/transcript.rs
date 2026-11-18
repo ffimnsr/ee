@@ -93,9 +93,17 @@ impl Transcript {
     /// instead of being dropped silently.
     #[must_use]
     pub fn from_prompt(ctx: &PromptContext) -> Self {
+        let message = Self::user_message_from_blocks(&ctx.prompt);
+        let mut transcript = Self::new();
+        transcript.messages = vec![message];
+        transcript
+    }
+
+    /// Converts ACP prompt content into one normalized user message.
+    fn user_message_from_blocks(blocks: &[ContentBlock]) -> ModelMessage {
         let mut content = Vec::new();
         let mut unsupported = Vec::new();
-        for block in &ctx.prompt {
+        for block in blocks {
             match block {
                 ContentBlock::Text(text) => content.push(ModelContent::Text(text.text.clone())),
                 ContentBlock::ResourceLink(link) => {
@@ -140,9 +148,15 @@ impl Transcript {
         if !unsupported.is_empty() {
             message = message.with_metadata([("unsupported_blocks".into(), unsupported.join(","))]);
         }
-        let mut transcript = Self::new();
-        transcript.messages = vec![message];
-        transcript
+        message
+    }
+
+    /// Appends a mid-turn steer as an ordinary user message so the model
+    /// reads it at the next step boundary.
+    pub(crate) fn push_steer(&mut self, blocks: &[ContentBlock]) {
+        let message = Self::user_message_from_blocks(blocks)
+            .with_metadata([("ee_prompt".to_string(), "steer".to_string())]);
+        self.push_message(message);
     }
 
     /// Prepends a system message ahead of the prompt's user message, used to

@@ -17,6 +17,7 @@ impl LoopEngine {
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         task: TaskNode,
+        steer: Option<SteerInbox>,
     ) -> Result<PromptResult, OrchestratorError> {
         self.events.record(OrchestratorEvent::TurnStarted {
             session_id: session_id.clone(),
@@ -27,7 +28,7 @@ impl LoopEngine {
             let _ = log.record_turn_started(task.id.as_str());
         }
         let outcome = self
-            .run_loop_inner(transcript, &track, &sink, &client, cancel, &task, &session_id)
+            .run_loop_inner(transcript, &track, &sink, &client, cancel, &task, &session_id, steer)
             .await;
         let stop_reason = match &outcome {
             Ok(result) => {
@@ -64,6 +65,7 @@ impl LoopEngine {
         cancel: watch::Receiver<bool>,
         task: &TaskNode,
         session_id: &str,
+        steer: Option<SteerInbox>,
     ) -> Result<PromptResult, OrchestratorError> {
         let mut empty_responses = 0usize;
         let mut message_seq = 0usize;
@@ -100,6 +102,14 @@ impl LoopEngine {
         loop {
             if *cancel.borrow() {
                 return Err(OrchestratorError::Cancellation);
+            }
+            // Steer input lands at the next step boundary and is read by the
+            // model on the very next request; it never interrupts a tool that
+            // is already running.
+            if let Some(steer) = &steer {
+                for blocks in steer.drain() {
+                    transcript.push_steer(&blocks);
+                }
             }
             // The iteration cap is a budget stop, but the reference agent turns
             // it into one final text-only call so the user still gets a summary
@@ -405,6 +415,24 @@ impl LoopEngine {
                 ));
             }
             if response.completed {
+                // A detached delegate is outstanding work: do not settle the
+                // turn while it still runs.  Wait for a completion notice,
+                // inject it, and take another step so the model can use it.
+                if let Some(jobs) = &self.options.background_jobs {
+                    // Settled delegates that finished during the model call
+                    // still need one more step so the model reads them.
+                    let notices = jobs.take_subagent_notices();
+                    if !notices.is_empty() {
+                        for notice in notices {
+                            transcript.push_system_notice(notice);
+                        }
+                        continue;
+                    }
+                    if jobs.has_running_subagents() {
+                        self.wait_for_background_subagents(transcript, &cancel).await?;
+                        continue;
+                    }
+                }
                 if let Some(config) = self.options.stop_gate.map(StopGateConfig::bounded) {
                     let logged = self
                         .options
@@ -689,5 +717,41 @@ impl LoopEngine {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
             }
         }
+    }
+}
+
+impl LoopEngine {
+    /// Waits for detached delegate jobs and appends their bounded completion
+    /// notices to the transcript.  The caller then takes another step so the
+    /// model reads the notices before the turn can settle.
+    async fn wait_for_background_subagents(
+        &self,
+        transcript: &mut Transcript,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), OrchestratorError> {
+        let Some(jobs) = &self.options.background_jobs else { return Ok(()) };
+        while jobs.has_running_subagents() {
+            let cancelled = {
+                let mut signal = cancel.clone();
+                async move {
+                    if *signal.borrow() {
+                        return;
+                    }
+                    let _ = signal.changed().await;
+                }
+            };
+            tokio::select! {
+                biased;
+                () = cancelled => return Err(OrchestratorError::Cancellation),
+                () = jobs.wait_for_change() => {}
+            }
+            for notice in jobs.take_subagent_notices() {
+                transcript.push_system_notice(notice);
+            }
+        }
+        for notice in jobs.take_subagent_notices() {
+            transcript.push_system_notice(notice);
+        }
+        Ok(())
     }
 }

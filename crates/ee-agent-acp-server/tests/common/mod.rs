@@ -10,7 +10,7 @@ pub use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
     JsonRpcFrame, LoadSessionContext, LoginContext, MemoryTransport, MemoryTransportHandle,
     NewSessionContext, PromptContext, PromptResult, ProviderError, ProviderFuture, SessionInit,
-    SetModeContext, UpdateSink,
+    SetModeContext, SetModelContext, UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, ContentChunk, CreateTerminalRequest,
@@ -35,6 +35,13 @@ pub enum PromptBehavior {
     /// Blocks until the cancellation signal flips, then returns
     /// `ProviderError::Cancellation`.
     AwaitCancelThenCancelled,
+    /// Blocks until one steer message arrives through the prompt context's
+    /// steer inbox, records it as `prompt:<id>:steer:<text>`, then returns
+    /// `EndTurn`.
+    AwaitSteerThenReturn,
+    /// Sleeps for the given duration, then returns `EndTurn` (used to keep a
+    /// turn running while another prompt is delivered).
+    DelayThenReturn { millis: u64 },
     /// Blocks until the cancellation signal flips, then tries to emit one
     /// update and records whether the sink still works
     /// (`prompt:<id>:emit-after-cancel:emitted` or `err:<error>`) before
@@ -317,6 +324,14 @@ impl AgentProvider for FakeProvider {
         })
     }
 
+    fn set_model(&self, ctx: SetModelContext) -> ProviderFuture<Result<(), ProviderError>> {
+        let log = self.log.clone();
+        Box::pin(async move {
+            log.record(format!("set_model:{}:{}", ctx.session_id, ctx.model_id));
+            Ok(())
+        })
+    }
+
     fn prompt(
         &self,
         ctx: PromptContext,
@@ -335,6 +350,16 @@ impl AgentProvider for FakeProvider {
             .unwrap_or(PromptBehavior::Return);
         Box::pin(async move {
             log.record(format!("prompt:{session_id}:started"));
+            let prompt_text = ctx
+                .prompt
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            log.record(format!("prompt:{session_id}:text:{prompt_text}"));
             match behavior {
                 PromptBehavior::Return => Ok(PromptResult::new(StopReason::EndTurn)),
                 PromptBehavior::Fail => {
@@ -342,6 +367,31 @@ impl AgentProvider for FakeProvider {
                 }
                 PromptBehavior::EmitMessageThenReturn => {
                     sink.agent_message_chunk("m-1", "hello from provider").expect("sink emits");
+                    Ok(PromptResult::new(StopReason::EndTurn))
+                }
+                PromptBehavior::AwaitSteerThenReturn => {
+                    let text = match ctx.steer.as_ref() {
+                        Some(inbox) => inbox
+                            .recv()
+                            .await
+                            .map(|blocks| {
+                                blocks
+                                    .iter()
+                                    .filter_map(|block| match block {
+                                        ContentBlock::Text(text) => Some(text.text.clone()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    log.record(format!("prompt:{session_id}:steer:{text}"));
+                    Ok(PromptResult::new(StopReason::EndTurn))
+                }
+                PromptBehavior::DelayThenReturn { millis } => {
+                    tokio::time::sleep(Duration::from_millis(millis)).await;
                     Ok(PromptResult::new(StopReason::EndTurn))
                 }
                 PromptBehavior::EmitV2ChunkAndPlanThenReturn => {

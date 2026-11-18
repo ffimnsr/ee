@@ -62,6 +62,12 @@ pub(super) enum HostCommand {
         /// evidence turn (see [`AgentThread::resume_prompt_with_baseline`]).
         baseline: Option<EvidenceRevision>,
     },
+    /// Delivers a prompt into the running turn (or its queue) without
+    /// cancelling that turn.
+    SteerPrompt {
+        thread: AgentThread,
+        blocks: Vec<ContentBlock>,
+    },
     SetMode {
         thread: AgentThread,
         mode_id: SessionModeId,
@@ -71,6 +77,11 @@ pub(super) enum HostCommand {
         thread: AgentThread,
         config_id: ee_agent_protocol::SessionConfigId,
         value: SessionConfigOptionValue,
+        reply: std_mpsc::Sender<Result<String, String>>,
+    },
+    SetModel {
+        thread: AgentThread,
+        model_id: String,
         reply: std_mpsc::Sender<Result<String, String>>,
     },
     Cancel {
@@ -203,6 +214,16 @@ pub(super) fn host_worker(
                         thread.resume_prompt_with_baseline(blocks, baseline).await
                     }));
                 }
+                HostCommand::SteerPrompt { thread, blocks } => {
+                    std::mem::drop(tokio::spawn(async move {
+                        thread
+                            .send_prompt_with_delivery(
+                                blocks,
+                                ee_agent_protocol::PromptDelivery::Steer,
+                            )
+                            .await
+                    }));
+                }
                 HostCommand::SetMode { thread, mode_id, reply } => {
                     let message = format!("mode set: {}", mode_id.0);
                     let result = thread.set_mode(mode_id).await.map(|()| message);
@@ -211,6 +232,11 @@ pub(super) fn host_worker(
                 HostCommand::SetConfigOption { thread, config_id, value, reply } => {
                     let message = format!("config set: {}", config_id.0);
                     let result = thread.set_config_option(config_id, value).await.map(|()| message);
+                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                }
+                HostCommand::SetModel { thread, model_id, reply } => {
+                    let message = format!("model switched: {model_id}");
+                    let result = thread.set_model(model_id).await.map(|()| message);
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::Cancel { thread, reply } => {
@@ -336,6 +362,11 @@ impl AgentHostBridge {
         let _ = self.commands.send(HostCommand::ResumePrompt { thread, blocks, baseline });
     }
 
+    /// Enqueues a steer delivery into the running turn without cancelling it.
+    pub(super) fn steer_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
+        let _ = self.commands.send(HostCommand::SteerPrompt { thread, blocks });
+    }
+
     /// Enqueues a mode change.
     pub(super) fn set_mode(
         &self,
@@ -361,6 +392,17 @@ impl AgentHostBridge {
             value,
             reply: reply_tx,
         });
+        reply_rx
+    }
+
+    /// Enqueues a session model switch.
+    pub(super) fn set_model(
+        &self,
+        thread: AgentThread,
+        model_id: String,
+    ) -> std_mpsc::Receiver<Result<String, String>> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let _ = self.commands.send(HostCommand::SetModel { thread, model_id, reply: reply_tx });
         reply_rx
     }
 

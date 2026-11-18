@@ -35,6 +35,14 @@ pub struct AcpAgentServerConfig {
     pub session_id_prefix: String,
     /// Agent identity advertised in `initialize` responses.
     pub implementation: Implementation,
+    /// Whether a prompt sent while a turn is running is accepted into the
+    /// per-session inbox.  When false, mid-turn prompts fail with the
+    /// concurrent-prompt error.
+    pub prompt_inbox_enabled: bool,
+    /// Maximum number of buffered prompts per session (steer or queue).
+    pub max_pending_prompts: usize,
+    /// Maximum serialized size of one buffered prompt, in bytes.
+    pub max_prompt_bytes: usize,
 }
 
 impl Default for AcpAgentServerConfig {
@@ -46,6 +54,9 @@ impl Default for AcpAgentServerConfig {
             session_id_prefix: DEFAULT_SESSION_ID_PREFIX.to_string(),
             implementation: Implementation::new("ee-agent-acp-server", env!("CARGO_PKG_VERSION"))
                 .title("EE ACP Agent Server"),
+            prompt_inbox_enabled: true,
+            max_pending_prompts: crate::inbox::DEFAULT_MAX_PENDING_PROMPTS,
+            max_prompt_bytes: crate::inbox::DEFAULT_MAX_PROMPT_BYTES,
         }
     }
 }
@@ -79,6 +90,7 @@ mod tests {
             max_frame_bytes: 1024,
             session_id_prefix: "provider-session".to_string(),
             implementation: Implementation::new("test-provider", "1.2.3"),
+            ..AcpAgentServerConfig::default()
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: AcpAgentServerConfig = serde_json::from_str(&json).expect("config parses");

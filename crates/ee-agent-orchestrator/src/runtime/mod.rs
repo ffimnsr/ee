@@ -267,6 +267,11 @@ pub struct OrchestratorRuntime {
     /// and never logged; the loop replays them as the first transcript item.
     compaction_checkpoints:
         Mutex<HashMap<String, crate::compaction_checkpoint::CompactionCheckpoint>>,
+    /// Explicit model registry id for this session (mid-session switch).
+    /// `None` uses the registry's `DEFAULT_MODEL_ID` adapter.
+    selected_model: Mutex<Option<String>>,
+    /// Content-addressed workspace snapshots for per-turn diff and file revert.
+    snapshots: crate::workspace_snapshot::WorkspaceSnapshotStore,
 }
 
 mod branch;

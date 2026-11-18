@@ -282,6 +282,7 @@ mod usage;
 pub mod validation;
 pub mod workspace_isolation;
 pub mod workspace_scope;
+pub mod workspace_snapshot;
 pub mod write_conflicts;
 pub mod write_transaction;
 

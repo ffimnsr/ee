@@ -34,8 +34,10 @@
 pub mod capabilities;
 pub mod mcp_over_acp;
 pub mod ordering;
+pub mod prompt_delivery;
 pub mod recovery;
 pub mod registry;
+pub mod session_model;
 pub mod setup;
 pub mod slash_command;
 pub mod validate;
@@ -44,8 +46,12 @@ pub mod version;
 // Convenience re-exports of the boundary helpers at the crate root.
 pub use capabilities::*;
 pub use ordering::*;
+pub use prompt_delivery::PromptDelivery;
 pub use recovery::*;
 pub use registry::*;
+pub use session_model::{
+    SESSION_SET_MODEL_METHOD_NAME, SetSessionModelRequest, SetSessionModelResponse,
+};
 pub use slash_command::*;
 pub use validate::*;
 pub use version::*;

@@ -35,15 +35,16 @@ mod session_identity;
 
 use ee_agent_acp_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
-    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
+    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, SetModelContext,
+    UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
-    DISCARD_COMMAND_NAME, Implementation, MessageId, REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason,
-    TextContent, branch_available_command, compact_available_command, discard_available_command,
-    is_resume_command, parse_slash_command, resume_available_command, revert_available_command,
-    rubber_duck_available_command,
+    DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, Implementation, MessageId, REVERT_COMMAND_NAME,
+    RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId, SessionModeState,
+    SessionUpdate, StopReason, TextContent, branch_available_command, compact_available_command,
+    diff_available_command, discard_available_command, is_resume_command, parse_slash_command,
+    resume_available_command, revert_available_command, rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -528,6 +529,9 @@ fn parse_plan_items(response: &str) -> Result<Vec<crate::plan_compiler::PlanInpu
 struct PersistedSession {
     #[serde(default = "default_session_mode")]
     mode: SessionModeId,
+    /// Model registry id selected by a mid-session switch, when one was made.
+    #[serde(default)]
+    model_id: Option<String>,
 }
 
 /// ACP provider adapter around [`OrchestratorRuntime`].
@@ -576,6 +580,7 @@ mod branch_command;
 mod builder;
 mod checkpoint_command;
 mod conversation;
+mod snapshot_command;
 
 #[cfg(test)]
 mod tests;

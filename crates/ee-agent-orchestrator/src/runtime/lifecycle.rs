@@ -146,6 +146,7 @@ impl OrchestratorRuntime {
         let worktrees = Arc::new(Mutex::new(Vec::new()));
         let transcripts =
             Arc::new(Mutex::new(crate::subagent_transcripts::ChildTranscriptStore::default()));
+        let background_jobs = Arc::new(BackgroundJobRegistry::new());
         let manager = Arc::new(SubagentManager::new(
             config.clone(),
             models.clone(),
@@ -154,6 +155,7 @@ impl OrchestratorRuntime {
                 .with_worktrees(worktrees.clone())
                 .with_transcripts(transcripts.clone()),
             SubagentObservability::new(model_router.clone(), metrics.clone(), decisions.clone()),
+            background_jobs.clone(),
         ));
         tools
             .lock()
@@ -174,6 +176,10 @@ impl OrchestratorRuntime {
             ),
         );
         let session_logs = SessionLogStore::from_config(&config.session_log);
+        let snapshots = crate::workspace_snapshot::WorkspaceSnapshotStore::from_config(
+            &config.snapshots,
+            &config.session_log,
+        );
         Self {
             config,
             models,
@@ -208,11 +214,45 @@ impl OrchestratorRuntime {
             session_context: Mutex::new(crate::session_context::SessionContext::default()),
             workspace_instruction_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
             workspace_instruction_known: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            background_jobs: Arc::new(BackgroundJobRegistry::new()),
+            background_jobs,
             worktrees,
             transcripts,
             until: Mutex::new(None),
             compaction_checkpoints: Mutex::new(HashMap::new()),
+            selected_model: Mutex::new(None),
+            snapshots,
+        }
+    }
+
+    /// Sets the session's model registry id (`None` restores the default).
+    pub fn set_selected_model(&self, model_id: Option<String>) {
+        *self.selected_model.lock().expect("selected model poisoned") = model_id;
+    }
+
+    /// The session's explicit model registry id, when one was selected.
+    #[must_use]
+    pub fn selected_model(&self) -> Option<String> {
+        self.selected_model.lock().expect("selected model poisoned").clone()
+    }
+
+    /// Workspace snapshot store for this session.
+    #[must_use]
+    pub fn workspace_snapshots(&self) -> &crate::workspace_snapshot::WorkspaceSnapshotStore {
+        &self.snapshots
+    }
+
+    /// Resolves the adapter for this session's turns: the selected model when
+    /// one is set, otherwise the registry default.  Fails closed when the
+    /// selected id is no longer registered.
+    pub(crate) fn model_for_turn(&self) -> Result<Arc<dyn ModelAdapter>, OrchestratorError> {
+        let selected = self.selected_model();
+        match selected {
+            Some(model_id) => self.models.get(&model_id).ok_or_else(|| {
+                OrchestratorError::InvalidState(format!(
+                    "selected model {model_id:?} is not registered in this provider"
+                ))
+            }),
+            None => self.models.default_adapter(),
         }
     }
 
@@ -328,6 +368,9 @@ impl OrchestratorRuntime {
 
     /// Drops background job state without touching host terminals.
     pub fn clear_background_jobs(&self) {
+        // Session cancel/close/discard must stop detached delegates before
+        // their shared state disappears.
+        self.background_jobs.cancel_subagents();
         self.background_jobs.clear();
     }
 
@@ -364,6 +407,7 @@ impl OrchestratorRuntime {
     /// later request re-reads. Memory-only logs own no files, so this is a
     /// no-op there.
     pub fn purge_session_artifacts(&self, session_id: &str) {
+        self.snapshots.purge_session(session_id);
         let Some(store) =
             crate::session_log::SessionLogStore::from_config(&self.config.session_log)
         else {

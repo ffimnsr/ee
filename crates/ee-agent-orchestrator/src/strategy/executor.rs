@@ -175,7 +175,15 @@ impl StrategyExecutor {
             options,
         );
         engine
-            .run_transcript(&mut transcript, session_id, run.sink, run.client, run.cancel, run.task)
+            .run_transcript(
+                &mut transcript,
+                session_id,
+                run.sink,
+                run.client,
+                run.cancel,
+                run.task,
+                None,
+            )
             .await
             .map(|result| (result, transcript))
     }

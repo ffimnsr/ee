@@ -409,6 +409,9 @@ pub(crate) struct SubagentManager {
     children: Arc<ChildRegistry>,
     worktrees: Arc<Mutex<Vec<crate::workspace_isolation::WorktreeWorkspace>>>,
     transcripts: Arc<Mutex<crate::subagent_transcripts::ChildTranscriptStore>>,
+    /// Shared background registry: detached delegates report here so the
+    /// parent loop can surface completion notices and refuse to settle early.
+    background_jobs: crate::background_jobs::SharedBackgroundJobs,
 }
 
 /// Synchronous fail-safe for a dropped or panicking child future. Normal
@@ -491,6 +494,7 @@ struct DelegateArguments {
     prompt: String,
     resume_child_id: Option<String>,
     fork_context: bool,
+    background: bool,
 }
 
 impl DelegateTool {
@@ -566,6 +570,11 @@ impl DelegateTool {
             Some(serde_json::Value::Bool(value)) => *value,
             Some(_) => return Err("fork_context must be a boolean".into()),
         };
+        let background = match map.get("background") {
+            None => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => return Err("background must be a boolean".into()),
+        };
 
         // Built-in role security contracts are immutable at the tool boundary.
         // Model-supplied instructions, tool classes, and iteration limits are
@@ -574,7 +583,13 @@ impl DelegateTool {
             let mut role = builtin.role();
             role.allowed_scope_globs = allowed_scope_globs;
             role.model = model;
-            return Ok(DelegateArguments { role, prompt, resume_child_id, fork_context });
+            return Ok(DelegateArguments {
+                role,
+                prompt,
+                resume_child_id,
+                fork_context,
+                background,
+            });
         }
 
         let instructions =
@@ -617,6 +632,7 @@ impl DelegateTool {
             prompt,
             resume_child_id,
             fork_context,
+            background,
         })
     }
 }
@@ -674,6 +690,10 @@ impl ServerTool for DelegateTool {
                         "type": "boolean",
                         "description": "For explorer/planner: inherit a compacted parent context snapshot instead of the raw parent transcript",
                     },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Return a child id immediately and deliver the completion summary as a system reminder at the next step instead of blocking this turn",
+                    },
                 },
                 "required": ["prompt"]
             }),
@@ -700,7 +720,8 @@ impl ServerTool for DelegateTool {
                 Ok(arguments) => arguments,
                 Err(reason) => return ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
             };
-            let DelegateArguments { role, prompt, resume_child_id, fork_context } = arguments;
+            let DelegateArguments { role, prompt, resume_child_id, fork_context, background } =
+                arguments;
             let request = DelegationRequest {
                 parent_task_id: context.task.id.clone(),
                 role,
@@ -711,6 +732,55 @@ impl ServerTool for DelegateTool {
                 resume_child_id,
                 fork_context,
             };
+            if background {
+                let jobs = manager.background_jobs.clone();
+                let role_name = request.role.name.clone();
+                let (job_id, cancel) =
+                    jobs.register_subagent(role_name.clone(), request.scoped_prompt.clone());
+                let child_events = context.events.clone();
+                let child_manager = manager.clone();
+                let child_jobs = jobs.clone();
+                let task_job_id = job_id.clone();
+                tokio::spawn(async move {
+                    let result = child_manager.spawn(request, client, cancel, child_events).await;
+                    let (status, child_id, summary) = match result {
+                        Ok(result) => {
+                            let status = match result.handoff.status {
+                                SubagentStatus::Completed => {
+                                    crate::background_jobs::BackgroundSubagentStatus::Completed
+                                }
+                                SubagentStatus::Failed => {
+                                    crate::background_jobs::BackgroundSubagentStatus::Failed
+                                }
+                                SubagentStatus::Cancelled => {
+                                    crate::background_jobs::BackgroundSubagentStatus::Cancelled
+                                }
+                            };
+                            let summary = result
+                                .error_summary
+                                .clone()
+                                .or_else(|| Some(result.handoff.summary.clone()));
+                            (status, Some(result.subagent_id.as_str().to_string()), summary)
+                        }
+                        Err(error) => (
+                            crate::background_jobs::BackgroundSubagentStatus::Failed,
+                            None,
+                            Some(error.to_string()),
+                        ),
+                    };
+                    child_jobs.finish_subagent(&task_job_id, status, child_id, summary);
+                });
+                return ToolResult::success(
+                    serde_json::json!({
+                        "background": true,
+                        "child_id": job_id,
+                        "role": role_name,
+                        "status": "running",
+                        "message": "delegate started in the background; its completion summary arrives automatically at the next step",
+                    })
+                    .to_string(),
+                );
+            }
             match manager.spawn(request, client, cancel, context.events).await {
                 Ok(result) => match result.handoff.status {
                     SubagentStatus::Completed

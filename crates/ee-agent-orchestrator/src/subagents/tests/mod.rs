@@ -104,6 +104,7 @@ fn manager_harness(config: OrchestratorConfig, model: Arc<dyn ModelAdapter>) -> 
             Arc::new(Mutex::new(OrchestratorMetrics::new())),
             Arc::new(Mutex::new(DecisionLog::default())),
         ),
+        Arc::new(crate::background_jobs::BackgroundJobRegistry::new()),
     ));
     ManagerHarness { manager, tasks, _memory: memory, budget, children }
 }

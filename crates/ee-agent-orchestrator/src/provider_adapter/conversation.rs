@@ -259,6 +259,7 @@ pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol:
         rubber_duck_available_command(),
         branch_available_command(),
         revert_available_command(),
+        diff_available_command(),
     ];
     if recovery_enabled {
         commands.push(discard_available_command());
@@ -294,7 +295,7 @@ pub(super) fn next_session_number(
 }
 
 pub(super) fn session_snapshot(session: &SessionRuntime) -> PersistedSession {
-    PersistedSession { mode: session.mode.clone() }
+    PersistedSession { mode: session.mode.clone(), model_id: session.runtime.selected_model() }
 }
 
 pub(super) fn persist_session_snapshot(

@@ -40,6 +40,11 @@ pub const BRANCH_COMMAND_NAME: &str = "branch";
 /// sequence; when omitted the newest checkpoint is used.
 pub const REVERT_COMMAND_NAME: &str = "revert";
 
+/// The advertised slash-command name for reporting one turn's workspace diff.
+/// The optional argument is the turn sequence; when omitted the newest turn is
+/// used.
+pub const DIFF_COMMAND_NAME: &str = "turn-diff";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -169,10 +174,23 @@ pub fn is_revert_command(text: &str) -> bool {
 pub fn revert_available_command() -> AvailableCommand {
     AvailableCommand::new(
         REVERT_COMMAND_NAME,
-        "Restore the current session in place to a stored checkpoint. Task, memory, budget, and logged conversation state are restored; workspace files are not changed.",
+        "Restore the current session in place to a stored checkpoint. Task, memory, budget, and logged conversation state are restored; workspace files are not changed unless --files is used.",
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
-        "optional checkpoint sequence (defaults to the newest checkpoint)",
+        "optional sequence; --files [paths...] restores workspace files from the pre-turn snapshot",
+    )))
+}
+
+/// The `/diff` command advertised by providers with workspace snapshots:
+/// reports the files and structured patches a turn changed.
+#[must_use]
+pub fn diff_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        DIFF_COMMAND_NAME,
+        "Report the files and unified patches changed by one turn's start/end workspace snapshots.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional turn sequence (defaults to the newest captured turn)",
     )))
 }
 
@@ -315,7 +333,19 @@ mod tests {
             AvailableCommandInput::Unstructured(input) => input.hint.clone(),
             _ => panic!("expected unstructured input"),
         };
-        assert!(hint.contains("checkpoint sequence"), "{hint}");
+        assert!(hint.contains("pre-turn snapshot"), "{hint}");
+    }
+
+    #[test]
+    fn advertised_turn_diff_command_carries_name_and_turn_hint() {
+        let command = diff_available_command();
+        assert_eq!(command.name, DIFF_COMMAND_NAME);
+        assert!(!command.description.is_empty(), "description advertised");
+        let hint = match command.input.as_ref().expect("input advertised") {
+            AvailableCommandInput::Unstructured(input) => input.hint.clone(),
+            _ => panic!("expected unstructured input"),
+        };
+        assert!(hint.contains("turn sequence"), "{hint}");
     }
 
     #[test]

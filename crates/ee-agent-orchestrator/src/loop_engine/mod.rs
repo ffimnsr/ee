@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
+use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, SteerInbox, UpdateSink};
 use ee_agent_protocol::{SessionId, SessionInfoUpdate, SessionUpdate, StopReason, UsageUpdate};
 use tokio::sync::watch;
 
@@ -317,9 +317,18 @@ impl LoopEngine {
         context: TurnSystemContext,
     ) -> Result<PromptResult, OrchestratorError> {
         let mut transcript = Transcript::new();
+        let steer = ctx.steer.clone();
         context.apply_to_transcript(&mut transcript, Transcript::from_prompt(&ctx).messages);
-        self.run_transcript(&mut transcript, ctx.session_id.to_string(), sink, client, cancel, task)
-            .await
+        self.run_transcript(
+            &mut transcript,
+            ctx.session_id.to_string(),
+            sink,
+            client,
+            cancel,
+            task,
+            steer,
+        )
+        .await
     }
 
     /// Runs a turn over a prebuilt transcript, bounded by `turn_timeout`,
@@ -330,6 +339,7 @@ impl LoopEngine {
     /// captures even when the turn fails (deadline, timeout, cancellation,
     /// or an ordinary error).  When recovery is wired, deadline and timeout
     /// stops persist a recovery checkpoint before the error is returned.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_transcript(
         &self,
         transcript: &mut Transcript,
@@ -338,6 +348,7 @@ impl LoopEngine {
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         task: TaskNode,
+        steer: Option<SteerInbox>,
     ) -> Result<PromptResult, OrchestratorError> {
         // Per-turn mutable recovery state: in-flight marker, completed tools,
         // and the resume counters.  Shared with the loop so the interruption
@@ -376,6 +387,7 @@ impl LoopEngine {
             client,
             cancel,
             task.clone(),
+            steer,
         );
         let outcome = if let Some(limit) = self.config.turn_timeout {
             match tokio::time::timeout(limit, turn).await {

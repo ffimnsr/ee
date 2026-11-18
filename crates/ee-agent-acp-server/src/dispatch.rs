@@ -22,9 +22,10 @@ use ee_agent_protocol::{
     AvailableCommand, AvailableCommandsUpdate, CancelNotification, CloseSessionRequest,
     CloseSessionResponse, Error as RpcError, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId,
-    ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionInfo, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse, agent_capabilities_to_v2, v2,
+    NewSessionRequest, NewSessionResponse, PromptDelivery, PromptRequest, ProtocolVersion,
+    RequestId, ResumeSessionRequest, ResumeSessionResponse, SESSION_SET_MODEL_METHOD_NAME,
+    SessionId, SessionInfo, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
+    SetSessionModelRequest, SetSessionModelResponse, agent_capabilities_to_v2, v2,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -34,10 +35,12 @@ use crate::client::ClientBridgeFactory;
 use crate::config::AcpAgentServerConfig;
 use crate::error::{AcpServerError, ProviderError};
 use crate::ids::MessageIdGenerator;
+use crate::inbox::{DeliveryOutcome, PromptInbox, SteerInbox};
 use crate::provider::{
     AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,
-    ProviderFuture, SetModeContext,
+    ProviderFuture, SetModeContext, SetModelContext,
 };
+use crate::runner::PromptRunner;
 use crate::server::{ActivePromptError, ActivePrompts, OutboundEvent};
 use crate::session::{ServerSession, SessionStore, SessionStoreError};
 use crate::updates::{UpdateSink, UpdateSinkError};
@@ -67,8 +70,9 @@ pub(crate) struct RequestDispatcher<P> {
     config: Arc<AcpAgentServerConfig>,
     sessions: Arc<SessionStore>,
     active_prompts: Arc<ActivePrompts>,
+    inbox: Arc<PromptInbox>,
+    runner: Arc<PromptRunner<P>>,
     outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
-    client_factory: ClientBridgeFactory,
     /// The protocol version pinned by `initialize` (one per connection).
     negotiated: Arc<OnceLock<ProtocolVersion>>,
     /// Agent-owned user message ids for v2 prompt acknowledgments.
@@ -85,19 +89,30 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         config: Arc<AcpAgentServerConfig>,
         sessions: Arc<SessionStore>,
         active_prompts: Arc<ActivePrompts>,
+        inbox: Arc<PromptInbox>,
         outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
         client_factory: ClientBridgeFactory,
         negotiated: Arc<OnceLock<ProtocolVersion>>,
         message_ids: Arc<Mutex<MessageIdGenerator>>,
         request_id: RequestId,
     ) -> Self {
+        let runner = PromptRunner::new(
+            provider.clone(),
+            sessions.clone(),
+            active_prompts.clone(),
+            outbound_tx.clone(),
+            client_factory.clone(),
+            inbox.clone(),
+            negotiated.clone(),
+        );
         Self {
             provider,
             config,
             sessions,
             active_prompts,
+            inbox,
+            runner,
             outbound_tx,
-            client_factory,
             negotiated,
             message_ids,
             request_id,
@@ -123,6 +138,9 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             }
             SESSION_SET_MODE_METHOD_NAME => {
                 DispatchOutcome::Immediate(self.session_set_mode(params).await)
+            }
+            SESSION_SET_MODEL_METHOD_NAME => {
+                DispatchOutcome::Immediate(self.session_set_model(params).await)
             }
             SESSION_PROMPT_METHOD_NAME => match self.session_prompt(params).await {
                 Ok(outcome) => outcome,
@@ -629,66 +647,86 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         to_value(SetSessionModeResponse::new())
     }
 
-    /// `session/prompt`: starts a cancellable prompt task for the session.
+    /// `session/prompt`: starts a cancellable prompt task for the session, or
+    /// delivers it to the running turn's inbox.
     ///
-    /// Unknown sessions and concurrent same-session prompts are rejected
-    /// before any provider call.  The response is deferred: the task streams
-    /// updates through the FIFO outbound channel and completes it with the
-    /// prompt result, so updates arrive before the response.
+    /// Unknown sessions are rejected before any provider call.  When a turn
+    /// is running, the optional `delivery` field (default `steer`) decides
+    /// whether the prompt joins that turn or waits for it to settle.  The v1
+    /// response is deferred: the task streams updates through the FIFO
+    /// outbound channel and completes it with the prompt result, so updates
+    /// arrive before the response.
     async fn session_prompt(&self, params: Value) -> Result<DispatchOutcome, RpcError> {
+        let delivery = PromptDelivery::from_prompt_params(&params).map_err(|reason| {
+            RpcError::invalid_params().data(serde_json::json!({ "reason": reason }))
+        })?;
         let request: PromptRequest = parse_params(params)?;
         if self.negotiated.get() == Some(&ProtocolVersion::V2) {
-            return self.prompt_v2(request).await;
+            return self.prompt_v2(request, delivery).await;
         }
 
         // Reject unknown sessions before registering or invoking anything.
-        let sink = self.update_sink_for(&request.session_id).map_err(|error| match error {
-            UpdateSinkError::UnknownSession(session_id) => {
-                AcpServerError::UnknownSession(session_id).into_rpc_error()
-            }
-            other => {
-                RpcError::internal_error().data(serde_json::json!({ "reason": other.to_string() }))
-            }
-        })?;
+        let sink = self.update_sink_for(&request.session_id).map_err(unknown_session_error)?;
+        self.deliver_or_start_v1(request, delivery, sink)
+    }
 
-        // One active prompt per session.
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let generation = self
-            .active_prompts
-            .start(&request.session_id, cancel_tx.clone())
-            .map_err(|error| match error {
-                ActivePromptError::AlreadyActive(session_id) => {
-                    concurrent_prompt_error(&session_id)
-                }
-            })?;
-        drop(cancel_tx); // the registry entry holds its own sender
-
-        let ctx = PromptContext {
-            session_id: request.session_id.clone(),
-            prompt: request.prompt.clone(),
-            metadata: request.meta.clone(),
-        };
-        let provider = self.provider.clone();
-        let active_prompts = self.active_prompts.clone();
-        let outbound_tx = self.outbound_tx.clone();
-        let request_id = self.request_id.clone();
+    /// v1 prompt routing: idle sessions start normally, active sessions route
+    /// through the bounded inbox.
+    fn deliver_or_start_v1(
+        &self,
+        request: PromptRequest,
+        delivery: PromptDelivery,
+        sink: UpdateSink,
+    ) -> Result<DispatchOutcome, RpcError> {
         let session_id = request.session_id.clone();
-        // One live bridge per prompt: agent → client requests flow through
-        // the outbound path, and every request this prompt owns dies with it.
-        let client = self.client_factory.bridge_for(&request.session_id);
-        let join = tokio::spawn(async move {
-            let result = provider.prompt(ctx, sink, client, cancel_rx).await;
-            let _ = outbound_tx.send(OutboundEvent::PromptCompleted {
-                session_id: session_id.clone(),
-                request_id,
-                result,
-            });
-            // Always clean up active-prompt state: completion, provider
-            // error, and cancellation all land here.
-            active_prompts.remove(&session_id);
-        });
-        self.active_prompts.attach_join(&request.session_id, generation, join);
-        Ok(DispatchOutcome::Deferred)
+        match self.inbox.deliver(
+            &session_id,
+            self.request_id.clone(),
+            delivery,
+            request.prompt.clone(),
+            request.meta.clone(),
+        ) {
+            DeliveryOutcome::Steered | DeliveryOutcome::Queued { .. } => {
+                Ok(DispatchOutcome::Deferred)
+            }
+            DeliveryOutcome::Idle => self.start_prompt_v1(request, delivery, sink),
+            DeliveryOutcome::Full | DeliveryOutcome::Disabled => {
+                Err(concurrent_prompt_error(&session_id))
+            }
+        }
+    }
+
+    /// Reserves the session and spawns one v1 prompt.  A start race is
+    /// re-routed through the inbox with the caller's delivery choice.
+    fn start_prompt_v1(
+        &self,
+        request: PromptRequest,
+        delivery: PromptDelivery,
+        _sink: UpdateSink,
+    ) -> Result<DispatchOutcome, RpcError> {
+        let session_id = request.session_id.clone();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        match self.active_prompts.start(&session_id, cancel_tx) {
+            Ok(generation) => {
+                let steer = self.inbox.enabled().then(|| self.inbox.begin(&session_id));
+                let ctx = prompt_context(session_id.clone(), request, steer);
+                let join = self.runner.start(self.request_id.clone(), ctx, cancel_rx);
+                self.active_prompts.attach_join(&session_id, generation, join);
+                Ok(DispatchOutcome::Deferred)
+            }
+            Err(ActivePromptError::AlreadyActive(_)) => match self.inbox.deliver(
+                &session_id,
+                self.request_id.clone(),
+                delivery,
+                request.prompt,
+                request.meta,
+            ) {
+                DeliveryOutcome::Steered | DeliveryOutcome::Queued { .. } => {
+                    Ok(DispatchOutcome::Deferred)
+                }
+                _ => Err(concurrent_prompt_error(&session_id)),
+            },
+        }
     }
 
     /// v2 `session/prompt`: accepts the prompt, acknowledges insertion with
@@ -701,69 +739,96 @@ impl<P: AgentProvider> RequestDispatcher<P> {
     /// response, so no ordering constraint exists.  Turn completion is
     /// reported by the run loop as an idle `state_update` once the provider
     /// resolves.
-    async fn prompt_v2(&self, request: PromptRequest) -> Result<DispatchOutcome, RpcError> {
+    async fn prompt_v2(
+        &self,
+        request: PromptRequest,
+        delivery: PromptDelivery,
+    ) -> Result<DispatchOutcome, RpcError> {
         let session_id = request.session_id.clone();
-        let sink = self.update_sink_for(&session_id).map_err(|error| match error {
-            UpdateSinkError::UnknownSession(session_id) => {
-                AcpServerError::UnknownSession(session_id).into_rpc_error()
-            }
-            other => {
-                RpcError::internal_error().data(serde_json::json!({ "reason": other.to_string() }))
-            }
-        })?;
-
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let generation = self.active_prompts.start(&session_id, cancel_tx.clone()).map_err(
-            |error| match error {
-                ActivePromptError::AlreadyActive(session_id) => {
-                    concurrent_prompt_error(&session_id)
-                }
-            },
-        )?;
-        drop(cancel_tx);
+        self.update_sink_for(&session_id).map_err(unknown_session_error)?;
 
         // The agent owns message identity in v2: this id anchors the
         // acknowledgment response, the user_message update, and every chunk
         // the provider streams for this message.
         let message_id =
             self.message_ids.lock().expect("message id generator lock poisoned").next_id();
-
-        let ctx = PromptContext {
+        let _ = self.outbound_tx.send(OutboundEvent::UpdateV2 {
             session_id: session_id.clone(),
-            prompt: request.prompt.clone(),
-            metadata: request.meta.clone(),
-        };
-        let provider = self.provider.clone();
-        let active_prompts = self.active_prompts.clone();
-        let outbound_tx = self.outbound_tx.clone();
-        let request_id = self.request_id.clone();
-        let client = self.client_factory.bridge_for(&session_id);
-
-        let _ = outbound_tx.send(OutboundEvent::UpdateV2 {
-            session_id: session_id.clone(),
-            update: Box::new(translate::user_message_update(&message_id, &ctx.prompt)),
+            update: Box::new(translate::user_message_update(&message_id, &request.prompt)),
         });
-        let _ = outbound_tx.send(OutboundEvent::UpdateV2 {
+        let _ = self.outbound_tx.send(OutboundEvent::UpdateV2 {
             session_id: session_id.clone(),
             update: Box::new(translate::state_running()),
         });
 
-        let join_session_id = session_id.clone();
-        let join = tokio::spawn(async move {
-            let result = provider.prompt(ctx, sink, client, cancel_rx).await;
-            let _ = outbound_tx.send(OutboundEvent::PromptCompleted {
-                session_id: join_session_id.clone(),
-                request_id,
-                result,
-            });
-            active_prompts.remove(&join_session_id);
-        });
-        self.active_prompts.attach_join(&session_id, generation, join);
+        match self.inbox.deliver(
+            &session_id,
+            self.request_id.clone(),
+            delivery,
+            request.prompt.clone(),
+            request.meta.clone(),
+        ) {
+            DeliveryOutcome::Steered | DeliveryOutcome::Queued { .. } => {
+                return Ok(DispatchOutcome::Immediate(to_value(v2::PromptResponse::new(
+                    message_id.0.clone(),
+                ))));
+            }
+            DeliveryOutcome::Idle => {}
+            DeliveryOutcome::Full | DeliveryOutcome::Disabled => {
+                return Err(concurrent_prompt_error(&session_id));
+            }
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        match self.active_prompts.start(&session_id, cancel_tx) {
+            Ok(generation) => {
+                let steer = self.inbox.enabled().then(|| self.inbox.begin(&session_id));
+                let ctx = prompt_context(session_id.clone(), request, steer);
+                let join = self.runner.start(self.request_id.clone(), ctx, cancel_rx);
+                self.active_prompts.attach_join(&session_id, generation, join);
+            }
+            Err(ActivePromptError::AlreadyActive(_)) => {
+                match self.inbox.deliver(
+                    &session_id,
+                    self.request_id.clone(),
+                    delivery,
+                    request.prompt,
+                    request.meta,
+                ) {
+                    DeliveryOutcome::Steered | DeliveryOutcome::Queued { .. } => {}
+                    _ => return Err(concurrent_prompt_error(&session_id)),
+                }
+            }
+        }
 
         // SDK >= 2.1 typed `v2::PromptResponse` carries the required,
         // non-null `messageId`; the acknowledgment answers with the same
         // agent-owned id the user_message update and streamed chunks use.
         Ok(DispatchOutcome::Immediate(to_value(v2::PromptResponse::new(message_id.0.clone()))))
+    }
+
+    /// `session/set_model`: switches the session's model on an idle session.
+    ///
+    /// A running turn keeps the route it started on; switching mid-turn is
+    /// rejected before the provider sees it so transcript and native-state
+    /// replay stay consistent.
+    async fn session_set_model(&self, params: Value) -> Result<Value, RpcError> {
+        let request: SetSessionModelRequest = parse_params(params)?;
+        if self.sessions.get(&request.session_id).is_none() {
+            return Err(AcpServerError::UnknownSession(request.session_id).into_rpc_error());
+        }
+        if self.active_prompts.contains(&request.session_id) {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "cannot switch models while a turn is running; wait for the turn to settle or cancel it",
+            })));
+        }
+        self.with_provider_timeout(self.provider.set_model(SetModelContext {
+            session_id: request.session_id,
+            model_id: request.model_id,
+            metadata: request.meta,
+        }))
+        .await?;
+        to_value(SetSessionModelResponse::new())
     }
 
     /// `session/cancel` (notification or request form): cancels the active
@@ -777,6 +842,9 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             // `Cancelled` result, and removes its own state.
             drop(join);
         }
+        // Not-yet-promoted prompts have no cancellation receiver of their
+        // own; answer them here so clients never wait for a dead queue.
+        self.cancel_queued_prompts(&notification.session_id);
         if let Err(error) = self
             .with_provider_timeout(self.provider.cancel_session(notification.session_id.clone()))
             .await
@@ -784,6 +852,13 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             tracing::warn!(%error, "provider cancel_session failed");
         }
         Ok(())
+    }
+
+    /// Answers every buffered prompt for a session as cancelled.
+    fn cancel_queued_prompts(&self, session_id: &SessionId) {
+        for request_id in self.inbox.cancel_session(session_id) {
+            self.runner.cancel_prompt(session_id.clone(), request_id);
+        }
     }
 
     /// `session/close`: cancels any active prompt (awaiting its cleanup with
@@ -800,6 +875,16 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         if let Some(join) = self.active_prompts.cancel(&request.session_id) {
             let _ = tokio::time::timeout(self.config.request_timeout, join).await;
             self.active_prompts.remove(&request.session_id);
+        }
+
+        // Pending queue items and any steer waiters left without a running
+        // turn are answered before the session disappears.
+        let (pending, waiters) = self.inbox.close(&request.session_id);
+        for queued in pending {
+            self.runner.cancel_prompt(request.session_id.clone(), queued.request_id);
+        }
+        for waiter in waiters {
+            self.runner.cancel_prompt(request.session_id.clone(), waiter);
         }
 
         self.with_provider_timeout(self.provider.close_session(request.session_id.clone())).await?;
@@ -945,6 +1030,30 @@ fn concurrent_prompt_error(session_id: &SessionId) -> RpcError {
     }))
 }
 
+/// Builds the provider context for a freshly started prompt.
+fn prompt_context(
+    session_id: SessionId,
+    request: PromptRequest,
+    steer: Option<SteerInbox>,
+) -> PromptContext {
+    let mut ctx = PromptContext::new(session_id, request.prompt);
+    ctx.metadata = request.meta;
+    ctx.steer = steer;
+    ctx
+}
+
+/// Maps an update-sink lookup failure onto the JSON-RPC error surface.
+fn unknown_session_error(error: UpdateSinkError) -> RpcError {
+    match error {
+        UpdateSinkError::UnknownSession(session_id) => {
+            AcpServerError::UnknownSession(session_id).into_rpc_error()
+        }
+        other => {
+            RpcError::internal_error().data(serde_json::json!({ "reason": other.to_string() }))
+        }
+    }
+}
+
 /// Serializes a typed response; only fails on impossible SDK serialization
 /// bugs.
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
@@ -1024,6 +1133,7 @@ mod tests {
             Arc::new(config),
             sessions,
             Arc::new(ActivePrompts::new()),
+            Arc::new(PromptInbox::new(true, 16, 256 * 1024)),
             outbound_tx,
             client_factory,
             Arc::new(OnceLock::new()),

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use ee_agent_orchestrator::{ContextPackBuilder, WorkspaceRecallContext};
 use ee_agent_protocol::{
-    ContentBlock, PromptResponse, RequestPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    ContentBlock, PromptDelivery, PromptResponse, RequestPermissionOutcome, SessionConfigId,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeId, SessionModeState,
     SessionUpdate,
 };
@@ -437,6 +437,38 @@ impl AgentThread {
         self.send_prompt_inner(prompt, false, baseline).await
     }
 
+    /// Delivers a prompt to the running turn or its queue.
+    ///
+    /// When this thread is idle the call is an ordinary prompt turn.  When a
+    /// turn is already running the prompt does not take the host's turn
+    /// reservation: `steer` joins the running turn and `queue` waits for it
+    /// to settle, both handled by the agent's bounded inbox.  The returned
+    /// response is the joined turn's outcome (or the v2 delivery receipt).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the prompt is invalid or the agent rejects the delivery
+    /// (inbox disabled or full).
+    pub async fn send_prompt_with_delivery(
+        &self,
+        prompt: Vec<ContentBlock>,
+        delivery: PromptDelivery,
+    ) -> Result<PromptResponse, AgentError> {
+        if !self.is_turn_running() {
+            return self.send_prompt_inner(prompt, false, None).await;
+        }
+        validate_prompt_blocks(&self.connection, &prompt)?;
+        let wire_prompt = self.prompt_with_workspace_memory(&prompt);
+        // The steer is a real user message; render it optimistically like an
+        // ordinary prompt without creating a second evidence turn.
+        self.shared.state.lock().expect("session state poisoned").messages.push(ReducedMessage {
+            kind: MessageKind::User,
+            message_id: None,
+            blocks: prompt,
+        });
+        self.connection.steer_prompt(self.session_id.clone(), wire_prompt, delivery).await
+    }
+
     /// Re-sends the original prompt for an agent-reported recoverable pause.
     /// The host reuses the paused turn's evidence ledger rather than creating
     /// editor facts in the caller or a new evidence turn.
@@ -722,6 +754,19 @@ impl AgentThread {
         self.connection.set_mode(self.session_id.clone(), mode_id.clone()).await?;
         self.shared.state.lock().expect("session state poisoned").current_mode = Some(mode_id);
         Ok(())
+    }
+
+    /// Switches the session's model on an idle session.
+    ///
+    /// The agent keeps the provider-agnostic transcript; only provider-native
+    /// reasoning state stops replaying where the new route did not produce it.
+    ///
+    /// # Errors
+    ///
+    /// Fails while a turn is running, when the model is unknown or disabled,
+    /// or when the agent rejects the switch.
+    pub async fn set_model(&self, model_id: impl Into<String>) -> Result<(), AgentError> {
+        self.connection.set_model(self.session_id.clone(), model_id.into()).await.map(|_| ())
     }
 
     /// Sets one session config option through `session/set_config_option`.

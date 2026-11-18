@@ -343,6 +343,9 @@ pub struct OrchestratorConfig {
     /// admitted, before projection and compaction.
     #[serde(default)]
     pub tool_output: crate::tool_output::ToolOutputLimits,
+    /// Workspace snapshots, per-turn diffs, and selective file restore.
+    #[serde(default)]
+    pub snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig,
     /// Additional instruction sources beyond workspace discovery. Remote URLs
     /// are opt-in, fetched at most once per session, and skipped offline.
     #[serde(default)]
@@ -521,6 +524,7 @@ impl Default for OrchestratorConfig {
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::default(),
             tool_output: crate::tool_output::ToolOutputLimits::default(),
+            snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
         }
     }
@@ -747,6 +751,7 @@ mod tests {
             workspace_isolation: WorkspaceIsolationConfig::default(),
             approval_classifier: crate::approval_classifier::ApprovalClassifierConfig::auto(),
             tool_output: crate::tool_output::ToolOutputLimits::default(),
+            snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");

@@ -7,15 +7,20 @@
 //! model blocking on `wait_for_terminal_exit`.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ee_agent_acp_server::ClientBridge;
 use ee_agent_protocol::{
     KillTerminalRequest, ReleaseTerminalRequest, SessionId, TerminalId, TerminalOutputRequest,
 };
+use tokio::sync::{Notify, watch};
 
 /// Maximum bytes of terminal output retained in one completion notice.
 pub const BACKGROUND_JOB_TAIL_BYTES: usize = 2_000;
+/// Maximum characters of a background subagent description in the runtime
+/// snapshot.
+pub const BACKGROUND_SUBAGENT_DESCRIPTION_CHARS: usize = 200;
 
 /// Lifecycle state of one background terminal job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,10 +72,71 @@ impl BackgroundJob {
     }
 }
 
+/// Lifecycle state of one background subagent job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundSubagentStatus {
+    /// Child is still running (or waiting for a concurrency permit).
+    Running,
+    /// Child completed and produced a handoff summary.
+    Completed,
+    /// Child failed.
+    Failed,
+    /// Child was cancelled by request or session control.
+    Cancelled,
+    /// Session cancellation marked the job terminated before it reported.
+    Terminated,
+}
+
+impl BackgroundSubagentStatus {
+    fn status_line(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Terminated => "terminated",
+        }
+    }
+}
+
+/// One detached delegate job tracked by the parent session.
+#[derive(Debug)]
+pub struct BackgroundSubagentJob {
+    /// Stable background job id returned to the model immediately.
+    pub job_id: String,
+    /// Delegated role name.
+    pub role: String,
+    /// Bounded delegated prompt/description.
+    pub description: String,
+    /// Current lifecycle state.
+    pub status: BackgroundSubagentStatus,
+    /// Internal child id once the child reported.
+    pub child_id: Option<String>,
+    /// Bounded completion summary, when reported.
+    pub summary: Option<String>,
+    /// Whether the model was already told the job settled.
+    pub noticed: bool,
+    cancel: watch::Sender<bool>,
+}
+
+impl BackgroundSubagentJob {
+    fn status_line(&self) -> String {
+        let mut line = format!("{} {} [{}]", self.job_id, self.role, self.status.status_line());
+        if let Some(child_id) = &self.child_id {
+            line.push_str(&format!(" child={child_id}"));
+        }
+        line.push_str(&format!(": {}", self.description));
+        line
+    }
+}
+
 /// Shared per-runtime background terminal job registry.
 #[derive(Debug, Default)]
 pub struct BackgroundJobRegistry {
     jobs: Mutex<BTreeMap<String, BackgroundJob>>,
+    subagents: Mutex<BTreeMap<String, BackgroundSubagentJob>>,
+    next_subagent: AtomicU64,
+    changed: Notify,
 }
 
 impl BackgroundJobRegistry {
@@ -78,6 +144,114 @@ impl BackgroundJobRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers one detached delegate and returns its job id plus the
+    /// cancellation receiver the child observes.
+    pub fn register_subagent(
+        &self,
+        role: impl Into<String>,
+        description: impl Into<String>,
+    ) -> (String, watch::Receiver<bool>) {
+        let sequence = self.next_subagent.fetch_add(1, Ordering::Relaxed) + 1;
+        let job_id = format!("delegate-{sequence}");
+        let (cancel, cancel_rx) = watch::channel(false);
+        self.subagents.lock().expect("background jobs poisoned").insert(
+            job_id.clone(),
+            BackgroundSubagentJob {
+                job_id: job_id.clone(),
+                role: role.into(),
+                description: truncate_chars(
+                    description.into(),
+                    BACKGROUND_SUBAGENT_DESCRIPTION_CHARS,
+                ),
+                status: BackgroundSubagentStatus::Running,
+                child_id: None,
+                summary: None,
+                noticed: false,
+                cancel,
+            },
+        );
+        (job_id, cancel_rx)
+    }
+
+    /// Records a detached delegate's terminal result.
+    ///
+    /// A job already marked terminated by session control stays terminated so
+    /// a late report cannot resurrect it.
+    pub fn finish_subagent(
+        &self,
+        job_id: &str,
+        status: BackgroundSubagentStatus,
+        child_id: Option<String>,
+        summary: Option<String>,
+    ) {
+        {
+            let mut subagents = self.subagents.lock().expect("background jobs poisoned");
+            let Some(job) = subagents.get_mut(job_id) else { return };
+            if job.status == BackgroundSubagentStatus::Terminated {
+                return;
+            }
+            job.status = status;
+            job.child_id = child_id;
+            job.summary = summary.map(|summary| truncate_chars(summary, BACKGROUND_JOB_TAIL_BYTES));
+        }
+        self.changed.notify_one();
+    }
+
+    /// Whether any detached delegate is still running.
+    #[must_use]
+    pub fn has_running_subagents(&self) -> bool {
+        self.subagents
+            .lock()
+            .expect("background jobs poisoned")
+            .values()
+            .any(|job| job.status == BackgroundSubagentStatus::Running)
+    }
+
+    /// Waits until a background job reports a terminal state.
+    pub async fn wait_for_change(&self) {
+        self.changed.notified().await;
+    }
+
+    /// Marks every running delegate terminated and signals its child.
+    pub fn cancel_subagents(&self) {
+        let mut subagents = self.subagents.lock().expect("background jobs poisoned");
+        for job in subagents.values_mut() {
+            if job.status == BackgroundSubagentStatus::Running {
+                let _ = job.cancel.send(true);
+                job.status = BackgroundSubagentStatus::Terminated;
+            }
+        }
+    }
+
+    /// Collects and marks settled delegate notices for the model.
+    pub fn take_subagent_notices(&self) -> Vec<String> {
+        let mut subagents = self.subagents.lock().expect("background jobs poisoned");
+        let mut notices = Vec::new();
+        for job in subagents.values_mut() {
+            if job.noticed || job.status == BackgroundSubagentStatus::Running {
+                continue;
+            }
+            job.noticed = true;
+            let mut notice = format!(
+                "[background delegate {}] {} {}.",
+                job.status.status_line(),
+                job.job_id,
+                job.role
+            );
+            if let Some(child_id) = &job.child_id {
+                notice.push_str(&format!(" Child id: {child_id}."));
+            }
+            if let Some(summary) = &job.summary
+                && !summary.trim().is_empty()
+            {
+                notice.push_str("\nSummary:\n");
+                notice.push_str(summary.trim_end());
+            }
+            notices.push(notice);
+        }
+        notices
     }
 
     /// Records a terminal as a background job. Re-registering the same
@@ -98,11 +272,13 @@ impl BackgroundJobRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.jobs.lock().expect("background jobs poisoned").is_empty()
+            && self.subagents.lock().expect("background jobs poisoned").is_empty()
     }
 
     /// Drops all tracked jobs without touching the host terminals.
     pub fn clear(&self) {
         self.jobs.lock().expect("background jobs poisoned").clear();
+        self.subagents.lock().expect("background jobs poisoned").clear();
     }
 
     /// Renders the deterministic `BACKGROUND_JOBS` runtime-context section.
@@ -111,11 +287,12 @@ impl BackgroundJobRegistry {
     #[must_use]
     pub fn snapshot_text(&self) -> Option<String> {
         let jobs = self.jobs.lock().expect("background jobs poisoned");
-        if jobs.is_empty() {
+        let subagents = self.subagents.lock().expect("background jobs poisoned");
+        if jobs.is_empty() && subagents.is_empty() {
             return None;
         }
         let mut text = String::from(
-            "Background terminal jobs. Exit notices also arrive as system reminders between steps.",
+            "Background jobs. Exit/completion notices also arrive as system reminders between steps.",
         );
         for job in jobs.values() {
             text.push_str(&format!(
@@ -124,6 +301,9 @@ impl BackgroundJobRegistry {
                 job.status_line(),
                 job.command
             ));
+        }
+        for job in subagents.values() {
+            text.push_str(&format!("\n- subagent {}", job.status_line()));
         }
         Some(text)
     }
@@ -135,6 +315,7 @@ impl BackgroundJobRegistry {
     /// output for a terminal that is still live, and a transient transport
     /// error must not fabricate an exit.
     pub async fn poll(&self, client: &ClientBridge, session_id: &SessionId) -> Vec<String> {
+        let mut notices = self.take_subagent_notices();
         let running: Vec<(String, String)> = {
             let jobs = self.jobs.lock().expect("background jobs poisoned");
             jobs.values()
@@ -143,9 +324,8 @@ impl BackgroundJobRegistry {
                 .collect()
         };
         if running.is_empty() {
-            return Vec::new();
+            return notices;
         }
-        let mut notices = Vec::new();
         for (terminal_id, command) in running {
             let response = client
                 .terminal_output(TerminalOutputRequest::new(
@@ -189,6 +369,7 @@ impl BackgroundJobRegistry {
     /// Used on `session/cancel` and `/discard` so no background child outlives
     /// its session.
     pub async fn terminate_all(&self, client: &ClientBridge, session_id: &SessionId) {
+        self.cancel_subagents();
         let terminal_ids: Vec<String> = {
             let jobs = self.jobs.lock().expect("background jobs poisoned");
             jobs.values()
@@ -223,6 +404,15 @@ fn tail_bytes(text: &str) -> String {
     text[start..].to_string()
 }
 
+fn truncate_chars(value: String, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value;
+    }
+    let mut truncated: String = value.chars().take(limit).collect();
+    truncated.push('…');
+    truncated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +433,7 @@ mod tests {
         assert_eq!(
             registry.snapshot_text().as_deref(),
             Some(
-                "Background terminal jobs. Exit notices also arrive as system reminders between steps.\n- terminal term-a [running]: cargo build"
+                "Background jobs. Exit/completion notices also arrive as system reminders between steps.\n- terminal term-a [running]: cargo build"
             )
         );
     }

@@ -113,7 +113,7 @@ impl AgentProvider for OrchestratorProvider {
         let plugins = self.plugins.clone();
         Box::pin(async move {
             let workspace_roots = normalize_workspace_roots(&ctx.cwd, &ctx.additional_directories);
-            let (provider_label, model_label) = default_model_labels(&models);
+            let (mut provider_label, mut model_label) = default_model_labels(&models);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
             // A live session (same process, e.g. reconnect) is reused
             // as-is, including its recorded conversation.
@@ -138,6 +138,7 @@ impl AgentProvider for OrchestratorProvider {
                     .load(&implementation.name, &ctx.cwd, &session_id.to_string())
                     .map_err(ProviderError::from)?,
             };
+            let model_override = state.as_ref().and_then(|state| state.model_id.clone());
             let (runtime, conversation, mode) = match state {
                 Some(state) => {
                     let mode = state.mode;
@@ -192,6 +193,24 @@ impl AgentProvider for OrchestratorProvider {
                     (runtime, Vec::new(), mode)
                 }
             };
+            if let Some(model_id) = model_override {
+                // A persisted switch survives reconnect only while the target
+                // is still registered; a removed model falls back to default
+                // instead of making the session unloadable.
+                if models.contains(&model_id) {
+                    if let Some(info) = models.info(&model_id) {
+                        provider_label = info.identity.provider_id.clone();
+                        model_label = model_id.clone();
+                    }
+                    runtime.set_selected_model(Some(model_id));
+                } else {
+                    tracing::warn!(
+                        %session_id,
+                        model_id,
+                        "persisted session model is no longer registered; using the default model"
+                    );
+                }
+            }
             session_identity::register(
                 &runtime,
                 &session_id,
@@ -515,6 +534,25 @@ impl AgentProvider for OrchestratorProvider {
                 )?;
                 return Ok(turn.prompt_result);
             }
+            // `/diff` reports the files and patches one turn changed, using
+            // the start/end workspace snapshots captured around it.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == DIFF_COMMAND_NAME
+            {
+                return super::snapshot_command::handle_diff_command(
+                    super::snapshot_command::DiffCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        workspace: &workspace,
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                );
+            }
             // `/branch` forks the current session from a stored checkpoint.
             // It runs before discard/resume handling so a paused turn can be
             // branched instead of continued. Missing checkpoints fail closed
@@ -530,6 +568,8 @@ impl AgentProvider for OrchestratorProvider {
                             sink: &sink,
                             session_id: &session_id,
                             instructions: command.instructions.as_deref(),
+                            workspace: &workspace,
+                            workspace_roots: &workspace_roots,
                             telemetry: &telemetry,
                             telemetry_turn: &telemetry_turn,
                             telemetry_started_at,
@@ -553,6 +593,7 @@ impl AgentProvider for OrchestratorProvider {
                         workspace_roots: &workspace_roots,
                         provider_label: &provider_label,
                         model_label: &model_label,
+                        selected_model: runtime.selected_model(),
                         mcp_servers: &mcp_servers,
                         implementation_name: &implementation_name,
                         telemetry: &telemetry,
@@ -789,6 +830,25 @@ impl AgentProvider for OrchestratorProvider {
             );
             let resume_recovery_context =
                 StrategicRecoveryContext::new(strategic_input, bundle, provider_name);
+            // Capture the pre-turn workspace before the first model call.  The
+            // capture is bounded and ignore-aware; a failure never blocks the
+            // turn, it only disables file diff/revert for this turn.
+            let snapshot_roots: Vec<std::path::PathBuf> = {
+                let mut roots = Vec::with_capacity(workspace_roots.len() + 1);
+                roots.push(workspace.clone());
+                roots.extend(workspace_roots.iter().filter(|root| **root != workspace).cloned());
+                roots
+            };
+            let snapshot_turn = match runtime
+                .workspace_snapshots()
+                .begin_turn(&session_id.to_string(), &snapshot_roots)
+            {
+                Ok(record) => Some(record.turn),
+                Err(error) => {
+                    tracing::warn!(%error, "workspace snapshot capture failed; turn diff disabled");
+                    None
+                }
+            };
             let result = if has_pending {
                 // A paused turn awaits: the same prompt resumes it from its
                 // checkpoint (manual resume). `/resume` carries no new prompt
@@ -845,8 +905,24 @@ impl AgentProvider for OrchestratorProvider {
                 }
                 Err(error) => Err(ProviderError::from(error)),
             };
+            let snapshot_record = snapshot_turn.and_then(|turn| {
+                match runtime.workspace_snapshots().finish_turn(
+                    &session_id.to_string(),
+                    turn,
+                    &snapshot_roots,
+                ) {
+                    Ok(record) => Some(record),
+                    Err(error) => {
+                        tracing::warn!(%error, "workspace snapshot end capture failed");
+                        None
+                    }
+                }
+            });
             if result.is_ok() {
                 record_model_transcript(&model_transcript, runtime.last_turn_transcript());
+                if let Some(record) = &snapshot_record {
+                    annotate_snapshot_ids(&model_transcript, record);
+                }
             }
             let telemetry_completion = result.as_ref().ok().map(|turn| {
                 (
@@ -971,6 +1047,64 @@ impl AgentProvider for OrchestratorProvider {
         })
     }
 
+    fn set_model(&self, ctx: SetModelContext) -> ProviderFuture<Result<(), ProviderError>> {
+        let sessions = self.sessions.clone();
+        let models = self.models.clone();
+        let session_store = self.session_store.clone();
+        let implementation_name = self.config.implementation.name.clone();
+        Box::pin(async move {
+            let info = models.info(&ctx.model_id).ok_or_else(|| {
+                let available = models
+                    .advertised()
+                    .into_iter()
+                    .map(|model| model.id)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ProviderError::InvalidRequest(format!(
+                    "unknown model modelId={:?}; available models: {available}",
+                    ctx.model_id
+                ))
+            })?;
+            if !info.enabled {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "model modelId={:?} is disabled; enable it in provider config before switching",
+                    ctx.model_id
+                )));
+            }
+            if !info
+                .identity
+                .capabilities
+                .contains(&crate::model_registry::ModelCapability::ChatCompletion)
+            {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "model modelId={:?} does not advertise chat-completion support",
+                    ctx.model_id
+                )));
+            }
+            {
+                let mut sessions = sessions.lock().expect("adapter sessions poisoned");
+                let Some(session) = sessions.get_mut(&ctx.session_id.to_string()) else {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "unknown orchestrator session: {}",
+                        ctx.session_id
+                    )));
+                };
+                // The transcript is provider-agnostic; provider-native state
+                // stays producer-gated by each codec's `replayable_for`, so a
+                // cross-provider switch simply stops replaying old state.
+                session.runtime.set_selected_model(Some(ctx.model_id.clone()));
+                session.provider_label = info.identity.provider_id.clone();
+                session.model_label = ctx.model_id.clone();
+            }
+            persist_session_snapshot(
+                &session_store,
+                &implementation_name,
+                &ctx.session_id,
+                &sessions,
+            )
+        })
+    }
+
     fn cancel_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
         let sessions = self.sessions.clone();
         let plugins = self.plugins.clone();
@@ -1033,5 +1167,23 @@ impl AgentProvider for OrchestratorProvider {
                 .save(&implementation_name, &runtime.workspace, &session_id.to_string(), &state)
                 .map_err(ProviderError::from)
         })
+    }
+}
+
+/// Tags the turn's user and final assistant messages with the snapshot ids
+/// captured around it.  Metadata is diagnostic only; providers ignore it.
+fn annotate_snapshot_ids(
+    transcript: &Arc<Mutex<Vec<ModelMessage>>>,
+    record: &crate::workspace_snapshot::TurnSnapshotRecord,
+) {
+    let mut messages = transcript.lock().expect("model transcript poisoned");
+    if let Some(user) = messages.iter_mut().rev().find(|message| message.role == ModelRole::User) {
+        user.metadata.insert("ee_snapshot_start".to_string(), record.start.clone());
+    }
+    if let Some(end) = &record.end
+        && let Some(assistant) =
+            messages.iter_mut().rev().find(|message| message.role == ModelRole::Assistant)
+    {
+        assistant.metadata.insert("ee_snapshot_end".to_string(), end.clone());
     }
 }

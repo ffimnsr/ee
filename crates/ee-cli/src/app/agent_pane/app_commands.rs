@@ -3,7 +3,7 @@
 use super::super::*;
 
 use super::constants::{AGENT_TERMINAL_OUTPUT_TAIL_BYTES, AGENT_TERMINAL_STOP_ALL_MAX};
-use super::format::owned_terminal_summary_line;
+use super::format::{owned_terminal_summary_line, prompt_blocks_with_context};
 use super::state::{AgentPaneLayout, TerminalStopConfirmation};
 use super::thread_ui::{ExternalEditorRequest, ThreadUiState};
 impl App {
@@ -485,7 +485,7 @@ impl App {
         }
     }
 
-    /// Cancels a running ACP turn and dispatches this steer message before older follow-ups.
+    /// Delivers this steer message into the running turn without cancelling it.
     pub(super) fn agents_steer_command(&mut self, args: &str) {
         let prompt_text = args.trim_end().to_string();
         let Some(active) = self.agents.active_thread_index() else {
@@ -494,25 +494,28 @@ impl App {
         };
         match self.agents.threads[active].state {
             ThreadUiState::Running => {
-                let Some(queued_count) = self.queue_agent_prompt(active, prompt_text, true) else {
-                    return;
+                let blocks = {
+                    let thread = &self.agents.threads[active];
+                    prompt_blocks_with_context(
+                        &prompt_text,
+                        &thread.context_files,
+                        &thread.next_prompt_context_files,
+                    )
                 };
-                let thread = self.agents.threads[active].host.clone();
-                if thread.is_turn_running() {
-                    let host = self.agents.host.as_ref().expect("host present");
-                    let session_id = self.agents.threads[active].session_id.clone();
-                    self.agents
-                        .pending_cancels
-                        .entry(session_id)
-                        .or_insert_with(|| host.cancel(thread));
-                    self.backend.status_message = Some(format!(
-                        "steering active turn; cancelling now, steer message dispatches next ({queued_count} queued)"
-                    ));
-                } else {
-                    self.backend.status_message = Some(format!(
-                        "steer message queued first ({queued_count} queued); current turn is starting"
-                    ));
+                {
+                    let thread = &mut self.agents.threads[active];
+                    thread.draft.clear();
+                    thread.draft_cursor = 0;
+                    thread.next_prompt_context_files.clear();
+                    thread.record_prompt_history(&prompt_text);
+                    thread.push_message("you", &prompt_text, MessageRenderKind::User, None, None);
+                    thread.last_prompt = Some(blocks.clone());
                 }
+                let handle = self.agents.threads[active].host.clone();
+                let host = self.agents.host.as_ref().expect("host present");
+                host.steer_prompt(handle, blocks);
+                self.backend.status_message =
+                    Some(String::from("steer delivered to the running turn"));
             }
             ThreadUiState::Ready => {
                 self.send_ready_agent_prompt(active, prompt_text);
@@ -528,6 +531,42 @@ impl App {
                     Some(String::from("agent session is not ready; cannot steer"));
             }
         }
+    }
+
+    /// Switches the session model between turns (`/model`; `/agent` aliases it).
+    pub(super) fn agents_model_command(&mut self, args: &str) {
+        let model_id = args.trim();
+        if model_id.is_empty() || model_id.contains(char::is_whitespace) {
+            self.backend.status_message =
+                Some(String::from("usage: /model <model-id> (alias: /agent <model-id>)"));
+            return;
+        }
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if matches!(
+            self.agents.threads[active].state,
+            ThreadUiState::Starting
+                | ThreadUiState::Queued
+                | ThreadUiState::Running
+                | ThreadUiState::AwaitingPermission
+                | ThreadUiState::AwaitingElicitation
+                | ThreadUiState::Cancelling
+                | ThreadUiState::PausedRecoverable
+        ) {
+            self.backend.status_message = Some(String::from(
+                "cannot switch models while a turn is active or paused; wait for it to settle",
+            ));
+            return;
+        }
+        let Some(host) = &self.agents.host else {
+            self.backend.status_message = Some(String::from("agent host not ready"));
+            return;
+        };
+        let reply = host.set_model(self.agents.threads[active].host.clone(), model_id.to_string());
+        self.agents.pending_thread_action = Some(reply);
+        self.backend.status_message = Some(format!("switching model: {model_id}"));
     }
 
     pub(super) fn agents_set_transcript_detail(&mut self, args: &str) {

@@ -39,10 +39,10 @@ use ee_agent_protocol::{
     InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse,
     McpServer, McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
-    ReadTextFileRequest, ReleaseTerminalRequest, RequestId, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    NewSessionRequest, NewSessionResponse, PromptDelivery, PromptRequest, PromptResponse,
+    ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest, RequestId,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigOptionsCapabilities, SessionId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, StopReason, TerminalOutputRequest, WaitForTerminalExitRequest,
@@ -146,6 +146,10 @@ pub(crate) enum ConnectionCommand {
         request: SetSessionConfigOptionRequest,
         tx: oneshot::Sender<Result<SetSessionConfigOptionResponse, AgentError>>,
     },
+    SetModel {
+        request: ee_agent_protocol::SetSessionModelRequest,
+        tx: oneshot::Sender<Result<ee_agent_protocol::SetSessionModelResponse, AgentError>>,
+    },
     Authenticate {
         request: AuthenticateRequest,
         tx: oneshot::Sender<Result<AuthenticateResponse, AgentError>>,
@@ -157,6 +161,12 @@ pub(crate) enum ConnectionCommand {
     Prompt {
         request: PromptRequest,
         cancel: watch::Receiver<bool>,
+        tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+    },
+    /// Delivers a prompt to a running turn (or its queue) without taking the
+    /// host's per-session turn reservation.
+    SteerPrompt {
+        request: PromptRequest,
         tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
     },
     CancelSession {
@@ -1195,6 +1205,21 @@ impl AgentConnection {
         self.send_command(|tx| ConnectionCommand::Prompt { request, cancel, tx }).await
     }
 
+    /// Delivers a prompt to a running turn or its queue, bypassing this
+    /// connection's one-at-a-time session reservation.
+    pub(crate) async fn steer_prompt(
+        &self,
+        session_id: SessionId,
+        prompt: Vec<ee_agent_protocol::ContentBlock>,
+        delivery: PromptDelivery,
+    ) -> Result<PromptResponse, AgentError> {
+        // The SDK prompt type cannot carry a top-level extension field, so the
+        // delivery rides in `_meta`; the agent reads both forms.
+        let mut request = PromptRequest::new(session_id, prompt);
+        request.meta = Some(delivery.attach_to_meta(request.meta));
+        self.send_command(|tx| ConnectionCommand::SteerPrompt { request, tx }).await
+    }
+
     /// Sends the `session/cancel` notification for a session.
     pub(crate) fn send_session_cancel(&self, session_id: SessionId) {
         let _ = self.inner.commands.send(ConnectionCommand::CancelSession { session_id });
@@ -1211,6 +1236,7 @@ impl AgentConnection {
     }
 
     /// Sends `session/set_config_option` for a session (used by [`AgentThread`]).
+    /// Sends one session config option change through `session/set_config_option`.
     pub(crate) async fn set_config_option(
         &self,
         session_id: SessionId,
@@ -1219,6 +1245,16 @@ impl AgentConnection {
     ) -> Result<SetSessionConfigOptionResponse, AgentError> {
         let request = SetSessionConfigOptionRequest::new(session_id, config_id, value);
         self.send_command(|tx| ConnectionCommand::SetConfigOption { request, tx }).await
+    }
+
+    /// Sends `session/set_model` for an idle session.
+    pub(crate) async fn set_model(
+        &self,
+        session_id: SessionId,
+        model_id: String,
+    ) -> Result<ee_agent_protocol::SetSessionModelResponse, AgentError> {
+        let request = ee_agent_protocol::SetSessionModelRequest::new(session_id, model_id);
+        self.send_command(|tx| ConnectionCommand::SetModel { request, tx }).await
     }
 
     /// Resolves a pending permission request; returns `false` for stale or
@@ -1638,6 +1674,7 @@ async fn driver_loop(
     let (prompt_shutdown_tx, prompt_shutdown_rx) = watch::channel(false);
     let (lifecycle_shutdown_tx, lifecycle_shutdown_rx) = watch::channel(false);
     let mut prompt_tasks = FuturesUnordered::<PromptTask>::new();
+    let mut steering_tasks = FuturesUnordered::<PromptTask>::new();
     let mut lifecycle_tasks = FuturesUnordered::<LifecycleTask>::new();
     let mut active_prompts = HashMap::<SessionId, RequestId>::new();
     let mut queued_prompts = VecDeque::<PendingPrompt>::new();
@@ -1660,6 +1697,11 @@ async fn driver_loop(
                     &inner,
                     is_v2,
                 );
+            }
+            Some(completion) = steering_tasks.next(), if !steering_tasks.is_empty() => {
+                // Steer/queue deliveries never occupy the per-session turn
+                // reservation, so only the caller's oneshot is resolved here.
+                let _ = completion.tx.send(completion.result);
             }
             Some(()) = lifecycle_tasks.next(), if !lifecycle_tasks.is_empty() => {}
             command = rx.recv() => {
@@ -1852,6 +1894,16 @@ async fn driver_loop(
                         };
                         let _ = tx.send(result);
                     }
+                    ConnectionCommand::SetModel { request, tx } => {
+                        let result = request_with_timeout(
+                            &connection,
+                            request,
+                            request_timeout,
+                            "session/set_model",
+                        )
+                        .await;
+                        let _ = tx.send(result);
+                    }
                     ConnectionCommand::Authenticate { request, tx } => {
                         let result = request_with_timeout(&connection, request, request_timeout, "authenticate").await;
                         let _ = tx.send(result);
@@ -1889,6 +1941,17 @@ async fn driver_loop(
                             &inner,
                         );
                     }
+                    ConnectionCommand::SteerPrompt { request, tx } => {
+                        start_steer_task(
+                            &connection,
+                            &mut steering_tasks,
+                            PendingPrompt { request, cancel: watch::channel(false).1, tx },
+                            &prompt_shutdown_rx,
+                            &state_rx,
+                            &agent_id,
+                            is_v2,
+                        );
+                    }
                     ConnectionCommand::CancelSession { session_id } => {
                         if let Some(position) = queued_prompts
                             .iter()
@@ -1922,6 +1985,9 @@ async fn driver_loop(
 
     while let Some(completion) = prompt_tasks.next().await {
         finish_prompt_task(completion, &mut active_prompts);
+    }
+    while let Some(completion) = steering_tasks.next().await {
+        let _ = completion.tx.send(completion.result);
     }
     while lifecycle_tasks.next().await.is_some() {}
     while let Some(command) = rx.recv().await {
@@ -2001,6 +2067,80 @@ fn start_prompt_task(
         connection.clone(),
         pending.tx,
     )));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_steer_task(
+    connection: &ConnectionTo<AgentRole>,
+    steering_tasks: &mut FuturesUnordered<PromptTask>,
+    pending: PendingPrompt,
+    prompt_shutdown: &watch::Receiver<bool>,
+    state_rx: &watch::Receiver<AgentConnectionState>,
+    agent_id: &str,
+    is_v2: bool,
+) {
+    let session_id = pending.request.session_id.clone();
+    if is_v2 {
+        // A delivery prompt is acknowledged immediately on v2; the joined
+        // turn's completion arrives through `session/update`, so waiting for
+        // the session's single turn-end waiter would steal the main turn's
+        // signal.  The acknowledgment is the delivery receipt.
+        let request = v2_prompt_request(&pending.request);
+        let sent = connection.send_request(request);
+        let request_id = sent.id().clone();
+        steering_tasks.push(Box::pin(run_steer_task_v2(
+            sent,
+            session_id,
+            request_id,
+            prompt_shutdown.clone(),
+            state_rx.clone(),
+            agent_id.to_string(),
+            pending.tx,
+        )));
+        return;
+    }
+    let sent = connection.send_request(pending.request);
+    let request_id = sent.id().clone();
+    // A steer/queue delivery is not cancellable from the host's turn
+    // reservation; `session/cancel` on the agent closes it.
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    steering_tasks.push(Box::pin(run_prompt_task(
+        sent,
+        session_id,
+        request_id,
+        cancel_rx,
+        prompt_shutdown.clone(),
+        state_rx.clone(),
+        agent_id.to_string(),
+        connection.clone(),
+        pending.tx,
+    )));
+}
+
+/// v2 delivery prompt: the ack is the terminal result for the caller; the
+/// joined turn keeps streaming through the regular event path.
+async fn run_steer_task_v2(
+    sent: ee_agent_protocol::SentRequest<v2::PromptResponse>,
+    session_id: SessionId,
+    request_id: RequestId,
+    prompt_shutdown: watch::Receiver<bool>,
+    state_rx: watch::Receiver<AgentConnectionState>,
+    agent_id: String,
+    tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+) -> PromptTaskCompletion {
+    let shutdown = wait_for_true(prompt_shutdown);
+    let result = tokio::select! {
+        biased;
+        () = shutdown => Err(AgentError::ConnectionClosed { agent_id }),
+        response = sent.block_task() => match response {
+            Ok(_ack) => Ok(PromptResponse::new(StopReason::EndTurn)),
+            Err(_error) if matches!(*state_rx.borrow(), AgentConnectionState::Closed(_)) => {
+                Err(AgentError::ConnectionClosed { agent_id })
+            }
+            Err(error) => Err(AgentError::Rpc(error)),
+        },
+    };
+    PromptTaskCompletion { session_id, request_id, result, tx }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2362,6 +2502,9 @@ fn reject_command_after_shutdown(command: ConnectionCommand, agent_id: &str) {
         ConnectionCommand::SetConfigOption { tx, .. } => {
             let _ = tx.send(Err(error()));
         }
+        ConnectionCommand::SetModel { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
         ConnectionCommand::Authenticate { tx, .. } => {
             let _ = tx.send(Err(error()));
         }
@@ -2369,6 +2512,9 @@ fn reject_command_after_shutdown(command: ConnectionCommand, agent_id: &str) {
             let _ = tx.send(Err(error()));
         }
         ConnectionCommand::Prompt { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::SteerPrompt { tx, .. } => {
             let _ = tx.send(Err(error()));
         }
         ConnectionCommand::CancelSession { .. } | ConnectionCommand::Close => {}

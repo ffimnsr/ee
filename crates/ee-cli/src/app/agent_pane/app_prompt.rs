@@ -219,6 +219,15 @@ impl App {
                 self.backend.status_message = Some(String::from("usage: /steer <message>"));
                 true
             }
+            "model" | "agent" if !args.is_empty() => {
+                self.agents_model_command(args);
+                true
+            }
+            "model" | "agent" => {
+                self.backend.status_message =
+                    Some(String::from("usage: /model <model-id> (alias: /agent <model-id>)"));
+                true
+            }
             "queue" if queue_command_is_management(args) => {
                 self.agents_queue_command(args);
                 true

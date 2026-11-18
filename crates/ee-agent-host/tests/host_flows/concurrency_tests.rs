@@ -323,6 +323,64 @@ async fn prompts_in_two_sessions_on_one_connection_run_concurrently() {
 }
 
 #[tokio::test]
+async fn steer_delivery_joins_the_running_turn_without_taking_the_reservation() {
+    let script = base_script()
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "first_id")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "steer_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "first_id" },
+            "result": { "stopReason": "end_turn" }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "steer_id" },
+            "result": { "stopReason": "end_turn" }
+        }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let first_thread = thread.clone();
+    let first = tokio::spawn(async move {
+        first_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("first"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+
+    let steer = tokio::time::timeout(
+        TEST_TIMEOUT,
+        thread.send_prompt_with_delivery(
+            vec![ContentBlock::Text(TextContent::new("steer"))],
+            ee_agent_protocol::PromptDelivery::Steer,
+        ),
+    )
+    .await
+    .expect("steer resolves without waiting on the host reservation")
+    .expect("steer is accepted");
+    assert_eq!(steer.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        fake.requests_by_method("session/prompt").len(),
+        2,
+        "the steer travelled while the first turn was still running"
+    );
+
+    let first = tokio::time::timeout(TEST_TIMEOUT, first)
+        .await
+        .expect("first prompt resolves")
+        .expect("first prompt task")
+        .expect("first prompt succeeds");
+    assert_eq!(first.stop_reason, StopReason::EndTurn);
+
+    let prompts = fake.requests_by_method("session/prompt");
+    assert_eq!(prompts.len(), 2, "the steer travelled as its own request");
+    assert_eq!(prompts[1]["params"]["_meta"]["delivery"], "steer");
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn second_prompt_in_same_session_is_rejected_while_first_is_active() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

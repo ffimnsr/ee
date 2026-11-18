@@ -13,7 +13,8 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
             COMPACT_COMMAND_NAME,
             RUBBER_DUCK_COMMAND_NAME,
             BRANCH_COMMAND_NAME,
-            REVERT_COMMAND_NAME
+            REVERT_COMMAND_NAME,
+            DIFF_COMMAND_NAME
         ]
     );
     let recovery_commands = initial_commands(true);
@@ -24,6 +25,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
             RUBBER_DUCK_COMMAND_NAME,
             BRANCH_COMMAND_NAME,
             REVERT_COMMAND_NAME,
+            DIFF_COMMAND_NAME,
             DISCARD_COMMAND_NAME,
             ee_agent_protocol::RESUME_COMMAND_NAME,
         ]
@@ -41,6 +43,129 @@ fn provider_registry_requires_default_adapter() {
         result,
         Err(ProviderError::BackendFailure(reason)) if reason.contains("no default adapter")
     ));
+}
+
+fn switched_model_plumbing() -> (
+    UpdateSink,
+    ClientBridge,
+    tokio::sync::mpsc::UnboundedReceiver<ee_agent_acp_server::server::OutboundEvent>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (
+        UpdateSink::new_for_test(SessionId::new("s-1"), tx.clone()),
+        ClientBridge::new_for_test(std::time::Duration::from_secs(5), tx),
+        rx,
+    )
+}
+
+#[tokio::test]
+async fn mid_session_model_switch_keeps_the_transcript_and_routes_the_next_turn() {
+    let default =
+        Arc::new(FakeModel::new(vec![ModelResponse::new().text("first answer").completed()]));
+    let switched =
+        Arc::new(FakeModel::new(vec![ModelResponse::new().text("second answer").completed()]));
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry
+        .register(crate::model_registry::DEFAULT_MODEL_ID, default.clone())
+        .expect("default registered");
+    registry.register("model-b", switched.clone()).expect("model-b registered");
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig::default(),
+        registry,
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("hello"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("first turn completes");
+    assert_eq!(default.call_count(), 1);
+
+    provider
+        .set_model(SetModelContext::new(session_id.clone(), "model-b"))
+        .await
+        .expect("idle session switches models");
+
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("again"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("second turn completes");
+
+    assert_eq!(default.call_count(), 1, "the default route is no longer used");
+    assert_eq!(switched.call_count(), 1, "the next turn runs on the new route");
+    let request = switched.requests().remove(0);
+    assert!(
+        request.transcript.iter().any(|message| {
+            message.role == ModelRole::User
+                && message.content.iter().any(|content| {
+                    matches!(content, crate::model::ModelContent::Text(text) if text == "hello")
+                })
+        }),
+        "the prior user turn survives the switch"
+    );
+    assert!(
+        request.transcript.iter().any(|message| {
+            message.role == ModelRole::Assistant
+                && message.content.iter().any(|content| {
+                    matches!(content, crate::model::ModelContent::Text(text) if text == "first answer")
+                })
+        }),
+        "the prior assistant turn survives the switch"
+    );
+}
+
+#[tokio::test]
+async fn unknown_model_switch_fails_closed_with_the_target_named() {
+    let model = Arc::new(FakeModel::new(Vec::new()));
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry.register(crate::model_registry::DEFAULT_MODEL_ID, model).expect("default registered");
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig::default(),
+        registry,
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+
+    let error = provider
+        .set_model(SetModelContext::new(init.session_id, "missing-model"))
+        .await
+        .expect_err("unknown target is rejected");
+    assert!(
+        matches!(&error, ProviderError::InvalidRequest(reason) if reason.contains("missing-model")),
+        "error names the target: {error:?}"
+    );
 }
 #[test]
 fn streamed_agent_chunks_replay_as_one_message_per_turn() {
@@ -548,4 +673,88 @@ async fn provider_adapter_load_after_process_restart_restores_durable_session() 
     assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID);
     assert!(replayed.is_empty(), "durable session load must not replay transcript: {replayed:?}");
     handle_b.shutdown(task_b).await;
+}
+
+#[derive(Clone)]
+struct MutatingModel {
+    root: std::path::PathBuf,
+}
+
+impl ModelAdapter for MutatingModel {
+    fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancel: watch::Receiver<bool>,
+    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let root = self.root.clone();
+        Box::pin(async move {
+            for name in ["a.rs", "b.rs", "c.rs"] {
+                std::fs::write(root.join(name), format!("fn {name} changed\n"))
+                    .expect("mutate workspace");
+                // Give each file a distinct mtime-independent content change.
+                std::fs::write(root.join(name), format!("changed-{name}\n"))
+                    .expect("mutate workspace");
+            }
+            Ok(ModelResponse::new().text("done").completed())
+        })
+    }
+}
+
+#[tokio::test]
+async fn provider_turn_diff_reports_exactly_the_files_the_turn_changed() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let root = workspace.path().to_path_buf();
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(root.join(name), format!("original-{name}\n")).expect("seed");
+    }
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry
+        .register(
+            crate::model_registry::DEFAULT_MODEL_ID,
+            Arc::new(MutatingModel { root: root.clone() }),
+        )
+        .expect("default registered");
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig::default(),
+        registry,
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let init = provider.new_session(NewSessionContext::new(&root)).await.expect("session creates");
+    let session_id = init.session_id.clone();
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("edit"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("turn completes");
+
+    let session = provider
+        .sessions
+        .lock()
+        .expect("adapter sessions poisoned")
+        .get(&session_id.to_string())
+        .expect("session runtime")
+        .runtime
+        .clone();
+    let diff = session
+        .workspace_snapshots()
+        .turn_diff(&session_id.to_string(), 1, &root)
+        .expect("diff reads")
+        .expect("turn 1 has a diff");
+    let paths: Vec<_> = diff.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.rs", "b.rs", "c.rs"]);
+    assert!(
+        diff.files
+            .iter()
+            .all(|file| file.change == crate::workspace_snapshot::DiffChange::Modified)
+    );
 }

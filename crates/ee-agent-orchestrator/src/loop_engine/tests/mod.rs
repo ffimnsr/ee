@@ -2,8 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ee_agent_acp_server::server::OutboundEvent;
-use ee_agent_acp_server::{ClientBridge, PromptContext, UpdateSink};
-use ee_agent_protocol::{ContentBlock, SessionId, SessionUpdate, StopReason, TextContent};
+use ee_agent_acp_server::{ClientBridge, PromptContext, SteerInbox, UpdateSink};
+use ee_agent_protocol::{
+    ContentBlock, RequestId, SessionId, SessionUpdate, StopReason, TextContent,
+};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 
@@ -108,6 +110,44 @@ fn engine_with_options(
         events,
         options,
     )
+}
+
+#[tokio::test]
+async fn steer_message_is_visible_before_the_next_model_call() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))]),
+        ModelResponse::new().text("second step").completed(),
+    ]);
+    let (sink, client, _rx) = plumbing();
+    let events = EventRecorder::new();
+    let engine =
+        engine_with(OrchestratorConfig::default(), Arc::new(model.clone()), echo_tool(), events);
+
+    let (steer_tx, steer_inbox) = SteerInbox::channel(4);
+    steer_tx
+        .try_send(
+            RequestId::Number(9),
+            vec![ContentBlock::Text(TextContent::new("please also check tests"))],
+        )
+        .expect("steer accepted");
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    engine
+        .run(prompt("hello world").with_steer(steer_inbox), sink, client, cancel_rx, task(), None)
+        .await
+        .expect("turn completes");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "one steer does not add a model call");
+    assert!(
+        requests[1].transcript.iter().any(|message| {
+            message.role == ModelRole::User
+                && message.content.iter().any(|content| {
+                    matches!(content, ModelContent::Text(text) if text == "please also check tests")
+                })
+        }),
+        "steer lands in the second request transcript: {:?}",
+        requests[1].transcript
+    );
 }
 
 #[tokio::test]
@@ -640,3 +680,48 @@ async fn max_tool_calls_stops_before_unbounded_tool_use() {
 }
 
 mod budgets;
+
+#[tokio::test]
+async fn turn_waits_for_background_subagents_and_injects_the_notice() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().text("premature completion").completed(),
+        ModelResponse::new().text("finished after notice").completed(),
+    ]);
+    let background = Arc::new(crate::background_jobs::BackgroundJobRegistry::new());
+    let (job_id, _cancel) = background.register_subagent("researcher", "inspect the workspace");
+    let finisher = background.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        finisher.finish_subagent(
+            &job_id,
+            crate::background_jobs::BackgroundSubagentStatus::Completed,
+            Some("child-1".to_string()),
+            Some("child summary with the answer".to_string()),
+        );
+    });
+    let (sink, client, _rx) = plumbing();
+    let options = LoopOptions { background_jobs: Some(background), ..LoopOptions::default() };
+    let engine = engine_with_options(
+        OrchestratorConfig::default(),
+        Arc::new(model.clone()),
+        echo_tool(),
+        EventRecorder::new(),
+        options,
+    );
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    engine
+        .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+        .await
+        .expect("turn completes after the child");
+
+    assert_eq!(model.call_count(), 2, "a settled child forces one more model step");
+    let second = &model.requests()[1];
+    assert!(
+        second.transcript.iter().any(|message| {
+            message.role == ModelRole::System
+                && message.text_content().contains("child summary with the answer")
+        }),
+        "completion notice is a system reminder at the next step: {:?}",
+        second.transcript
+    );
+}
