@@ -11,9 +11,12 @@ use crate::{content_text, tool_call_id_of};
 
 /// Converts one transcript message into an input item.
 ///
+/// `provider` is the route of the outgoing request; it gates hosted items, which
+/// may only be replayed to the provider that produced them.
+///
 /// Messages whose rendered text is empty are omitted: Responses rejects empty
 /// text parts.
-pub(crate) fn input_item(message: &ModelMessage) -> Option<Value> {
+pub(crate) fn input_item(message: &ModelMessage, provider: Option<&str>) -> Option<Value> {
     // A provider-executed result is already part of the provider's response; a
     // synthetic `function_call_output` would reference a call it never saw as a
     // local function.
@@ -25,7 +28,7 @@ pub(crate) fn input_item(message: &ModelMessage) -> Option<Value> {
     if message.role == ModelRole::Tool
         && message.metadata.contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
     {
-        return hosted_result_item(message);
+        return hosted_result_item(message, provider);
     }
     let text = content_text(&message.content);
     match message.role {
@@ -59,7 +62,19 @@ pub(crate) fn input_item(message: &ModelMessage) -> Option<Value> {
 /// hosted kind, or a call the executor recorded locally) stays out of the
 /// request rather than being re-serialized into an item shape the provider did
 /// not send.
-fn hosted_result_item(message: &ModelMessage) -> Option<Value> {
+///
+/// A result stamped with its producing route is replayed only when the outgoing
+/// request targets that same route: a provider cannot accept an opaque item it
+/// never emitted. Unstamped (legacy) results replay as before.
+fn hosted_result_item(message: &ModelMessage, provider: Option<&str>) -> Option<Value> {
+    if let Some(producer) = message
+        .metadata
+        .get(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_PROVIDER_KEY)
+        .filter(|producer| !producer.is_empty())
+        && provider != Some(producer.as_str())
+    {
+        return None;
+    }
     let item = message.content.iter().find_map(|block| match block {
         ModelContent::ToolResult { result, .. } => result.structured_output.as_ref(),
         _ => None,

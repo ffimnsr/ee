@@ -97,6 +97,27 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  catalog:
+    name: Catalog reproducibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      # The generated tables are checked in, so a snapshot change that is not
+      # regenerated must fail here instead of shipping a stale catalog.
+      - name: Check OpenCode catalog
+        working-directory: crates/ee-agent-opencode
+        run: python3 scripts/gen_catalog.py --check
+
+      - name: Check OpenRouter catalog
+        working-directory: crates/ee-agent-openrouter
+        run: python3 scripts/gen_catalog.py --check
+
   build:
     name: Build
     runs-on: ubuntu-latest

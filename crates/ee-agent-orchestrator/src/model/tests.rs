@@ -236,6 +236,41 @@ fn tool_result_appends_stable_tool_call_id() {
 }
 
 #[test]
+fn provider_tool_result_records_the_producing_route() {
+    let mut transcript = Transcript::new();
+    let intent = ToolIntent::new("ws-1", "web_search", serde_json::json!({}))
+        .with_provider_executed(true)
+        .with_provider("OpenCode");
+    transcript.push_provider_tool_result(
+        &intent,
+        ToolResult::success_structured(r#"{"type":"web_search_call"}"#, serde_json::json!({})),
+    );
+    let message = &transcript.messages()[0];
+    assert_eq!(message.role, ModelRole::Tool);
+    assert_eq!(
+        message
+            .metadata
+            .get(crate::model::PROVIDER_EXECUTED_RESULT_PROVIDER_KEY)
+            .map(String::as_str),
+        Some("OpenCode")
+    );
+    assert!(message.metadata.contains_key(crate::model::PROVIDER_EXECUTED_RESULT_KEY));
+}
+
+#[test]
+fn provider_tool_result_without_a_route_stays_unstamped() {
+    let mut transcript = Transcript::new();
+    let intent =
+        ToolIntent::new("ws-1", "web_search", serde_json::json!({})).with_provider_executed(true);
+    transcript.push_provider_tool_result(&intent, ToolResult::success("provider executed"));
+    assert!(
+        !transcript.messages()[0]
+            .metadata
+            .contains_key(crate::model::PROVIDER_EXECUTED_RESULT_PROVIDER_KEY)
+    );
+}
+
+#[test]
 fn subagent_summary_appends_subagent_message() {
     let mut transcript = Transcript::new();
     transcript.push_subagent_summary("subagent finished");

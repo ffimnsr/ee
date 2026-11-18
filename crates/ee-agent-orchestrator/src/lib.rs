@@ -411,9 +411,9 @@ pub use model::{
     Continuation, ModelAdapter, ModelContent, ModelError, ModelFuture, ModelLimits, ModelMessage,
     ModelRequest, ModelResponse, ModelRole, ModelUsage, OUTPUT_LIMIT_FALLBACK, OUTPUT_LIMIT_MAX,
     OUTPUT_LIMIT_MIN, OpaqueProviderState, PROVIDER_EXECUTED_METADATA_PREFIX,
-    PROVIDER_EXECUTED_RESULT_KEY, ResponseFormat, ToolCallControl, ToolChoice, Transcript,
-    TranscriptTruncation, compaction_threshold_tokens, estimate_json_prompt_tokens,
-    estimate_prompt_tokens, fit_output_limit, validate_tool_names,
+    PROVIDER_EXECUTED_RESULT_KEY, PROVIDER_EXECUTED_RESULT_PROVIDER_KEY, ResponseFormat,
+    ToolCallControl, ToolChoice, Transcript, TranscriptTruncation, compaction_threshold_tokens,
+    estimate_json_prompt_tokens, estimate_prompt_tokens, fit_output_limit, validate_tool_names,
 };
 pub use model_metadata::{
     CacheCapability, CacheFormatId, CachePlacement, CacheTargets, CostTier, MEDIA_TARGET_BYTES,

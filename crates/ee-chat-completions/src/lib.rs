@@ -68,7 +68,7 @@ pub use generation::{
 pub use merge::{MAX_MERGE_DEPTH, MAX_MERGE_NODES, deep_merge};
 pub use native::{
     CHAT_REPLAY_FIELDS, NATIVE_META_KEY, PROVIDER_META_KEY, replayable, replayable_for, seal,
-    seal_response, seal_response_with_provider, seal_with_provider,
+    seal_response, seal_response_with_provider, seal_with_provider, stamp_provider_executed,
 };
 pub use partial_json::{MAX_PARTIAL_JSON_BYTES, parse_partial};
 pub use profile::{

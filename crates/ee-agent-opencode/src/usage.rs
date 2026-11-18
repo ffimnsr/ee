@@ -4,9 +4,10 @@
 //! this module, so an ordinary session performs exactly the requests its turns
 //! require. Two documented endpoints share the OpenCode origin:
 //!
-//! - `GET https://opencode.ai/api/policies/current-budgets` reports workspace
-//!   policy budgets. Service-account keys get `403`, which means "no budgets",
-//!   not an error.
+//! - `GET https://opencode.ai/console/api/policies/current-budgets` reports
+//!   workspace policy budgets. Service-account keys get `403`, which means "no
+//!   budgets", not an error. The console origin (`https://opencode.ai/console`)
+//!   matches the reference `console-access.ts` `defaultServer`.
 //! - `GET https://opencode.ai/zen/go/v1/usage` reports the Go meter (rolling,
 //!   weekly, monthly). A workspace without a Go subscription gets `403`, which
 //!   means "no allowance to show".

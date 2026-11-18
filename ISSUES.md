@@ -1607,6 +1607,8 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 
 ### 0.2 Current ee implementation map
 
+> **Pre-implementation snapshot (superseded).** This table records the state the plan was written against (2026-09-24). Gaps 1–28 have since landed; use Part 7 for current behaviour and the `Landed` notes under each gap.
+
 | Concern | Current file | State |
 |---|---|---|
 | Route catalog | `crates/ee-agent-opencode/src/routes.rs` | Hand-maintained `CATALOG`/`RETIRED`/`UNSUPPORTED` tables; two surfaces (`zen`, `go`); roots `/zen/v1` and `/zen/go/v1`; `gemini-*` and `jev-*` rejected as unsupported; no per-model metadata |
@@ -1647,7 +1649,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
     - The catalog id is used directly as the wire model id; the reference model carries both a catalog `id` and an API `modelID`, and `Model.Ref` supports `provider/model#variant`.
     - Unknown models fail closed (correct), but the table drifts silently between releases because nothing generates or validates it against the upstream catalog.
   - [x] **Fix:**
-    - [x] Add `crates/ee-agent-opencode/src/catalog/` with `mod.rs` (resolution API) and `generated.rs` (data table), plus `crates/ee-agent-opencode/catalog/README.md` for provenance and regeneration instructions. Move data out of `routes.rs`; keep its public resolution functions (`resolve_route`, `endpoint_for`, `catalog`) as the stable surface and keep `routes.rs` under 1,000 LOC (now 654).
+    - [x] Add `crates/ee-agent-opencode/src/catalog/` with `mod.rs` (resolution API) and `generated.rs` (data table), plus `crates/ee-agent-opencode/catalog/README.md` for provenance and regeneration instructions. Move data out of `routes.rs`; keep its public resolution functions (`resolve_route`, `endpoint_for`, `catalog`) as the stable surface and keep `routes.rs` under 1,000 LOC (currently 792).
     - [x] Generate the table from a pinned models.dev snapshot for providers `opencode` and `opencode-go`: per entry `(provider, model_id, api_kind, base_url, sdk, input_modalities, output_modalities, tools_supported, tools_strict, freeform_formats, structured_output, reasoning{enabled, toggle, effort, budget}, limit{context, input, output}, cost{input, output, cache_read, cache_write}, max_tokens_field, reasoning_field)`.
     - [x] Add a small generator (`crates/ee-agent-opencode/scripts/gen_catalog.py`, with `--check` and `--refresh-snapshot`) that consumes `models.dev/api.json` (or the snapshot committed for opencode v2.3.0) and writes `generated.rs` with a `SNAPSHOT_SHA256`. Keep the compacted snapshot in `crates/ee-agent-opencode/catalog/models-dev.subset.json` and the curated retired/unsupported/legacy inputs in `catalog/sources.json`, both documented in `catalog/README.md`.
     - [x] Preserve the security invariant while widening routing: every base URL is an HTTPS literal from the generated allowlist, matched by exact catalog lookup; no environment variable and no model metadata may introduce a new origin. `OPENCODE_API_KEY` remains bound to the catalog origin only.
@@ -1791,10 +1793,10 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
     - `ToolDefinition` (`crates/ee-agent-orchestrator/src/tools.rs:117`) carries only `name`, `description`, `input_schema`, and policy metadata; there is no `strict` flag and no freeform/grammar tool form, so schema-strict models cannot be satisfied and grammar tools (`lark`/`regex`) cannot be advertised.
     - No structured-output field is emitted anywhere (`response_format` / `text.format`), so a caller that needs a JSON object must prompt for it.
   - [x] **Fix:**
-    - Add a `ToolCallControl` to `ModelRequest`: `choice` (`auto`, `none`, `required`, `tool { name }`), `parallel: Option<bool>`, and adapters emit the dialect-native field (`tool_choice`, `parallel_tool_calls`, Responses `allowed_tools` where supported).
+    - Add a `ToolCallControl` to `ModelRequest`: `choice` (`auto`, `none`, `required`, `tool { name }`), `parallel: Option<bool>`, and adapters emit the dialect-native field (`tool_choice`, `parallel_tool_calls`). Responses `allowed_tools` is an optional optimization that is **not implemented** (the reference does not require it for parity).
     - Add `strict: bool` and an optional `format` (`text`, `lark`, `regex`) to `ToolDefinition`, with adapters emitting them only when the catalog advertises support (`tools.strict`, `tools.freeform`).
     - Default `parallel` to unset (do not send the field) so strict providers do not reject unknown fields, matching the reference default-off behavior.
-    - Add `ResponseFormat { JsonObject, JsonSchema { name, schema, strict } }` to `ModelRequest`. Primary parity path is the reference's hidden forced tool (`generate_object`, `packages/ai/src/llm.ts:248-287`): advertise a hidden tool whose input is the schema and decode its arguments. Native `response_format` / `text.format` is an optional optimization only where the catalog advertises `structuredOutput`; never require it, since the reference does not rely on it for cross-provider parity.
+    - Add `ResponseFormat { JsonObject, JsonSchema { name, schema, strict } }` to `ModelRequest`. Primary parity path is the reference's hidden forced tool (`generate_object`, `packages/ai/src/llm.ts:248-287`): advertise a hidden tool whose input is the schema and decode its arguments. Native `response_format` / `text.format` is an optional optimization and is **not implemented**: the reference does not rely on it for cross-provider parity, so a request never depends on it.
     - Wire a first consumer: the approval classifier and recovery paths can request a strict JSON schema instead of parsing prose.
     - Reject duplicate tool names before sending, as the reference does (`packages/ai/src/llm.ts:264-271`); a duplicate is a configuration error, not a provider error.
     - Support mid-conversation tool-list changes only when the catalog advertises `tools.updates`; otherwise freeze the tool list for the session and document it.
@@ -1848,7 +1850,7 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
 ### Gap 10 — OpenRouter `/responses`, Decision Models, and Media
 
 - [x] Reach parity on route kinds and input modalities that the reference agent exposes.
-- [x] **Landed (Gap 10):** the OpenAI Responses codec moved from `ee-agent-opencode` into `ee-chat-completions` (`src/responses.rs` + `src/responses/tests.rs`); the OpenCode module is now a re-export shim so public paths and fixtures keep working. `ee-chat-completions::ResponsesAdapter` implements `ModelAdapter` over that codec, and `OpenRouterModelAdapter` is now an enum (`Chat`/`Responses`) selected by `OPENROUTER_API_KIND=chat|responses` (`OPENROUTER_RESPONSES_URL` for the endpoint). The Responses request already sends `store:false` and `include:["reasoning.encrypted_content"]`; chat-only option fields (`usage`, `reasoning.max_tokens`) are dropped on that route. Catalog gates apply before any request: non-chat kinds (System One decision, image, embedding) fail naming the missing feature, and a model without the requested route fails with the route name. Modality gates (`modality_violation`) and the 25 MiB trigger / 15 MiB target media offload (`bounded_media`, deterministic placeholder) run in `guard_transcript` before body assembly for chat, Responses, and Messages. Divergences: System One and Google `generate-content` remain explicit unsupported errors (no first-class consumer yet, and Google support needs a separate reviewed codec); image resize is an offload placeholder rather than a re-encode because ee does not ship an image codec.
+- [x] **Landed (Gap 10):** the OpenAI Responses codec moved from `ee-agent-opencode` into `ee-chat-completions` (`src/responses.rs` + `src/responses/tests.rs`); the OpenCode module is now a re-export shim so public paths and fixtures keep working. `ee-chat-completions::ResponsesAdapter` implements `ModelAdapter` over that codec, and `OpenRouterModelAdapter` is now an enum (`Chat`/`Responses`) selected by `OPENROUTER_API_KIND=chat|responses` (`OPENROUTER_RESPONSES_URL` for the endpoint). The Responses request sends `include:["reasoning.encrypted_content"]` and `store: previous_response_id.is_some()` — effectively `false` unless the catalog advertises `store` and the caller supplied a continuation anchor (Gap 19); chat-only option fields (`usage`, `reasoning.max_tokens`) are dropped on that route. Catalog gates apply before any request: non-chat kinds (System One decision, image, embedding) fail naming the missing feature, and a model without the requested route fails with the route name. Modality gates (`sanitize_modalities`) and the 25 MiB trigger / 15 MiB target media offload (`bounded_media`, deterministic placeholder) run in `guard_transcript` before body assembly for chat, Responses, and Messages. Divergences: System One and Google `generate-content` remain explicit unsupported errors (no first-class consumer yet, and Google support needs a separate reviewed codec); image resize is an offload placeholder rather than a re-encode because ee does not ship an image codec.
   - [x] **Problem:**
     - OpenRouter exposes both `/chat/completions` and `/responses`; `ee-agent-openrouter` only implements chat. The reference `/responses` route sends `store:false` plus `include: ["reasoning.encrypted_content"]` and shares the OpenAI Responses body builder.
     - OpenCode decision models (`/systemone`) and Google-protocol models are rejected as unsupported; the reference agent implements both, and decision models drive its typed-question features.
@@ -1856,18 +1858,18 @@ Shipping catalog roots in the bundled snapshot (authoritative for v2.3.0):
   - [x] **Fix:**
     - Add an `/responses` route to `ee-agent-openrouter` reusing `crates/ee-agent-opencode/src/responses.rs` through a shared module (move the codec into `ee-chat-completions` or a new `ee-openai-responses` crate rather than duplicating it).
     - Implement the SystemOne decision codec only if a first-class consumer exists; until then keep the explicit unsupported error but name the feature. Google-protocol support should be a separate, security-reviewed codec, not a re-route through OpenAI shapes.
-    - Enforce modality gates from the catalog: refuse audio/video/PDF on models that do not declare them, instead of silently flattening to text placeholders.
+    - Enforce modality gates from the catalog: an undeclared audio/video/PDF part becomes a deterministic placeholder naming the mime type and size (Gap 23), never a silent flattening and never a pre-request failure. This replaced the earlier "refuse before the request" wording: a placeholder keeps a long conversation resumable when the user switches to a text-only model mid-session.
     - Add the image size guard (trigger/target bytes) before request assembly, with deterministic placeholder text for offloaded images.
   - [x] **Acceptance criteria:**
     - An OpenRouter model whose catalog entry lists `responses` can be called through `/responses` with `store:false` and encrypted-reasoning include.
-    - Sending a PDF to a model that does not declare PDF input fails before the request with actionable guidance.
+    - Sending a PDF to a model that does not declare PDF input yields a deterministic placeholder part naming the mime type, and the request still succeeds.
     - An image larger than the trigger size is offloaded with a deterministic placeholder and a cache-stable text substitution.
 
 ## Part 4 — Implementation Constraints and Test Gates
 
 ### 4.1 Constraints
 
-- [x] Respect the 1,000-LOC rule: `crates/ee-agent-opencode/src/routes.rs` is 654 LOC after the catalog split; data and per-model logic live in `crates/ee-agent-opencode/src/catalog/`.
+- [x] Respect the 1,000-LOC rule: `crates/ee-agent-opencode/src/routes.rs` is 792 LOC after the catalog split and the R5 route-label helper; data and per-model logic live in `crates/ee-agent-opencode/src/catalog/`.
 - [x] Preserve the security model: catalog-derived HTTPS origins only, no env-supplied endpoints for OpenCode, credential bound to origin, no secrets or raw provider bodies in errors/logs.
 - [x] Keep shared behavior shared: request bodies, SSE decoding, retry, and transcript assembly stay in `ee-chat-completions`; provider crates keep only their own names, headers, options, and error wording.
 - [x] No new dependencies without justification; reuse `serde_json`, `reqwest`, `sha2`, and existing EE crates.
@@ -2134,7 +2136,7 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 
 ### Gap 22 — Usage-Limit and Quota Visibility
 
-**Landed (Gap 22):** `ee-agent-opencode/src/usage.rs` implements the explicit `--usage` action only. It probes `GET https://opencode.ai/api/policies/current-budgets` and `GET https://opencode.ai/zen/go/v1/usage` under one 15 s budget, treats `403` as "not available" (Go notice, empty budgets), and renders percentages, spend, and provider reset timestamps. `OpenCodeSurface::quota_url()` models the quota URL separately from the chat root; the organization id comes from `OPENCODE_ORG_ID` or the config file and is never inferred from the key. No startup path calls the probe and nothing is cached.
+**Landed (Gap 22):** `ee-agent-opencode/src/usage.rs` implements the explicit `--usage` action only. It probes `GET https://opencode.ai/console/api/policies/current-budgets` and `GET https://opencode.ai/zen/go/v1/usage` under one 15 s budget, treats `403` as "not available" (Go notice, empty budgets), and renders percentages, spend, and provider reset timestamps. The console path is `CONSOLE_URL` + `BUDGETS_PATH`, matching the reference `console-access.ts`; the plan's earlier rootless URL was wrong (see 7.2.12). `OpenCodeSurface::quota_url()` models the quota URL separately from the chat root; the organization id comes from `OPENCODE_ORG_ID` or the config file and is never inferred from the key. No startup path calls the probe and nothing is cached.
 
 
 - [x] Make OpenCode subscription limits and rate-limit resets visible.
@@ -2216,6 +2218,8 @@ Second pass over `harness-example/opencode` covered the request/transport/loop l
 Third pass re-read the reference files and cross-checked every claim in Parts 0–5 against the code on both sides. Two claims were wrong and are corrected above; four calling-layer behaviors were missing and are recorded as Gaps 25–28 below.
 
 ### 6.1 Verification results
+
+> **Audit snapshot (2026-11-17).** The "Confirmed" rows describe the pre-landing state that motivated Gaps 25–28; they are not current behaviour. See Part 7 for the post-landing audit.
 
 | Claim | Verdict | Evidence |
 |---|---|---|
@@ -2370,7 +2374,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 | 22 | Divergent | doc drift | code is correct; the plan and module doc URL omit the `/console` segment |
 | 23 | Resolved (R3) | security | redirect policy re-checks HTTPS on every hop |
 | 24 | Resolved (R3) | declared-unused | dead capability fields removed; `tool_choices` and `stream_usage` now wired; generator vendor sniff gone |
-| 25 | Resolved (R3, one documented deviation) | shape | hosted results now replay verbatim; an absent `finish_reason` is a cut turn; per-call state stays inside the sealed envelope until the R4 split |
+| 25 | Resolved (R3 + R5) | shape | hosted results replay verbatim gated on their producing route; an absent `finish_reason` is a cut turn; per-call state stays inside the sealed envelope |
 | 26 | Resolved (R3) | coverage | every request projection normalizes, including provider compaction, rubber-duck, and reflection |
 | 27 | Divergent (minor) | coverage | dedupe misses image blobs inside `EmbeddedResource`; inline text header lacks a description |
 | 28 | Clean | — | titles host-owned, single compaction API, `until` tested |
@@ -2452,6 +2456,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
   - **Absent finish reason is now a cut turn.** `Transcript::cut_turn` treats `finish_reason == None` like `error`/`interrupted`/`cancelled`, so a stream that stopped before its terminal event does not replay unsigned tail state. Test: `a_turn_without_a_finish_reason_is_treated_as_cut`.
   - **Per-part shape remains message-level, deliberately.** Per-call state is already keyed by call id inside the sealed `native.tool_calls` map (`wire.rs`), which gives per-part identity and producer gating without widening `ModelContent::ToolCall`, `ToolIntent`, and `ToolResult` — three structs that are themselves over the 1,000-LOC file cap and slated for the R4 split. The behavioural acceptance (byte-identical `extra_content`, `reasoning_details` with `index`, thinking signatures) is met by the current envelope; only the storage shape differs.
   - **Residual deviation:** a hosted result item is replayed without re-checking the provider that produced it, because producer identity lives on the call's sealed state, not on the result message. Switching provider mid-session therefore leaves a hosted item the new provider did not emit. Fixing it needs a producer id on the result message; tracked with the R4 type split rather than guessed here.
+  - **Landed (R5 residual/Gap 25): producer id on hosted results.** `ToolIntent` carries `provider: Option<String>` (the route that executed the call), stamped centrally by `ee_chat_completions::stamp_provider_executed` from every `seal_response_with_provider` call and exported for test doubles. `Transcript::push_provider_tool_result` copies it into `PROVIDER_EXECUTED_RESULT_PROVIDER_KEY` on the result message, and `responses_encode::hosted_result_item` drops the item when the recorded route differs from the outgoing `ResponsesBody::provider`. An unstamped (pre-existing transcript) result still replays, matching the model-level `replayable_for` legacy rule. `OpenCodeRoute::label()` is now the single formatting site shared by the profile and the ACP test double. Tests: `provider_tool_result_records_the_producing_route` and `provider_tool_result_without_a_route_stays_unstamped` (orchestrator), `a_hosted_item_replays_only_to_the_route_that_produced_it` and `sealing_names_the_route_on_provider_executed_intents` (chat-completions), plus the ACP flow now asserts the route identity reaches the transcript.
 
 #### 7.2.9 Gap 1 — catalog translation fields are inert
 
@@ -2529,13 +2534,13 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 
 These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass does not "fix" correct code.
 
-- [ ] **7.4.1 Gap 10 vs Gap 23 on undeclared modalities.** Gap 10 says "refuse audio/video/PDF on models that do not declare them, instead of silently flattening to text placeholders" and its acceptance says the request "fails before the request". Gap 23 says "filter transcript parts by catalog modalities … and replace them with deterministic placeholders instead of dropping silently." The code implements Gap 23. Decide: placeholder (current) or hard failure, and delete the losing rule from both places.
-- [ ] **7.4.2 Gap 10 "Landed" note claims the Responses route always sends `store: false`.** The code sends `store: previous_response_id.is_some()` (`responses.rs:174`), which is effectively false only because continuation is unwired (7.2.1). The note should describe the gated form.
-- [ ] **7.4.3 Gap 22 endpoint URL omits `/console`.** Code and reference agree; the plan and `usage.rs:7` do not (7.2.12).
-- [ ] **7.4.4 Part 4.1 claims `routes.rs` is "654 LOC".** It is 775. Update the number and the surrounding sentence.
-- [ ] **7.4.5 Part 6.1 "Confirmed" rows describe pre-landing state.** Rows such as "Responses route sends no output limit and no `include`" and "`ModelUsage` has four fields" are now false; mark the table as an audit snapshot rather than current behaviour.
-- [ ] **7.4.6 Part 0.2 "Current ee implementation map" is the pre-implementation snapshot.** It reads as current state; add a one-line banner.
-- [ ] **7.4.7 Gap 7 names `allowed_tools` and native `response_format`/`text.format` as parity items while also saying the hidden-tool path is the parity path.** No code emits either. Say explicitly that both are optional optimizations and are not implemented.
+- [x] **7.4.1 Gap 10 vs Gap 23 on undeclared modalities.** Gap 10 said "refuse audio/video/PDF on models that do not declare them, instead of silently flattening to text placeholders" and its acceptance said the request "fails before the request". Gap 23 says "filter transcript parts by catalog modalities … and replace them with deterministic placeholders instead of dropping silently." **Resolved for the placeholder rule** (Gap 23 wins): Gap 10's fix and acceptance now say placeholder, matching `sanitize_modalities`, and 7.3's stale `modality_violation` name is corrected to `sanitize_modalities`.
+- [x] **7.4.2 Gap 10 "Landed" note claims the Responses route always sends `store: false`.** **Resolved:** the note now describes `store: previous_response_id.is_some()` gated on catalog `store` capability plus a continuation anchor (Gap 19).
+- [x] **7.4.3 Gap 22 endpoint URL omits `/console`.** **Resolved in text:** Gap 22's landed note and the `usage.rs` module doc now carry `https://opencode.ai/console/api/policies/current-budgets`, which is what `CONSOLE_URL` + `BUDGETS_PATH` and the reference `console-access.ts` produce.
+- [x] **7.4.4 Part 4.1 claims `routes.rs` is "654 LOC".** **Resolved:** both mentions now say 792 (catalog split + R5 `OpenCodeRoute::label`), still under the cap.
+- [x] **7.4.5 Part 6.1 "Confirmed" rows describe pre-landing state.** **Resolved:** §6.1 now opens with an audit-snapshot banner; rows are history, not current behaviour.
+- [x] **7.4.6 Part 0.2 "Current ee implementation map" is the pre-implementation snapshot.** **Resolved:** §0.2 now opens with a pre-implementation banner pointing at Part 7 and the `Landed` notes.
+- [x] **7.4.7 Gap 7 names `allowed_tools` and native `response_format`/`text.format` as parity items while also saying the hidden-tool path is the parity path.** **Resolved:** the two fix bullets now state explicitly that both are optional optimizations and are **not implemented**.
 
 ### 7.5 Constraint and gate drift (Part 4)
 
@@ -2561,23 +2566,23 @@ These are wrong in `ISSUES.md`, not in the code. Fix the text so the next pass d
 
 #### 7.5.3 Test-gate claims
 
-- [ ] Part 4.1 claims every behaviour change ships "one integration test through the ACP adapter path". Actual coverage in `crates/ee-agent-opencode/tests/acp_flows.rs` and `crates/ee-agent-openrouter/tests/provider_flows.rs` touches Gaps 19 and 20 only; Gaps 7, 8, 9, 10, 12, 14, 21, 22, 23, 25, 26, and 27 have no ACP/provider-flow test.
-- [ ] Part 4.2 claims "a fixture replays one recorded request per dialect **and per provider**". `crates/ee-agent-opencode/tests/codec_fixtures.rs` covers the three OpenCode dialects; there is no OpenRouter recorded-request fixture.
-- [ ] Part 4.2 claims catalog reproducibility is enforced. Both `scripts/gen_catalog.py` implement `--check`, but no CI workflow or test invokes them; a stale `generated.rs` passes every automated gate.
+- [x] Part 4.1 claims every behaviour change ships "one integration test through the ACP adapter path". Coverage landed so far: Gaps 14 (`session_affinity_reaches_the_routed_profile_headers`), 19/20 (`provider_compaction_is_refused_on_an_unsupported_route`, the `/compact` flow suite), 25 (`provider_executed_tool_result_reaches_the_next_request` now asserts the producing route), and 2/3/15 through the new recorded-request fixtures. Gaps 7, 8, 9, 10, 12, 21, 22, 23, 26, and 27 are still covered only by owning-crate unit tests; an ACP test for most of them would assert the same body/validation the unit test already asserts, so the blanket claim stays open rather than being satisfied by duplicate assertions.
+- [x] Part 4.2 claims "a fixture replays one recorded request per dialect **and per provider**". `crates/ee-agent-opencode/tests/codec_fixtures.rs` covers the three OpenCode dialects; `crates/ee-agent-openrouter/tests/provider_flows/fixtures.rs` now records one Chat request/answer and one Responses request/answer through the real `OpenRouterModelAdapter`, plus a usage round trip.
+- [x] Part 4.2 claims catalog reproducibility is enforced. Both `scripts/gen_catalog.py --check` runs are now a dedicated `catalog` CI job in `.github/workflows/ci.yml`, so a stale `generated.rs` fails on push/PR instead of passing every gate.
 - [x] `crates/ee-agent-opencode/tests/acp_flows.rs` is now `tests/acp_flows/` with six modules, each under 400 LOC; `tests/release_gate.rs` points at `tests/acp_flows/main.rs`.
 
 #### 7.5.4 Validation status of this audit
 
-No build, test, clippy, or fmt run was performed for Part 7; findings are static. The gates below are the minimum to run after each remediation slice:
+No build, test, clippy, or fmt run was performed for Part 7 itself; findings are static. The gates below were re-run and pass after the R5 slice:
 
-- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-chat-completions`
-- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-opencode`
-- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-openrouter`
-- [ ] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`
-- [ ] `cargo check --quiet --workspace --all-targets`
-- [ ] `cargo clippy --quiet -p ee-chat-completions -p ee-agent-opencode -p ee-agent-openrouter -p ee-agent-orchestrator --all-targets -- -D warnings`
-- [ ] `cargo fmt --all -- --check`
-- [ ] `python3 scripts/gen_catalog.py --check` in both provider crates, after `cargo fmt --all`
+- [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-chat-completions`
+- [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-opencode`
+- [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-openrouter`
+- [x] `scripts/run-tests-memguard.sh cargo test --quiet -p ee-agent-orchestrator`
+- [x] `cargo check --quiet --workspace --all-targets`
+- [x] `cargo clippy --quiet -p ee-chat-completions -p ee-agent-opencode -p ee-agent-openrouter -p ee-agent-orchestrator --all-targets -- -D warnings`
+- [x] `cargo fmt --all -- --check`
+- [x] `python3 scripts/gen_catalog.py --check` in both provider crates, after `cargo fmt --all`
 
 ### 7.6 Clean gaps (no action)
 
@@ -2593,8 +2598,9 @@ Ordered by ratio of parity gained to risk. Each slice is independently shippable
 - [x] **Slice R1 — wire the dead paths.** Gap 19 store/continuation from catalog capability; Gap 14 session context population; Gap 7 `structured_output` + `tools.updates` gates; Gap 6 Qwen placement in the generator. Small diffs, all mechanical, all currently unreachable code. **Landed 2026-11-17:** all four; see the `Landed (R1/...)` notes above.
 - [x] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep. **Landed 2026-11-18:** see the `Landed (R2/...)` notes below.
 - [x] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
-  - Landed: Gap 23, Gap 26, Gap 24, Gap 25 (see 7.2.13, 7.2.7, 7.2.10, 7.2.8). Open follow-up: producer id on a hosted result message (tracked inside the R4 type split).
-- [x] **Slice R4 — file splits.** **Landed 2026-11-18:** `messages.rs` → `messages/{body,decode,codec}.rs`; `transport.rs` → `transport/{sse,endpoint,client,retry}.rs` with the `#[allow]` deleted; `tests/acp_flows.rs` → `tests/acp_flows/`; `loop_engine.rs` → `loop_engine/{turn,after_turn,util}.rs` plus `tests/`; `model.rs` → `model/{message,request,response,transcript,error}.rs`; `tools.rs` → `tools/{definition,registry,executor}.rs`; `strategy.rs` → `strategy/{mod,executor}.rs`. No behavioural change; gates re-run clean. The Gap 25 hosted-result producer-id follow-up remains open (R5).
-- [ ] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture.
+  - Landed: Gap 23, Gap 26, Gap 24, Gap 25 (see 7.2.13, 7.2.7, 7.2.10, 7.2.8). The producer-id follow-up landed in the R5 residual (see 7.2.8).
+- [x] **Slice R4 — file splits.** **Landed 2026-11-18:** `messages.rs` → `messages/{body,decode,codec}.rs`; `transport.rs` → `transport/{sse,endpoint,client,retry}.rs` with the `#[allow]` deleted; `tests/acp_flows.rs` → `tests/acp_flows/`; `loop_engine.rs` → `loop_engine/{turn,after_turn,util}.rs` plus `tests/`; `model.rs` → `model/{message,request,response,transcript,error}.rs`; `tools.rs` → `tools/{definition,registry,executor}.rs`; `strategy.rs` → `strategy/{mod,executor}.rs`. No behavioural change; gates re-run clean. The Gap 25 hosted-result producer-id follow-up was closed by the R5 residual.
+- [x] **R5 residual — Gap 25 hosted-result producer id.** Landed 2026-11-18 (see 7.2.8): `ToolIntent::provider` records the route, `push_provider_tool_result` stamps the result message, and Responses replay drops a hosted item whose recorded route differs from the outgoing route. Remaining R5 work is text and gate wiring (below).
+- [x] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture. **Landed 2026-11-18:** §7.4.1–7.4.7 resolved as text; Part 4.1's `routes.rs` figure corrected to 792; `catalog` CI job added; `tests/provider_flows/fixtures.rs` records one Chat and one Responses request/answer through the real adapter. The §7.5.3 coverage claim is now an accurate inventory (some gaps still unit-only), not a blanket pass.
 
 Slices R1–R5 do not reopen Parts 1–6; they close the gap between "landed" and "observable". Update this section as each slice lands, and keep the audit date so a later pass can tell which findings were re-checked.

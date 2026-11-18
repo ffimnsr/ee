@@ -217,7 +217,7 @@ fn spawn_agent_with_config(
     dirs: &TestDirs,
 ) -> SpawnedAgent {
     let route = config.route;
-    let codec = Arc::new(ScriptedCodec::new(route.dialect, answers));
+    let codec = Arc::new(ScriptedCodec::new(route.dialect, answers).with_label(route.label()));
     let (provider, warning) = opencode_multi_model_provider_with_codecs(
         &config,
         dirs.state(),

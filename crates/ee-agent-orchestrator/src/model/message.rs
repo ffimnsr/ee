@@ -32,6 +32,12 @@ pub const PROVIDER_EXECUTED_METADATA_PREFIX: &str = "provider_executed:";
 
 /// Metadata key marking a tool-result message as provider-produced.
 pub const PROVIDER_EXECUTED_RESULT_KEY: &str = "provider_executed";
+
+/// Metadata key naming the route that produced a hosted tool result.
+///
+/// Hosted items are replayed verbatim, so the recorded route is compared with
+/// the route of the outgoing request and a mismatch drops the item.
+pub const PROVIDER_EXECUTED_RESULT_PROVIDER_KEY: &str = "provider_executed_provider";
 /// Message metadata key: the tool's side-effect class label.
 pub const TOOL_SIDE_EFFECT_METADATA_KEY: &str = "tool_side_effect";
 /// Message metadata key: the primary path argument of a read/write tool.

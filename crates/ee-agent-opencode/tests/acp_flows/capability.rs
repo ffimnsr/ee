@@ -62,6 +62,13 @@ async fn provider_executed_tool_result_reaches_the_next_request() {
             .metadata
             .contains_key(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY)
     );
+    // The hosted item is replayed verbatim, so the result records the route that
+    // emitted it; replay gating compares that route with the next request.
+    let producer = provider_results[0]
+        .metadata
+        .get(ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_PROVIDER_KEY)
+        .expect("the producing route is recorded on the hosted result");
+    assert!(producer.starts_with("OpenCode "), "route identity is the catalog label: {producer}");
 
     harness.shutdown(task).await;
 }

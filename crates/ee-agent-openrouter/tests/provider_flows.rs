@@ -6,6 +6,9 @@
 
 mod common;
 
+#[path = "provider_flows/fixtures.rs"]
+mod fixtures;
+
 use std::time::Duration;
 
 use common::{

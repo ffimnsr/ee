@@ -837,6 +837,81 @@ fn a_provider_executed_result_replays_the_provider_item_verbatim() {
 }
 
 #[test]
+fn a_hosted_item_replays_only_to_the_route_that_produced_it() {
+    let item = serde_json::json!({
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed"
+    });
+    let messages = vec![
+        ModelMessage::text(ModelRole::User, "search rust"),
+        ModelMessage::tool_result(
+            "ws_1",
+            ToolResult::success_structured(item.to_string(), item.clone()),
+        )
+        .with_metadata([
+            (ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_KEY.to_string(), String::from("true")),
+            (
+                ee_agent_orchestrator::PROVIDER_EXECUTED_RESULT_PROVIDER_KEY.to_string(),
+                String::from("OpenCode"),
+            ),
+        ]),
+    ];
+    let build = |provider: Option<&'static str>| {
+        responses_body(&ResponsesBody {
+            model: "gpt-5.5",
+            provider,
+            system_prompt: "system",
+            transcript: &messages,
+            tools: &[],
+            stream: false,
+            max_output_tokens: None,
+            extensions: None,
+            generation: None,
+            tool_control: &ee_agent_orchestrator::ToolCallControl::auto(),
+            cache: &CacheDirective::disabled(),
+            session: None,
+            previous_response_id: None,
+            input_from: 0,
+        })
+    };
+    let same_route = build(Some("OpenCode"));
+    assert!(
+        same_route["input"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["type"] == "web_search_call")),
+        "the producing route replays its own hosted item"
+    );
+    let other_route = build(Some("OpenRouter"));
+    assert!(
+        other_route["input"]
+            .as_array()
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "web_search_call")),
+        "a route that did not emit the item never receives it"
+    );
+}
+
+#[test]
+fn sealing_names_the_route_on_provider_executed_intents() {
+    let value = serde_json::json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed"
+        }]
+    });
+    let decoded = super::response_from_buffered("test", &value).expect("decodes");
+    let sealed = crate::seal_response_with_provider(decoded, Some("OpenCode"), "gpt-x");
+    assert_eq!(sealed.tool_intents[0].provider.as_deref(), Some("OpenCode"));
+
+    let decoded = super::response_from_buffered("test", &value).expect("decodes");
+    let unstamped = crate::seal_response_with_provider(decoded, None, "gpt-x");
+    assert!(unstamped.tool_intents[0].provider.is_none());
+}
+
+#[test]
 fn stale_continuation_is_classified_not_string_matched() {
     let mut decoder = super::StreamDecoder::new("test");
     let error = decoder

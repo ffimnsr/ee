@@ -288,6 +288,12 @@ pub struct ToolIntent {
     /// Provider-supplied result for a provider-executed call, verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_result: Option<serde_json::Value>,
+    /// Route identity that executed a provider-executed call (for example
+    /// `OpenCode`). Hosted results are replayed as the provider's own items, so
+    /// the recorded identity gates replay to the same route. `None` when the
+    /// decoder could not name the producing route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Bounded parse failure when the model emitted malformed tool arguments.
     /// The executor returns this text as the tool observation so the model can
     /// correct itself instead of seeing a generic schema error.
@@ -309,6 +315,7 @@ impl ToolIntent {
             arguments,
             provider_executed: false,
             provider_result: None,
+            provider: None,
             argument_error: None,
         }
     }
@@ -324,6 +331,13 @@ impl ToolIntent {
     #[must_use]
     pub fn with_provider_result(mut self, result: serde_json::Value) -> Self {
         self.provider_result = Some(result);
+        self
+    }
+
+    /// Records the route that executed a provider-executed call.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
         self
     }
 

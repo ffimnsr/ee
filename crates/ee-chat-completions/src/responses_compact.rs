@@ -165,11 +165,11 @@ pub fn compact_body(input: &CompactBody<'_>) -> Value {
                 input.provider,
                 input.model,
             ));
-            if let Some(item) = input_item(message) {
+            if let Some(item) = input_item(message, input.provider) {
                 items.push(item);
             }
             items.extend(function_call_items(message));
-        } else if let Some(item) = input_item(message) {
+        } else if let Some(item) = input_item(message, input.provider) {
             items.push(item);
         }
     }

@@ -158,6 +158,7 @@ impl RecordedRequest {
 #[derive(Debug)]
 pub struct ScriptedCodec {
     dialect: OpenCodeDialect,
+    label: Option<String>,
     answers: Mutex<VecDeque<ScriptedAnswer>>,
     requests: Mutex<Vec<RecordedRequest>>,
 }
@@ -168,9 +169,18 @@ impl ScriptedCodec {
     pub fn new(dialect: OpenCodeDialect, answers: Vec<ScriptedAnswer>) -> Self {
         Self {
             dialect,
+            label: None,
             answers: Mutex::new(answers.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Names the route this double serves so its answers carry the same
+    /// producer identity a production codec seals.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     /// Builds a codec that never answers, for cancellation and timeout tests.
@@ -240,7 +250,8 @@ impl DialectCodec for ScriptedCodec {
         tools: &'a [ToolDefinition],
     ) -> CodecFuture<'a> {
         let answer = self.take_answer(transcript, tools);
-        Box::pin(async move { resolve(answer).await })
+        let label = self.label.clone();
+        Box::pin(async move { resolve(answer, label.as_deref()).await })
     }
 
     fn complete_streaming<'a>(
@@ -250,8 +261,9 @@ impl DialectCodec for ScriptedCodec {
         sink: DeltaSink<'a>,
     ) -> CodecFuture<'a> {
         let answer = self.take_answer(transcript, tools);
+        let label = self.label.clone();
         Box::pin(async move {
-            let response = resolve(answer).await?;
+            let response = resolve(answer, label.as_deref()).await?;
             // Mirrors the production codecs: the finished response reaches the
             // sink before the adapter returns it.
             emit_finished_deltas(&response, sink)?;
@@ -261,9 +273,14 @@ impl DialectCodec for ScriptedCodec {
 }
 
 /// Resolves a scripted answer; a pending answer never completes.
-async fn resolve(answer: ScriptedAnswer) -> Result<ModelResponse, ProviderError> {
+async fn resolve(
+    answer: ScriptedAnswer,
+    label: Option<&str>,
+) -> Result<ModelResponse, ProviderError> {
     match answer {
-        ScriptedAnswer::Complete(response) => Ok(*response),
+        ScriptedAnswer::Complete(response) => {
+            Ok(ee_chat_completions::stamp_provider_executed(*response, label))
+        }
         ScriptedAnswer::Pending => std::future::pending().await,
         ScriptedAnswer::Failure(detail) => Err(ProviderError::BackendFailure(detail)),
         ScriptedAnswer::Cancellation => Err(ProviderError::Cancellation),

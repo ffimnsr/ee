@@ -157,11 +157,11 @@ pub fn responses_body(input: &ResponsesBody<'_>) -> Value {
         // protocol replays them as their own input items, in generation order.
         if message.role == ModelRole::Assistant {
             items.extend(replay_reasoning_items(message, input.provider, input.model));
-            if let Some(item) = input_item(message) {
+            if let Some(item) = input_item(message, input.provider) {
                 items.push(item);
             }
             items.extend(function_call_items(message));
-        } else if let Some(item) = input_item(message) {
+        } else if let Some(item) = input_item(message, input.provider) {
             items.push(item);
         }
     }

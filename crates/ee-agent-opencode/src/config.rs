@@ -893,39 +893,29 @@ pub fn route_profile(
     let endpoint = TrustedEndpoint::parse(route.endpoint).map_err(|error| {
         ConfigError::UntrustedRouteEndpoint { endpoint: route.endpoint, detail: error.to_string() }
     })?;
-    Ok(EndpointProfile::new(
-        format!(
-            "OpenCode {} {} ({})",
-            route.surface.as_str(),
-            route.model_id,
-            route.dialect.as_str()
-        ),
-        API_KEY_ENV,
-        endpoint,
-        route.model_id,
-    )
-    .with_system_prompt(system_prompt)
-    .with_timeouts(timeouts)
-    .with_retry(retry)
-    .with_limits(route.limits())
-    .with_cost(route.cost())
-    .with_modalities(route.entry.modalities)
-    .with_tools_strict(route.entry.tools_strict)
-    // A route whose catalog entry does not declare structured output rejects a
-    // `response_format` request before it is built.
-    .with_structured_output(route.entry.structured_output)
-    .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
-    // Catalog-declared `tool_choice` values; an empty list keeps the protocol
-    // default, so a row that declares nothing sends today's body.
-    .with_tool_choices(route.entry.capabilities.tool_choices)
-    // Reference opt-in: only sent when the request actually carries an image,
-    // so text-only request bytes stay identical.
-    .with_image_opt_in_header(Some(HeaderName::from_static("typesafe-danger-zone-images")))
-    // Continuation is a capability: only rows that advertise server-side state
-    // may receive a `previous_response_id`. The Responses codec enforces the
-    // rest, so a chat or Messages route ignores the flag.
-    .with_store_responses(route.supports_store())
-    .with_stream_usage(route.entry.capabilities.stream_usage))
+    Ok(EndpointProfile::new(route.label(), API_KEY_ENV, endpoint, route.model_id)
+        .with_system_prompt(system_prompt)
+        .with_timeouts(timeouts)
+        .with_retry(retry)
+        .with_limits(route.limits())
+        .with_cost(route.cost())
+        .with_modalities(route.entry.modalities)
+        .with_tools_strict(route.entry.tools_strict)
+        // A route whose catalog entry does not declare structured output rejects a
+        // `response_format` request before it is built.
+        .with_structured_output(route.entry.structured_output)
+        .with_freeform(route.entry.freeform.iter().map(|value| (*value).to_string()).collect())
+        // Catalog-declared `tool_choice` values; an empty list keeps the protocol
+        // default, so a row that declares nothing sends today's body.
+        .with_tool_choices(route.entry.capabilities.tool_choices)
+        // Reference opt-in: only sent when the request actually carries an image,
+        // so text-only request bytes stay identical.
+        .with_image_opt_in_header(Some(HeaderName::from_static("typesafe-danger-zone-images")))
+        // Continuation is a capability: only rows that advertise server-side state
+        // may receive a `previous_response_id`. The Responses codec enforces the
+        // rest, so a chat or Messages route ignores the flag.
+        .with_store_responses(route.supports_store())
+        .with_stream_usage(route.entry.capabilities.stream_usage))
 }
 
 /// Resolves the exact route for `OPENCODE_SURFACE` and `OPENCODE_MODEL`.

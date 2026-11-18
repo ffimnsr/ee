@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::compaction_checkpoint::CompactionCheckpoint;
 use crate::session_log::SessionLog;
-use crate::tools::ToolResult;
+use crate::tools::{ToolIntent, ToolResult};
 
 use super::{
     ModelContent, ModelMessage, ModelResponse, ModelRole, PROVIDER_EXECUTED_METADATA_PREFIX,
-    PROVIDER_EXECUTED_RESULT_KEY, TOOL_NAME_METADATA_KEY, TOOL_PATH_METADATA_KEY,
-    TOOL_SIDE_EFFECT_METADATA_KEY,
+    PROVIDER_EXECUTED_RESULT_KEY, PROVIDER_EXECUTED_RESULT_PROVIDER_KEY, TOOL_NAME_METADATA_KEY,
+    TOOL_PATH_METADATA_KEY, TOOL_SIDE_EFFECT_METADATA_KEY,
 };
 
 /// How much context was dropped by the last memory-limit enforcement.
@@ -364,18 +364,18 @@ impl Transcript {
     /// Appends a provider-executed tool's result.
     ///
     /// The message is marked so a re-encoded request never synthesizes a local
-    /// `function_call_output` for a call the provider already ran.
-    pub fn push_provider_tool_result(
-        &mut self,
-        tool_call_id: impl Into<String>,
-        mut result: ToolResult,
-    ) {
+    /// `function_call_output` for a call the provider already ran. When the
+    /// producing route is known it is recorded as well: the hosted item is
+    /// replayed verbatim, so it may only travel back to that provider.
+    pub fn push_provider_tool_result(&mut self, intent: &ToolIntent, mut result: ToolResult) {
         crate::tool_output::apply_to_result(&mut result, self.tool_output, self.log.as_deref());
-        let tool_call_id = tool_call_id.into();
-        self.messages.push(
-            ModelMessage::tool_result(tool_call_id.clone(), result)
-                .with_metadata([(PROVIDER_EXECUTED_RESULT_KEY.to_string(), String::from("true"))]),
-        );
+        let mut entries = vec![(PROVIDER_EXECUTED_RESULT_KEY.to_string(), String::from("true"))];
+        if let Some(provider) = intent.provider.as_deref().filter(|provider| !provider.is_empty()) {
+            entries.push((PROVIDER_EXECUTED_RESULT_PROVIDER_KEY.to_string(), provider.to_string()));
+        }
+        let tool_call_id = intent.tool_call_id.clone();
+        self.messages
+            .push(ModelMessage::tool_result(tool_call_id.clone(), result).with_metadata(entries));
         let id = self.record_message_at(self.messages.len() - 1, Some(&tool_call_id));
         self.log_ids.push(id);
     }

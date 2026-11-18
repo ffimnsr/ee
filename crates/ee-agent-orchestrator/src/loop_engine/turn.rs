@@ -488,7 +488,7 @@ impl LoopEngine {
                     tool_name: intent.name.clone(),
                     success: result.success,
                 });
-                transcript.push_provider_tool_result(intent.tool_call_id.clone(), result);
+                transcript.push_provider_tool_result(&intent, result);
                 self.capture_checkpoint(transcript, track, task, false).await;
             }
             let intents = local_intents;

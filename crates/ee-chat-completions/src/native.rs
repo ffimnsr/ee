@@ -69,14 +69,40 @@ pub fn seal_response(mut response: ModelResponse, model: &str) -> ModelResponse 
 }
 
 /// Seals a response's decoded provider state with the provider and model.
+///
+/// The producing route is also recorded on every provider-executed intent: a
+/// hosted result is replayed as the provider's own transcript item, so the
+/// result must name the route that emitted it.
 #[must_use]
 pub fn seal_response_with_provider(
-    mut response: ModelResponse,
+    response: ModelResponse,
     provider: Option<&str>,
     model: &str,
 ) -> ModelResponse {
+    let mut response = stamp_provider_executed(response, provider);
     if let Some(state) = response.native.take() {
         response.native = seal_with_provider(state.into_value(), provider, model);
+    }
+    response
+}
+
+/// Records the producing route on every provider-executed intent.
+///
+/// The stamp travels with the intent into the tool result, so replay can drop a
+/// hosted item that a different provider did not emit. An unnamed route leaves
+/// the intent unchanged.
+#[must_use]
+pub fn stamp_provider_executed(
+    mut response: ModelResponse,
+    provider: Option<&str>,
+) -> ModelResponse {
+    let Some(provider) = provider.filter(|provider| !provider.is_empty()) else {
+        return response;
+    };
+    for intent in &mut response.tool_intents {
+        if intent.provider_executed {
+            intent.provider = Some(provider.to_string());
+        }
     }
     response
 }

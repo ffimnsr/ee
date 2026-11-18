@@ -202,6 +202,16 @@ impl OpenCodeRoute {
         self.entry.api_id
     }
 
+    /// Stable route label used for diagnostics, native-state sealing, and
+    /// hosted-result producer identity.
+    ///
+    /// One formatting site so a codec, the profile, and a test double never
+    /// disagree about which route produced a payload.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("OpenCode {} {} ({})", self.surface.as_str(), self.model_id, self.dialect.as_str())
+    }
+
     /// Whether this row is a legacy route without catalog metadata.
     #[must_use]
     pub const fn is_legacy(&self) -> bool {

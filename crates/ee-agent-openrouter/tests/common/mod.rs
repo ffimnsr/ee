@@ -64,6 +64,14 @@ impl MockOpenRouter {
         )
     }
 
+    /// The Responses URL to point the provider at; the mock answers any path.
+    pub fn responses_url(&self) -> String {
+        format!(
+            "http://127.0.0.1:{}/v1/responses",
+            self.listener.local_addr().expect("mock server address").port()
+        )
+    }
+
     /// Request bodies received so far, in order.
     pub fn request_bodies(&self) -> Vec<Value> {
         self.bodies.lock().expect("mock bodies poisoned").clone()
