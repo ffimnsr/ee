@@ -976,6 +976,9 @@ impl AgentProvider for OrchestratorProvider {
             runtime.runtime.clear_background_jobs();
             runtime.runtime.prune_worktrees();
             runtime.runtime.clear_subagent_transcripts();
+            // Retained tool-output overflow bodies are large and are never
+            // re-read after the session ends; the record log stays.
+            runtime.runtime.purge_session_artifacts(&session_id.to_string());
             // Explicit close finalizes the session: pending recovery
             // checkpoints are deleted (the interrupted work is abandoned
             // unless the host loads the persisted state below).

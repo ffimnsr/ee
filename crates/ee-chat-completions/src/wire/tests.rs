@@ -842,6 +842,29 @@ fn a_throttle_is_never_a_context_overflow() {
     assert!(matches!(error, ProviderError::RateLimited { .. }), "{error:?}");
 }
 
+/// A throttled response that carries an overflow-shaped *code* rather than
+/// overflow wording must still classify as a rate limit: the status guard has
+/// to cover the code branch, not just the phrase branch.
+#[test]
+fn a_throttle_with_an_overflow_code_is_still_a_rate_limit() {
+    let body = json!({
+        "error": { "code": "context_length_exceeded", "message": "slow down" }
+    });
+    let error = classify_status_error("x", 429, &HeaderMap::new(), &body);
+    assert!(matches!(error, ProviderError::RateLimited { .. }), "{error:?}");
+}
+
+/// The same code on a non-throttled status is a real overflow and must keep
+/// driving compaction.
+#[test]
+fn an_overflow_code_on_a_400_is_a_context_overflow() {
+    let body = json!({
+        "error": { "code": "context_length_exceeded", "message": "too long" }
+    });
+    let error = classify_status_error("x", 400, &HeaderMap::new(), &body);
+    assert!(matches!(error, ProviderError::ContextOverflow(_)), "{error:?}");
+}
+
 #[test]
 fn x_should_retry_false_suppresses_the_retry() {
     let mut headers = HeaderMap::new();

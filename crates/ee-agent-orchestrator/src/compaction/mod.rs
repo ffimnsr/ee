@@ -21,8 +21,10 @@ use crate::model::ModelMessage;
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::tasks::{TaskGraph, TaskStatus};
 
+pub mod overflow;
 pub mod pipeline;
 
+pub use overflow::{OverflowCompaction, compact_transcript_for_overflow};
 pub use pipeline::{
     CompactPlan, CompactionInput, CompactionStageCounts, CompactionStrategy,
     DEFAULT_KEEP_RECENT_MULTIMODAL_TURNS, DUPLICATE_TOOL_RESULT_MARKER, DefaultCompactionStrategy,

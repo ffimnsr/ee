@@ -393,9 +393,7 @@ pub use issue_integration::{
     CRITERIA_KEY_MARKER, ChecklistEdit, ChecklistItem, IssueChecklist, IssueChecklistConfig,
     is_configured,
 };
-pub use loop_control::{
-    MAX_STEPS_PROMPT, RetryKind, StepOutcome, is_known_finish_reason, validate_finish_reason,
-};
+pub use loop_control::{MAX_STEPS_PROMPT, is_known_finish_reason, validate_finish_reason};
 pub use loop_hooks::{UntilFn, UntilPredicate};
 pub use mcp::{McpToolClassSpec, McpToolPolicy};
 pub use memory::{MemoryItem, MemoryStore};

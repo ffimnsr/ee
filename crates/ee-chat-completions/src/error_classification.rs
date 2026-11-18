@@ -107,10 +107,13 @@ fn classify_response(
     let has_text = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     let client_scoped = (400..500).contains(&status);
     // A throttle is never an overflow: providers reuse token wording for
-    // throughput limits ("too many tokens processed").
+    // throughput limits ("too many tokens processed"), and some proxy a
+    // rate-limit body through an overflow-shaped code. The status check must
+    // therefore guard the code branch too, not only the phrase branch.
     let throttling = status == 429 || has_code(&["throttl"]);
     if client_scoped
-        && (has_code(&CONTEXT_OVERFLOW_CODES) || (!throttling && has_text(&CONTEXT_OVERFLOW_TEXT)))
+        && !throttling
+        && (has_code(&CONTEXT_OVERFLOW_CODES) || has_text(&CONTEXT_OVERFLOW_TEXT))
     {
         return ProviderError::ContextOverflow(detail.to_string());
     }

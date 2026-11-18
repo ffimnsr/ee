@@ -7,11 +7,15 @@
 //!   exhausted. The reference agent makes one final text-only call with tools
 //!   disabled instead of failing the turn, so the user always receives a
 //!   summary of completed and remaining work.
-//! - [`RetryKind`] names *what* a retry may reuse. A request that never reached
-//!   the provider is safe to send again from scratch; a request that already
-//!   produced output can only be resumed.
 //! - [`validate_finish_reason`] rejects provider stop reasons the loop cannot
 //!   interpret instead of silently treating them as a normal completion.
+//!
+//! Retry classification is deliberately not modelled here yet: the loop has a
+//! single recovery path (a provider context overflow, handled by
+//! [`crate::compaction::compact_transcript_for_overflow`]), and transport
+//! retries live in the provider crates where the delivery state is known. A
+//! retry-kind enum with no consumer would describe behaviour the engine does
+//! not have.
 //!
 //! Reference: `packages/core/src/session/runner/{max-steps,step}.ts`.
 
@@ -35,49 +39,6 @@ Response must include:
 - Recommendations for what should be done next
 
 Any attempt to use tools is a critical violation. Respond with text ONLY.";
-
-/// How much of a failed attempt a retry may reuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetryKind {
-    /// The request never reached the provider (or produced no output), so the
-    /// whole request is replayed and a fresh assistant message is started.
-    Fresh,
-    /// Output already streamed; only the remaining work may be resumed.
-    Resume,
-    /// The credential was rejected; rotate before replaying the full request.
-    ///
-    /// Reserved: no model registry exposes alternate credentials yet, so the
-    /// loop never emits this kind today.
-    Rotate,
-}
-
-/// What one loop step decided before the next iteration.
-///
-/// The loop engine currently implements the transitions inline; the enum keeps
-/// the vocabulary explicit and gives tests one place to assert on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepOutcome {
-    /// The step finished; `needs_continuation` mirrors the provider signal.
-    Completed {
-        /// Whether the model asked for another step.
-        needs_continuation: bool,
-    },
-    /// The output bound cut the reply; continue with the bounded notice.
-    OutputLimit {
-        /// Whether tool work remains for a following step.
-        needs_continuation: bool,
-    },
-    /// The prompt overflowed; the transcript was compacted and the step retried
-    /// with a fresh assistant message.
-    Compacted,
-    /// A transport failure before any output; replay the full request once.
-    RecoverFull,
-    /// The step failed after output started; retry according to `kind`.
-    Retry {
-        /// What the retry may reuse.
-        kind: RetryKind,
-    },
-}
 
 /// Finish reasons the loop understands.
 ///
@@ -173,13 +134,5 @@ mod tests {
     #[test]
     fn empty_finish_reason_is_rejected() {
         assert!(validate_finish_reason(Some("m"), Some("  ")).is_err());
-    }
-
-    #[test]
-    fn step_outcomes_are_copy_and_explicit() {
-        let outcome = StepOutcome::Retry { kind: RetryKind::Fresh };
-        let copied = outcome;
-        assert_eq!(outcome, copied);
-        assert_eq!(StepOutcome::Compacted, StepOutcome::Compacted);
     }
 }

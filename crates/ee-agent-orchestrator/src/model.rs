@@ -1124,7 +1124,7 @@ impl Default for Transcript {
 
 /// Serialized byte size of one normalized message.  Normalized messages only
 /// hold strings, maps, and plain JSON values, so serialization is infallible.
-fn message_bytes(message: &ModelMessage) -> usize {
+pub(crate) fn message_bytes(message: &ModelMessage) -> usize {
     serde_json::to_string(message).expect("normalized messages always serialize").len()
 }
 

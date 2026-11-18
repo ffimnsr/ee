@@ -311,6 +311,29 @@ impl OrchestratorRuntime {
         self.transcripts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
+    /// Sweeps retained tool-output overflow artifacts for one closed session.
+    ///
+    /// The record log stays as the durable audit trail; only bodies no record
+    /// references are removed, which is exactly the retained overflow that no
+    /// later request re-reads. Memory-only logs own no files, so this is a
+    /// no-op there.
+    pub fn purge_session_artifacts(&self, session_id: &str) {
+        let Some(store) =
+            crate::session_log::SessionLogStore::from_config(&self.config.session_log)
+        else {
+            return;
+        };
+        match store.log_for(session_id).purge_artifacts() {
+            Ok(0) => {}
+            Ok(removed) => {
+                tracing::debug!(session_id, removed, "swept retained tool-output artifacts");
+            }
+            Err(error) => {
+                tracing::warn!(%error, session_id, "sweeping retained tool-output artifacts failed");
+            }
+        }
+    }
+
     /// Installs an observe-only observer on the runtime event recorder.
     ///
     /// The recorder keeps the same event buffer, so early events are not lost.

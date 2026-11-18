@@ -241,3 +241,44 @@ fn disabled_config_yields_no_store() {
     let config = SessionLogConfig { enabled: false, ..SessionLogConfig::default() };
     assert!(SessionLogStore::from_config(&config).is_none());
 }
+
+#[test]
+fn purge_removes_retained_artifacts_and_keeps_the_record_log() {
+    let root = tempfile::tempdir().expect("log root");
+    let config =
+        SessionLogConfig { dir: Some(root.path().to_path_buf()), ..SessionLogConfig::default() };
+    let store = SessionLogStore::from_config(&config).expect("store");
+    let log = store.log_for("s-1");
+    log.record_message(&message("hello"), None).expect("records");
+    log.store_artifact(b"overflow body").expect("stores");
+    let bodies = root.path().join("s-1").join("bodies");
+    assert_eq!(std::fs::read_dir(&bodies).expect("bodies").count(), 2);
+
+    assert_eq!(log.purge_artifacts().expect("purges"), 1, "only the unreferenced body goes");
+    assert_eq!(std::fs::read_dir(&bodies).expect("bodies").count(), 1);
+    assert!(root.path().join("s-1").join(SESSION_LOG_RECORD_FILE).is_file());
+    assert_eq!(log.replay_messages().expect("message body survives").len(), 1);
+    // Idempotent: a second sweep has nothing left to remove.
+    assert_eq!(log.purge_artifacts().expect("purges"), 0);
+}
+
+#[test]
+fn artifact_sweep_cannot_escape_the_log_root() {
+    let root = tempfile::tempdir().expect("log root");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::create_dir_all(outside.path().join("bodies")).expect("outside bodies");
+    let planted = outside.path().join("bodies").join("planted");
+    std::fs::write(&planted, b"keep me").expect("planted");
+
+    let sink = FileSessionLogSink::new(root.path().to_path_buf(), 1024);
+    assert_eq!(sink.prune_bodies("../..", &[]).expect("sweep is safe"), 0);
+    assert!(planted.is_file(), "nothing outside the root is touched");
+
+    // A non-hash file planted inside the bodies directory is never removed.
+    let bodies = root.path().join("s-1").join("bodies");
+    std::fs::create_dir_all(&bodies).expect("bodies");
+    let stray = bodies.join("stray-file");
+    std::fs::write(&stray, b"x").expect("stray");
+    assert_eq!(sink.prune_bodies("s-1", &[]).expect("sweep"), 0);
+    assert!(stray.is_file(), "only content-hash names are candidates");
+}

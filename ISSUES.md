@@ -2350,7 +2350,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 | 2 | Divergent (minor) | behaviour | reasoning budget floor applied to non-Anthropic models; `models` sent on `/responses`; nested option validation shallow |
 | 3 | Divergent (minor) | numbering | output-limit floor is 1 token, not the planned 1024 |
 | 4 | Clean | — | signed thinking replay, reasoning items, `reasoning_details` all present |
-| 5 | Divergent | behaviour | 429 carrying an overflow **code** classifies as `ContextOverflow` |
+| 5 | Resolved (R2) | behaviour | the throttle guard now covers the code branch, so a 429 never becomes `ContextOverflow` |
 | 6 | Resolved (R1) | dead wiring | Qwen rows now carry `SystemAndTail` placement, so the Qwen policy is reachable |
 | 7 | Resolved (R1) | missing gate | `structured_output` gate enforced in the adapters; `tools.updates` now derived from the catalog |
 | 8 | Clean (minor note) | consistency | trailing `model#` errors on OpenCode, silently ignored on OpenRouter |
@@ -2361,8 +2361,8 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 | 13 | Divergent | typing + config | no typed `Timeout { phase }`; header/chunk share one retry budget; setup pins a 120 s total |
 | 14 | Resolved (R1) | dead wiring | session affinity now carries project, client, and branch-parent identity into every turn |
 | 15 | Divergent (minor) | decode | cost-only usage payloads are dropped; `context_tokens` never surfaced |
-| 16 | Divergent | default-off + lifecycle | overflow artifact is opt-in; unchanged results omit `truncated: false`; no cleanup path |
-| 17 | Divergent | behaviour | overflow recovery shrinks the transcript instead of compacting; `RetryKind` is dead vocabulary |
+| 16 | Resolved (R2) | default-off + lifecycle | unchanged results carry `truncated: false`, failed retention is visible, and session close sweeps unreferenced bodies |
+| 17 | Resolved (R2) | behaviour | overflow recovery compacts through the pipeline; dead `RetryKind`/`StepOutcome` deleted |
 | 18 | Divergent (minor) | surface | `ToolInputError` variant absent; ACP drops `Raw` and never forwards `Usage` |
 | 19 | Resolved (R1) | dead wiring | store/continuation now derived from catalog state in both provider profiles |
 | 20 | Divergent | capability + lifecycle | compact body lacks `prompt_cache_options`; checkpoint not provider-gated; lost on resume |
@@ -2400,6 +2400,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 - **Actual:** `crates/ee-agent-orchestrator/src/loop_engine.rs:648-653` calls `transcript.shrink_oldest()` once and retries; if shrinking fails it returns the overflow error. `RetryKind` and `StepOutcome` are defined in `loop_control.rs:20-80` but are referenced **only by `loop_control`'s own tests** — `rg` finds no use in `loop_engine.rs`, so `Fresh`/`Resume`/`Rotate` carry no loop behaviour.
 - **Impact:** the recovery path discards transcript content rather than producing a summary, so it neither matches the reference nor the planned behaviour. `freshAssistant` duplication acceptance has no code path to test.
 - **Fix direction:** route the overflow arm through `DefaultCompactionStrategy::plan` once (it already normalizes as stage 0), rebuild, retry, then fail with the bounded diagnostic. Either delete `RetryKind`/`StepOutcome` or have the loop consume them; dead vocabulary is worse than none.
+- **Landed (R2/Gap 17):** new `crates/ee-agent-orchestrator/src/compaction/overflow.rs` (`compact_transcript_for_overflow`, `OverflowCompaction`) runs the pipeline stages the loop can use without a second model call — prune superseded read-only results, offload stale multimodal blocks, then drop the oldest half while keeping the system prefix and the newest message — and reports what changed. The overflow arm in `loop_engine.rs` now calls it, records the compaction counts in the `Error` event, retries once, and ends the turn on a second overflow (test: `a_second_overflow_ends_the_turn_without_looping`). `RetryKind`/`StepOutcome` were deleted rather than faked: the loop has one recovery path and transport retries live in the provider crates where delivery state is known, so the module doc now says that explicitly.
 
 #### 7.2.4 Gap 6 — the Qwen cache policy cannot fire
 
@@ -2413,6 +2414,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
 
 - **Plan requires:** "Never treat a `429` as context overflow even when its body mentions tokens."
 - **Actual:** `crates/ee-chat-completions/src/error_classification.rs:112-116` computes `throttling = status == 429 || has_code(&["throttl"])`, then guards **only the text branch**: `has_code(&CONTEXT_OVERFLOW_CODES) || (!throttling && has_text(...))`. A 429 whose `error.code` is `context_length_exceeded` (or any other entry in `CONTEXT_OVERFLOW_CODES`) still returns `ProviderError::ContextOverflow`.
+- **Landed (R2/Gap 5):** the status guard now covers both branches (`!throttling && (has_code(..) || has_text(..))`), so a throttled response stays `RateLimited` whatever its code says while a 400 with the same code still compacts. Regression tests: `a_throttle_with_an_overflow_code_is_still_a_rate_limit`, `an_overflow_code_on_a_400_is_a_context_overflow`.
 - **Impact:** a throughput-limit response can trigger the orchestrator's overflow path (see 7.2.3), i.e. transcript shrinking on a retryable throttle. This is the one acceptance criterion in Gap 5 stated as an absolute.
 - **Fix direction:** make the code branch respect the guard — `!throttling && (has_code(..) || has_text(..))` — and add a regression test with `status = 429` plus a code-only overflow body.
 
@@ -2498,6 +2500,7 @@ Slices A–N from Parts 4–5 remain valid; O–P are prerequisites for any late
   - No removal API exists for session-log artifacts; only checkpoint directories are removed (`checkpoint_store.rs:202,253`).
 - **Impact:** the acceptance criteria for Gap 16 hold only when a durable session log is configured, and cleanliness ("cleaned up with the session lifecycle") holds for nothing.
 - **Fix direction:** always write `truncated: false` on the unchanged path; surface a bounded notice when the artifact cannot be stored; add a session-end sweep for artifacts under the session directory, or make the default sink durable when a state dir exists.
+- **Landed (R2/Gap 16):** `apply_to_result` now merges `truncated: false` on the unchanged path, distinguishes a memory-only log from a failed write in the marker, and records `output_save_error: true` plus a `tracing::warn!` when the sink rejects the artifact. The session-end sweep is `SessionLog::purge_artifacts`, which deletes only bodies no `Message` record references — message bodies survive, retained overflow does not — through `SessionLogSink::prune_bodies` (`FileSessionLogSink` removes only content-hash-named files inside the session directory). `OrchestratorRuntime::purge_session_artifacts` calls it from the provider-adapter session-close hook, so it runs where the log root is configured. The default sink stays memory-only (`session_log_durable` is still an explicit opt-in); the difference is that a degraded path is now observable instead of silent.
 
 ### 7.3 Reported findings (not re-read line by line)
 
@@ -2573,7 +2576,7 @@ No build, test, clippy, or fmt run was performed for Part 7; findings are static
 Ordered by ratio of parity gained to risk. Each slice is independently shippable and lands with its own tests.
 
 - [x] **Slice R1 — wire the dead paths.** Gap 19 store/continuation from catalog capability; Gap 14 session context population; Gap 7 `structured_output` + `tools.updates` gates; Gap 6 Qwen placement in the generator. Small diffs, all mechanical, all currently unreachable code. **Landed 2026-11-17:** all four; see the `Landed (R1/...)` notes above.
-- [ ] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep.
+- [x] **Slice R2 — behaviour mismatches.** Gap 5 429 guard; Gap 17 compaction-not-shrink and `RetryKind` disposition; Gap 16 `truncated: false`, store-failure notice, cleanup sweep. **Landed 2026-11-18:** see the `Landed (R2/...)` notes below.
 - [ ] **Slice R3 — correctness hardening.** Gap 23 redirect scheme check; Gap 25 per-part native state + hosted replay + absent-finish tail; Gap 26 normalization at the three bypass sites; Gap 24 finish-or-delete the decorative capabilities.
 - [ ] **Slice R4 — file splits.** `messages.rs`, `transport.rs`, `acp_flows.rs`; record or remove the pre-existing oversized files; delete the `#[allow]` in `transport.rs`.
 - [ ] **Slice R5 — text and gates.** All of 7.4, the LOC figure in 7.4.4, and CI wiring for `gen_catalog.py --check` plus an OpenRouter recorded-request fixture.

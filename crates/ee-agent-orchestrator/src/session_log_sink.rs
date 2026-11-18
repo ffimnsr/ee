@@ -40,6 +40,18 @@ pub trait SessionLogSink: Send + Sync + std::fmt::Debug {
     fn session_ids(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Removes stored bodies that no record references, keeping the record log.
+    ///
+    /// Every model-visible message has a record, so its body survives; a
+    /// retained tool-output overflow has none and is swept. Default: nothing to
+    /// remove (memory sinks own no files). Returns the number removed.
+    fn prune_bodies(
+        &self,
+        _session_id: &str,
+        _keep: &[String],
+    ) -> Result<usize, OrchestratorError> {
+        Ok(0)
+    }
 }
 
 /// Process-lifetime in-memory sink used by tests and memory-only runtimes.
@@ -248,6 +260,47 @@ impl SessionLogSink for FileSessionLogSink {
             .unwrap_or_default();
         ids.sort();
         ids
+    }
+
+    /// Removes bodies under `bodies/` whose hash no record references.
+    ///
+    /// Message bodies are always referenced; retained tool-output overflow is
+    /// not, so this is the session-end sweep. The directory is derived from
+    /// [`sanitize_component`] and each candidate name must be a content hash,
+    /// so neither a crafted session id nor a planted file can escape the root.
+    fn prune_bodies(&self, session_id: &str, keep: &[String]) -> Result<usize, OrchestratorError> {
+        let directory = self.session_dir(session_id).join("bodies");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => {
+                return Err(OrchestratorError::Serialization(format!(
+                    "failed to read session bodies {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        let mut removed = 0usize;
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !is_content_hash(&name) || keep.iter().any(|kept| kept == &name) {
+                continue;
+            }
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(OrchestratorError::Serialization(format!(
+                        "failed to remove session body {}: {error}",
+                        entry.path().display()
+                    )));
+                }
+            }
+        }
+        Ok(removed)
     }
 }
 

@@ -25,6 +25,8 @@ pub const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 50 * 1024;
 pub const TOOL_OUTPUT_TRUNCATED_KEY: &str = "truncated";
 /// Structured-output key carrying the retained overflow path.
 pub const TOOL_OUTPUT_PATH_KEY: &str = "output_path";
+/// Structured-output key flagging that retaining the overflow failed.
+pub const TOOL_OUTPUT_SAVE_ERROR_KEY: &str = "output_save_error";
 
 /// Per-result bounds applied before projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +113,11 @@ pub fn bound_tool_output(text: &str, limits: ToolOutputLimits) -> BoundedToolOut
 /// The retained copy goes through the existing content-addressed session log,
 /// so it shares the session's owner-only lifecycle and never escapes the state
 /// directory. Secret-like spans are redacted before the copy is stored.
+///
+/// The result always carries `truncated`, so a caller can distinguish "fits the
+/// bounds" from "was bounded". When a durable log is wired but the write fails,
+/// the marker names the failure and a warning records the error: a silent
+/// "truncated, no path" would be indistinguishable from a memory-only log.
 pub fn apply_to_result(
     result: &mut ToolResult,
     limits: ToolOutputLimits,
@@ -118,17 +125,26 @@ pub fn apply_to_result(
 ) {
     let bounded = bound_tool_output(&result.text_output, limits);
     if !bounded.truncated {
+        merge_metadata(result, false, None, false);
         return;
     }
     let redacted = SensitiveDataGuard::new().redact(&result.text_output);
-    let saved = log.and_then(|log| log.store_artifact(redacted.as_bytes()).ok());
-    let path = saved.as_ref().and_then(|artifact| artifact.path.clone());
-    let marker = marker(&bounded, path.as_deref());
+    let (path, save_error) = match log {
+        Some(log) => match log.store_artifact(redacted.as_bytes()) {
+            Ok(artifact) => (artifact.path, false),
+            Err(error) => {
+                tracing::warn!(%error, "retaining a bounded tool output failed");
+                (None, true)
+            }
+        },
+        None => (None, false),
+    };
+    let marker = marker(&bounded, path.as_deref(), save_error);
     result.text_output = format!("{}\n\n{marker}", bounded.text);
-    merge_metadata(result, bounded.truncated, path.as_deref());
+    merge_metadata(result, true, path.as_deref(), save_error);
 }
 
-fn marker(bounded: &BoundedToolOutput, path: Option<&std::path::Path>) -> String {
+fn marker(bounded: &BoundedToolOutput, path: Option<&std::path::Path>, save_error: bool) -> String {
     let range = if bounded.shown_lines == 0 {
         "0 lines".to_string()
     } else {
@@ -141,6 +157,11 @@ fn marker(bounded: &BoundedToolOutput, path: Option<&std::path::Path>) -> String
             bounded.total_lines,
             path.display()
         ),
+        None if save_error => format!(
+            "[showing {range} of {}{cut}; full output could not be saved: session log write \
+             failed]",
+            bounded.total_lines
+        ),
         None => format!(
             "[showing {range} of {}{cut}; full output could not be saved: no durable session log]",
             bounded.total_lines
@@ -148,7 +169,12 @@ fn marker(bounded: &BoundedToolOutput, path: Option<&std::path::Path>) -> String
     }
 }
 
-fn merge_metadata(result: &mut ToolResult, truncated: bool, path: Option<&std::path::Path>) {
+fn merge_metadata(
+    result: &mut ToolResult,
+    truncated: bool,
+    path: Option<&std::path::Path>,
+    save_error: bool,
+) {
     let mut metadata = match result.structured_output.take() {
         Some(serde_json::Value::Object(object)) => object,
         Some(other) => {
@@ -164,6 +190,9 @@ fn merge_metadata(result: &mut ToolResult, truncated: bool, path: Option<&std::p
             TOOL_OUTPUT_PATH_KEY.to_string(),
             serde_json::Value::String(path.display().to_string()),
         );
+    }
+    if save_error {
+        metadata.insert(TOOL_OUTPUT_SAVE_ERROR_KEY.to_string(), serde_json::Value::Bool(true));
     }
     result.structured_output = Some(serde_json::Value::Object(metadata));
 }
@@ -217,6 +246,37 @@ mod tests {
         let bounded = bound_tool_output(&text, ToolOutputLimits::default());
         assert!(!bounded.truncated);
         assert_eq!(bounded.text, text);
+    }
+
+    #[test]
+    fn an_unchanged_result_still_reports_truncated_false() {
+        let mut result = ToolResult::success("short output");
+        apply_to_result(&mut result, ToolOutputLimits::default(), None);
+        let structured = result.structured_output.expect("metadata");
+        assert_eq!(structured[TOOL_OUTPUT_TRUNCATED_KEY], serde_json::json!(false));
+        assert_eq!(result.text_output, "short output", "text is untouched");
+    }
+
+    #[test]
+    fn a_failing_store_reports_the_failure_instead_of_silence() {
+        use std::sync::Arc;
+
+        // A file where the session directory belongs: every write fails.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker");
+        let sink = Arc::new(crate::session_log::FileSessionLogSink::new(
+            blocker.join("session-log"),
+            1024 * 1024,
+        ));
+        let log =
+            SessionLog::with_sink("s-1", sink, crate::session_log::SessionLogConfig::default());
+        let mut result = ToolResult::success("x".repeat(2 * DEFAULT_MAX_TOOL_OUTPUT_BYTES));
+        apply_to_result(&mut result, ToolOutputLimits::default(), Some(&log));
+        assert!(result.text_output.contains("could not be saved"), "{}", result.text_output);
+        assert!(result.text_output.contains("write failed"), "{}", result.text_output);
+        let structured = result.structured_output.expect("metadata");
+        assert_eq!(structured[TOOL_OUTPUT_SAVE_ERROR_KEY], serde_json::json!(true));
     }
 
     #[test]

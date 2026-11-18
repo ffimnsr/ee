@@ -646,16 +646,28 @@ impl LoopEngine {
                 {
                     Ok(response) => break response,
                     Err(OrchestratorError::ContextOverflow(detail)) if !overflow_retried => {
-                        if !transcript.shrink_oldest() {
+                        // Deterministic in-turn compaction: prune superseded
+                        // read-only results, offload stale binary payloads, then
+                        // drop the oldest half. A second overflow ends the turn
+                        // instead of looping on an unchanged prompt.
+                        let keep_multimodal = self.config.compaction.keep_recent_multimodal_turns;
+                        let Some(compaction) = crate::compaction::compact_transcript_for_overflow(
+                            transcript,
+                            keep_multimodal,
+                        ) else {
                             self.events.record(OrchestratorEvent::Error {
                                 error: format!("context window exceeded: {detail}"),
                             });
                             return Err(OrchestratorError::ContextOverflow(detail));
-                        }
+                        };
                         overflow_retried = true;
                         self.events.record(OrchestratorEvent::Error {
                             error: format!(
-                                "context window exceeded; dropping oldest messages and retrying: {detail}"
+                                "context window exceeded; compacted {} message(s) ({} dropped, {} \
+                                 multimodal block(s) offloaded) and retrying: {detail}",
+                                compaction.retained_messages,
+                                compaction.dropped_messages,
+                                compaction.offloaded_multimodal
                             ),
                         });
                         let projected = crate::prompt_injection::prepare_request(
@@ -2586,6 +2598,59 @@ mod tests {
 
         let model = Arc::new(OverflowOnSecondCall { calls: Arc::new(AtomicUsize::new(0)) });
         let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let engine =
+            engine_with(OrchestratorConfig::default(), model.clone(), echo_tool(), events.clone());
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("overflow is recovered by compacting the transcript");
+
+        assert_eq!(
+            model.calls.load(Ordering::SeqCst),
+            3,
+            "tool round, overflow, then the retried call"
+        );
+        let noticed = events.events().iter().any(|event| {
+            matches!(event, OrchestratorEvent::Error { error } if error.contains("compacted"))
+        });
+        assert!(noticed, "the overflow notice must report the compaction");
+    }
+
+    #[tokio::test]
+    async fn a_second_overflow_ends_the_turn_without_looping() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysOverflows {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl ModelAdapter for AlwaysOverflows {
+            fn complete(
+                &self,
+                _request: ModelRequest,
+                _cancel: watch::Receiver<bool>,
+            ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+                let calls = self.calls.clone();
+                Box::pin(async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Ok(ModelResponse::new().tool_intents(vec![ToolIntent::new(
+                            "tc-1",
+                            "echo",
+                            json!({}),
+                        )]));
+                    }
+                    Err(ModelError::Provider(ee_agent_acp_server::ProviderError::ContextOverflow(
+                        "still too long".into(),
+                    )))
+                })
+            }
+        }
+
+        let model = Arc::new(AlwaysOverflows { calls: Arc::new(AtomicUsize::new(0)) });
+        let (sink, client, _rx) = plumbing();
         let engine = engine_with(
             OrchestratorConfig::default(),
             model.clone(),
@@ -2594,16 +2659,12 @@ mod tests {
         );
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        engine
+        let error = engine
             .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
             .await
-            .expect("overflow is recovered by shrinking the transcript");
-
-        assert_eq!(
-            model.calls.load(Ordering::SeqCst),
-            3,
-            "tool round, overflow, then the retried call"
-        );
+            .expect_err("a second overflow ends the turn");
+        assert!(matches!(error, OrchestratorError::ContextOverflow(_)), "{error:?}");
+        assert_eq!(model.calls.load(Ordering::SeqCst), 3, "one retry, never a loop");
     }
 
     #[tokio::test]

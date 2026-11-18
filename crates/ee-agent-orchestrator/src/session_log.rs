@@ -409,6 +409,26 @@ impl SessionLog {
         Ok(StoredArtifact { content_hash, path })
     }
 
+    /// Sweeps retained tool-output overflow bodies at session end.
+    ///
+    /// Bodies referenced by a message record are kept, so the log still replays;
+    /// retained overflow bodies — which no later request re-reads — are removed.
+    /// Returns how many bodies were removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink failure when the body directory cannot be read or a body
+    /// cannot be removed.
+    pub fn purge_artifacts(&self) -> Result<usize, OrchestratorError> {
+        let mut keep = Vec::new();
+        for record in self.records()? {
+            if let SessionLogRecord::Message(message) = record {
+                keep.push(message.content_hash);
+            }
+        }
+        self.sink.prune_bodies(&self.session_id, &keep)
+    }
+
     /// Starts a new turn, resetting the recorded iteration.
     pub fn begin_turn(&self) -> u64 {
         let mut state = self.state.lock().expect("session log state poisoned");
