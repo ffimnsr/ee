@@ -284,6 +284,38 @@ mod tests {
     "produces": []
   },
   {
+    "name": "load_memory",
+    "description": "Loads or searches memory entries listed in the prompt catalog",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "sideEffect": "read",
+    "sideEffectSubclass": null,
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": [
+      "file_text"
+    ]
+  },
+  {
     "name": "load_skill",
     "description": "Loads the full SKILL.md for a skill listed in the prompt catalog",
     "inputSchema": {

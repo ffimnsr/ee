@@ -50,7 +50,13 @@ pub(crate) const TOOL_PWSH: Slot =
 pub(crate) const TOOL_READ: Slot = Slot {
     name: "TOOL_READ",
     order: 1100,
-    registrations: &["tool:read", "tool:read-buffer", "tool:read-text-file", "tool:load-skill"],
+    registrations: &[
+        "tool:read",
+        "tool:read-buffer",
+        "tool:read-text-file",
+        "tool:load-skill",
+        "tool:load-memory",
+    ],
 };
 pub(crate) const TOOL_WRITE: Slot = Slot {
     name: "TOOL_WRITE",

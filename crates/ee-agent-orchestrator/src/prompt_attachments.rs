@@ -320,6 +320,13 @@ fn expand_mentions(
                 messages.push(skill_message(name, cwd, roots, config_root, max_mention_bytes)?);
                 continue;
             }
+            if let Some(name) = mention.strip_prefix("memory:") {
+                if !seen.insert(format!("memory:{name}")) {
+                    continue;
+                }
+                messages.push(memory_message(name, cwd, roots, config_root, max_mention_bytes)?);
+                continue;
+            }
             if !mention.contains('/') && !mention.contains('.') {
                 // Bare `@name` handles are ordinary text, not file paths.
                 continue;
@@ -376,6 +383,38 @@ fn skill_message(
         crate::prompt::skills::SkillScope::User => TrustLevel::UserInstructionTrusted,
     };
     Ok(workspace_message(&skill.path, format!("[skill: {}]\n{content}", skill.name), trust))
+}
+
+fn memory_message(
+    name: &str,
+    cwd: &Path,
+    roots: &[PathBuf],
+    config_root: Option<&Path>,
+    max_bytes: usize,
+) -> Result<WorkspaceMessage, String> {
+    let registry = crate::user_memories::UserMemoryRegistry::discover(cwd, roots, config_root);
+    let entry = registry.get(name).ok_or_else(|| format!("unknown memory entry {name:?}"))?;
+    let content = if entry.content.len() > max_bytes {
+        truncate_bytes(&entry.content, max_bytes)
+    } else {
+        entry.content.clone()
+    };
+    let trust = match entry.scope {
+        crate::user_memories::UserMemoryScope::Workspace => {
+            TrustLevel::WorkspaceInstructionUntrusted
+        }
+        crate::user_memories::UserMemoryScope::User => TrustLevel::UserInstructionTrusted,
+    };
+    Ok(workspace_message(
+        &entry.path,
+        format!(
+            "[memory: {}; importance: {}; tags: {}]\n{content}",
+            entry.name,
+            entry.importance.as_str(),
+            entry.tags.join(", ")
+        ),
+        trust,
+    ))
 }
 
 fn workspace_message(path: &Path, text: String, trust: TrustLevel) -> WorkspaceMessage {
@@ -580,6 +619,35 @@ mod tests {
             TrustLevel::WorkspaceInstructionUntrusted
         );
         assert!(prepared.instructions[0].message.text_content().contains("Atlas body"));
+    }
+
+    #[test]
+    fn memory_mention_is_injected_with_its_scope_trust() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let memory = workspace.path().join(".agents").join("memories").join("testing.md");
+        fs::create_dir_all(memory.parent().expect("parent")).expect("mkdir");
+        fs::write(
+            &memory,
+            "---\nname: testing\ntags: [rust]\nimportance: high\n---\nRun the quiet suite.\n",
+        )
+        .expect("write");
+        let mut ctx = context("use @memory:testing");
+        let prepared = prepare_prompt(
+            &mut ctx,
+            workspace.path(),
+            &[workspace.path().to_path_buf()],
+            None,
+            &PromptAttachmentConfig::default(),
+        )
+        .expect("memory expanded");
+        assert_eq!(prepared.instructions.len(), 1);
+        assert_eq!(
+            prepared.instructions[0].message.trust,
+            TrustLevel::WorkspaceInstructionUntrusted
+        );
+        let text = prepared.instructions[0].message.text_content();
+        assert!(text.contains("Run the quiet suite."));
+        assert!(text.contains("importance: high"));
     }
 
     #[test]

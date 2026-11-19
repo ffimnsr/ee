@@ -426,6 +426,13 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
         inputs.workspace_roots,
         inputs.global_config_root,
     ));
+    // Memory catalogs ride the same planes as skills: repository entries are
+    // untrusted, user-global entries are trusted relative to workspace text.
+    bundle.workspace.extend(crate::user_memories::catalog_messages(
+        inputs.cwd,
+        inputs.workspace_roots,
+        inputs.global_config_root,
+    ));
     // A selected primary agent's body is the session's role prompt. Personal
     // definitions are trusted relative to workspace content; project files are
     // attacker-controlled in shared workspaces and ride the untrusted plane.
@@ -571,6 +578,47 @@ mod tests {
         assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
         assert!(message.text_content().contains("project rule"));
         assert!(bundle.workspace[0].path.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn prompt_bundle_injects_a_bounded_memory_catalog() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let memory = temp.path().join(".agents/memories/testing.md");
+        std::fs::create_dir_all(memory.parent().expect("parent")).expect("memory dir");
+        std::fs::write(
+            &memory,
+            "---\ntags: [rust]\nimportance: critical\n---\nRun tests with --quiet.\n",
+        )
+        .expect("write memory");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+
+        let catalog = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_prompt"))
+            .expect("memory catalog injected");
+        assert_eq!(catalog.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        let text = catalog.message.text_content();
+        assert!(text.contains("testing"));
+        assert!(text.contains("critical"));
+        assert!(text.contains("rust"));
+        assert!(text.contains("load_memory"));
     }
 
     #[test]

@@ -228,6 +228,7 @@ fn builtin_tools_register_under_session() {
             "cargo_check",
             "create_terminal",
             "kill_terminal",
+            "load_memory",
             "load_skill",
             "read_file",
             "release_terminal",
@@ -236,7 +237,7 @@ fn builtin_tools_register_under_session() {
             "write_file"
         ]
     );
-    assert_eq!(registry.len(), 10);
+    assert_eq!(registry.len(), 11);
 }
 
 #[tokio::test]
@@ -331,6 +332,71 @@ async fn load_skill_reads_a_scoped_manifest_and_rejects_traversal() {
         .await;
     assert!(!traversal.success);
     assert_eq!(traversal.error_kind, Some(ToolErrorKind::InvalidArguments));
+}
+
+#[tokio::test]
+async fn load_memory_loads_by_name_and_searches_by_tag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let memory_dir = temp.path().join(".agents/memories");
+    std::fs::create_dir_all(&memory_dir).expect("memory dir");
+    std::fs::write(
+        memory_dir.join("testing.md"),
+        "---\nname: testing\ndescription: Test commands\ntags: [rust, ee-memory-tool-test]\nimportance: high\n---\n\nRun cargo test --quiet.\n",
+    )
+    .expect("write memory");
+    std::fs::write(
+        memory_dir.join("style.md"),
+        "---\ndescription: Style rules\ntags: [rust, ee-memory-tool-test]\nimportance: low\n---\n\nUse rustfmt.\n",
+    )
+    .expect("write memory");
+    let mut registry = ToolRegistry::new();
+    registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+    let tool = registry.get("load_memory").expect("load_memory registered");
+    let (sink, client, _rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+
+    let loaded = tool
+        .execute(
+            json!({ "name": "testing" }),
+            client.clone(),
+            watch::channel(false).1,
+            context.clone(),
+        )
+        .await;
+    assert!(loaded.success, "{}", loaded.text_output);
+    assert!(loaded.text_output.contains("cargo test --quiet"));
+    assert_eq!(loaded.structured_output.expect("structured")["importance"], "high");
+
+    let invalid = tool
+        .execute(
+            json!({ "tags": "rust" }),
+            client.clone(),
+            watch::channel(false).1,
+            context.clone(),
+        )
+        .await;
+    assert!(!invalid.success);
+    assert_eq!(invalid.error_kind, Some(ToolErrorKind::InvalidArguments));
+
+    let searched = tool
+        .execute(
+            json!({ "query": "rustfmt", "tags": ["ee-memory-tool-test"], "limit": 4 }),
+            client,
+            watch::channel(false).1,
+            context,
+        )
+        .await;
+    assert!(searched.success, "{}", searched.text_output);
+    assert!(searched.text_output.contains("Use rustfmt."));
+    assert!(searched.text_output.contains("testing"), "tag match is included");
 }
 
 #[test]

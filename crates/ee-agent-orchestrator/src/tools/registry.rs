@@ -576,6 +576,127 @@ impl ServerTool for LoadSkillTool {
     }
 }
 
+/// Read-only memory entry loader and search.
+///
+/// The prompt advertises a bounded catalog of `.agents/memories` entries; the
+/// model loads one by name or searches by text and tags only when it needs the
+/// content. Entry text is repository- or user-authored data, never policy.
+#[derive(Clone)]
+struct LoadMemoryTool;
+
+impl ServerTool for LoadMemoryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "load_memory",
+            "Loads or searches memory entries listed in the prompt catalog",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "query": { "type": "string" },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                },
+                "limit": { "type": "integer" },
+            },
+            "required": [],
+        }))
+        .dependency(ToolDependency::new().produces(vec![ToolDataClass::FileText]))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _client: ClientBridge,
+        _cancel: watch::Receiver<bool>,
+        context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        Box::pin(async move {
+            let name = optional_string_arg(&arguments, "name");
+            let query = optional_string_arg(&arguments, "query");
+            let tags = match string_array_arg(&arguments, "tags") {
+                Ok(tags) => tags,
+                Err(result) => return result,
+            };
+            let limit = arguments
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(crate::user_memories::DEFAULT_MEMORY_RECALL_LIMIT);
+            let roots = context
+                .scope
+                .as_ref()
+                .map(|scope| scope.allowed_roots.clone())
+                .filter(|roots| !roots.is_empty())
+                .or_else(|| std::env::current_dir().ok().map(|cwd| vec![cwd]))
+                .unwrap_or_default();
+            let cwd = roots.first().cloned().unwrap_or_default();
+            let config_root = crate::prompt::skills::user_config_root_from_env();
+            let registry = crate::user_memories::UserMemoryRegistry::discover(
+                &cwd,
+                &roots,
+                config_root.as_deref(),
+            );
+            if let Some(name) = name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+                let Some(entry) = registry.get(name) else {
+                    return ToolResult::failure(
+                        ToolErrorKind::InvalidArguments,
+                        format!("unknown memory entry {name:?}"),
+                    );
+                };
+                let (content, truncated) = crate::user_memories::render_entries(
+                    &[entry],
+                    crate::user_memories::MAX_MEMORY_TOOL_BYTES,
+                );
+                return ToolResult::success_structured(
+                    content,
+                    serde_json::json!({
+                        "name": entry.name,
+                        "description": entry.description,
+                        "tags": entry.tags,
+                        "importance": entry.importance.as_str(),
+                        "scope": entry.scope.as_str(),
+                        "path": entry.path.display().to_string(),
+                        "bytes": entry.content.len(),
+                        "truncated": truncated,
+                    }),
+                );
+            }
+            let hits = registry.search(query.as_deref(), &tags, limit);
+            if hits.is_empty() {
+                return ToolResult::success("No memory entries matched.");
+            }
+            let (content, truncated) = crate::user_memories::render_entries(
+                &hits,
+                crate::user_memories::MAX_MEMORY_TOOL_BYTES,
+            );
+            let entries: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "name": entry.name,
+                        "description": entry.description,
+                        "tags": entry.tags,
+                        "importance": entry.importance.as_str(),
+                        "scope": entry.scope.as_str(),
+                        "path": entry.path.display().to_string(),
+                    })
+                })
+                .collect();
+            ToolResult::success_structured(
+                content,
+                serde_json::json!({
+                    "count": entries.len(),
+                    "truncated": truncated,
+                    "entries": entries,
+                }),
+            )
+        })
+    }
+}
+
 /// Model-facing session todo list.
 ///
 /// Mutates only ephemeral session state, never the workspace, so it stays
@@ -714,6 +835,7 @@ pub(crate) fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> 
     vec![
         Arc::new(CargoCheckTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         Arc::new(LoadSkillTool) as Arc<dyn ServerTool>,
+        Arc::new(LoadMemoryTool) as Arc<dyn ServerTool>,
         make(
             BridgeCall::ReadTextFile,
             "read_file",
@@ -806,6 +928,21 @@ fn string_arg(arguments: &serde_json::Value, name: &str) -> Result<String, ToolR
 
 fn optional_string_arg(arguments: &serde_json::Value, name: &str) -> Option<String> {
     arguments.get(name).and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+fn string_array_arg(arguments: &serde_json::Value, name: &str) -> Result<Vec<String>, ToolResult> {
+    let Some(value) = arguments.get(name) else { return Ok(Vec::new()) };
+    let Some(values) = value.as_array() else {
+        return Err(invalid_args(format!("tool argument {name} must be an array of strings")));
+    };
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                invalid_args(format!("tool argument {name} must be an array of strings"))
+            })
+        })
+        .collect()
 }
 
 fn terminal_arg(arguments: &serde_json::Value) -> Result<TerminalId, ToolResult> {

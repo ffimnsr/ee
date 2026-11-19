@@ -284,6 +284,7 @@ pub mod trust;
 mod usage;
 pub mod user_agents;
 pub mod user_commands;
+pub mod user_memories;
 pub mod validation;
 pub mod workspace_isolation;
 pub mod workspace_scope;
