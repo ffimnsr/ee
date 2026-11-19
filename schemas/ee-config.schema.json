@@ -834,6 +834,9 @@
             }
           ]
         },
+        "permissions": {
+          "description": "Declarative `allow`/`ask`/`deny` permission rules for external agent\n`session/request_permission` calls (`[agents.permissions]` table)."
+        },
         "servers": {
           "type": "object",
           "additionalProperties": {
