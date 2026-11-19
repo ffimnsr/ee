@@ -22,7 +22,11 @@ pub mod inbound;
 pub mod manager;
 pub mod mcp_over_acp;
 pub mod permission;
-pub mod permission_rules;
+/// Re-export of the shared ruleset evaluator. The orchestrator owns the
+/// implementation so agent policy and the host broker cannot drift.
+pub mod permission_rules {
+    pub use ee_agent_orchestrator::permission_rules::*;
+}
 pub mod process;
 pub mod redact;
 pub mod reducer;

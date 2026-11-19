@@ -45,6 +45,12 @@ pub const REVERT_COMMAND_NAME: &str = "revert";
 /// used.
 pub const DIFF_COMMAND_NAME: &str = "turn-diff";
 
+/// The advertised slash-command name for selecting a user-defined primary
+/// agent. Distinct from the CLI's `/agent` model-switch alias so the two
+/// layers cannot intercept each other. The optional argument is the agent
+/// name; when omitted the provider lists the available primary agents.
+pub const PRIMARY_AGENT_COMMAND_NAME: &str = "primary-agent";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -105,6 +111,20 @@ pub fn compact_available_command() -> AvailableCommand {
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional instructions for what the summary must preserve",
+    )))
+}
+
+/// The `/agent` command advertised by providers that discover user-defined
+/// The `/primary-agent` command advertised by providers that discover
+/// user-defined primary agents. The optional argument is an agent name.
+#[must_use]
+pub fn primary_agent_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        PRIMARY_AGENT_COMMAND_NAME,
+        "List or select a user-defined primary agent from .agents/agents or the ee config root.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "agent name (omit to list)",
     )))
 }
 

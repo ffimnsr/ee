@@ -40,7 +40,38 @@ impl SubagentManager {
             worktrees: state.worktrees,
             transcripts: state.transcripts,
             background_jobs,
+            user_agents: Arc::new(RwLock::new(UserAgentRegistry::default())),
         }
+    }
+
+    /// Shares the runtime-owned user-agent registry with the delegate tool.
+    #[must_use]
+    pub(crate) fn with_user_agents(mut self, user_agents: Arc<RwLock<UserAgentRegistry>>) -> Self {
+        self.user_agents = user_agents;
+        self
+    }
+
+    /// Resolves a command subtask role. `None` uses the read-only researcher.
+    pub(crate) fn command_role(
+        &self,
+        agent: Option<&str>,
+    ) -> Result<SubagentRole, OrchestratorError> {
+        let Some(name) = agent else {
+            return Ok(BuiltinSubagentRole::Researcher.role());
+        };
+        if let Some(builtin) = BuiltinSubagentRole::by_name(name) {
+            return Ok(builtin.role());
+        }
+        let registry = self.user_agents.read().expect("user agent registry poisoned");
+        let agent = registry.get(name).ok_or_else(|| {
+            OrchestratorError::InvalidState(format!("unknown command agent: {name}"))
+        })?;
+        if !agent.is_subagent() {
+            return Err(OrchestratorError::InvalidState(format!(
+                "agent {name:?} is primary-only; omit `agent` or use a subagent-mode definition"
+            )));
+        }
+        Ok(agent.to_subagent_role())
     }
 
     /// Snapshot of quarantined (failed, cancelled, or unverified) child
@@ -435,10 +466,23 @@ impl SubagentManager {
     ) -> Result<ResolvedModel, OrchestratorError> {
         let id = match selected {
             Some(id) => {
-                if !self.models.contains(&id) {
+                if self.models.contains(&id) {
+                    id
+                } else if let Some((base, variant)) = id.split_once('#')
+                    && self.models.contains(base)
+                {
+                    // `model#variant` falls back to the base model when the
+                    // registry has no variant-specific route.
+                    tracing::debug!(
+                        requested = %id,
+                        %variant,
+                        base,
+                        "subagent model variant is not registered; using the base model"
+                    );
+                    base.to_string()
+                } else {
                     return Err(OrchestratorError::InvalidState(format!("unknown model id: {id}")));
                 }
-                id
             }
             None => {
                 let routed = self
@@ -538,6 +582,7 @@ impl SubagentManager {
                 )),
                 (scope, None) => scope.clone(),
             },
+            permission_rules: request.role.permission_rules.clone(),
         };
         // Discovery and dispatch use same exact immutable critic tool set.
         let visible_tool_names = is_rubber_duck.then(|| {

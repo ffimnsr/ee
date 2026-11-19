@@ -3,6 +3,7 @@ use super::conversation::initial_commands;
 use super::conversation::record_agent_message;
 use super::conversation::record_user_message;
 use super::*;
+use ee_agent_acp_server::server::OutboundEvent;
 
 #[test]
 fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
@@ -11,6 +12,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
         commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
         vec![
             COMPACT_COMMAND_NAME,
+            PRIMARY_AGENT_COMMAND_NAME,
             RUBBER_DUCK_COMMAND_NAME,
             BRANCH_COMMAND_NAME,
             REVERT_COMMAND_NAME,
@@ -22,6 +24,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
         recovery_commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
         vec![
             COMPACT_COMMAND_NAME,
+            PRIMARY_AGENT_COMMAND_NAME,
             RUBBER_DUCK_COMMAND_NAME,
             BRANCH_COMMAND_NAME,
             REVERT_COMMAND_NAME,
@@ -139,6 +142,315 @@ async fn mid_session_model_switch_keeps_the_transcript_and_routes_the_next_turn(
         }),
         "the prior assistant turn survives the switch"
     );
+}
+
+#[tokio::test]
+async fn agent_command_selects_a_user_defined_primary_agent_without_a_model_call() {
+    let default = Arc::new(FakeModel::new(Vec::new()));
+    let switched = Arc::new(FakeModel::new(Vec::new()));
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry
+        .register(crate::model_registry::DEFAULT_MODEL_ID, default.clone())
+        .expect("default registered");
+    registry.register("model-b", switched.clone()).expect("model-b registered");
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig::default(),
+        registry,
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let agent_path = workspace.path().join(".agents/agents/reviewer.md");
+    std::fs::create_dir_all(agent_path.parent().expect("agent parent")).expect("agent dir");
+    std::fs::write(
+        &agent_path,
+        "---\ndescription: Reviewer\nmode: primary\nmodel: model-b\nsteps: 2\n---\nReview the change.\n",
+    )
+    .expect("agent file");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let result = provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/primary-agent reviewer"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("/agent completes");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(default.call_count(), 0, "commands never call the model");
+    assert_eq!(switched.call_count(), 0);
+
+    let sessions = provider.sessions.lock().expect("sessions");
+    let session = sessions.get(&session_id.to_string()).expect("session exists");
+    assert_eq!(session.runtime.active_user_agent_name().as_deref(), Some("reviewer"));
+    assert_eq!(session.runtime.selected_model().as_deref(), Some("model-b"));
+    assert_eq!(session.model_label, "model-b");
+}
+
+#[tokio::test]
+async fn user_command_expands_template_and_advertises_completion() {
+    let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+    let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let command_path = workspace.path().join(".agents/commands/release.md");
+    std::fs::create_dir_all(command_path.parent().expect("command parent")).expect("mkdir");
+    std::fs::write(
+        &command_path,
+        "---\ndescription: Prepare a release\n---\nRelease $1 now: $ARGUMENTS\n",
+    )
+    .expect("command file");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let (sink, client, mut rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/release v1"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("command turn completes");
+
+    let request = model.requests().remove(0);
+    let user_text = request
+        .transcript
+        .iter()
+        .filter(|message| message.role == ModelRole::User)
+        .map(|message| message.text_content())
+        .find(|text| text.contains("Release"))
+        .expect("expanded template reaches the model");
+    assert!(user_text.contains("Release v1 now: v1"));
+
+    let mut advertised = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let OutboundEvent::Update { update, .. } = event
+            && let SessionUpdate::AvailableCommandsUpdate(update) = *update
+        {
+            advertised =
+                update.available_commands.iter().map(|command| command.name.clone()).collect();
+        }
+    }
+    assert!(advertised.iter().any(|name| name == "release"), "completion list: {advertised:?}");
+}
+
+#[tokio::test]
+async fn subtask_user_command_runs_through_the_subagent_manager() {
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().text(crate::test_support::DELEGATED_HANDOFF_OUTPUT).completed(),
+    ]));
+    let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let agent_path = workspace.path().join(".agents/agents/auditor.md");
+    let command_path = workspace.path().join(".agents/commands/audit.md");
+    std::fs::create_dir_all(agent_path.parent().expect("agent parent")).expect("mkdir");
+    std::fs::create_dir_all(command_path.parent().expect("command parent")).expect("mkdir");
+    std::fs::write(
+        &agent_path,
+        "---\nmode: subagent\ndescription: Auditor\n---\nAudit the assigned scope.\n",
+    )
+    .expect("agent file");
+    std::fs::write(&command_path, "---\nsubtask: true\nagent: auditor\n---\nAudit $ARGUMENTS\n")
+        .expect("command file");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let (sink, client, mut rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let result = provider
+        .prompt(
+            PromptContext::new(
+                session_id,
+                vec![ContentBlock::Text(TextContent::new("/audit src"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("subtask command completes");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(model.call_count(), 1, "only the child calls the model");
+    let child = model.requests().remove(0);
+    assert!(
+        child.transcript.iter().any(|message| {
+            message.role == ModelRole::System
+                && message.text_content().contains("Audit the assigned scope.")
+        }),
+        "user-defined agent body becomes the child system prompt"
+    );
+    assert!(child.transcript.iter().any(|message| {
+        message.role == ModelRole::User && message.text_content().contains("Audit src")
+    }));
+    let mut reported = false;
+    while let Ok(event) = rx.try_recv() {
+        if let OutboundEvent::Update { update, .. } = event
+            && let SessionUpdate::AgentMessageChunk(chunk) = *update
+            && let ContentBlock::Text(text) = &chunk.content
+            && text.text.contains("/audit")
+        {
+            reported = true;
+        }
+    }
+    assert!(reported, "subtask result is reported back to the parent session");
+}
+
+#[tokio::test]
+async fn user_command_applies_agent_and_model_before_prompting() {
+    let default = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+    let alternate = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry
+        .register(crate::model_registry::DEFAULT_MODEL_ID, default.clone())
+        .expect("default registered");
+    registry.register("model-b", alternate.clone()).expect("model-b registered");
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig::default(),
+        registry,
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let agent_path = workspace.path().join(".agents/agents/reviewer.md");
+    let command_path = workspace.path().join(".agents/commands/release.md");
+    std::fs::create_dir_all(agent_path.parent().expect("agent parent")).expect("mkdir");
+    std::fs::create_dir_all(command_path.parent().expect("command parent")).expect("mkdir");
+    std::fs::write(
+        &agent_path,
+        "---\nmode: primary\ndescription: Reviewer\n---\nReview the release notes.\n",
+    )
+    .expect("agent file");
+    std::fs::write(
+        &command_path,
+        "---\nagent: reviewer\nmodel: model-b\n---\nRelease $ARGUMENTS\n",
+    )
+    .expect("command file");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider
+        .prompt(
+            PromptContext::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new("/release v1"))],
+            ),
+            sink,
+            client,
+            cancel_rx,
+        )
+        .await
+        .expect("command turn completes");
+
+    assert_eq!(default.call_count(), 0, "the command switched models before the call");
+    let request = alternate.requests().remove(0);
+    assert!(
+        request.transcript.iter().any(|message| {
+            message.role == ModelRole::User
+                && message.text_content().contains("Review the release notes.")
+        }),
+        "the selected agent prompt is in the same turn"
+    );
+    assert!(request.transcript.iter().any(|message| {
+        message.role == ModelRole::User && message.text_content().contains("Release v1")
+    }));
+    let sessions = provider.sessions.lock().expect("sessions");
+    let session = sessions.get(&session_id.to_string()).expect("session exists");
+    assert_eq!(session.runtime.active_user_agent_name().as_deref(), Some("reviewer"));
+    assert_eq!(session.runtime.selected_model().as_deref(), Some("model-b"));
+}
+
+#[tokio::test]
+async fn prompt_attachment_image_is_downscaled_before_the_model_call() {
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use image::ImageFormat;
+
+    let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("seen").completed()]));
+    let provider = OrchestratorProvider::with_model_registry(
+        OrchestratorProviderConfig {
+            orchestrator: crate::config::OrchestratorConfig {
+                prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig {
+                    max_image_dimension: 64,
+                    ..crate::prompt_attachments::PromptAttachmentConfig::default()
+                },
+                ..crate::config::OrchestratorConfig::default()
+            },
+            ..OrchestratorProviderConfig::default()
+        },
+        {
+            let mut registry = crate::model_registry::ModelRegistry::new();
+            registry
+                .register(crate::model_registry::DEFAULT_MODEL_ID, model.clone())
+                .expect("default registered");
+            registry
+        },
+        PolicyEngine::default(),
+    )
+    .expect("provider builds");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let init = provider
+        .new_session(NewSessionContext::new(workspace.path()))
+        .await
+        .expect("session creates");
+    let session_id = init.session_id.clone();
+
+    let image = image::RgbaImage::from_pixel(200, 100, image::Rgba([1, 2, 3, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+        .expect("encode image");
+    let mut ctx =
+        PromptContext::new(session_id, vec![ContentBlock::Text(TextContent::new("look at this"))]);
+    ctx.metadata = Some(
+        serde_json::json!({
+            "attachments": [{ "dataUrl": format!("data:image/png;base64,{}", BASE64.encode(&bytes)) }]
+        })
+        .as_object()
+        .expect("map")
+        .clone(),
+    );
+    let (sink, client, _rx) = switched_model_plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    provider.prompt(ctx, sink, client, cancel_rx).await.expect("turn completes");
+
+    let request = model.requests().remove(0);
+    let crate::model::ModelContent::Image { data, .. } = request
+        .transcript
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find(|content| matches!(content, crate::model::ModelContent::Image { .. }))
+        .expect("image reached the model")
+    else {
+        panic!("expected image content");
+    };
+    let decoded = image::load_from_memory(&BASE64.decode(data).expect("base64")).expect("png");
+    assert!(decoded.width() <= 64 && decoded.height() <= 64, "bounded image");
 }
 
 #[tokio::test]

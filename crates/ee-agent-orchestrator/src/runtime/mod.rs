@@ -79,10 +79,13 @@ pub(crate) use crate::strategy::{
     capability_aware_guidance,
 };
 pub(crate) use crate::subagents::{
-    DelegateTool, SubagentManager, SubagentObservability, SubagentState,
+    DelegateTool, DelegationRequest, SubagentManager, SubagentObservability, SubagentResult,
+    SubagentRole, SubagentState,
 };
 pub(crate) use crate::tasks::{TaskGraph, TaskId, TaskNode, TaskStatus, truncate};
 pub(crate) use crate::tools::{ServerTool, ToolExecutionLogEntry, ToolExecutor, ToolRegistry};
+pub(crate) use crate::user_agents::UserAgentRegistry;
+pub(crate) use crate::user_commands::UserCommandRegistry;
 pub(crate) use crate::validation::{
     ValidationPlanner, ValidationPlanningContext, ValidationResult, ValidationRunner,
     WorkspaceValidationConfig, finalize_validation_tasks,
@@ -272,6 +275,20 @@ pub struct OrchestratorRuntime {
     /// Explicit model registry id for this session (mid-session switch).
     /// `None` uses the registry's `DEFAULT_MODEL_ID` adapter.
     selected_model: Mutex<Option<String>>,
+    /// User-defined agent definitions shared with the subagent manager.
+    /// Reloaded from the workspace and personal config roots per prompt.
+    user_agents: Arc<RwLock<UserAgentRegistry>>,
+    /// Name of the user-defined primary agent selected for this session.
+    active_user_agent: Mutex<Option<String>>,
+    /// User-defined slash-command templates reloaded per prompt.
+    user_commands: Arc<RwLock<UserCommandRegistry>>,
+    /// Command-name fingerprint already advertised to this session, so the
+    /// completion list is only refreshed when the template set changes.
+    /// `None` means the session has only seen the initial built-in list.
+    advertised_commands: Mutex<Option<Vec<String>>>,
+    /// Shared subagent manager; command subtasks use the same budget, task
+    /// graph, and transcript stores as `delegate_task`.
+    subagents: Arc<SubagentManager>,
     /// Content-addressed workspace snapshots for per-turn diff and file revert.
     snapshots: crate::workspace_snapshot::WorkspaceSnapshotStore,
     /// Weak handle to the shared runtime, set once by [`Self::into_shared`].

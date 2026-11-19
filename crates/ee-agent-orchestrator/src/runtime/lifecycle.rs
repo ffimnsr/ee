@@ -156,20 +156,29 @@ impl OrchestratorRuntime {
         let transcripts =
             Arc::new(Mutex::new(crate::subagent_transcripts::ChildTranscriptStore::default()));
         let background_jobs = Arc::new(BackgroundJobRegistry::new());
-        let manager = Arc::new(SubagentManager::new(
-            config.clone(),
-            models.clone(),
-            tools.clone(),
-            SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone())
-                .with_worktrees(worktrees.clone())
-                .with_transcripts(transcripts.clone()),
-            SubagentObservability::new(model_router.clone(), metrics.clone(), decisions.clone()),
-            background_jobs.clone(),
-        ));
+        let user_agents = Arc::new(RwLock::new(UserAgentRegistry::default()));
+        let user_commands = Arc::new(RwLock::new(UserCommandRegistry::default()));
+        let manager = Arc::new(
+            SubagentManager::new(
+                config.clone(),
+                models.clone(),
+                tools.clone(),
+                SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone())
+                    .with_worktrees(worktrees.clone())
+                    .with_transcripts(transcripts.clone()),
+                SubagentObservability::new(
+                    model_router.clone(),
+                    metrics.clone(),
+                    decisions.clone(),
+                ),
+                background_jobs.clone(),
+            )
+            .with_user_agents(user_agents.clone()),
+        );
         tools
             .lock()
             .expect("tool registry poisoned")
-            .register(Arc::new(DelegateTool::new(manager)))
+            .register(Arc::new(DelegateTool::new(manager.clone())))
             .expect("registers delegate_task");
         let rubber_duck = Arc::new(
             RubberDuckRunner::with_config(
@@ -229,6 +238,11 @@ impl OrchestratorRuntime {
             until: Mutex::new(None),
             compaction_checkpoints: Mutex::new(HashMap::new()),
             selected_model: Mutex::new(None),
+            user_agents,
+            active_user_agent: Mutex::new(None),
+            user_commands,
+            advertised_commands: Mutex::new(None),
+            subagents: manager,
             snapshots,
             self_ref: std::sync::OnceLock::new(),
         }
@@ -243,6 +257,234 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn selected_model(&self) -> Option<String> {
         self.selected_model.lock().expect("selected model poisoned").clone()
+    }
+
+    /// Reloads user-defined agents from the workspace and personal config
+    /// roots. Workspace definitions win over personal ones with the same name.
+    ///
+    /// A selected agent that disappears is cleared with its permission
+    /// overlay, so a removed definition cannot keep stale authority.
+    pub fn reload_user_agents(
+        &self,
+        cwd: &std::path::Path,
+        workspace_roots: &[std::path::PathBuf],
+        config_root: Option<&std::path::Path>,
+    ) {
+        let registry = UserAgentRegistry::discover(cwd, workspace_roots, config_root);
+        let active = self.active_user_agent_name();
+        if let Some(name) = &active
+            && registry.get(name).is_none()
+        {
+            tracing::warn!(agent = %name, "selected user agent no longer exists; clearing selection");
+            *self.active_user_agent.lock().expect("active user agent poisoned") = None;
+            self.policy.write().expect("policy poisoned").set_permission_rules(None);
+        }
+        *self.user_agents.write().expect("user agent registry poisoned") = registry;
+    }
+
+    /// Selects a primary user-defined agent, or clears the selection with
+    /// `None` / `"default"`.
+    ///
+    /// The agent's model is resolved against the registry before any state
+    /// changes; an unknown or non-chat-capable model fails closed with the
+    /// available ids. Subagent-mode definitions are rejected because they
+    /// belong to `delegate_task`.
+    pub fn select_user_agent(&self, name: Option<&str>) -> Result<(), String> {
+        let name = name.map(str::trim).filter(|name| !name.is_empty());
+        if name.is_none_or(|name| matches!(name, "default" | "none")) {
+            *self.active_user_agent.lock().expect("active user agent poisoned") = None;
+            self.policy.write().expect("policy poisoned").set_permission_rules(None);
+            return Ok(());
+        }
+        let name = name.expect("checked above");
+        let (agent, available) = {
+            let registry = self.user_agents.read().expect("user agent registry poisoned");
+            let agent = registry.get(name).cloned();
+            let available = {
+                let names = registry
+                    .primary()
+                    .filter(|agent| !agent.hidden)
+                    .map(|agent| agent.name.clone())
+                    .collect::<Vec<_>>();
+                if names.is_empty() { "none".to_string() } else { names.join(", ") }
+            };
+            (agent, available)
+        };
+        let Some(agent) = agent else {
+            return Err(format!("unknown agent {name:?}; available primary agents: {available}"));
+        };
+        if !agent.is_primary() {
+            return Err(format!(
+                "agent `{name}` is subagent-only; delegate it with delegate_task instead"
+            ));
+        }
+        let mut selected_model = None;
+        for candidate in agent.model_candidates() {
+            if let Some(info) = self.models.info(&candidate)
+                && info.enabled
+                && info
+                    .identity
+                    .capabilities
+                    .contains(&crate::model_registry::ModelCapability::ChatCompletion)
+            {
+                selected_model = Some(candidate);
+                break;
+            }
+        }
+        if !agent.model_candidates().is_empty() && selected_model.is_none() {
+            let available = self
+                .models
+                .advertised()
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "agent `{name}` model {:?} is not a registered chat-capable model; available models: {available}",
+                agent.model_candidates().first().cloned().unwrap_or_default()
+            ));
+        }
+        if let Some(model_id) = selected_model {
+            self.set_selected_model(Some(model_id));
+        }
+        self.policy
+            .write()
+            .expect("policy poisoned")
+            .set_permission_rules(agent.permissions.clone());
+        *self.active_user_agent.lock().expect("active user agent poisoned") =
+            Some(agent.name.clone());
+        Ok(())
+    }
+
+    /// Restores a persisted selection without re-resolving its model; the
+    /// provider applies the persisted model separately.
+    pub fn restore_user_agent(&self, name: &str) -> Result<(), String> {
+        let agent = self
+            .user_agents
+            .read()
+            .expect("user agent registry poisoned")
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("persisted user agent {name:?} no longer exists"))?;
+        if !agent.is_primary() {
+            return Err(format!("persisted agent {name:?} is not a primary agent"));
+        }
+        self.policy
+            .write()
+            .expect("policy poisoned")
+            .set_permission_rules(agent.permissions.clone());
+        *self.active_user_agent.lock().expect("active user agent poisoned") = Some(agent.name);
+        Ok(())
+    }
+
+    /// The selected primary user-defined agent, when one is active.
+    #[must_use]
+    pub fn active_user_agent(&self) -> Option<crate::user_agents::UserAgentDefinition> {
+        let name = self.active_user_agent_name()?;
+        self.user_agents.read().expect("user agent registry poisoned").get(&name).cloned()
+    }
+
+    /// The selected user-agent name, when one is active.
+    #[must_use]
+    pub fn active_user_agent_name(&self) -> Option<String> {
+        self.active_user_agent.lock().expect("active user agent poisoned").clone()
+    }
+
+    /// Snapshot of the discovered agent registry for listings and commands.
+    #[must_use]
+    pub fn user_agents_snapshot(&self) -> UserAgentRegistry {
+        self.user_agents.read().expect("user agent registry poisoned").clone()
+    }
+
+    /// Reloads markdown command templates from the workspace and personal
+    /// config roots.
+    pub fn reload_user_commands(
+        &self,
+        cwd: &std::path::Path,
+        workspace_roots: &[std::path::PathBuf],
+        config_root: Option<&std::path::Path>,
+    ) {
+        let registry = UserCommandRegistry::discover(cwd, workspace_roots, config_root);
+        *self.user_commands.write().expect("user command registry poisoned") = registry;
+    }
+
+    /// Snapshot of the discovered command registry.
+    #[must_use]
+    pub fn user_commands_snapshot(&self) -> UserCommandRegistry {
+        self.user_commands.read().expect("user command registry poisoned").clone()
+    }
+
+    /// Whether this session has already received a template-aware command
+    /// list. `false` means only the initial built-in list was advertised.
+    pub(crate) fn commands_were_advertised(&self) -> bool {
+        self.advertised_commands.lock().expect("advertised commands poisoned").is_some()
+    }
+
+    /// Marks the current command-name set advertised. Returns `true` when the
+    /// set changed and the client needs a fresh completion list.
+    pub(crate) fn mark_commands_advertised(&self, names: &[String]) -> bool {
+        let mut advertised = self.advertised_commands.lock().expect("advertised commands poisoned");
+        if advertised.as_deref() == Some(names) {
+            return false;
+        }
+        *advertised = Some(names.to_vec());
+        true
+    }
+
+    /// Resolves the role for a `subtask: true` command. The default is the
+    /// read-only researcher role; a named built-in or user-defined subagent
+    /// replaces it. Primary-only agents are rejected.
+    pub(crate) fn command_role(
+        &self,
+        agent: Option<&str>,
+    ) -> Result<SubagentRole, OrchestratorError> {
+        self.subagents.command_role(agent)
+    }
+
+    /// Runs one command-defined subtask through the shared subagent manager,
+    /// so it uses the same budget, task graph, cancellation, and evidence
+    /// verification as `delegate_task`.
+    pub(crate) async fn run_user_command_subtask(
+        &self,
+        role: SubagentRole,
+        prompt: String,
+        model_id: Option<String>,
+        context_snapshot: Vec<ModelMessage>,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<SubagentResult, OrchestratorError> {
+        let parent = {
+            let mut tasks = self.tasks.lock().expect("task graph poisoned");
+            tasks.create_root("user command", &truncate(&prompt, 200))
+        };
+        let scope = self
+            .workspace_scope()
+            .map(|(_, roots)| crate::workspace_scope::WorkspaceScope::new(roots, Vec::new()));
+        let request = DelegationRequest {
+            parent_task_id: parent.id.clone(),
+            role,
+            scoped_prompt: prompt,
+            context_snapshot,
+            scope,
+            model_id,
+            resume_child_id: None,
+            fork_context: false,
+        };
+        let result = self.subagents.spawn(request, client, cancel, self.events.clone()).await;
+        let status = if result.is_ok() { TaskStatus::Completed } else { TaskStatus::Failed };
+        let _ = self.tasks.lock().expect("task graph poisoned").transition(&parent.id, status);
+        result
+    }
+
+    /// Root-turn config with an active agent's `steps` budget applied.
+    #[must_use]
+    pub(crate) fn config_for_turn(&self) -> OrchestratorConfig {
+        let mut config = self.config.clone();
+        if let Some(steps) = self.active_user_agent().and_then(|agent| agent.steps) {
+            config.max_loop_iterations =
+                Some(config.max_loop_iterations.map_or(steps, |cap| cap.min(steps)));
+        }
+        config
     }
 
     /// Workspace snapshot store for this session.
@@ -445,7 +687,12 @@ impl OrchestratorRuntime {
     }
 
     /// Replaces the active tool policy without resetting session state.
-    pub fn set_policy(&self, policy: PolicyEngine) {
+    pub fn set_policy(&self, mut policy: PolicyEngine) {
+        // A mode or plugin policy refresh must not silently drop the selected
+        // user agent's deny overlay.
+        if let Some(rules) = self.active_user_agent().and_then(|agent| agent.permissions) {
+            policy.set_permission_rules(Some(rules));
+        }
         *self.policy.write().expect("runtime policy poisoned") = policy;
     }
     /// Snapshot of the active tool policy.

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::destructive_policy::SideEffectSubclass;
+use crate::permission_rules::{PermissionEffect, PermissionSideEffect, PermissionTarget};
 use crate::tools::{SideEffectClass, ToolDefinition};
 use crate::workspace_scope::WorkspaceScope;
 
@@ -48,6 +49,12 @@ pub struct ToolPolicy {
     /// Optional workspace scope; when set, file/cwd paths are checked before
     /// any client-bridge call.
     pub scope: Option<WorkspaceScope>,
+    /// Optional per-agent permission overlay. `Deny` matches block dispatch
+    /// before any host approval request; `allow`/`ask` fall through to the
+    /// class gates above, so an agent definition can never self-grant a class
+    /// the session policy denied.
+    #[serde(default)]
+    pub permission_rules: Option<crate::permission_rules::PermissionRuleset>,
 }
 
 impl Default for ToolPolicy {
@@ -63,6 +70,7 @@ impl Default for ToolPolicy {
             allowed_side_effect_subclasses: HashSet::new(),
             owned_terminal_ids: HashSet::new(),
             scope: None,
+            permission_rules: None,
         }
     }
 }
@@ -217,6 +225,15 @@ impl PolicyEngine {
         &self.policy
     }
 
+    /// Replaces the per-agent permission overlay without changing the class
+    /// gates. `None` restores the session-level ruleset.
+    pub fn set_permission_rules(
+        &mut self,
+        rules: Option<crate::permission_rules::PermissionRuleset>,
+    ) {
+        self.policy.permission_rules = rules;
+    }
+
     /// Checks a tool definition against the policy, including the
     /// destructive-subclass gate.
     #[must_use]
@@ -225,6 +242,22 @@ impl PolicyEngine {
             && !allowed.contains(&tool.name)
         {
             return PolicyDecision::denied("tool is outside exact role allowlist");
+        }
+        if let Some(rules) = &self.policy.permission_rules {
+            // Coarse pass: only `*`-resource rules can be decided without the
+            // call arguments. Resource-specific denies are enforced again in
+            // `check_with_arguments`.
+            let target = PermissionTarget {
+                action: tool.name.clone(),
+                resource: "*".to_string(),
+                side_effect: PermissionSideEffect::from_side_effect_class(tool.side_effect_class),
+            };
+            if rules.evaluate(&target) == PermissionEffect::Deny {
+                return PolicyDecision::denied(format!(
+                    "agent permission rules deny tool {}",
+                    tool.name
+                ));
+            }
         }
         // Trusted ee proxy mutations and terminal operations are approved by
         // the editor host. Do not block their dispatch before that prompt.
@@ -282,6 +315,19 @@ impl PolicyEngine {
         let decision = self.check(tool, context);
         if !decision.allow {
             return decision;
+        }
+        if let Some(rules) = &self.policy.permission_rules {
+            let target = PermissionTarget::from_tool_arguments(
+                &tool.name,
+                PermissionSideEffect::from_side_effect_class(tool.side_effect_class),
+                arguments,
+            );
+            if rules.evaluate(&target) == PermissionEffect::Deny {
+                return PolicyDecision::denied(format!(
+                    "agent permission rules deny {} for resource {}",
+                    tool.name, target.resource
+                ));
+            }
         }
         if tool.side_effect_subclass == Some(SideEffectSubclass::TerminalKill) {
             match arguments.get("terminal_id").and_then(serde_json::Value::as_str) {
@@ -559,6 +605,50 @@ mod tests {
             ..ToolPolicy::default()
         });
         assert!(!engine.check(&tool(SideEffectClass::Delegate), PolicyContext::default()).allow);
+    }
+
+    #[test]
+    fn agent_permission_rules_deny_before_host_approval_and_match_resources() {
+        use crate::permission_rules::PermissionRuleset;
+
+        let rules = PermissionRuleset::from_value(&serde_json::json!({
+            "write_file": "deny",
+            "bash": { "rm *": "deny" },
+        }))
+        .expect("rules parse");
+        let engine = PolicyEngine::new(ToolPolicy {
+            allow_execute: true,
+            permission_rules: Some(rules),
+            ..ToolPolicy::default()
+        });
+
+        // The deny is evaluated before the host-approval shortcut.
+        let mut write = tool(SideEffectClass::Write).host_approval();
+        write.name = "write_file".into();
+        let decision = engine.check(&write, PolicyContext::default());
+        assert!(!decision.allow);
+        assert!(decision.reason.expect("reason").contains("agent permission rules"));
+
+        let mut bash = tool(SideEffectClass::Execute);
+        bash.name = "bash".into();
+        assert!(
+            !engine
+                .check_with_arguments(
+                    &bash,
+                    PolicyContext::default(),
+                    &serde_json::json!({ "command": "rm -rf target" })
+                )
+                .allow
+        );
+        assert!(
+            engine
+                .check_with_arguments(
+                    &bash,
+                    PolicyContext::default(),
+                    &serde_json::json!({ "command": "git status" })
+                )
+                .allow
+        );
     }
 
     #[test]

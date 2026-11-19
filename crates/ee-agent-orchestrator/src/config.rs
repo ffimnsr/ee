@@ -350,6 +350,9 @@ pub struct OrchestratorConfig {
     /// are opt-in, fetched at most once per session, and skipped offline.
     #[serde(default)]
     pub instructions: InstructionSourceConfig,
+    /// Prompt attachment, mention, and image normalization limits.
+    #[serde(default)]
+    pub prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig,
 }
 
 /// Extra instruction sources for the prompt payload.
@@ -526,6 +529,7 @@ impl Default for OrchestratorConfig {
             tool_output: crate::tool_output::ToolOutputLimits::default(),
             snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
+            prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig::default(),
         }
     }
 }
@@ -753,6 +757,7 @@ mod tests {
             tool_output: crate::tool_output::ToolOutputLimits::default(),
             snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
+            prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");

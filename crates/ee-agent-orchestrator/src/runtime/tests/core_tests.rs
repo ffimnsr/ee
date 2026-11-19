@@ -1,6 +1,55 @@
 //! Runtime tests: core.
 use super::*;
 
+#[test]
+fn user_agent_selection_sets_model_steps_and_permission_overlay() {
+    let default = Arc::new(FakeModel::new(Vec::new()));
+    let alternate = Arc::new(FakeModel::new(Vec::new()));
+    let mut registry = crate::model_registry::ModelRegistry::new();
+    registry
+        .register(crate::model_registry::DEFAULT_MODEL_ID, default)
+        .expect("default registered");
+    registry.register("model-b", alternate).expect("model-b registered");
+    let runtime = OrchestratorRuntime::with_shared_model_registry(
+        OrchestratorConfig::default(),
+        Arc::new(registry),
+        PolicyEngine::default(),
+    )
+    .expect("runtime builds");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = workspace.path().join(".agents/agents/reviewer.md");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &path,
+        "---\nmode: primary\nmodel: model-b\nsteps: 2\npermission:\n  edit: deny\n---\nReview.\n",
+    )
+    .expect("write agent");
+    let subagent = workspace.path().join(".agents/agents/helper.md");
+    std::fs::write(&subagent, "---\nmode: subagent\n---\nHelp.\n").expect("write helper");
+
+    runtime.reload_user_agents(workspace.path(), &[], None);
+    runtime.select_user_agent(Some("reviewer")).expect("reviewer selected");
+    assert_eq!(runtime.active_user_agent_name().as_deref(), Some("reviewer"));
+    assert_eq!(runtime.selected_model().as_deref(), Some("model-b"));
+    assert_eq!(runtime.config_for_turn().max_loop_iterations, Some(2));
+    let tool = ToolDefinition::new("write_file", "write").side_effect_class(SideEffectClass::Write);
+    assert!(
+        !runtime.policy().check(&tool, Default::default()).allow,
+        "the agent's deny overlay blocks writes before host approval"
+    );
+    runtime.set_policy(PolicyEngine::default());
+    assert!(
+        runtime.policy().policy().permission_rules.is_some(),
+        "a policy refresh keeps the agent overlay"
+    );
+
+    let error = runtime.select_user_agent(Some("helper")).expect_err("subagent rejected");
+    assert!(error.contains("subagent-only"), "unexpected error: {error}");
+    runtime.select_user_agent(None).expect("clears selection");
+    assert!(runtime.active_user_agent_name().is_none());
+    assert!(runtime.policy().policy().permission_rules.is_none());
+}
+
 #[tokio::test]
 async fn session_affinity_reaches_every_model_request() {
     let model = FakeModel::new(vec![ModelResponse::new().text("ok").completed()]);

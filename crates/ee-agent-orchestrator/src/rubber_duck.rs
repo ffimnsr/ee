@@ -818,6 +818,7 @@ fn critic_tools(definitions: &[ToolDefinition]) -> Vec<ToolDefinition> {
         allowed_side_effect_subclasses: Default::default(),
         owned_terminal_ids: Default::default(),
         scope: None,
+        permission_rules: None,
     })
     .with_allowed_tool_names(names);
     visible

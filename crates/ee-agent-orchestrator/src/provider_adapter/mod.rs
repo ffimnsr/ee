@@ -29,8 +29,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod agent_command;
 mod auto_compact;
 mod bootstrap;
+mod command_template;
 mod session_identity;
 
 use ee_agent_acp_server::{
@@ -40,10 +42,11 @@ use ee_agent_acp_server::{
 };
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
-    DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, Implementation, MessageId, REVERT_COMMAND_NAME,
-    RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId, SessionModeState,
-    SessionUpdate, StopReason, TextContent, branch_available_command, compact_available_command,
-    diff_available_command, discard_available_command, is_resume_command, parse_slash_command,
+    DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME,
+    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId,
+    SessionModeState, SessionUpdate, StopReason, TextContent, branch_available_command,
+    compact_available_command, diff_available_command, discard_available_command,
+    is_resume_command, parse_slash_command, primary_agent_available_command,
     resume_available_command, revert_available_command, rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
@@ -532,6 +535,9 @@ struct PersistedSession {
     /// Model registry id selected by a mid-session switch, when one was made.
     #[serde(default)]
     model_id: Option<String>,
+    /// Selected user-defined primary agent, when one was active.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 /// ACP provider adapter around [`OrchestratorRuntime`].

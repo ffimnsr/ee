@@ -70,6 +70,7 @@ pub(crate) use crate::tools::{
     ToolRegistry, ToolResult,
 };
 pub(crate) use crate::trust::TrustLevel;
+pub(crate) use crate::user_agents::UserAgentRegistry;
 pub(crate) use crate::workspace_scope::WorkspaceScope;
 
 /// Default max loop iterations for a subagent role.
@@ -132,6 +133,10 @@ pub struct SubagentRole {
     /// session enables worktree isolation. Defaults to the shared checkout.
     #[serde(default)]
     pub workspace_isolation: crate::workspace_isolation::WorkspaceIsolation,
+    /// Optional per-agent permission overlay. Only user-defined agent files
+    /// can set this; model-supplied custom roles cannot.
+    #[serde(default)]
+    pub permission_rules: Option<crate::permission_rules::PermissionRuleset>,
 }
 
 impl SubagentRole {
@@ -147,6 +152,7 @@ impl SubagentRole {
             model: None,
             requires_evidence: true,
             workspace_isolation: crate::workspace_isolation::WorkspaceIsolation::Shared,
+            permission_rules: None,
         }
     }
 
@@ -412,6 +418,9 @@ pub(crate) struct SubagentManager {
     /// Shared background registry: detached delegates report here so the
     /// parent loop can surface completion notices and refuse to settle early.
     background_jobs: crate::background_jobs::SharedBackgroundJobs,
+    /// User-defined agents discovered for this session. Shared with the
+    /// runtime so `/agent` and `delegate_task` see the same definitions.
+    user_agents: Arc<RwLock<UserAgentRegistry>>,
 }
 
 /// Synchronous fail-safe for a dropped or panicking child future. Normal
@@ -504,7 +513,10 @@ impl DelegateTool {
     }
 
     /// Parses and validates delegation arguments.
-    fn role_from_arguments(arguments: &serde_json::Value) -> Result<DelegateArguments, String> {
+    fn role_from_arguments(
+        arguments: &serde_json::Value,
+        user_agents: &UserAgentRegistry,
+    ) -> Result<DelegateArguments, String> {
         let map = arguments.as_object().ok_or("delegate arguments must be a JSON object")?;
         let prompt = map
             .get("prompt")
@@ -592,6 +604,28 @@ impl DelegateTool {
             });
         }
 
+        // User-defined agents join the role library after the built-ins, so a
+        // project file can never shadow a hardened built-in policy.
+        if let Some(agent) = user_agents.get(&name) {
+            if !agent.is_subagent() {
+                return Err(format!(
+                    "agent `{name}` is primary-only; select it in the root session instead of delegating"
+                ));
+            }
+            let mut role = agent.to_subagent_role();
+            role.allowed_scope_globs = allowed_scope_globs;
+            if model.is_some() {
+                role.model = model;
+            }
+            return Ok(DelegateArguments {
+                role,
+                prompt,
+                resume_child_id,
+                fork_context,
+                background,
+            });
+        }
+
         let instructions =
             map.get("instructions").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
         let mut allowed = Vec::new();
@@ -628,6 +662,7 @@ impl DelegateTool {
                 model,
                 requires_evidence: true,
                 workspace_isolation: crate::workspace_isolation::WorkspaceIsolation::Shared,
+                permission_rules: None,
             },
             prompt,
             resume_child_id,
@@ -651,6 +686,34 @@ impl ServerTool for DelegateTool {
                 ids.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
             )
         };
+        let user_roles = self
+            .manager
+            .user_agents
+            .read()
+            .expect("user agent registry poisoned")
+            .subagent()
+            .map(|agent| agent.name.clone())
+            .collect::<Vec<_>>();
+        let role_help = if user_roles.is_empty() {
+            format!(
+                "Built-in role ({}) or custom role identifier",
+                BuiltinSubagentRole::ALL
+                    .iter()
+                    .map(|role| role.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            format!(
+                "Built-in role ({}) or a project/user agent ({})",
+                BuiltinSubagentRole::ALL
+                    .iter()
+                    .map(|role| role.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                user_roles.join(", ")
+            )
+        };
         ToolDefinition {
             name: "delegate_task".into(),
             description: format!(
@@ -664,14 +727,7 @@ impl ServerTool for DelegateTool {
                         "type": "string",
                         "maxLength": MAX_CHILD_ROLE_CHARS,
                         "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
-                        "description": format!(
-                            "Built-in role ({}) or custom role identifier",
-                            BuiltinSubagentRole::ALL
-                                .iter()
-                                .map(|role| role.name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
+                        "description": role_help,
                     },
                     "instructions": { "type": "string" },
                     "allowed_tool_classes": { "type": "array" },
@@ -716,7 +772,10 @@ impl ServerTool for DelegateTool {
     ) -> ToolFuture<ToolResult> {
         let manager = self.manager.clone();
         Box::pin(async move {
-            let arguments = match Self::role_from_arguments(&arguments) {
+            let arguments = match Self::role_from_arguments(
+                &arguments,
+                &manager.user_agents.read().expect("user agent registry poisoned"),
+            ) {
                 Ok(arguments) => arguments,
                 Err(reason) => return ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
             };

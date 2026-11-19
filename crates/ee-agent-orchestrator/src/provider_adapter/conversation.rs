@@ -256,6 +256,7 @@ pub(super) fn restore_runtime_from_checkpoint(
 pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableCommand> {
     let mut commands = vec![
         compact_available_command(),
+        primary_agent_available_command(),
         rubber_duck_available_command(),
         branch_available_command(),
         revert_available_command(),
@@ -295,7 +296,11 @@ pub(super) fn next_session_number(
 }
 
 pub(super) fn session_snapshot(session: &SessionRuntime) -> PersistedSession {
-    PersistedSession { mode: session.mode.clone(), model_id: session.runtime.selected_model() }
+    PersistedSession {
+        mode: session.mode.clone(),
+        model_id: session.runtime.selected_model(),
+        agent: session.runtime.active_user_agent_name(),
+    }
 }
 
 pub(super) fn persist_session_snapshot(
@@ -366,6 +371,9 @@ pub(super) struct PromptBundleInputs<'a> {
     pub(super) background_jobs: Option<&'a str>,
     /// Configured remote instructions, already fetched for this session.
     pub(super) remote_instructions: &'a [crate::prompt::WorkspaceMessage],
+    /// Selected user-defined primary agent, when one is active. Its body is
+    /// injected through the trust plane that matches its scope.
+    pub(super) user_agent: Option<&'a crate::user_agents::UserAgentDefinition>,
 }
 
 /// Builds the stable prompt and runtime snapshot for one session mode.
@@ -418,13 +426,123 @@ pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBund
         inputs.workspace_roots,
         inputs.global_config_root,
     ));
+    // A selected primary agent's body is the session's role prompt. Personal
+    // definitions are trusted relative to workspace content; project files are
+    // attacker-controlled in shared workspaces and ride the untrusted plane.
+    if let Some(agent) = inputs.user_agent {
+        use crate::trust::TrustLevel;
+        let trust = match agent.scope {
+            crate::user_agents::UserAgentScope::User => TrustLevel::UserInstructionTrusted,
+            crate::user_agents::UserAgentScope::Workspace => {
+                TrustLevel::WorkspaceInstructionUntrusted
+            }
+        };
+        let message = ModelMessage::text(
+            ModelRole::User,
+            format!("User-defined agent `{}` instructions:\n\n{}", agent.name, agent.prompt),
+        )
+        .with_trust(trust)
+        .with_metadata([
+            ("ee_prompt".to_string(), "user_agent_prompt".to_string()),
+            ("ee_agent".to_string(), agent.name.clone()),
+        ]);
+        let message = WorkspaceMessage { path: agent.path.display().to_string(), message };
+        match agent.scope {
+            crate::user_agents::UserAgentScope::User => bundle.global.push(message),
+            crate::user_agents::UserAgentScope::Workspace => bundle.workspace.push(message),
+        }
+    }
     Ok(bundle)
+}
+
+/// Inputs for [`runtime_prompt_bundle`].
+#[derive(Clone, Copy)]
+pub(super) struct RuntimePromptInputs<'a> {
+    pub(super) cwd: &'a std::path::Path,
+    pub(super) workspace_roots: &'a [std::path::PathBuf],
+    pub(super) mode: &'a SessionModeId,
+    pub(super) mcp_servers: &'a [String],
+    pub(super) global_config_root: Option<&'a std::path::Path>,
+    pub(super) background_jobs: Option<&'a str>,
+    pub(super) remote_instructions: &'a [crate::prompt::WorkspaceMessage],
+}
+
+/// Builds the prompt planes for the runtime's current selection: the
+/// mid-session model route and the active user-defined primary agent.
+pub(super) fn runtime_prompt_bundle(
+    runtime: &OrchestratorRuntime,
+    models: &crate::model_registry::ModelRegistry,
+    inputs: RuntimePromptInputs<'_>,
+) -> Result<PromptBundle, ProviderError> {
+    let (provider, model) = runtime
+        .selected_model()
+        .and_then(|id| models.info(&id).map(|info| (info.identity.provider_id.clone(), id)))
+        .unwrap_or_else(|| default_model_labels(models));
+    let policy = runtime.policy();
+    let user_agent = runtime.active_user_agent();
+    prompt_bundle(PromptBundleInputs {
+        cwd: inputs.cwd,
+        workspace_roots: inputs.workspace_roots,
+        provider: &provider,
+        model: &model,
+        mode: inputs.mode,
+        policy: policy.policy(),
+        advertised_tools: &runtime.advertised_tool_names(),
+        mcp_servers: inputs.mcp_servers,
+        global_config_root: inputs.global_config_root,
+        background_jobs: inputs.background_jobs,
+        remote_instructions: inputs.remote_instructions,
+        user_agent: user_agent.as_ref(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::trust::TrustLevel;
+
+    #[test]
+    fn prompt_bundle_injects_workspace_agent_as_untrusted_instructions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let agent = crate::user_agents::UserAgentDefinition {
+            name: "reviewer".into(),
+            description: "Reviewer".into(),
+            model: None,
+            variant: None,
+            mode: crate::user_agents::UserAgentMode::Primary,
+            hidden: false,
+            steps: None,
+            prompt: "Review the change and cite files.".into(),
+            permissions: None,
+            scope: crate::user_agents::UserAgentScope::Workspace,
+            path: temp.path().join(".agents/agents/reviewer.md"),
+        };
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: Some(&agent),
+        })
+        .expect("bundle");
+
+        let injected = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_agent"))
+            .expect("agent prompt injected");
+        assert_eq!(injected.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(injected.message.text_content().contains("Review the change"));
+    }
 
     #[test]
     fn prompt_bundle_loads_workspace_instructions_as_untrusted() {
@@ -444,6 +562,7 @@ mod tests {
             global_config_root: None,
             background_jobs: None,
             remote_instructions: &[],
+            user_agent: None,
         })
         .expect("bundle");
 
@@ -475,6 +594,7 @@ mod tests {
             global_config_root: Some(&global),
             background_jobs: None,
             remote_instructions: &[],
+            user_agent: None,
         })
         .expect("bundle");
 
@@ -543,6 +663,7 @@ mod tests {
             global_config_root: None,
             background_jobs: None,
             remote_instructions: &[],
+            user_agent: None,
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");
@@ -569,6 +690,7 @@ mod tests {
             global_config_root: None,
             background_jobs: Some("- terminal term-1 [running]: cargo build"),
             remote_instructions: &[],
+            user_agent: None,
         })
         .expect("bundle");
         let runtime = bundle.runtime.expect("runtime context");

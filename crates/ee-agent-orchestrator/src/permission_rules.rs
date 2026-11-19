@@ -6,10 +6,12 @@
 //! configured deny always wins over any allow. Saved approvals are allow-only
 //! rules remembered after the user chooses an `allow_always` option.
 //!
-//! The ruleset is consulted by [`crate::PermissionBroker`] before it asks the
-//! client, so an `allow`/`deny` decision never performs an ACP
-//! `session/request_permission` round-trip. Only an `ask` decision reaches the
-//! existing approval pipeline, which is where the ee approval classifier runs.
+//! The host broker consults the ruleset before it asks the client, so an
+//! `allow`/`deny` decision never performs an ACP `session/request_permission`
+//! round-trip. Only an `ask` decision reaches the existing approval pipeline,
+//! which is where the ee approval classifier runs. The orchestrator consults
+//! the same evaluator for per-agent permission rules, so a tool denied by an
+//! agent definition is never dispatched or escalated to the host.
 
 use std::fmt;
 use std::fs;
@@ -55,7 +57,7 @@ impl PermissionEffect {
 }
 
 /// Coarse side-effect class derived from the ACP tool kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermissionSideEffect {
     /// Reading data.
     Read,
@@ -65,6 +67,19 @@ pub enum PermissionSideEffect {
     Execute,
     /// Unknown or non-side-effecting.
     Other,
+}
+
+impl PermissionSideEffect {
+    /// Derives the permission class from the orchestrator's tool class.
+    #[must_use]
+    pub fn from_side_effect_class(class: crate::tools::SideEffectClass) -> Self {
+        match class {
+            crate::tools::SideEffectClass::Read => Self::Read,
+            crate::tools::SideEffectClass::Write => Self::Write,
+            crate::tools::SideEffectClass::Execute => Self::Execute,
+            crate::tools::SideEffectClass::Delegate => Self::Other,
+        }
+    }
 }
 
 impl PermissionSideEffect {
@@ -320,6 +335,35 @@ impl PermissionTarget {
         let resource = resource_of(fields);
         Self { action, resource, side_effect }
     }
+
+    /// Normalizes one orchestrator tool invocation for per-agent rule checks.
+    #[must_use]
+    pub fn from_tool_arguments(
+        tool_name: &str,
+        side_effect: PermissionSideEffect,
+        arguments: &serde_json::Value,
+    ) -> Self {
+        Self {
+            action: tool_name.to_string(),
+            resource: resource_from_arguments(arguments),
+            side_effect,
+        }
+    }
+}
+
+/// Most specific resource a tool invocation names, or `*`.
+fn resource_from_arguments(arguments: &serde_json::Value) -> String {
+    let Some(input) = arguments.as_object() else {
+        return "*".to_string();
+    };
+    for key in ["command", "path", "file", "file_path", "directory", "url"] {
+        if let Some(value) = input.get(key).and_then(serde_json::Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return value.to_string();
+        }
+    }
+    "*".to_string()
 }
 
 fn resource_of(fields: &ee_agent_protocol::ToolCallUpdateFields) -> String {

@@ -68,6 +68,45 @@ async fn rubber_duck_uses_fixed_read_only_contract_and_returns_verified_report()
 }
 
 #[tokio::test]
+async fn user_defined_subagent_role_runs_with_its_file_prompt() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = workspace.path().join(".agents/agents/auditor.md");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &path,
+        "---\nmode: subagent\nsteps: 2\ndescription: Auditor\n---\nAudit the assigned scope.\n",
+    )
+    .expect("write agent");
+    let model = FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![delegate_intent(json!({
+            "prompt": "audit the change",
+            "role_name": "auditor",
+        }))]),
+        ModelResponse::new().text(handoff_output("audited")).completed(),
+        ModelResponse::new().text("parent done").completed(),
+    ]);
+    let (sink, client, _rx) = plumbing();
+    let runtime = delegating_runtime(OrchestratorConfig::default(), Arc::new(model.clone()));
+    runtime.reload_user_agents(workspace.path(), &[], None);
+
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    runtime.run_turn(prompt("hello"), sink, client, cancel_rx).await.expect("turn succeeds");
+
+    let calls = model.requests();
+    let child = calls.get(1).expect("child model call");
+    let system = child
+        .transcript
+        .iter()
+        .find(|message| {
+            message.role == ModelRole::System
+                && message.text_content().contains("user-defined agent")
+        })
+        .expect("child system prompt");
+    assert!(system.text_content().contains("Audit the assigned scope."));
+    assert_eq!(child.budget.iterations_max, Some(2), "agent steps bound the child");
+}
+
+#[tokio::test]
 async fn delegate_task_spawns_logical_subagent() {
     let model = FakeModel::new(vec![
         ModelResponse::new().tool_intents(vec![delegate_intent(json!({

@@ -138,7 +138,7 @@ impl OrchestratorRuntime {
         let policy = self.policy();
         let truncation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine = LoopEngine::new(
-            self.config.clone(),
+            self.config_for_turn(),
             model,
             self.tools.clone(),
             self.budget.clone(),
@@ -411,7 +411,7 @@ impl OrchestratorRuntime {
             }));
         }
         let engine = LoopEngine::new(
-            self.config.clone(),
+            self.config_for_turn(),
             model,
             self.tools.clone(),
             self.budget.clone(),

@@ -16,7 +16,7 @@ use super::conversation::restore_runtime_from_checkpoint;
 use super::conversation::session_compaction_history;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
-use super::conversation::{PromptBundleInputs, prompt_bundle};
+use super::conversation::{RuntimePromptInputs, runtime_prompt_bundle};
 use super::session_identity;
 use super::*;
 
@@ -138,6 +138,7 @@ impl AgentProvider for OrchestratorProvider {
                     .map_err(ProviderError::from)?,
             };
             let model_override = state.as_ref().and_then(|state| state.model_id.clone());
+            let agent_override = state.as_ref().and_then(|state| state.agent.clone());
             let (runtime, conversation, mode) = match state {
                 Some(state) => {
                     let mode = state.mode;
@@ -204,6 +205,18 @@ impl AgentProvider for OrchestratorProvider {
                         %session_id,
                         model_id,
                         "persisted session model is no longer registered; using the default model"
+                    );
+                }
+            }
+            if let Some(agent) = agent_override {
+                let config_root = crate::prompt::skills::user_config_root_from_env();
+                runtime.reload_user_agents(&ctx.cwd, &workspace_roots, config_root.as_deref());
+                if let Err(reason) = runtime.restore_user_agent(&agent) {
+                    tracing::warn!(
+                        %session_id,
+                        agent,
+                        %reason,
+                        "persisted user agent could not be restored; continuing without it"
                     );
                 }
             }
@@ -323,7 +336,7 @@ impl AgentProvider for OrchestratorProvider {
 
     fn prompt(
         &self,
-        ctx: PromptContext,
+        mut ctx: PromptContext,
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
@@ -396,35 +409,68 @@ impl AgentProvider for OrchestratorProvider {
                 .lock()
                 .expect("telemetry recorder poisoned")
                 .start_turn(&telemetry_turn, telemetry_attribution);
-            let policy = runtime.policy();
             let mcp_server_names: Vec<String> =
                 mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
             let background_jobs = runtime.background_jobs_snapshot();
             let global_config_root = crate::prompt::skills::user_config_root_from_env();
+            runtime.reload_user_agents(&workspace, &workspace_roots, global_config_root.as_deref());
+            runtime.reload_user_commands(
+                &workspace,
+                &workspace_roots,
+                global_config_root.as_deref(),
+            );
+            let prepared_prompt = crate::prompt_attachments::prepare_prompt(
+                &mut ctx,
+                &workspace,
+                &workspace_roots,
+                global_config_root.as_deref(),
+                &runtime.config().prompt_attachments,
+            )
+            .map_err(ProviderError::InvalidRequest)?;
+            let user_commands = runtime.user_commands_snapshot();
+            // Refresh completion when the template set changed; builtins are
+            // always included so the list replaces the previous session state.
+            let mut command_names = initial_commands(runtime.config().recovery.enabled)
+                .into_iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>();
+            command_names.extend(user_commands.iter().map(|command| command.name.clone()));
+            if runtime.commands_were_advertised() || !user_commands.is_empty() {
+                let mut commands = initial_commands(runtime.config().recovery.enabled);
+                commands.extend(user_commands.available_commands());
+                if runtime.mark_commands_advertised(&command_names) {
+                    sink.available_commands_replace(commands).map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to advertise session commands: {error}"
+                        ))
+                    })?;
+                }
+            }
             let remote = bootstrap::remote_instructions(
                 &instruction_sources,
                 instruction_fetcher.as_ref(),
                 &remote_cache,
             )
             .await;
-            let bundle = prompt_bundle(PromptBundleInputs {
-                cwd: &workspace,
-                workspace_roots: &workspace_roots,
-                provider: &provider_label,
-                model: &model_label,
-                mode: &mode,
-                policy: policy.policy(),
-                advertised_tools: &runtime.advertised_tool_names(),
-                mcp_servers: &mcp_server_names,
-                global_config_root: global_config_root.as_deref(),
-                background_jobs: background_jobs.as_deref(),
-                remote_instructions: &remote,
-            })?;
+            let mut bundle = runtime_prompt_bundle(
+                &runtime,
+                &models,
+                RuntimePromptInputs {
+                    cwd: &workspace,
+                    workspace_roots: &workspace_roots,
+                    mode: &mode,
+                    mcp_servers: &mcp_server_names,
+                    global_config_root: global_config_root.as_deref(),
+                    background_jobs: background_jobs.as_deref(),
+                    remote_instructions: &remote,
+                },
+            )?;
+            bundle.workspace.extend(prepared_prompt.instructions.iter().cloned());
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
             // expose tools; the runtime still routes the turn to its
             // dedicated compaction path (no model–tool loop).
-            let prompt_text = ctx
+            let mut prompt_text = ctx
                 .prompt
                 .iter()
                 .filter_map(|block| match block {
@@ -485,6 +531,29 @@ impl AgentProvider for OrchestratorProvider {
                     &sessions,
                 )?;
                 return Ok(result);
+            }
+            // `/primary-agent` selects a user-defined primary agent. It runs
+            // before MCP discovery and tool registration because the selection
+            // changes the prompt and model for the next turn, not this one.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == PRIMARY_AGENT_COMMAND_NAME
+            {
+                return super::agent_command::handle_agent_command(
+                    super::agent_command::AgentCommand {
+                        runtime: &runtime,
+                        sessions: &sessions,
+                        session_store: &session_store,
+                        implementation_name: &implementation_name,
+                        models: &models,
+                        sink: &sink,
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                );
             }
             // Manual critique is handled before MCP discovery and mutable tool
             // registration. Existing built-ins remain registered but critic
@@ -627,6 +696,61 @@ impl AgentProvider for OrchestratorProvider {
                     },
                 );
                 return Ok(PromptResult::new(StopReason::EndTurn));
+            }
+            // User-defined templates run after built-in commands so a template
+            // can never shadow `/compact`, `/branch`, or another reserved name.
+            if let Some(parsed) = parse_slash_command(&prompt_text)
+                && let Some(user_command) = user_commands.get(&parsed.name)
+            {
+                let outcome = super::command_template::handle_command_template(
+                    super::command_template::CommandTemplate {
+                        runtime: &runtime,
+                        sessions: &sessions,
+                        models: &models,
+                        sink: &sink,
+                        client: &client,
+                        cancel: &cancel,
+                        ctx: &mut ctx,
+                        command: user_command,
+                        instructions: parsed.instructions.as_deref(),
+                        transcript: &model_transcript,
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                )
+                .await?;
+                match outcome {
+                    super::command_template::CommandTemplateOutcome::Prompt(rendered) => {
+                        prompt_text = rendered;
+                        // Selection may have changed the model route or active
+                        // agent; rebuild the prompt planes for this same turn.
+                        bundle = runtime_prompt_bundle(
+                            &runtime,
+                            &models,
+                            RuntimePromptInputs {
+                                cwd: &workspace,
+                                workspace_roots: &workspace_roots,
+                                mode: &mode,
+                                mcp_servers: &mcp_server_names,
+                                global_config_root: global_config_root.as_deref(),
+                                background_jobs: background_jobs.as_deref(),
+                                remote_instructions: &remote,
+                            },
+                        )?;
+                        bundle.workspace.extend(prepared_prompt.instructions.iter().cloned());
+                    }
+                    super::command_template::CommandTemplateOutcome::Completed(result) => {
+                        persist_session_snapshot(
+                            &session_store,
+                            &implementation_name,
+                            &session_id,
+                            &sessions,
+                        )?;
+                        return Ok(result);
+                    }
+                }
             }
             let has_pending = store.has_pending(&session_id.to_string());
             // `/resume` continues a paused turn without the original prompt
@@ -788,19 +912,19 @@ impl AgentProvider for OrchestratorProvider {
             // Rebuild the stable prompt now that prompt-scoped MCP tools are
             // registered: guidance must name only tools the model can call.
             let background_jobs = runtime.background_jobs_snapshot();
-            let mut bundle = prompt_bundle(PromptBundleInputs {
-                cwd: &workspace,
-                workspace_roots: &workspace_roots,
-                provider: &provider_label,
-                model: &model_label,
-                mode: &mode,
-                policy: policy.policy(),
-                advertised_tools: &runtime.advertised_tool_names(),
-                mcp_servers: &mcp_server_names,
-                global_config_root: global_config_root.as_deref(),
-                background_jobs: background_jobs.as_deref(),
-                remote_instructions: &remote,
-            })?;
+            let mut bundle = runtime_prompt_bundle(
+                &runtime,
+                &models,
+                RuntimePromptInputs {
+                    cwd: &workspace,
+                    workspace_roots: &workspace_roots,
+                    mode: &mode,
+                    mcp_servers: &mcp_server_names,
+                    global_config_root: global_config_root.as_deref(),
+                    background_jobs: background_jobs.as_deref(),
+                    remote_instructions: &remote,
+                },
+            )?;
             bundle.mcp = crate::prompt::mcp::instruction_messages(&mcp_instructions);
             let cleanup =
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };

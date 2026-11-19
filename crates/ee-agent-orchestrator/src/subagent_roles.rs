@@ -176,6 +176,7 @@ impl BuiltinSubagentRole {
             } else {
                 crate::workspace_isolation::WorkspaceIsolation::Shared
             },
+            permission_rules: None,
         }
     }
 

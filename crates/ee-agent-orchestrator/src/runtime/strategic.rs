@@ -482,7 +482,7 @@ impl OrchestratorRuntime {
                 "repair budget deadline elapsed".into(),
             ));
         }
-        let mut config = self.config.clone();
+        let mut config = self.config_for_turn();
         config.turn_timeout = remaining;
         let handle = CheckpointHandle::new(self.checkpoints.clone(), session_id, provider);
         let model = self.model_for_turn()?;

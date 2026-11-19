@@ -25,12 +25,15 @@ ee-mcp.workspace = true
 ee-agent-protocol.workspace = true
 ee-plugin-api.workspace = true
 ee-plugin-runtime.workspace = true
+base64.workspace = true
 futures.workspace = true
 globset.workspace = true
 ignore.workspace = true
+image.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 sha2.workspace = true
 similar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

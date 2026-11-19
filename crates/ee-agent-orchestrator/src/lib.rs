@@ -204,6 +204,7 @@ pub mod issue_integration;
 pub mod loop_control;
 pub mod loop_engine;
 pub mod loop_hooks;
+mod markdown_config;
 pub mod mcp;
 pub mod memory;
 pub mod memory_compaction;
@@ -217,6 +218,7 @@ pub mod model_router;
 pub mod observability;
 pub mod opaque_state;
 pub mod parallel_tools;
+pub mod permission_rules;
 pub mod plan_compiler;
 pub mod plugin_runtime;
 pub mod policy;
@@ -228,6 +230,7 @@ pub use prompt::{
     FetchFuture, McpInstructionMessage, PromptBundle, RemoteInstructionBody,
     RemoteInstructionFetcher, RuntimeSnapshot, WorkspaceMessage,
 };
+pub mod prompt_attachments;
 pub mod prompt_injection;
 pub mod provider_adapter;
 pub mod rate_limit;
@@ -279,6 +282,8 @@ mod transcript_log;
 pub mod transcript_normalize;
 pub mod trust;
 mod usage;
+pub mod user_agents;
+pub mod user_commands;
 pub mod validation;
 pub mod workspace_isolation;
 pub mod workspace_scope;
