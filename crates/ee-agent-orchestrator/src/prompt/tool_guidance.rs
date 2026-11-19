@@ -154,6 +154,12 @@ pub(crate) const TOOL_GUIDANCE: &[ToolGuidance] = &[
         text: "Use `ee_create_directory`, `ee_copy_path`, `ee_move_path`, and `ee_delete_path` for filesystem structure changes. Each call needs absolute paths and host approval, and deletion is recursive. Confirm the exact target before any destructive operation and report only the returned result.",
     },
     ToolGuidance {
+        slot: &TOOL_WRITE,
+        registration: "tool:memory-write",
+        requires: &["save_memory", "delete_memory"],
+        text: "Use `save_memory` to create or replace one workspace memory entry under `.agents/memories`, and `delete_memory` to remove one. Both ask the user for confirmation first. Keep names as stable identifiers, include tags and importance when useful, and never store secrets.",
+    },
+    ToolGuidance {
         slot: &TOOL_GLOB,
         registration: "tool:list-directory",
         requires: &[

@@ -262,6 +262,26 @@ mod tests {
     ]
   },
   {
+    "name": "delete_memory",
+    "description": "Deletes one workspace memory entry under .agents/memories after user confirmation",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "sideEffect": "write",
+    "sideEffectSubclass": "delete",
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": []
+  },
+  {
     "name": "kill_terminal",
     "description": "Kills a terminal without releasing it",
     "inputSchema": {
@@ -381,6 +401,50 @@ mod tests {
       "terminal_handle"
     ],
     "produces": []
+  },
+  {
+    "name": "save_memory",
+    "description": "Creates or updates one workspace memory entry under .agents/memories after user confirmation",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "importance": {
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "critical"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "content"
+      ],
+      "type": "object"
+    },
+    "sideEffect": "write",
+    "sideEffectSubclass": "overwrite",
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": [
+      "file_text"
+    ]
   },
   {
     "name": "terminal_output",

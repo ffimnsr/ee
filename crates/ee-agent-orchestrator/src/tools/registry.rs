@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use ee_agent_acp_server::{ClientBridge, ProviderError};
 use ee_agent_protocol::{
-    CreateElicitationRequest, CreateTerminalRequest, ElicitationFormMode, ElicitationMode,
-    ElicitationSchema, ElicitationScope, ElicitationSessionScope, KillTerminalRequest,
-    ReadTextFileRequest, ReleaseTerminalRequest, SessionId, TerminalId, TerminalOutputRequest,
-    WaitForTerminalExitRequest, WriteTextFileRequest,
+    CreateElicitationRequest, CreateTerminalRequest, ElicitationAction, ElicitationFormMode,
+    ElicitationMode, ElicitationSchema, ElicitationScope, ElicitationSessionScope,
+    KillTerminalRequest, ReadTextFileRequest, ReleaseTerminalRequest, SessionId, TerminalId,
+    TerminalOutputRequest, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use tokio::sync::watch;
 
@@ -697,6 +697,212 @@ impl ServerTool for LoadMemoryTool {
     }
 }
 
+/// Creates or replaces one workspace memory entry after user confirmation.
+#[derive(Clone)]
+struct SaveMemoryTool {
+    session_id: SessionId,
+}
+
+impl ServerTool for SaveMemoryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "save_memory",
+            "Creates or updates one workspace memory entry under .agents/memories after user confirmation",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "content": { "type": "string" },
+                "description": { "type": "string" },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                },
+                "importance": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high", "critical"],
+                },
+            },
+            "required": ["name", "content"],
+        }))
+        .side_effect_class(SideEffectClass::Write)
+        .side_effect_subclass(SideEffectSubclass::Overwrite)
+        .host_approval()
+        .dependency(ToolDependency::new().produces(vec![ToolDataClass::FileText]))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            let name = match string_arg(&arguments, "name") {
+                Ok(name) => name,
+                Err(result) => return result,
+            };
+            let content = match string_arg(&arguments, "content") {
+                Ok(content) => content,
+                Err(result) => return result,
+            };
+            let description = optional_string_arg(&arguments, "description");
+            let tags_present = arguments.get("tags").is_some();
+            let tags = match string_array_arg(&arguments, "tags") {
+                Ok(tags) => tags,
+                Err(result) => return result,
+            };
+            let importance = match optional_string_arg(&arguments, "importance") {
+                Some(value) => match value.parse::<crate::user_memories::MemoryImportance>() {
+                    Ok(importance) => Some(importance),
+                    Err(reason) => return invalid_args(reason),
+                },
+                None => None,
+            };
+            let roots = memory_workspace_roots(&context);
+            let cwd = roots.first().cloned().unwrap_or_default();
+            let request = crate::user_memory_write::MemorySaveRequest {
+                name: &name,
+                description: description.as_deref(),
+                tags: if tags_present { Some(tags.as_slice()) } else { None },
+                importance,
+                content: &content,
+            };
+            if let Err(result) = confirm_memory_mutation(
+                &client,
+                &session_id,
+                format!("Save memory entry `{name}` under .agents/memories?"),
+            )
+            .await
+            {
+                return result;
+            }
+            if *cancel.borrow() {
+                return ToolResult::failure(ToolErrorKind::Cancelled, "memory save cancelled");
+            }
+            match crate::user_memory_write::save(&cwd, &roots, request) {
+                Ok(outcome) => ToolResult::success_structured(
+                    if outcome.created {
+                        format!("created memory entry {name}")
+                    } else {
+                        format!("updated memory entry {name}")
+                    },
+                    serde_json::json!({
+                        "name": outcome.entry.name,
+                        "description": outcome.entry.description,
+                        "tags": outcome.entry.tags,
+                        "importance": outcome.entry.importance.as_str(),
+                        "scope": outcome.entry.scope.as_str(),
+                        "path": outcome.entry.path.display().to_string(),
+                        "created": outcome.created,
+                    }),
+                ),
+                Err(reason) => ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
+            }
+        })
+    }
+}
+
+/// Deletes one workspace memory entry after user confirmation.
+#[derive(Clone)]
+struct DeleteMemoryTool {
+    session_id: SessionId,
+}
+
+impl ServerTool for DeleteMemoryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "delete_memory",
+            "Deletes one workspace memory entry under .agents/memories after user confirmation",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+            },
+            "required": ["name"],
+        }))
+        .side_effect_class(SideEffectClass::Write)
+        .side_effect_subclass(SideEffectSubclass::Delete)
+        .host_approval()
+        .dependency(ToolDependency::new())
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            let name = match string_arg(&arguments, "name") {
+                Ok(name) => name,
+                Err(result) => return result,
+            };
+            let roots = memory_workspace_roots(&context);
+            let cwd = roots.first().cloned().unwrap_or_default();
+            if let Err(result) = confirm_memory_mutation(
+                &client,
+                &session_id,
+                format!("Delete memory entry `{name}` under .agents/memories?"),
+            )
+            .await
+            {
+                return result;
+            }
+            if *cancel.borrow() {
+                return ToolResult::failure(ToolErrorKind::Cancelled, "memory deletion cancelled");
+            }
+            match crate::user_memory_write::delete(&cwd, &roots, &name) {
+                Ok(entry) => ToolResult::success_structured(
+                    format!("deleted memory entry {name}"),
+                    serde_json::json!({
+                        "name": entry.name,
+                        "deleted": true,
+                        "path": entry.path.display().to_string(),
+                    }),
+                ),
+                Err(reason) => ToolResult::failure(ToolErrorKind::InvalidArguments, reason),
+            }
+        })
+    }
+}
+
+fn memory_workspace_roots(context: &ToolCallContext) -> Vec<std::path::PathBuf> {
+    context
+        .scope
+        .as_ref()
+        .map(|scope| scope.allowed_roots.clone())
+        .filter(|roots| !roots.is_empty())
+        .or_else(|| std::env::current_dir().ok().map(|cwd| vec![cwd]))
+        .unwrap_or_default()
+}
+
+async fn confirm_memory_mutation(
+    client: &ClientBridge,
+    session_id: &SessionId,
+    message: String,
+) -> Result<(), ToolResult> {
+    let scope = ElicitationScope::Session(ElicitationSessionScope::new(session_id.clone()));
+    let mode = ElicitationMode::Form(ElicitationFormMode::new(scope, ElicitationSchema::new()));
+    match client.create_elicitation(CreateElicitationRequest::new(mode, message)).await {
+        Ok(response) => match response.action {
+            ElicitationAction::Accept(_) => Ok(()),
+            ElicitationAction::Decline => Err(ToolResult::failure(
+                ToolErrorKind::PermissionDenied,
+                "memory mutation declined",
+            )),
+            _ => Err(ToolResult::failure(ToolErrorKind::Cancelled, "memory mutation cancelled")),
+        },
+        Err(error) => Err(bridge_error(error)),
+    }
+}
+
 /// Model-facing session todo list.
 ///
 /// Mutates only ephemeral session state, never the workspace, so it stays
@@ -836,6 +1042,8 @@ pub(crate) fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> 
         Arc::new(CargoCheckTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         Arc::new(LoadSkillTool) as Arc<dyn ServerTool>,
         Arc::new(LoadMemoryTool) as Arc<dyn ServerTool>,
+        Arc::new(SaveMemoryTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
+        Arc::new(DeleteMemoryTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         make(
             BridgeCall::ReadTextFile,
             "read_file",

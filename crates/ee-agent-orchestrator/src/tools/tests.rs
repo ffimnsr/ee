@@ -227,17 +227,19 @@ fn builtin_tools_register_under_session() {
             "ask_user",
             "cargo_check",
             "create_terminal",
+            "delete_memory",
             "kill_terminal",
             "load_memory",
             "load_skill",
             "read_file",
             "release_terminal",
+            "save_memory",
             "terminal_output",
             "wait_for_terminal_exit",
             "write_file"
         ]
     );
-    assert_eq!(registry.len(), 11);
+    assert_eq!(registry.len(), 13);
 }
 
 #[tokio::test]
@@ -397,6 +399,156 @@ async fn load_memory_loads_by_name_and_searches_by_tag() {
     assert!(searched.success, "{}", searched.text_output);
     assert!(searched.text_output.contains("Use rustfmt."));
     assert!(searched.text_output.contains("testing"), "tag match is included");
+}
+
+#[tokio::test]
+async fn save_memory_requires_confirmation_and_writes_the_entry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut registry = ToolRegistry::new();
+    registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+    let tool = registry.get("save_memory").expect("save_memory registered");
+    let (sink, bridge, mut rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+    let task_bridge = bridge.clone();
+    let task = tokio::spawn(async move {
+        tool.execute(
+            json!({
+                "name": "testing",
+                "content": "Run cargo test --quiet.",
+                "description": "Test commands",
+                "tags": ["rust"],
+                "importance": "high",
+            }),
+            task_bridge,
+            watch::channel(false).1,
+            context,
+        )
+        .await
+    });
+
+    let RawJsonRpcMessage::Request(request) = next_client_request(&mut rx).await else {
+        panic!("expected request frame");
+    };
+    assert_eq!(request.method.as_ref(), "elicitation/create");
+    bridge.handle_response(Response::Result {
+        id: RequestId::Number(1),
+        result: json!({ "action": "accept" }),
+    });
+
+    let result = task.await.expect("task joins");
+    assert!(result.success, "{}", result.text_output);
+    let path = temp.path().join(".agents/memories/testing.md");
+    let text = std::fs::read_to_string(&path).expect("memory written");
+    assert!(text.contains("importance: high"));
+    assert!(text.contains("Run cargo test --quiet."));
+    assert_eq!(result.structured_output.expect("structured")["created"], true);
+}
+
+#[tokio::test]
+async fn delete_memory_requires_confirmation_and_removes_the_entry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let roots = vec![temp.path().to_path_buf()];
+    crate::user_memory_write::save(
+        temp.path(),
+        &roots,
+        crate::user_memory_write::MemorySaveRequest {
+            name: "testing",
+            description: Some("Test commands"),
+            tags: None,
+            importance: None,
+            content: "Run tests.",
+        },
+    )
+    .expect("seed memory");
+    let mut registry = ToolRegistry::new();
+    registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+    let tool = registry.get("delete_memory").expect("delete_memory registered");
+    let (sink, bridge, mut rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: Some(WorkspaceScope::new(roots, Vec::new())),
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+    let task_bridge = bridge.clone();
+    let task = tokio::spawn(async move {
+        tool.execute(json!({ "name": "testing" }), task_bridge, watch::channel(false).1, context)
+            .await
+    });
+
+    let RawJsonRpcMessage::Request(request) = next_client_request(&mut rx).await else {
+        panic!("expected request frame");
+    };
+    assert_eq!(request.method.as_ref(), "elicitation/create");
+    bridge.handle_response(Response::Result {
+        id: RequestId::Number(1),
+        result: json!({ "action": "accept" }),
+    });
+
+    let result = task.await.expect("task joins");
+    assert!(result.success, "{}", result.text_output);
+    assert!(!temp.path().join(".agents/memories/testing.md").exists());
+    assert_eq!(result.structured_output.expect("structured")["deleted"], true);
+}
+
+#[tokio::test]
+async fn delete_memory_declined_keeps_the_entry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let roots = vec![temp.path().to_path_buf()];
+    crate::user_memory_write::save(
+        temp.path(),
+        &roots,
+        crate::user_memory_write::MemorySaveRequest {
+            name: "testing",
+            description: Some("Test commands"),
+            tags: None,
+            importance: None,
+            content: "Run tests.",
+        },
+    )
+    .expect("seed memory");
+    let mut registry = ToolRegistry::new();
+    registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+    let tool = registry.get("delete_memory").expect("delete_memory registered");
+    let (sink, bridge, mut rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: Some(WorkspaceScope::new(roots, Vec::new())),
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+    let task_bridge = bridge.clone();
+    let task = tokio::spawn(async move {
+        tool.execute(json!({ "name": "testing" }), task_bridge, watch::channel(false).1, context)
+            .await
+    });
+
+    let RawJsonRpcMessage::Request(_request) = next_client_request(&mut rx).await else {
+        panic!("expected request frame");
+    };
+    bridge.handle_response(Response::Result {
+        id: RequestId::Number(1),
+        result: json!({ "action": "decline" }),
+    });
+
+    let result = task.await.expect("task joins");
+    assert!(!result.success);
+    assert_eq!(result.error_kind, Some(ToolErrorKind::PermissionDenied));
+    assert!(temp.path().join(".agents/memories/testing.md").exists());
 }
 
 #[test]
