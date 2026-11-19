@@ -79,14 +79,13 @@ pub(super) fn handle_branch_command(ctx: BranchCommand<'_>) -> Result<PromptResu
             ))
         })?;
     let branch_policy = ctx.plugins.gate_policy(mode_policy(ctx.base_policy, ctx.mode)?);
-    let branch_runtime = Arc::new(
-        OrchestratorRuntime::from_checkpoint_with_model_registry(
-            &checkpoint,
-            ctx.models.clone(),
-            branch_policy,
-        )?
-        .with_plugin_observer(ctx.plugins.bridge().observer(outcome.session_id.clone())),
-    );
+    let branch_runtime = OrchestratorRuntime::from_checkpoint_with_model_registry(
+        &checkpoint,
+        ctx.models.clone(),
+        branch_policy,
+    )?
+    .with_plugin_observer(ctx.plugins.bridge().observer(outcome.session_id.clone()))
+    .into_shared();
     if let Some(model_id) = ctx.selected_model.clone() {
         // The fork keeps the source session's route, not the process default.
         branch_runtime.set_selected_model(Some(model_id));

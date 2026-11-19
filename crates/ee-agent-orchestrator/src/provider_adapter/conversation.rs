@@ -247,7 +247,7 @@ pub(super) fn restore_runtime_from_checkpoint(
         Some(observer) => runtime.with_plugin_observer(observer),
         None => runtime,
     };
-    Ok(Arc::new(runtime))
+    Ok(runtime.into_shared())
 }
 
 /// Initial slash commands for orchestrated sessions. `/rubber-duck` is

@@ -26,6 +26,7 @@ pub use definition::{
     ToolExecutionLogEntry, ToolFormat, ToolFuture, ToolIntent, ToolResult,
 };
 pub use executor::ToolExecutor;
+pub(crate) use executor::emit_tool_outcome;
 pub use registry::{ServerTool, ToolRegistry};
 pub(crate) use registry::{canonical_tool_definitions, read_only_definitions};
 pub(crate) use session_tools::{SessionToolContext, session_tools};

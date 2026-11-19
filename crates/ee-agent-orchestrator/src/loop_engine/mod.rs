@@ -26,7 +26,9 @@ use std::{
 };
 
 use ee_agent_acp_server::{ClientBridge, PromptContext, PromptResult, SteerInbox, UpdateSink};
-use ee_agent_protocol::{SessionId, SessionInfoUpdate, SessionUpdate, StopReason, UsageUpdate};
+use ee_agent_protocol::{
+    SessionId, SessionInfoUpdate, SessionUpdate, StopReason, ToolKind, UsageUpdate,
+};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
@@ -61,8 +63,13 @@ use crate::tools::{
 };
 
 mod after_turn;
+mod compact_tool;
 mod turn;
 mod util;
+
+pub(crate) use compact_tool::{
+    COMPACT_TOOL_NAME, CompactToolHook, CompactToolOutcome, compact_tool_definition,
+};
 
 #[cfg(test)]
 mod tests;
@@ -166,6 +173,10 @@ pub(crate) struct LoopOptions {
     /// is replayed as the first transcript item so the provider resumes from
     /// the conversation it already compacted.
     pub compaction_checkpoint: Option<crate::compaction_checkpoint::CompactionCheckpoint>,
+    /// Model-callable compaction hook. Advertised as the `compact` tool only
+    /// when the runtime can execute it; root turns set this from the runtime's
+    /// shared handle.
+    pub compact_tool: Option<CompactToolHook>,
 }
 
 pub use crate::loop_hooks::{UntilFn, UntilPredicate};
@@ -202,6 +213,7 @@ impl Default for LoopOptions {
             session_context: None,
             metrics: None,
             compaction_checkpoint: None,
+            compact_tool: None,
         }
     }
 }

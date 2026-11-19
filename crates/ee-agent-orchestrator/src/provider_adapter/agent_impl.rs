@@ -55,14 +55,13 @@ impl AgentProvider for OrchestratorProvider {
             let (provider_label, model_label) = default_model_labels(&models);
             let mode = default_session_mode();
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let runtime = Arc::new(
-                OrchestratorRuntime::with_shared_model_registry(
-                    config,
-                    models,
-                    plugins.gate_policy(mode_policy(&policy, &mode)?),
-                )?
-                .with_plugin_observer(plugins.bridge().observer(session_id.to_string())),
-            );
+            let runtime = OrchestratorRuntime::with_shared_model_registry(
+                config,
+                models,
+                plugins.gate_policy(mode_policy(&policy, &mode)?),
+            )?
+            .with_plugin_observer(plugins.bridge().observer(session_id.to_string()))
+            .into_shared();
             session_identity::register(
                 &runtime,
                 &session_id,
@@ -143,16 +142,13 @@ impl AgentProvider for OrchestratorProvider {
                 Some(state) => {
                     let mode = state.mode;
                     (
-                        Arc::new(
-                            OrchestratorRuntime::with_shared_model_registry(
-                                config,
-                                models.clone(),
-                                plugins.gate_policy(mode_policy(&policy, &mode)?),
-                            )?
-                            .with_plugin_observer(
-                                plugins.bridge().observer(session_id.to_string()),
-                            ),
-                        ),
+                        OrchestratorRuntime::with_shared_model_registry(
+                            config,
+                            models.clone(),
+                            plugins.gate_policy(mode_policy(&policy, &mode)?),
+                        )?
+                        .with_plugin_observer(plugins.bridge().observer(session_id.to_string()))
+                        .into_shared(),
                         Vec::new(),
                         mode,
                     )

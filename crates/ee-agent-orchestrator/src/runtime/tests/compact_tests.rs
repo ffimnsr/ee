@@ -56,6 +56,76 @@ async fn compact_turn_preserves_protected_memory_and_invokes_no_tools() {
 }
 
 #[tokio::test]
+async fn compact_tool_compacts_mid_turn_and_returns_to_the_loop() {
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(
+            "tc-compact",
+            "compact",
+            serde_json::json!({ "instructions": "keep API v2" }),
+        )]),
+        ModelResponse::new().text("NEW SUMMARY").completed(),
+        ModelResponse::new().text("continued").completed(),
+    ]));
+    let runtime = compact_runtime(OrchestratorConfig::default(), model.clone()).into_shared();
+    let (sink, client, _rx) = plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let events = EventRecorder::new();
+
+    let result = runtime
+        .run_turn_recording(prompt("please compact"), sink, client, cancel_rx, events.clone())
+        .await
+        .expect("compact tool turn succeeds");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+    let calls = model.requests();
+    assert_eq!(calls.len(), 3, "step, compaction call, follow-up step");
+    assert!(
+        calls[0].tools.iter().any(|tool| tool.name == "compact"),
+        "compact tool advertised to the root turn"
+    );
+    assert!(calls[1].tools.is_empty(), "compaction model call exposes no tools");
+    let crate::model::ModelContent::Text(instructions) = &calls[1].transcript[1].content[0] else {
+        panic!("expected compaction instructions");
+    };
+    assert_eq!(instructions, "keep API v2");
+
+    assert_eq!(
+        runtime.memory().query("summary:session").expect("summary stored").value,
+        "NEW SUMMARY"
+    );
+    assert!(
+        events.events().iter().any(|event| match event {
+            OrchestratorEvent::ToolFinished { tool_name, success, .. } => {
+                *success && tool_name == "compact"
+            }
+            _ => false,
+        }),
+        "compact tool lifecycle recorded: {:?}",
+        events.events()
+    );
+}
+
+#[tokio::test]
+async fn compact_tool_is_not_advertised_without_a_shared_runtime() {
+    let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("answer").completed()]));
+    let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+    let (sink, client, _rx) = plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+    runtime
+        .run_turn(prompt("answer only"), sink, client, cancel_rx)
+        .await
+        .expect("ordinary turn succeeds");
+
+    let calls = model.requests();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].tools.iter().any(|tool| tool.name == "compact"),
+        "no hook means no compact advertisement"
+    );
+}
+
+#[tokio::test]
 async fn compact_turn_context_is_byte_bounded() {
     let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("SUMMARY").completed()]));
     let mut memory = MemoryStore::new(4_096);

@@ -82,6 +82,7 @@ impl OrchestratorRuntime {
                     Some(prompt),
                     metadata.history,
                     self.events.clone(),
+                    false,
                 )
                 .await?;
             return Ok(TurnOutcome::Completed(result));
@@ -221,6 +222,7 @@ impl OrchestratorRuntime {
                     Some(prompt),
                     metadata.history,
                     self.events.clone(),
+                    false,
                 )
                 .await;
         }

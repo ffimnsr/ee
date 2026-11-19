@@ -39,7 +39,9 @@ pub(crate) use crate::final_response::{
     FinalResponse, FinalResponseBuilder, ValidationOutcome, ValidationRecorder,
     changed_files_from_log,
 };
-pub(crate) use crate::loop_engine::{LoopEngine, LoopOptions, UntilPredicate};
+pub(crate) use crate::loop_engine::{
+    CompactToolHook, CompactToolOutcome, LoopEngine, LoopOptions, UntilPredicate,
+};
 pub(crate) use crate::memory::{MemoryItem, MemoryStore};
 pub(crate) use crate::metrics::OrchestratorMetrics;
 pub(crate) use crate::model::{
@@ -272,6 +274,10 @@ pub struct OrchestratorRuntime {
     selected_model: Mutex<Option<String>>,
     /// Content-addressed workspace snapshots for per-turn diff and file revert.
     snapshots: crate::workspace_snapshot::WorkspaceSnapshotStore,
+    /// Weak handle to the shared runtime, set once by [`Self::into_shared`].
+    /// Model-callable compaction needs an owned handle inside the loop hook;
+    /// holding only a weak reference keeps the runtime free of a self-cycle.
+    self_ref: std::sync::OnceLock<std::sync::Weak<OrchestratorRuntime>>,
 }
 
 mod branch;

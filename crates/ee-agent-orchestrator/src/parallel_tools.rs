@@ -27,8 +27,9 @@ use crate::tools::{
 /// a concurrent wave. `todowrite` replaces the session plan wholesale, so two
 /// calls in one batch would race and the last writer would be nondeterministic;
 /// `session_rename`/`session_move` mutate the title and working directory the
-/// loop emits after each call.
-const SERIAL_READ_TOOL_NAMES: &[&str] = &["todowrite", "session_rename", "session_move"];
+/// loop emits after each call; `compact` invokes the runtime directly.
+const SERIAL_READ_TOOL_NAMES: &[&str] =
+    &["todowrite", "session_rename", "session_move", crate::loop_engine::COMPACT_TOOL_NAME];
 
 /// Whether `name` is a read-class tool that must run serially.
 #[must_use]

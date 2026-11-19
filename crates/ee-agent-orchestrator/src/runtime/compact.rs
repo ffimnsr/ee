@@ -216,9 +216,12 @@ impl OrchestratorRuntime {
             prompt,
             recent_messages,
             self.events.clone(),
+            false,
         )
         .await
     }
+    /// Runs compaction from inside a model tool call. `nested` keeps the
+    /// durable session log on the enclosing turn instead of starting a new one.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_compact_turn_recording(
         &self,
@@ -229,6 +232,7 @@ impl OrchestratorRuntime {
         prompt: Option<PromptBundle>,
         recent_messages: Vec<ModelMessage>,
         events: EventRecorder,
+        nested: bool,
     ) -> Result<PromptResult, OrchestratorError> {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
@@ -239,7 +243,11 @@ impl OrchestratorRuntime {
         let recent_messages = crate::transcript_normalize::normalize_transcript(&recent_messages);
         // Compaction changes the session summary; the next turn must resend a
         // full runtime snapshot rather than a delta against pre-compaction state.
-        self.clear_runtime_plane(&ctx.session_id.to_string());
+        // Nested compaction runs before the enclosing turn commits its runtime
+        // plane, so there is no retained delta to clear.
+        if !nested {
+            self.clear_runtime_plane(&ctx.session_id.to_string());
+        }
         // Stage every memory mutation. Failed compaction leaves live memory
         // byte-for-byte unchanged.
         let original_memory = self.memory.lock().expect("memory store poisoned").clone();
@@ -400,15 +408,20 @@ impl OrchestratorRuntime {
         // hold the effective request.
         if let Some(store) = &self.session_logs {
             let log = store.log_for(&session_id);
-            log.begin_turn();
-            log.set_iteration(1);
-            log.record_request(
-                &transcript,
-                &[],
-                crate::session_log::projection_hash(&transcript),
-                &budget_snapshot,
-                Some(DEFAULT_MODEL_ID),
-            )?;
+            // A tool-initiated compaction is an auxiliary model call inside
+            // the enclosing turn; starting a new turn here would split the
+            // loop's log records. Only standalone `/compact` turns begin one.
+            if !nested {
+                log.begin_turn();
+                log.set_iteration(1);
+                log.record_request(
+                    &transcript,
+                    &[],
+                    crate::session_log::projection_hash(&transcript),
+                    &budget_snapshot,
+                    Some(DEFAULT_MODEL_ID),
+                )?;
+            }
         }
         let task = TaskNode::new(
             TaskId::new("compact-session"),

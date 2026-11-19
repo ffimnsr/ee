@@ -2,6 +2,15 @@
 use super::*;
 
 impl OrchestratorRuntime {
+    /// Wraps the runtime in an `Arc` and records the weak self handle used by
+    /// turn-scoped hooks such as model-callable compaction.
+    pub(crate) fn into_shared(self) -> Arc<Self> {
+        Arc::new_cyclic(|weak| {
+            let _ = self.self_ref.set(weak.clone());
+            self
+        })
+    }
+
     /// Creates a runtime with the given config and injected model adapter
     /// and empty stores.  Uses a conservative fail-closed policy: reads are
     /// allowed, writes, executes, and delegation are denied.
@@ -221,6 +230,7 @@ impl OrchestratorRuntime {
             compaction_checkpoints: Mutex::new(HashMap::new()),
             selected_model: Mutex::new(None),
             snapshots,
+            self_ref: std::sync::OnceLock::new(),
         }
     }
 

@@ -276,6 +276,7 @@ impl OrchestratorRuntime {
                     prompt,
                     Vec::new(),
                     events,
+                    false,
                 )
                 .await;
         }
@@ -367,6 +368,47 @@ impl OrchestratorRuntime {
         }
         if options.depth == 0 && self.config.stop_gate.enabled {
             options.stop_gate = Some(self.config.stop_gate.bounded());
+        }
+        // Root turns advertise model-callable compaction when the runtime is
+        // shared. The hook owns a strong handle so the compaction model call
+        // can run inside the loop while the turn is active.
+        if options.compact_tool.is_none()
+            && options.depth == 0
+            && options.visible_tool_names.is_none()
+            && let Some(runtime) = self.self_ref.get().and_then(std::sync::Weak::upgrade)
+        {
+            let compact_sink = sink.clone();
+            let compact_cancel = cancel.clone();
+            let compact_session = ctx.session_id.clone();
+            let compact_events = self.events.clone();
+            options.compact_tool = Some(CompactToolHook::new(move |history, instructions| {
+                let runtime = runtime.clone();
+                let sink = compact_sink.clone();
+                let cancel = compact_cancel.clone();
+                let session = compact_session.clone();
+                let events = compact_events.clone();
+                Box::pin(async move {
+                    let compact_ctx = PromptContext::new(session, Vec::new());
+                    runtime
+                        .run_compact_turn_recording(
+                            compact_ctx,
+                            sink,
+                            cancel,
+                            instructions,
+                            None,
+                            history,
+                            events,
+                            true,
+                        )
+                        .await
+                        .map(|_| CompactToolOutcome {
+                            report: "Session compacted; continuation summary stored in session \
+                                     memory."
+                                .to_string(),
+                        })
+                        .map_err(|error| error.to_string())
+                })
+            }));
         }
         let engine = LoopEngine::new(
             self.config.clone(),

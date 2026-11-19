@@ -150,7 +150,7 @@ impl LoopEngine {
                 budget.emit(&self.events);
                 snapshot
             };
-            let tools: Vec<ToolDefinition> = {
+            let mut tools: Vec<ToolDefinition> = {
                 let definitions = crate::tools::canonical_tool_definitions(
                     self.tools.lock().expect("tool registry poisoned").definitions(),
                     self.options.visible_tool_names.as_ref(),
@@ -161,6 +161,12 @@ impl LoopEngine {
                     definitions
                 }
             };
+            if self.options.compact_tool.is_some()
+                && self.options.visible_tool_names.is_none()
+                && !tools.iter().any(|tool| tool.name == COMPACT_TOOL_NAME)
+            {
+                tools.push(compact_tool_definition());
+            }
             let evidence_capabilities = crate::stop_gate::evidence_capabilities_for(&tools);
             crate::model_options::validate_tool_names(&tools)
                 .map_err(OrchestratorError::ModelFailure)?;
@@ -521,9 +527,12 @@ impl LoopEngine {
             let intents = local_intents;
             // Read-only batches are independent regardless of which strategy
             // selected the turn; write/execute waves still serialize inside the
-            // runner. `read_first` now only controls ordering.
-            let parallel_read_wave =
-                intents.len() > 1 && crate::parallel_tools::all_read_only(&intents, &self.tools);
+            // runner. `read_first` now only controls ordering. Compaction runs
+            // in-loop because it needs the runtime and sink, so it never joins
+            // a parallel wave.
+            let parallel_read_wave = intents.len() > 1
+                && !intents.iter().any(|intent| intent.name == COMPACT_TOOL_NAME)
+                && crate::parallel_tools::all_read_only(&intents, &self.tools);
             if parallel_read_wave {
                 // The runner retains model order in its output while scheduling only
                 // independent read waves concurrently. Host web-service limits remain
@@ -601,12 +610,15 @@ impl LoopEngine {
                         tool_call_id: intent.tool_call_id.clone(),
                         tool_name: intent.name.clone(),
                     });
-                    let class = self
-                        .tools
-                        .lock()
-                        .expect("tool registry poisoned")
-                        .get(&intent.name)
-                        .map(|tool| tool.definition().side_effect_class);
+                    let class = if intent.name == COMPACT_TOOL_NAME {
+                        Some(SideEffectClass::Read)
+                    } else {
+                        self.tools
+                            .lock()
+                            .expect("tool registry poisoned")
+                            .get(&intent.name)
+                            .map(|tool| tool.definition().side_effect_class)
+                    };
                     // Resumed turns never replay a completed write/execute/delegate
                     // call with identical arguments: the stored summary is reused
                     // and the operation is not re-run (idempotency guard).
@@ -614,6 +626,15 @@ impl LoopEngine {
                     let reused = reuse.is_some();
                     let executed = match reuse {
                         Some(result) => Ok(result),
+                        None if intent.name == COMPACT_TOOL_NAME => {
+                            {
+                                let mut budget =
+                                    self.budget.lock().expect("budget tracker poisoned");
+                                budget.try_reserve_tool_call()?;
+                                budget.emit(&self.events);
+                            }
+                            self.run_compact_tool(&intent, transcript, sink, &cancel).await
+                        }
                         None => {
                             track.lock().expect("recovery track poisoned").in_flight =
                                 Some(InFlightOperation {
@@ -720,7 +741,75 @@ impl LoopEngine {
     }
 }
 
+fn compact_update_error(error: ee_agent_acp_server::UpdateSinkError) -> OrchestratorError {
+    OrchestratorError::InvalidState(format!("update emission failed: {error}"))
+}
+
 impl LoopEngine {
+    /// Runs the model-callable `compact` tool through the runtime hook.
+    async fn run_compact_tool(
+        &self,
+        intent: &ToolIntent,
+        transcript: &Transcript,
+        sink: &UpdateSink,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<ToolResult, OrchestratorError> {
+        let Some(hook) = &self.options.compact_tool else {
+            return Ok(ToolResult::failure(
+                crate::tools::ToolErrorKind::Backend,
+                "compaction is unavailable in this session".to_string(),
+            ));
+        };
+        if *cancel.borrow() {
+            return Ok(ToolResult::failure(
+                crate::tools::ToolErrorKind::Cancelled,
+                "compaction cancelled".to_string(),
+            ));
+        }
+        sink.tool_call_pending(&intent.tool_call_id, COMPACT_TOOL_NAME, ToolKind::Read)
+            .map_err(compact_update_error)?;
+        sink.tool_call_in_progress(&intent.tool_call_id, COMPACT_TOOL_NAME, Vec::new())
+            .map_err(compact_update_error)?;
+        let instructions = match intent.arguments.get("instructions") {
+            None => None,
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            Some(_) => {
+                let result = ToolResult::failure(
+                    crate::tools::ToolErrorKind::InvalidArguments,
+                    "tool argument instructions must be a string".to_string(),
+                );
+                crate::tools::emit_tool_outcome(sink, intent, &result)?;
+                return Ok(result);
+            }
+        };
+        // The current step's assistant message carries this call but no
+        // matching result yet. Summarize the settled history instead of
+        // handing compaction an orphaned tool call.
+        let mut history = transcript.messages().to_vec();
+        let carries_current_call = history.last().is_some_and(|message| {
+            message.role == ModelRole::Assistant
+                && message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        crate::model::ModelContent::ToolCall { tool_call_id, .. }
+                            if tool_call_id == &intent.tool_call_id
+                    )
+                })
+        });
+        if carries_current_call {
+            history.pop();
+        }
+        let result = match hook.invoke(history, instructions).await {
+            Ok(outcome) => ToolResult::success(outcome.report),
+            Err(error) => ToolResult::failure(
+                crate::tools::ToolErrorKind::Backend,
+                format!("compaction failed: {error}"),
+            ),
+        };
+        crate::tools::emit_tool_outcome(sink, intent, &result)?;
+        Ok(result)
+    }
+
     /// Waits for detached delegate jobs and appends their bounded completion
     /// notices to the transcript.  The caller then takes another step so the
     /// model reads the notices before the turn can settle.

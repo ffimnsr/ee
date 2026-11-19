@@ -401,7 +401,7 @@ fn tool_kind(definition: &ToolDefinition) -> ToolKind {
 }
 
 /// Emits the completed/failed tool-call update for a finished tool.
-fn emit_tool_outcome(
+pub(crate) fn emit_tool_outcome(
     sink: &UpdateSink,
     intent: &ToolIntent,
     result: &ToolResult,
