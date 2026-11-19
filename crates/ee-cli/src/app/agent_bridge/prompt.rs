@@ -1,6 +1,7 @@
 //! `ApprovalPrompt` construction and approval option helpers.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ee_agent_host::ClientRequestResult;
@@ -14,8 +15,8 @@ use crate::app::write_leases::{WriteLeaseId, WriteLeaseOwner};
 use crate::policy::{AlwaysRuleCandidate, AlwaysRulePreview, McpInvocation};
 
 use super::approval::{
-    ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation,
-    PersistentDenyCandidate, PreparedWrite, ProxyWriteSpec, WebApprovalCall,
+    ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, DeferredExternalRead, DenyScopePreview,
+    MandatoryConfirmation, PersistentDenyCandidate, PreparedWrite, ProxyWriteSpec, WebApprovalCall,
     WorkspaceMemoryApprovalOperation, WorkspaceMemoryApprovalTarget, WriteExpectation,
     WriteReplyKind,
 };
@@ -312,6 +313,43 @@ impl ApprovalPrompt {
         }
     }
 
+    /// One external directory read awaiting approval (I21). The detail is
+    /// bounded to the directory and requested path; no file contents or
+    /// environment values are rendered.
+    pub(super) fn external_read(
+        session_id: &str,
+        directory: PathBuf,
+        requested: &Path,
+        read: DeferredExternalRead,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        Self {
+            thread_index: None,
+            session_id: session_id.to_string(),
+            agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
+            title: String::from("external directory read"),
+            detail: format!("directory: {}\npath: {}", directory.display(), requested.display()),
+            // A session grant is the widest scope offered; there is no
+            // always-allow here because external reads never persist to disk.
+            options: vec![
+                (String::from("Allow once"), ApprovalChoice::AllowOnce),
+                (String::from("Allow directory for session"), ApprovalChoice::AllowSession),
+                (String::from("Deny"), ApprovalChoice::DenyOnce),
+            ],
+            selected: 0,
+            kind: ApprovalKind::ExternalRead { directory, read },
+            mcp: None,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
+            reply,
+        }
+    }
+
     pub(super) fn terminal(
         thread_index: Option<usize>,
         agent_id: Option<String>,
@@ -450,11 +488,6 @@ use super::approval::approval_fingerprint;
 use super::approval::session_decision;
 #[cfg(test)]
 use super::bridge_ui::BridgeUiHandler;
-#[cfg(test)]
-#[cfg(test)]
-#[cfg(test)]
-use std::path::PathBuf;
-
 #[cfg(test)]
 #[cfg(test)]
 mod tests {

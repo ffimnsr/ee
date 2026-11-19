@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandInput, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME,
-    DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, PRIMARY_AGENT_COMMAND_NAME, RESUME_COMMAND_NAME,
+    DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, EXPORT_SESSION_COMMAND_NAME,
+    IMPORT_SESSION_COMMAND_NAME, PRIMARY_AGENT_COMMAND_NAME, RESUME_COMMAND_NAME,
     REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, UnstructuredCommandInput,
 };
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,8 @@ pub const RESERVED_COMMAND_NAMES: &[&str] = &[
     BRANCH_COMMAND_NAME,
     REVERT_COMMAND_NAME,
     DIFF_COMMAND_NAME,
+    EXPORT_SESSION_COMMAND_NAME,
+    IMPORT_SESSION_COMMAND_NAME,
     PRIMARY_AGENT_COMMAND_NAME,
     // The CLI intercepts these before ACP, so a provider-level definition
     // would never run and tab completion would be misleading.

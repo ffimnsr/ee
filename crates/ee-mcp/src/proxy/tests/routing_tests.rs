@@ -392,6 +392,51 @@ async fn phase2_tools_return_structured_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_tools_accept_reference_prefixes_but_writes_stay_absolute() {
+    let backend: Arc<dyn EeProxyBackend> = Arc::new(ScriptedBackend::default());
+    let (client, server) = connect(backend).await;
+
+    tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        client.call_tool(
+            CallToolRequestParams::new("ee_read_buffer")
+                .with_arguments(arguments(json!({ "path": "docs/src/lib.rs" }))),
+        ),
+    )
+    .await
+    .expect("reference read timed out")
+    .expect("reference read must be accepted by the read-class validator");
+
+    let error = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        client.call_tool(CallToolRequestParams::new("ee_write_text_file").with_arguments(
+            arguments(json!({
+                "path": "docs/src/lib.rs",
+                "content": "x",
+            })),
+        )),
+    )
+    .await
+    .expect("write timed out")
+    .expect_err("writes must remain absolute");
+    assert!(format!("{error:?}").contains("path must be absolute"), "{error:?}");
+
+    let error = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        client.call_tool(
+            CallToolRequestParams::new("ee_read_text_file")
+                .with_arguments(arguments(json!({ "path": "../escape.rs" }))),
+        ),
+    )
+    .await
+    .expect("traversal timed out")
+    .expect_err("traversal is not a reference prefix");
+    assert!(format!("{error:?}").contains("path must be absolute"), "{error:?}");
+
+    shutdown(&client, &server);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phase2_argument_validation_rejects_invalid_patch_shapes() {
     let backend: Arc<dyn EeProxyBackend> = Arc::new(ScriptedBackend::default());
     let (client, server) = connect(backend).await;

@@ -587,6 +587,62 @@ async fn provider_adapter_load_session_restores_persisted_state() {
 }
 
 #[tokio::test]
+async fn durable_session_load_replays_the_logged_transcript() {
+    let temp = tempfile::tempdir().expect("temp");
+    let mut config = OrchestratorProviderConfig::default();
+    config.orchestrator.session_log.dir = Some(temp.path().join("logs"));
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().text("first turn").completed(),
+        ModelResponse::new().text("second turn").completed(),
+    ]));
+    let provider = OrchestratorProvider::new(config, model.clone());
+    let probe = provider.clone();
+    let (handle, task) = spawn_server(provider);
+    let session_id = new_session(&handle, 1).await;
+
+    handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+    drain_mcp_diagnostics(&handle).await;
+    handle.next_frames(4).await;
+    handle.send(request(3, "session/close", json!({ "sessionId": session_id })));
+    let _ = request_result(handle.next_frame().await);
+
+    handle.send(request(
+        4,
+        "session/load",
+        json!({
+            "sessionId": session_id,
+            "cwd": "/work",
+            "additionalDirectories": [],
+            "mcpServers": [],
+        }),
+    ));
+    // Durable log replay emits at least the commands update, replayed
+    // user/assistant chunks, and the load response.
+    let frames = handle.next_frames(4).await;
+    assert!(
+        frames.iter().any(|frame| {
+            matches!(frame, RawJsonRpcMessage::Notification(notification)
+                if raw_params_to_value(notification.params.clone())["update"]["sessionUpdate"]
+                    == "agent_message_chunk")
+        }),
+        "durable load replays logged assistant text: {frames:?}"
+    );
+    assert!(probe.session_state(&session_id).is_some());
+
+    handle.send(request(5, "session/prompt", prompt_params(&session_id, "again")));
+    drain_mcp_diagnostics(&handle).await;
+    let _ = handle.next_frames(4).await;
+    let requests = model.requests();
+    let last = requests.last().expect("second prompt request");
+    let transcript =
+        last.transcript.iter().map(|message| message.text_content()).collect::<Vec<_>>().join("\n");
+    assert!(transcript.contains("hello"), "restored user text: {transcript}");
+    assert!(transcript.contains("first turn"), "restored assistant text: {transcript}");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test]
 async fn configured_remote_instructions_reach_the_model_once_per_session() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

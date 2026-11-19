@@ -42,7 +42,7 @@ impl App {
             let _ = reply.send(Err(error));
             return;
         }
-        if !self.path_in_effective_workspace(&request.path) {
+        if !self.path_in_effective_read_scope(&request.path) {
             let _ = reply.send(Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 request.path.display()
@@ -152,7 +152,7 @@ impl App {
     }
 }
 
-fn validate_read_window(
+pub(super) fn validate_read_window(
     line: Option<u32>,
     limit: Option<u32>,
     line_count: Option<usize>,

@@ -2,6 +2,29 @@
 use super::*;
 
 #[test]
+fn usage_stats_tool_registers_only_with_session_logging() {
+    let runtime = OrchestratorRuntime::new(
+        OrchestratorConfig::default(),
+        Arc::new(FakeModel::new(Vec::new())),
+    );
+    runtime
+        .register_builtins(&ee_agent_protocol::SessionId::new("s-1"))
+        .expect("builtins register");
+    assert!(
+        runtime.tool_names().contains(&String::from("usage_stats")),
+        "session-log analytics reach the model as a read-only tool"
+    );
+
+    let mut config = OrchestratorConfig::default();
+    config.session_log.enabled = false;
+    let runtime = OrchestratorRuntime::new(config, Arc::new(FakeModel::new(Vec::new())));
+    runtime
+        .register_builtins(&ee_agent_protocol::SessionId::new("s-2"))
+        .expect("builtins register");
+    assert!(!runtime.tool_names().contains(&String::from("usage_stats")));
+}
+
+#[test]
 fn user_agent_selection_sets_model_steps_and_permission_overlay() {
     let default = Arc::new(FakeModel::new(Vec::new()));
     let alternate = Arc::new(FakeModel::new(Vec::new()));

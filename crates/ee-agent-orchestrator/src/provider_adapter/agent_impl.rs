@@ -137,6 +137,7 @@ impl AgentProvider for OrchestratorProvider {
                     .load(&implementation.name, &ctx.cwd, &session_id.to_string())
                     .map_err(ProviderError::from)?,
             };
+            let durable_load = state.is_some();
             let model_override = state.as_ref().and_then(|state| state.model_id.clone());
             let agent_override = state.as_ref().and_then(|state| state.agent.clone());
             let (runtime, conversation, mode) = match state {
@@ -230,17 +231,30 @@ impl AgentProvider for OrchestratorProvider {
             replay_conversation(ctx.replay_sink.as_ref(), &conversation)?;
             plugins.session_scope(&session_id.to_string()).map_err(ProviderError::from)?;
             // The checkpoint stays pending: the next prompt resumes it.
-            sessions.lock().expect("adapter sessions poisoned").insert(
-                session_id.to_string(),
-                SessionRuntime::new(
-                    runtime,
-                    ctx.cwd.clone(),
-                    workspace_roots,
-                    (provider_label, model_label),
-                    mode.clone(),
-                    mcp_servers,
-                ),
+            let entry = SessionRuntime::new(
+                runtime,
+                ctx.cwd.clone(),
+                workspace_roots,
+                (provider_label, model_label),
+                mode.clone(),
+                mcp_servers,
             );
+            if durable_load {
+                super::conversation::restore_planes_from_log(
+                    &entry.runtime,
+                    &session_id.to_string(),
+                    &entry.conversation,
+                    &entry.model_transcript,
+                );
+                replay_conversation(
+                    ctx.replay_sink.as_ref(),
+                    &entry.conversation.lock().expect("conversation poisoned"),
+                )?;
+            }
+            sessions
+                .lock()
+                .expect("adapter sessions poisoned")
+                .insert(session_id.to_string(), entry);
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
                 .modes(session_modes(mode)))
@@ -617,6 +631,58 @@ impl AgentProvider for OrchestratorProvider {
                         telemetry_event_start,
                     },
                 );
+            }
+            // `/export-session` and `/import-session` move a session between
+            // machines. Export is redacted unless `--include-content`; import
+            // seeds only an empty session so an existing log is never
+            // overwritten.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == EXPORT_SESSION_COMMAND_NAME
+            {
+                return super::session_transfer_command::handle_export_command(
+                    super::session_transfer_command::ExportCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        info: crate::session_transfer::SessionTransferInfo {
+                            provider: Some(provider_label.clone()),
+                            model_id: Some(model_label.clone()),
+                            mode: Some(mode.to_string()),
+                            agent: runtime.active_user_agent_name(),
+                            title: None,
+                        },
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                );
+            }
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == IMPORT_SESSION_COMMAND_NAME
+            {
+                let result = super::session_transfer_command::handle_import_command(
+                    super::session_transfer_command::ImportCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        conversation: &conversation,
+                        model_transcript: &model_transcript,
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                )?;
+                persist_session_snapshot(
+                    &session_store,
+                    &implementation_name,
+                    &session_id,
+                    &sessions,
+                )?;
+                return Ok(result);
             }
             // `/branch` forks the current session from a stored checkpoint.
             // It runs before discard/resume handling so a paused turn can be

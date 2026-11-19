@@ -345,7 +345,13 @@ impl PolicyEngine {
         if let Some(scope) = &self.policy.scope
             && let Err(reason) = scope.check_arguments(tool.side_effect_class, arguments)
         {
-            return PolicyDecision::denied(reason);
+            // The editor host owns external-directory read approval (I21): a
+            // host-approved read tool may leave the workspace scope so the
+            // host can prompt for the lexical ancestor directory. Writes,
+            // executes, and non-host-approved reads stay fail-closed here.
+            if !(tool.side_effect_class == SideEffectClass::Read && tool.host_approval) {
+                return PolicyDecision::denied(reason);
+            }
         }
         PolicyDecision::allowed()
     }
@@ -519,6 +525,45 @@ mod tests {
         let decision = engine.check(&tool(SideEffectClass::Read), PolicyContext::default());
         assert!(!decision.allow);
         assert!(decision.reason.unwrap().contains("read tools"));
+    }
+
+    #[test]
+    fn host_approved_reads_reach_host_external_directory_approval() {
+        let scope = WorkspaceScope::new(vec![std::path::PathBuf::from("/work")], Vec::new());
+        let engine = PolicyEngine::new(ToolPolicy::default().with_scope(scope));
+        let context = PolicyContext::default();
+        let outside = serde_json::json!({ "path": "/etc/hosts" });
+
+        let host_read = ToolDefinition::new("ee_read_text_file", "reads")
+            .side_effect_class(SideEffectClass::Read)
+            .host_approval();
+        assert!(
+            engine.check_with_arguments(&host_read, context, &outside).allow,
+            "the host owns external-directory read approval (I21)"
+        );
+
+        let plain_read =
+            ToolDefinition::new("read_file", "reads").side_effect_class(SideEffectClass::Read);
+        let denied = engine.check_with_arguments(&plain_read, context, &outside);
+        assert!(!denied.allow, "non-host reads still fail closed on scope escape");
+        assert!(denied.reason.unwrap().contains("outside the active workspace scope"));
+
+        let write = ToolDefinition::new("ee_tool", "test")
+            .side_effect_class(SideEffectClass::Write)
+            .host_approval();
+        assert!(
+            !engine.check_with_arguments(&write, context, &outside).allow,
+            "writes must never leave the workspace scope"
+        );
+        let execute = ToolDefinition::new("ee_tool", "test")
+            .side_effect_class(SideEffectClass::Execute)
+            .host_approval();
+        assert!(
+            !engine
+                .check_with_arguments(&execute, context, &serde_json::json!({ "cwd": "/etc" }))
+                .allow,
+            "executes must never leave the workspace scope"
+        );
     }
 
     #[test]

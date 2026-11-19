@@ -33,6 +33,10 @@ use ee_agent_host::AgentWebContextConfig;
 
 const DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS: usize = 4;
 pub(super) const MAX_AGENT_MAX_CONCURRENT_PROMPTS: usize = 32;
+/// Maximum named read-only reference sources kept from config.
+pub(crate) const MAX_AGENT_REFERENCES: usize = 16;
+/// Maximum reference-name length.
+const MAX_AGENT_REFERENCE_NAME_CHARS: usize = 64;
 
 /// Agent modes that never receive trusted-workspace write auto-approval.
 /// Read-only modes still get the read-only command allowlist; they only lose
@@ -124,6 +128,8 @@ pub(crate) struct AgentsSettings {
     /// Agent modes that never receive trusted-workspace write auto-approval.
     pub read_only_modes: BTreeSet<String>,
     pub servers: BTreeMap<String, AgentServerSettings>,
+    /// Named read-only reference sources. Never workspace or write roots.
+    pub references: BTreeMap<String, AgentReferenceSettings>,
     /// Bridge-approval alignment with the agent's own permission prompt.
     pub approval: AgentApprovalSettings,
     /// Declarative permission rules for external agent permission requests.
@@ -151,6 +157,7 @@ impl Default for AgentsSettings {
                 .map(|mode| (*mode).to_string())
                 .collect(),
             servers: BTreeMap::new(),
+            references: BTreeMap::new(),
             approval: AgentApprovalSettings::default(),
             permissions: None,
             rubber_duck: RubberDuckSettings::default(),
@@ -170,6 +177,71 @@ impl Default for AgentsSettings {
 pub(crate) type AgentEnvValue = ConfigSecretValue;
 
 /// Resolved ACP agent subprocess definition.
+/// One resolved read-only reference source (`[agents.references]`).
+///
+/// Local entries are read in place; remote entries are cloned into a bounded
+/// host cache on first use and refreshed on a daily throttle. Reference roots
+/// are never write roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentReferenceSettings {
+    /// Absolute or workspace-relative local directory.
+    Local(PathBuf),
+    /// Remote git repository and optional branch.
+    Remote { repository: String, branch: Option<String> },
+}
+
+/// Parses one `[agents.references]` entry and validates the name/fields.
+pub(crate) fn parse_agent_reference(
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<AgentReferenceSettings, String> {
+    let valid_name = !name.is_empty()
+        && name.chars().count() <= MAX_AGENT_REFERENCE_NAME_CHARS
+        && name.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        && name != "."
+        && name != "..";
+    if !valid_name {
+        return Err(format!(
+            "reference name {name:?} must be 1-{MAX_AGENT_REFERENCE_NAME_CHARS} ascii letters, digits, '-', '_', or '.'"
+        ));
+    }
+    match value {
+        serde_json::Value::String(path) if !path.trim().is_empty() => {
+            Ok(AgentReferenceSettings::Local(PathBuf::from(path)))
+        }
+        serde_json::Value::String(_) => Err(String::from("local reference path must not be empty")),
+        serde_json::Value::Object(map) => {
+            let repository = map
+                .get("repository")
+                .and_then(serde_json::Value::as_str)
+                .filter(|repository| !repository.trim().is_empty())
+                .ok_or_else(|| String::from("remote reference requires a non-empty repository"))?;
+            let branch = match map.get("branch") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(branch)) => {
+                    if branch.trim().is_empty()
+                        || branch.starts_with('-')
+                        || branch.chars().any(char::is_whitespace)
+                    {
+                        return Err(String::from(
+                            "remote reference branch must be a non-empty git ref without whitespace or a leading '-'",
+                        ));
+                    }
+                    Some(branch.clone())
+                }
+                Some(_) => return Err(String::from("remote reference branch must be a string")),
+            };
+            for key in map.keys() {
+                if !matches!(key.as_str(), "repository" | "branch") {
+                    return Err(format!("unknown remote reference key {key:?}"));
+                }
+            }
+            Ok(AgentReferenceSettings::Remote { repository: repository.to_string(), branch })
+        }
+        _ => Err(String::from("reference must be a path string or a repository table")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentServerSettings {
     /// Optional frontend-only label shown in agent pickers.
@@ -254,6 +326,34 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
             alignment: Some(agents.approval.alignment.label().to_string()),
         }),
         permissions: agents.permissions.clone(),
+        references: (!agents.references.is_empty()).then(|| {
+            agents
+                .references
+                .iter()
+                .map(|(name, reference)| {
+                    let value = match reference {
+                        AgentReferenceSettings::Local(path) => {
+                            serde_json::Value::String(path.display().to_string())
+                        }
+                        AgentReferenceSettings::Remote { repository, branch } => {
+                            let mut map = serde_json::Map::new();
+                            map.insert(
+                                String::from("repository"),
+                                serde_json::Value::String(repository.clone()),
+                            );
+                            if let Some(branch) = branch {
+                                map.insert(
+                                    String::from("branch"),
+                                    serde_json::Value::String(branch.clone()),
+                                );
+                            }
+                            serde_json::Value::Object(map)
+                        }
+                    };
+                    (name.clone(), value)
+                })
+                .collect()
+        }),
         workspace_memory: Some(WorkspaceMemoryToml {
             enabled: Some(agents.workspace_memory.enabled),
             persist_notes: Some(agents.workspace_memory.persist_notes),

@@ -197,6 +197,30 @@ impl App {
             return;
         }
 
+        if matches!(prompt.kind, ApprovalKind::ExternalRead { .. }) {
+            if !choice.allows() {
+                let directory = match &prompt.kind {
+                    ApprovalKind::ExternalRead { directory, .. } => directory.clone(),
+                    _ => unreachable!(),
+                };
+                self.release_prompt_write_lease(&mut prompt);
+                let reason =
+                    format!("external directory read denied (I21): {}", directory.display());
+                let _ =
+                    prompt.reply.send(Err(AgentError::PermissionDenied { reason: reason.clone() }));
+                self.backend.status_message = Some(reason);
+                return;
+            }
+            let ApprovalKind::ExternalRead { directory, read } = prompt.kind else {
+                unreachable!()
+            };
+            // `AllowSession` persists the directory for the app session;
+            // every other allowing choice covers only this one call.
+            let persist = choice == ApprovalChoice::AllowSession;
+            self.dispatch_external_read(read, &directory, persist, prompt.reply);
+            return;
+        }
+
         if choice == ApprovalChoice::DenyPersistent {
             self.resolve_persistent_deny_choice(prompt);
             return;
@@ -285,6 +309,7 @@ impl App {
                 self.apply_proxy_filesystem(operation, prompt.reply);
             }
             ApprovalKind::WorkspaceMemoryApproval { .. } => unreachable!(),
+            ApprovalKind::ExternalRead { .. } => unreachable!(),
             ApprovalKind::Network {
                 route,
                 requested_host,
@@ -359,6 +384,7 @@ impl App {
                 _ => unreachable!(),
             },
             ApprovalKind::WorkspaceMemoryApproval { .. } => unreachable!(),
+            ApprovalKind::ExternalRead { .. } => unreachable!(),
             ApprovalKind::Filesystem { .. } => {
                 self.release_prompt_write_lease(&mut prompt);
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {

@@ -82,7 +82,7 @@ impl App {
         if !path.is_absolute() {
             return Err(AgentError::invalid_params("path must be absolute"));
         }
-        if !self.path_in_effective_workspace(path) {
+        if !self.path_in_effective_read_scope(path) {
             return Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 path.display()
@@ -657,7 +657,7 @@ impl App {
         let canonical = std::fs::canonicalize(path).map_err(|error| {
             AgentError::Io(format!("cannot resolve symbol-dependency path: {error}"))
         })?;
-        if !self.path_in_workspace(&canonical) {
+        if !self.path_in_read_scope(&canonical) {
             return Err(AgentError::invalid_params("path outside allowed workspace"));
         }
         let buffer_id = self.ensure_proxy_buffer(&canonical)?;
@@ -691,7 +691,7 @@ impl App {
         let canonical = std::fs::canonicalize(path).map_err(|error| {
             AgentError::Io(format!("cannot resolve dependency-map path: {error}"))
         })?;
-        if !self.path_in_workspace(&canonical) {
+        if !self.path_in_read_scope(&canonical) {
             return Err(AgentError::invalid_params("path outside allowed workspace"));
         }
         serde_json::to_value(crate::app::agent_knowledge::unavailable_dependency_map(canonical))

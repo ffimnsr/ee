@@ -567,3 +567,33 @@ fn require_absolute(path: &str) -> Result<(), ErrorData> {
         Err(ErrorData::invalid_params(format!("path must be absolute: {path:?}"), None))
     }
 }
+
+/// Requires an absolute path, or a `<reference>/<relative>` prefix accepted by
+/// read-class tools (I25). The host resolves configured reference names; an
+/// unknown prefix stays relative and fails closed there.
+fn require_absolute_or_reference(path: &str) -> Result<(), ErrorData> {
+    if std::path::Path::new(path).is_absolute() {
+        return Ok(());
+    }
+    let valid_prefix =
+        path.split_once('/').or_else(|| path.split_once(':')).is_some_and(|(name, rest)| {
+            !rest.is_empty()
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+                && name != "."
+                && name != ".."
+                && !std::path::Path::new(rest)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+        });
+    if valid_prefix {
+        Ok(())
+    } else {
+        Err(ErrorData::invalid_params(
+            format!("path must be absolute or <reference>/<relative>: {path:?}"),
+            None,
+        ))
+    }
+}

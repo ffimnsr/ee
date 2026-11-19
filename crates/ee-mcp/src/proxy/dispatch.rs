@@ -28,7 +28,7 @@ impl EeMcpProxy {
             "ee_list_directory" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .list_directory(path.to_owned())
@@ -38,7 +38,7 @@ impl EeMcpProxy {
             "ee_list_directory_all" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .list_directory_all(path.to_owned())
@@ -282,7 +282,7 @@ impl EeMcpProxy {
             "ee_read_buffer" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .read_buffer(path.to_owned())
@@ -292,7 +292,7 @@ impl EeMcpProxy {
             "ee_read_buffer_lines" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = require_positive_u32(arguments, "line")?;
                 let limit = require_positive_u32(arguments, "limit")?;
                 Ok(self
@@ -314,7 +314,7 @@ impl EeMcpProxy {
             "ee_get_file_diagnostics" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .get_file_diagnostics(path.to_owned())
@@ -324,7 +324,7 @@ impl EeMcpProxy {
             "ee_document_symbols" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .document_symbols(path.to_owned())
@@ -334,7 +334,7 @@ impl EeMcpProxy {
             "ee_references" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = require_positive_u32(arguments, "line")?;
                 let character = require_positive_u32(arguments, "character")?;
                 Ok(self
@@ -346,7 +346,7 @@ impl EeMcpProxy {
             "ee_list_code_actions" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = require_positive_u32(arguments, "line")?;
                 let character = require_positive_u32(arguments, "character")?;
                 Ok(self
@@ -379,7 +379,7 @@ impl EeMcpProxy {
             "ee_preview_rename_symbol" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = require_positive_u32(arguments, "line")?;
                 let character = require_positive_u32(arguments, "character")?;
                 let new_name = require_nonempty_string(arguments, "new_name")?;
@@ -405,7 +405,7 @@ impl EeMcpProxy {
             "ee_read_text_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = optional_u32(arguments, "line")?;
                 let limit = optional_u32(arguments, "limit")?;
                 Ok(self
@@ -536,7 +536,7 @@ impl EeMcpProxy {
             "ee_git_diff_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .git_diff_file(path.to_owned())
@@ -765,7 +765,7 @@ impl EeMcpProxy {
             "ee_file_dependency_map" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 Ok(self
                     .backend
                     .file_dependency_map(path.to_owned())
@@ -776,7 +776,7 @@ impl EeMcpProxy {
                 let arguments = require_arguments(request)?;
                 require_exact_argument_keys(arguments, &["path", "line", "character"])?;
                 let path = require_string(arguments, "path")?;
-                require_absolute(path)?;
+                require_absolute_or_reference(path)?;
                 let line = require_positive_u32(arguments, "line")?;
                 let character = optional_u32(arguments, "character")?.ok_or_else(|| {
                     ErrorData::invalid_params("missing argument 'character'", None)

@@ -11,11 +11,12 @@ use super::super::*;
 use crate::policy::TrustOutcome;
 
 use super::approval::{
-    WebApprovalCall, WorkspaceMemoryApprovalOperation, WorkspaceMemoryApprovalTarget,
-    WriteExpectation,
+    DeferredExternalRead, WebApprovalCall, WorkspaceMemoryApprovalOperation,
+    WorkspaceMemoryApprovalTarget, WriteExpectation,
 };
 use super::bridge_ui::BridgeUiMessage;
 use super::prompt::ApprovalPrompt;
+use super::read::validate_read_window;
 
 impl App {
     /// Drains bridge requests forwarded by the host handler.
@@ -23,7 +24,31 @@ impl App {
         self.prune_cancelled_bridge_approvals();
         while let Ok(message) = self.agents.bridge_rx.try_recv() {
             match message {
-                BridgeUiMessage::ReadFile { request, reply } => {
+                BridgeUiMessage::ReadFile { mut request, reply } => {
+                    // I25: `<reference>/path` resolves inside a read-only
+                    // reference root before the workspace/external checks.
+                    if let Err(error) = self.resolve_fs_reference_path(&mut request.path) {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                    // I21: a read outside the active workspace queues one
+                    // external-directory approval and resumes this exact read
+                    // after the user answers.
+                    if request.path.is_absolute()
+                        && validate_read_window(request.line, request.limit, None).is_ok()
+                        && let Some((canonical, directory)) =
+                            self.external_read_target_for_path(&request.path)
+                    {
+                        let session_id = request.session_id.0.to_string();
+                        self.request_external_read(
+                            &session_id,
+                            DeferredExternalRead::Fs(request),
+                            canonical,
+                            directory,
+                            reply,
+                        );
+                        continue;
+                    }
                     // Phase 4: normalize + evaluate before serving; reads
                     // stay prompt-free, but protected/external reads can
                     // never match a persistent rule.
@@ -270,13 +295,27 @@ impl App {
     /// direct ACP client methods (Phase 6).  `fs/read_text_file` is served
     /// directly; writes and terminal creates queue an approval prompt;
     /// diagnostics return the last stderr text.
-    fn handle_proxy_tool(
+    pub(super) fn handle_proxy_tool(
         &mut self,
-        call: crate::app::agents_mcp::ProxyToolCall,
+        mut call: crate::app::agents_mcp::ProxyToolCall,
         route: crate::app::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let session_id = SessionId::new("proxy");
+        // I25: resolve read-only `<reference>/path` targets before policy and
+        // approval checks. Write-class calls are never rewritten.
+        if let Err(error) = self.resolve_proxy_reference_paths(&mut call) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        // I21: read-class calls outside the workspace queue one
+        // external-directory approval; writes and executes never take this
+        // path and stay fail-closed to the workspace roots.
+        if let Some((canonical, directory)) = self.external_read_target(&call) {
+            let read = DeferredExternalRead::Proxy { call: Box::new(call), route };
+            self.request_external_read(session_id.0.as_ref(), read, canonical, directory, reply);
+            return;
+        }
         match call {
             crate::app::agents_mcp::ProxyToolCall::RememberWorkspaceFact { key, value } => {
                 self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(

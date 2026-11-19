@@ -459,9 +459,14 @@ impl App {
         &mut self,
         active: usize,
         display_text: String,
-        blocks: Vec<ContentBlock>,
+        mut blocks: Vec<ContentBlock>,
         persisted_prompt: Option<&str>,
     ) {
+        // I25: read-only reference sources travel with every prompt so the
+        // model knows the `<name>/path` prefixes without extra client setup.
+        if let Some(block) = self.reference_prompt_block() {
+            blocks.push(block);
+        }
         if let Some(prompt) = persisted_prompt
             && let Some(thread) = self.agents.threads.get(active)
         {

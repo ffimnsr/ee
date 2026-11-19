@@ -34,6 +34,8 @@ mod agent_filesystem;
 mod agent_knowledge;
 #[cfg(feature = "agents")]
 mod agent_pane;
+#[cfg(feature = "agents")]
+mod agent_references;
 mod agents;
 #[cfg(feature = "agents")]
 pub(crate) mod agents_mcp;

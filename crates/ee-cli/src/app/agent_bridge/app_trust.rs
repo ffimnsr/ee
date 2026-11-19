@@ -62,6 +62,7 @@ impl App {
                 }
                 ApprovalKind::Filesystem { .. }
                 | ApprovalKind::WorkspaceMemoryApproval { .. }
+                | ApprovalKind::ExternalRead { .. }
                 | ApprovalKind::Network { .. } => false,
             },
             ToolApprovalMode::Bypass => true,
@@ -77,8 +78,8 @@ impl App {
     pub(super) fn trust_operation_for_prompt(&self, prompt: &ApprovalPrompt) -> TrustOperation {
         let workspace = self.primary_workspace_identity();
         let (category, identity) = match &prompt.kind {
-            ApprovalKind::WorkspaceMemoryApproval { .. } => {
-                unreachable!("workspace memory approvals bypass trust policy")
+            ApprovalKind::WorkspaceMemoryApproval { .. } | ApprovalKind::ExternalRead { .. } => {
+                unreachable!("bypass approvals do not consult trust policy")
             }
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                 // Phase 3: eligible proxy tool calls carry a validated MCP
@@ -238,7 +239,9 @@ impl App {
                 }
                 paths.into_iter().find_map(|path| self.inspect_mutation_path(path))
             }
-            ApprovalKind::WorkspaceMemoryApproval { .. } | ApprovalKind::Network { .. } => None,
+            ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::Network { .. }
+            | ApprovalKind::ExternalRead { .. } => None,
         }
     }
 

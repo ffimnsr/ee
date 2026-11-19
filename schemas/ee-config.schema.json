@@ -844,6 +844,15 @@
           },
           "default": {}
         },
+        "references": {
+          "description": "Named read-only reference sources (`[agents.references]`): a local\npath string or `{ repository, branch }` for a cached clone.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "default": null
+        },
         "rubber_duck": {
           "description": "Optional bounded critic policy.",
           "anyOf": [

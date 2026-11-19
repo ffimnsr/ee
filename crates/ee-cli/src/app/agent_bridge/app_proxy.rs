@@ -317,7 +317,7 @@ impl App {
             if !path.is_absolute() {
                 return Err(AgentError::invalid_params("path must be absolute"));
             }
-            if !self.path_in_workspace(path) {
+            if !self.path_in_read_scope(path) {
                 return Err(AgentError::invalid_params(format!(
                     "path outside allowed workspace: {}",
                     path.display()
@@ -419,7 +419,7 @@ impl App {
         if let Some(id) = self.buffer_id_for_path(path) {
             return Ok(id);
         }
-        if !self.path_in_workspace(path) {
+        if !self.path_in_read_scope(path) {
             return Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 path.display()

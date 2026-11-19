@@ -152,6 +152,7 @@ impl App {
             ApprovalKind::Filesystem { .. }
             | ApprovalKind::TerminalCreate { .. }
             | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. }
             | ApprovalKind::Network { .. } => return,
         };
         let revision = self
@@ -506,6 +507,11 @@ impl App {
 
     pub(super) fn validate_workspace_write_path(&self, path: &Path) -> Result<(), AgentError> {
         let candidate = self.canonical_workspace_path(path)?;
+        if self.path_in_reference_root(&candidate) {
+            return Err(AgentError::PermissionDenied {
+                reason: format!("reference roots are read-only; cannot write {}", path.display()),
+            });
+        }
         if self.allowed_fs_roots().iter().any(|root| candidate.starts_with(root)) {
             Ok(())
         } else {

@@ -164,6 +164,45 @@ pub(super) fn session_compaction_history(
     if logged.is_empty() { model_history(transcript) } else { logged }
 }
 
+/// Restores the replay conversation and normalized model transcript from the
+/// durable session log. Used by `session/load` when no in-memory session
+/// survived (crash/restart or an imported session), so the loaded session can
+/// continue from its recorded history.
+pub(super) fn restore_planes_from_log(
+    runtime: &OrchestratorRuntime,
+    session_id: &str,
+    conversation: &Arc<Mutex<Vec<ConversationMessage>>>,
+    model_transcript: &Arc<Mutex<Vec<ModelMessage>>>,
+) {
+    let Ok(records) = runtime.replay_session_messages(session_id) else { return };
+    if records.is_empty() {
+        return;
+    }
+    let messages = normalize_model_messages(records.into_iter().map(|(_, message)| message));
+    if messages.is_empty() {
+        return;
+    }
+    let mut restored = Vec::new();
+    for message in &messages {
+        let text = message.text_content();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let role = match message.role {
+            ModelRole::User => ConversationRole::User,
+            ModelRole::Assistant | ModelRole::Subagent => ConversationRole::Agent,
+            _ => continue,
+        };
+        restored.push(ConversationMessage { role, text });
+    }
+    if restored.len() > CONVERSATION_MAX_MESSAGES {
+        let overflow = restored.len() - CONVERSATION_MAX_MESSAGES;
+        restored.drain(..overflow);
+    }
+    *conversation.lock().expect("conversation poisoned") = restored;
+    record_model_transcript(model_transcript, messages);
+}
+
 fn normalize_model_messages(messages: impl IntoIterator<Item = ModelMessage>) -> Vec<ModelMessage> {
     messages
         .into_iter()
@@ -261,6 +300,8 @@ pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol:
         branch_available_command(),
         revert_available_command(),
         diff_available_command(),
+        export_session_available_command(),
+        import_session_available_command(),
     ];
     if recovery_enabled {
         commands.push(discard_available_command());

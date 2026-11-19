@@ -90,7 +90,7 @@ fn read_rejects_zero_based_line_numbers() {
     fs::write(&file, "alpha\nbeta\n").unwrap();
     let path = file.to_string_lossy().to_string();
     let script = base_script().emit(read_text_file_with_range(104, "s1", &path, 0, 1));
-    let (mut app, _temp, fake) = fake_agents_app(script);
+    let (mut app, fake) = agents_app_in(&temp, script);
     open_pane_and_wait_ready(&mut app);
 
     wait_until(&mut app, "invalid read answered", |_| fake.agent().response_with_id(104).is_some());
@@ -126,18 +126,24 @@ fn read_in_non_active_workspace_root_fails_closed() {
 }
 
 #[test]
-fn read_outside_workspace_fails_closed() {
+fn read_outside_workspace_fails_closed_when_denied() {
     let path = "/etc/hostname".to_string();
     let script = base_script().emit(wire::read_text_file("s1", &path));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
+    wait_until(&mut app, "external read approval queued", |app| !app.agents.approvals.is_empty());
+    run_ex(&mut app, "agents");
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE); // Deny
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "read answered", |_| fake.agent().response_with_id(101).is_some());
     let response = fake.agent().response_with_id(101).expect("response");
-    assert!(response.get("error").is_some(), "outside-workspace reads must fail: {response}");
+    assert!(response.get("error").is_some(), "denied reads must fail: {response}");
     assert_eq!(response["error"]["code"], -32602);
     let reason = response["error"]["data"]["reason"].as_str().unwrap_or_default();
-    assert!(reason.contains("workspace"), "reason: {reason}");
+    assert!(reason.contains("external directory read denied"), "reason: {reason}");
+    assert!(app.agents.external_read_roots.is_empty(), "deny records no grant");
 }
 
 #[test]

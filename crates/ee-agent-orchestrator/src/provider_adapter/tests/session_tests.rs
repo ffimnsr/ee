@@ -16,7 +16,9 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
             RUBBER_DUCK_COMMAND_NAME,
             BRANCH_COMMAND_NAME,
             REVERT_COMMAND_NAME,
-            DIFF_COMMAND_NAME
+            DIFF_COMMAND_NAME,
+            EXPORT_SESSION_COMMAND_NAME,
+            IMPORT_SESSION_COMMAND_NAME,
         ]
     );
     let recovery_commands = initial_commands(true);
@@ -29,6 +31,8 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
             BRANCH_COMMAND_NAME,
             REVERT_COMMAND_NAME,
             DIFF_COMMAND_NAME,
+            EXPORT_SESSION_COMMAND_NAME,
+            IMPORT_SESSION_COMMAND_NAME,
             DISCARD_COMMAND_NAME,
             ee_agent_protocol::RESUME_COMMAND_NAME,
         ]

@@ -822,7 +822,7 @@ fn proxy_phase1_extras_return_structured_results() {
 }
 
 #[test]
-fn proxy_phase1_path_tools_reject_outside_workspace() {
+fn proxy_phase1_path_tools_reject_outside_workspace_when_denied() {
     let (mut app, _temp, _fake) = mcp_app(base_agent_script(), false, true);
     open_pane_and_wait_ready(&mut app);
     let outside = tempfile::tempdir().unwrap();
@@ -833,26 +833,160 @@ fn proxy_phase1_path_tools_reject_outside_workspace() {
         1,
         json!({ "method": "list_directory", "path": outside.path().display().to_string() }),
     );
-    settle(&mut app);
+    wait_until(&mut app, "external read approval queued", |app| !app.agents.approvals.is_empty());
+    run_ex(&mut app, "agents");
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE); // Deny
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "external read approval resolved", |app| app.agents.approvals.is_empty());
     let reply = proxy_recv(&mut stream);
     let error = &reply["result"]["error"]["message"];
     assert!(
-        error.as_str().unwrap_or_default().contains("outside allowed workspace"),
+        error.as_str().unwrap_or_default().contains("external directory read denied"),
         "reply: {reply}"
+    );
+    assert!(app.agents.external_read_roots.is_empty(), "deny records no grant");
+}
+
+#[test]
+fn proxy_external_read_session_grant_covers_later_reads_in_the_directory() {
+    let (mut app, _temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+    let outside = tempfile::tempdir().unwrap();
+    let first = outside.path().join("first.txt");
+    let second = outside.path().join("second.txt");
+    fs::write(&first, "external-first").unwrap();
+    fs::write(&second, "external-second").unwrap();
+    let mut stream = connect_proxy(&app);
+
+    proxy_send(
+        &mut stream,
+        1,
+        json!({ "method": "read_buffer", "path": first.display().to_string() }),
+    );
+    wait_until(&mut app, "external read approval queued", |app| !app.agents.approvals.is_empty());
+    run_ex(&mut app, "agents");
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE); // Allow directory for session
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "external read approval resolved", |app| app.agents.approvals.is_empty());
+    let reply = proxy_recv(&mut stream);
+    assert_eq!(reply["result"]["value"], json!("external-first"));
+    let canonical = fs::canonicalize(outside.path()).unwrap();
+    assert!(
+        app.agents.external_read_roots.contains(&canonical),
+        "session grant recorded: {:?}",
+        app.agents.external_read_roots
     );
 
     proxy_send(
         &mut stream,
         2,
-        json!({ "method": "list_directory_all", "path": outside.path().display().to_string() }),
+        json!({ "method": "read_buffer", "path": second.display().to_string() }),
     );
     settle(&mut app);
     let reply = proxy_recv(&mut stream);
-    let error = &reply["result"]["error"]["message"];
-    assert!(
-        error.as_str().unwrap_or_default().contains("outside allowed workspace"),
-        "reply: {reply}"
+    assert_eq!(reply["result"]["value"], json!("external-second"));
+    assert!(app.agents.approvals.is_empty(), "granted directory must not prompt again");
+
+    // Reads are the only widened class: writes still fail closed without a
+    // prompt, even inside the granted directory.
+    proxy_send(
+        &mut stream,
+        3,
+        json!({
+            "method": "create_text_file",
+            "path": outside.path().join("blocked.txt").display().to_string(),
+            "content": "nope\n"
+        }),
     );
+    settle(&mut app);
+    let reply = proxy_recv(&mut stream);
+    assert!(
+        reply["result"]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside allowed workspace"),
+        "write must stay fail-closed: {reply}"
+    );
+    assert!(app.agents.approvals.is_empty(), "denied write must not queue approval");
+    assert!(!outside.path().join("blocked.txt").exists());
+
+    // `/permissions revoke-read` drops the session grant; the next read asks
+    // for approval again.
+    type_text(&mut app, &format!("/permissions revoke-read {}", outside.path().display()));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.external_read_roots.is_empty(), "revoke drops the grant");
+    proxy_send(
+        &mut stream,
+        4,
+        json!({ "method": "read_buffer", "path": first.display().to_string() }),
+    );
+    wait_until(&mut app, "revoked read prompts again", |app| !app.agents.approvals.is_empty());
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE); // Deny
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "revoked read denied", |app| app.agents.approvals.is_empty());
+    let reply = proxy_recv(&mut stream);
+    assert!(reply["result"]["error"].is_object(), "denied after revoke: {reply}");
+}
+
+#[test]
+fn proxy_reference_prefix_reads_configured_sources_without_approval() {
+    let (mut app, _temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+    let reference = tempfile::tempdir().unwrap();
+    let note = reference.path().join("note.txt");
+    fs::write(&note, "pinned reference\n").unwrap();
+    app.config.agents.references.insert(
+        String::from("docs"),
+        crate::config::AgentReferenceSettings::Local(reference.path().to_path_buf()),
+    );
+    app.agents.test_reference_cache_base = Some(reference.path().join("cache"));
+    let mut stream = connect_proxy(&app);
+
+    proxy_send(&mut stream, 1, json!({ "method": "read_buffer", "path": "docs/note.txt" }));
+    settle(&mut app);
+    let reply = proxy_recv(&mut stream);
+    assert_eq!(reply["result"]["value"], json!("pinned reference"));
+    assert!(app.agents.approvals.is_empty(), "reference reads need no external approval");
+
+    proxy_send(
+        &mut stream,
+        2,
+        json!({
+            "method": "create_text_file",
+            "path": "docs/blocked.txt",
+            "content": "nope\n"
+        }),
+    );
+    settle(&mut app);
+    let reply = proxy_recv(&mut stream);
+    assert!(
+        reply["result"]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("path must be absolute"),
+        "reference roots are never write roots: {reply}"
+    );
+    assert!(!reference.path().join("blocked.txt").exists());
+
+    let absolute_write = reference.path().join("blocked-abs.txt");
+    proxy_send(
+        &mut stream,
+        3,
+        json!({
+            "method": "create_text_file",
+            "path": absolute_write.display().to_string(),
+            "content": "nope\n"
+        }),
+    );
+    settle(&mut app);
+    let reply = proxy_recv(&mut stream);
+    assert!(
+        reply["result"]["error"]["message"].as_str().unwrap_or_default().contains("read-only"),
+        "absolute writes into reference roots fail closed: {reply}"
+    );
+    assert!(!absolute_write.exists());
 }
 
 #[test]

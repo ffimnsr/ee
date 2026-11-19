@@ -134,6 +134,32 @@ impl std::fmt::Debug for WorkspaceMemoryApprovalTarget {
     }
 }
 
+/// Read-only operation deferred until the user approves the external
+/// directory (I21). The variant carries the original request so approval
+/// resumes exactly that call through the shared read path.
+pub(crate) enum DeferredExternalRead {
+    /// MCP proxy read-class tool call.
+    Proxy {
+        call: Box<crate::app::agents_mcp::ProxyToolCall>,
+        route: crate::app::agents_mcp::ProxyRoute,
+    },
+    /// Native `fs/read_text_file` client request.
+    Fs(ee_agent_protocol::ReadTextFileRequest),
+}
+
+impl std::fmt::Debug for DeferredExternalRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proxy { route, .. } => {
+                formatter.debug_tuple("DeferredExternalRead::Proxy").field(route).finish()
+            }
+            Self::Fs(request) => {
+                formatter.debug_tuple("DeferredExternalRead::Fs").field(&request.path).finish()
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum ApprovalKind {
     Write {
@@ -153,6 +179,15 @@ pub(super) enum ApprovalKind {
     },
     TerminalCreate {
         request: CreateTerminalRequest,
+    },
+    /// External directory read (I21). Holds the deferred read-only call so the
+    /// exact request resumes after approval; the payload is Debug-redacted
+    /// because it may carry file paths the prompt must not re-render.
+    ExternalRead {
+        /// Canonical lexical ancestor directory being approved.
+        directory: PathBuf,
+        /// Read-only call awaiting approval.
+        read: DeferredExternalRead,
     },
     /// External network approval carries only host/route in visible or
     /// persisted session state. Query and URL remain private call payloads.
@@ -268,6 +303,9 @@ pub(super) fn approval_fingerprint(kind: &ApprovalKind) -> String {
         ApprovalKind::Filesystem { operation } => operation.fingerprint(),
         ApprovalKind::WorkspaceMemoryApproval { operation, key, .. } => {
             format!("workspace-memory:{operation:?}:{key}")
+        }
+        ApprovalKind::ExternalRead { directory, .. } => {
+            format!("external-read:{}", directory.display())
         }
         ApprovalKind::TerminalCreate { request } => {
             let command = [request.command.clone()]

@@ -805,6 +805,11 @@ impl OrchestratorRuntime {
                 tools.register(tool)?;
             }
         }
+        if let Some(store) = &self.session_logs {
+            tools.register(Arc::new(crate::usage_stats::UsageStatsTool::new(
+                store.log_for(session_id.0.as_ref()),
+            )))?;
+        }
         Ok(())
     }
     /// ACP plan entries for the current session plan.
@@ -877,6 +882,22 @@ impl OrchestratorRuntime {
             return Ok(Vec::new());
         };
         store.log_for(session_id).replay_messages()
+    }
+
+    /// Live durable log for `session_id`, when session logging is enabled.
+    ///
+    /// Transfer commands must use this handle: a memory-only runtime owns the
+    /// only sink, so rebuilding a store from configuration would see no
+    /// records.
+    #[must_use]
+    pub fn session_log(&self, session_id: &str) -> Option<Arc<crate::session_log::SessionLog>> {
+        self.session_logs.as_ref().map(|store| store.log_for(session_id))
+    }
+
+    /// Live session-log store, when logging is enabled.
+    #[must_use]
+    pub fn session_log_store(&self) -> Option<Arc<crate::session_log::SessionLogStore>> {
+        self.session_logs.clone()
     }
 
     /// Replays the logged conversation prefix ending at `checkpoint_seq`.

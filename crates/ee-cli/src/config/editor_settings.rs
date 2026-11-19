@@ -12,7 +12,8 @@
 
 use super::agents;
 use super::agents_settings::{
-    AgentsSettings, MAX_AGENT_MAX_CONCURRENT_PROMPTS, merge_agent_approval, merge_agent_server,
+    AgentsSettings, MAX_AGENT_MAX_CONCURRENT_PROMPTS, MAX_AGENT_REFERENCES, merge_agent_approval,
+    merge_agent_server, parse_agent_reference,
 };
 use super::discovery::ConfigLayerKind;
 use super::init::load_config;
@@ -524,6 +525,26 @@ impl EditorSettings {
                     self.agents.servers.insert(id.clone(), resolved);
                 }
                 Err(err) => eprintln!("ee: warning: invalid agents server `{id}`: {err}"),
+            }
+        }
+        if let Some(references) = &patch.references {
+            for (name, value) in references {
+                if !self.agents.references.contains_key(name)
+                    && self.agents.references.len() >= MAX_AGENT_REFERENCES
+                {
+                    eprintln!(
+                        "ee: warning: agents.references exceeds {MAX_AGENT_REFERENCES} entries; ignoring `{name}`"
+                    );
+                    continue;
+                }
+                match parse_agent_reference(name, value) {
+                    Ok(reference) => {
+                        self.agents.references.insert(name.clone(), reference);
+                    }
+                    Err(error) => {
+                        eprintln!("ee: warning: invalid agents.references `{name}`: {error}")
+                    }
+                }
             }
         }
     }

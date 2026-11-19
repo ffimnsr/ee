@@ -58,7 +58,7 @@ impl App {
                 canonical.display()
             )));
         }
-        if !self.path_in_workspace(&canonical) {
+        if !self.path_in_read_scope(&canonical) {
             return Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 canonical.display()

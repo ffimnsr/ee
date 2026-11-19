@@ -348,6 +348,9 @@ impl LoopEngine {
                 budget.emit(&self.events);
             }
             turn_usage = turn_usage.accumulate(&response.usage);
+            if let Some(log) = transcript.session_log() {
+                let _ = log.record_usage(&response.usage, self.options.model_id.as_deref());
+            }
             if let Some(metrics) = &self.options.metrics {
                 metrics.lock().expect("orchestrator metrics poisoned").record_usage_for_model(
                     self.options.model_id.as_deref().unwrap_or("unknown"),
@@ -624,6 +627,7 @@ impl LoopEngine {
                     // and the operation is not re-run (idempotency guard).
                     let reuse = self.try_reuse_completed(&intent, class, track, transcript);
                     let reused = reuse.is_some();
+                    let execute_started = std::time::Instant::now();
                     let executed = match reuse {
                         Some(result) => Ok(result),
                         None if intent.name == COMPACT_TOOL_NAME => {
@@ -662,6 +666,18 @@ impl LoopEngine {
                         }
                     };
                     let success = executed.as_ref().is_ok_and(|result| result.success);
+                    if !reused {
+                        let duration_ms = u64::try_from(execute_started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX);
+                        if let Some(log) = transcript.session_log() {
+                            let error_kind = executed
+                                .as_ref()
+                                .ok()
+                                .and_then(|result| result.error_kind)
+                                .map(|kind| kind.as_str());
+                            let _ = log.record_tool(&intent.name, success, error_kind, duration_ms);
+                        }
+                    }
                     self.events.record(OrchestratorEvent::ToolFinished {
                         tool_call_id: intent.tool_call_id.clone(),
                         tool_name: intent.name.clone(),

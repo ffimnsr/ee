@@ -244,6 +244,12 @@ pub(crate) struct AgentPaneState {
     pub(crate) terminal_stop_confirmation: Option<TerminalStopConfirmation>,
     /// Explicit user-approved extra roots. Session-local and never persisted.
     pub(crate) additional_workspace_roots: BTreeSet<PathBuf>,
+    /// External directories the user approved for read-class tools only
+    /// (I21). Session-local, never persisted, and never consulted by writes or
+    /// execute tools. Directories are canonical.
+    pub(crate) external_read_roots: BTreeSet<PathBuf>,
+    /// Test-only override for the remote reference cache root (I25).
+    pub(crate) test_reference_cache_base: Option<PathBuf>,
     /// Pending elicitation requests, FIFO within each session. Empty-string key
     /// represents connection-scoped requests without ACP session identity.
     pub(crate) elicitations: BTreeMap<String, VecDeque<ElicitationPrompt>>,
@@ -352,6 +358,8 @@ impl Default for AgentPaneState {
             additional_directory_confirmation: None,
             terminal_stop_confirmation: None,
             additional_workspace_roots: BTreeSet::new(),
+            external_read_roots: BTreeSet::new(),
+            test_reference_cache_base: None,
             elicitations: BTreeMap::new(),
             approvals: VecDeque::new(),
             write_leases: crate::app::write_leases::WriteLeaseCoordinator::default(),
@@ -512,6 +520,9 @@ impl AgentPaneState {
 
     pub(super) fn clear_session_interactions(&mut self, session_id: &str) {
         self.permissions.remove(session_id);
+        // External read grants are app-session scoped in storage but must not
+        // outlive a closed agent session (I21 fail-closed revocation).
+        self.external_read_roots.clear();
         self.elicitations.remove(session_id);
         self.pending_cancels.remove(session_id);
         self.rubber_duck_calls.remove(session_id);

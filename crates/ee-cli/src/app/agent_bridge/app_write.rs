@@ -36,6 +36,7 @@ impl App {
             ApprovalKind::Filesystem { .. }
             | ApprovalKind::TerminalCreate { .. }
             | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. }
             | ApprovalKind::Network { .. } => return,
         };
         let revision = self
@@ -85,6 +86,7 @@ impl App {
                 .map_err(|error| AgentError::invalid_params(error.to_string()))?,
             ApprovalKind::TerminalCreate { .. }
             | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. }
             | ApprovalKind::Network { .. } => return Ok(()),
         };
 
@@ -101,6 +103,7 @@ impl App {
             ApprovalKind::Filesystem { .. } => true,
             ApprovalKind::TerminalCreate { .. }
             | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. }
             | ApprovalKind::Network { .. } => false,
         } && self.has_dirty_buffer(&scopes);
         if blocks_dirty {
@@ -130,6 +133,7 @@ impl App {
             }
             ApprovalKind::TerminalCreate { .. }
             | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. }
             | ApprovalKind::Network { .. } => unreachable!(),
         };
         self.agents.next_write_turn_id = self.agents.next_write_turn_id.wrapping_add(1);

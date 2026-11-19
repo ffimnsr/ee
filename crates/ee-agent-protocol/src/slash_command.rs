@@ -45,6 +45,14 @@ pub const REVERT_COMMAND_NAME: &str = "revert";
 /// used.
 pub const DIFF_COMMAND_NAME: &str = "turn-diff";
 
+/// The advertised slash-command name for writing a bounded session transfer
+/// document (redacted by default).
+pub const EXPORT_SESSION_COMMAND_NAME: &str = "export-session";
+
+/// The advertised slash-command name for importing a session transfer
+/// document into an empty session.
+pub const IMPORT_SESSION_COMMAND_NAME: &str = "import-session";
+
 /// The advertised slash-command name for selecting a user-defined primary
 /// agent. Distinct from the CLI's `/agent` model-switch alias so the two
 /// layers cannot intercept each other. The optional argument is the agent
@@ -211,6 +219,33 @@ pub fn diff_available_command() -> AvailableCommand {
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional turn sequence (defaults to the newest captured turn)",
+    )))
+}
+
+/// The `/export-session` command advertised by providers with a durable
+/// session log: writes a bounded JSON transfer document (redacted by default).
+#[must_use]
+pub fn export_session_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        EXPORT_SESSION_COMMAND_NAME,
+        "Write a bounded session transfer document. Redacted by default; pass --include-content for full text and tool data.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional output path and --include-content",
+    )))
+}
+
+/// The `/import-session` command advertised by providers with a durable
+/// session log: validates a transfer document and seeds the current empty
+/// session from it.
+#[must_use]
+pub fn import_session_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        IMPORT_SESSION_COMMAND_NAME,
+        "Import a session transfer document into the current empty session; the imported transcript is restored for the next turn.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "path to an exported .json document",
     )))
 }
 

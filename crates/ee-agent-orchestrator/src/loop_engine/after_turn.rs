@@ -73,6 +73,9 @@ impl LoopEngine {
         .await?;
         self.events.record(OrchestratorEvent::ModelResponded { iteration: max_iterations });
         turn_usage = turn_usage.accumulate(&response.usage);
+        if let Some(log) = transcript.session_log() {
+            let _ = log.record_usage(&response.usage, self.options.model_id.as_deref());
+        }
         // The summary is recorded like any other round so usage reporting and
         // the output-byte accounting stay consistent; a budget breach here does
         // not turn the terminal summary into an error.

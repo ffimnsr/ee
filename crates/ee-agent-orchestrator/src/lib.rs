@@ -256,6 +256,7 @@ mod session_log_sink;
 #[cfg(test)]
 mod session_log_tests;
 pub mod session_store;
+pub mod session_transfer;
 pub mod stop_gate;
 #[cfg(test)]
 mod stop_gate_loop_tests;
@@ -282,6 +283,7 @@ mod transcript_log;
 pub mod transcript_normalize;
 pub mod trust;
 mod usage;
+pub mod usage_stats;
 pub mod user_agents;
 pub mod user_commands;
 pub mod user_memories;

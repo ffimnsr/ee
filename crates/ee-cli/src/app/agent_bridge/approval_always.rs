@@ -144,7 +144,9 @@ impl App {
                     ));
                 }
             }
-            ApprovalKind::Filesystem { .. } | ApprovalKind::WorkspaceMemoryApproval { .. } => {}
+            ApprovalKind::Filesystem { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::ExternalRead { .. } => {}
         }
         for (choice, label, candidate) in candidates {
             prompt.options.push((label, choice));

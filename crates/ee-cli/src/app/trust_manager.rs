@@ -31,6 +31,7 @@ impl App {
             "revoke" if !rest.is_empty() => {
                 self.permissions_mutate(rest, RuleMutation::Revoke, "revoke")
             }
+            "revoke-read" if !rest.is_empty() => self.permissions_revoke_read(rest),
             "reload" if rest.is_empty() => self.permissions_reload(),
             "reset" if rest.is_empty() => self.permissions_notice(
                 "Reset requires explicit confirmation. Run `/permissions reset confirm`; workspace rules/defaults removed, session choices unchanged.",
@@ -39,7 +40,7 @@ impl App {
             "test" if !rest.is_empty() => self.permissions_test(rest, false),
             "preview" if !rest.is_empty() => self.permissions_test(rest, true),
             _ => self.permissions_notice(
-                "usage: /permissions [list|inspect <id>|disable <id>|enable <id>|revoke <id>|reload|reset confirm|test <kind> field=value...|preview <kind> field=value...]",
+                "usage: /permissions [list|inspect <id>|disable <id>|enable <id>|revoke <id>|revoke-read <dir|all>|reload|reset confirm|test <kind> field=value...|preview <kind> field=value...]",
             ),
         }
     }
@@ -63,13 +64,14 @@ impl App {
             .filter(|rule| managed.state(rule.id()).is_none_or(|state| state.enabled))
             .count();
         self.permissions_notice(&format!(
-            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} session-scope:memory-only store:{}\n{}",
+            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} session-scope:memory-only external-reads:{} store:{}\n{}",
             managed.document.workspace.as_string(),
             enabled,
             managed.document.rules.len(),
             managed.document.tool_defaults.len(),
             managed.document.category_defaults.len(),
             managed.document.global_default,
+            self.agents.external_read_roots.len(),
             store.path().display(),
             self.agents
                 .alignment_stats
@@ -118,6 +120,13 @@ impl App {
             ));
         }
         lines.push(format!("default global effect:{:?}", managed.document.global_default));
+        lines.push("[external reads] session-only, read-class tools only".into());
+        let roots = self.external_read_roots_display();
+        if roots.is_empty() {
+            lines.push(String::from("(none)"));
+        } else {
+            lines.extend(roots);
+        }
         self.permissions_notice(&lines.join("\n"));
     }
 
@@ -291,7 +300,7 @@ impl App {
         )
     }
 
-    fn permissions_notice(&mut self, text: &str) {
+    pub(super) fn permissions_notice(&mut self, text: &str) {
         if let Some(index) = self.agents.active_thread
             && let Some(thread) = self.agents.threads.get_mut(index)
         {

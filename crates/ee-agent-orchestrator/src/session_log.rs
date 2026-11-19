@@ -29,6 +29,7 @@ use crate::sensitive_data::SensitiveDataGuard;
 use crate::session_log_sink::sanitize_component;
 use crate::tools::ToolDefinition;
 use crate::trust::TrustLevel;
+use crate::usage::ModelUsage;
 
 pub use crate::session_log_sink::{FileSessionLogSink, InMemorySessionLogSink, SessionLogSink};
 
@@ -166,6 +167,55 @@ pub struct TruncationRecord {
     pub limit_bytes: usize,
 }
 
+/// One model-reported usage record.
+///
+/// Usage is recorded per model response so session exports, cost analytics,
+/// and import round-trips derive from the same append-only stream as the
+/// messages (no parallel bookkeeping).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct UsageRecord {
+    /// Monotonic append sequence within the session.
+    pub seq: u64,
+    /// Session that recorded the usage.
+    pub session_id: String,
+    /// Adapter registry id reported for the response, when known.
+    pub model_id: Option<String>,
+    /// Turn number.
+    pub turn: u64,
+    /// Loop iteration.
+    pub iteration: usize,
+    /// Normalized token and cost usage for one response.
+    pub usage: ModelUsage,
+}
+
+/// One completed tool execution.
+///
+/// Recorded beside messages and usage so per-tool call counts, failures, and
+/// bounded duration percentiles derive from the same append-only stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolRecord {
+    /// Monotonic append sequence within the session.
+    pub seq: u64,
+    /// Session that recorded the call.
+    pub session_id: String,
+    /// Model-visible tool name.
+    pub tool_name: String,
+    /// Whether the call returned a successful result.
+    pub success: bool,
+    /// Error kind for failed calls, when the failure was a normalized tool
+    /// error rather than a loop-stopping backend error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Wall-clock execution time in milliseconds.
+    pub duration_ms: u64,
+    /// Turn number.
+    pub turn: u64,
+    /// Loop iteration.
+    pub iteration: usize,
+}
+
 /// One append-only log record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -194,6 +244,10 @@ pub enum SessionLogRecord {
     ModelRequest(Box<ModelRequestRecord>),
     /// The bounded request view dropped oldest messages.
     Truncation(TruncationRecord),
+    /// A model response reported usage.
+    Usage(UsageRecord),
+    /// One tool execution completed.
+    Tool(ToolRecord),
     /// A recovery checkpoint was persisted.
     Checkpoint {
         /// Append sequence.
@@ -246,6 +300,8 @@ impl SessionLogRecord {
             Self::Message(record) => record.seq,
             Self::ModelRequest(record) => record.seq,
             Self::Truncation(record) => record.seq,
+            Self::Usage(record) => record.seq,
+            Self::Tool(record) => record.seq,
         }
     }
 
@@ -261,6 +317,8 @@ impl SessionLogRecord {
             Self::Message(record) => &record.session_id,
             Self::ModelRequest(record) => &record.session_id,
             Self::Truncation(record) => &record.session_id,
+            Self::Usage(record) => &record.session_id,
+            Self::Tool(record) => &record.session_id,
         }
     }
 
@@ -281,6 +339,16 @@ impl SessionLogRecord {
                 record.seq = seq;
                 record.session_id = session_id.to_string();
                 Self::Truncation(record)
+            }
+            Self::Usage(mut record) => {
+                record.seq = seq;
+                record.session_id = session_id.to_string();
+                Self::Usage(record)
+            }
+            Self::Tool(mut record) => {
+                record.seq = seq;
+                record.session_id = session_id.to_string();
+                Self::Tool(record)
             }
             other => other,
         }
@@ -575,6 +643,60 @@ impl SessionLog {
         let _ = self.append_record(move |seq| {
             SessionLogRecord::Truncation(TruncationRecord { seq, ..truncation })
         });
+    }
+
+    /// Records one model-reported usage observation.
+    pub fn record_usage(
+        &self,
+        usage: &ModelUsage,
+        model_id: Option<&str>,
+    ) -> Result<(), OrchestratorError> {
+        let mut state = self.state.lock().expect("session log state poisoned");
+        self.ensure_initialized(&mut state)?;
+        if let Err(error) = self.check_capacity(&state, 0) {
+            state.failure = Some(error.to_string());
+            return Err(error);
+        }
+        let record = SessionLogRecord::Usage(UsageRecord {
+            seq: state.next_seq,
+            session_id: self.session_id.clone(),
+            model_id: model_id.map(str::to_string),
+            turn: state.turn,
+            iteration: state.iteration,
+            usage: *usage,
+        });
+        self.commit(&mut state, record).inspect_err(|error| {
+            state.failure = Some(error.to_string());
+        })
+    }
+
+    /// Records one completed tool execution.
+    pub fn record_tool(
+        &self,
+        tool_name: &str,
+        success: bool,
+        error_kind: Option<&str>,
+        duration_ms: u64,
+    ) -> Result<(), OrchestratorError> {
+        let mut state = self.state.lock().expect("session log state poisoned");
+        self.ensure_initialized(&mut state)?;
+        if let Err(error) = self.check_capacity(&state, 0) {
+            state.failure = Some(error.to_string());
+            return Err(error);
+        }
+        let record = SessionLogRecord::Tool(ToolRecord {
+            seq: state.next_seq,
+            session_id: self.session_id.clone(),
+            tool_name: tool_name.to_string(),
+            success,
+            error_kind: error_kind.map(str::to_string),
+            duration_ms,
+            turn: state.turn,
+            iteration: state.iteration,
+        });
+        self.commit(&mut state, record).inspect_err(|error| {
+            state.failure = Some(error.to_string());
+        })
     }
 
     /// Records a persisted recovery checkpoint.

@@ -166,6 +166,10 @@ pub(crate) struct AgentsToml {
     pub permissions: Option<serde_json::Value>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
+    /// Named read-only reference sources (`[agents.references]`): a local
+    /// path string or `{ repository, branch }` for a cached clone.
+    #[serde(default)]
+    pub references: Option<BTreeMap<String, serde_json::Value>>,
     /// Optional bounded critic policy.
     pub rubber_duck: Option<RubberDuckToml>,
     /// Explicit opt-in and quotas for durable canonical-workspace memory.
