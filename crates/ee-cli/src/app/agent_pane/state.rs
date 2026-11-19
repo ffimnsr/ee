@@ -250,6 +250,9 @@ pub(crate) struct AgentPaneState {
     pub(crate) external_read_roots: BTreeSet<PathBuf>,
     /// Test-only override for the remote reference cache root (I25).
     pub(crate) test_reference_cache_base: Option<PathBuf>,
+    /// Test-only override for the config home used by host permission rules.
+    /// Keeps saved `agent-permissions.json` state out of the developer config.
+    pub(crate) test_config_home: Option<PathBuf>,
     /// Pending elicitation requests, FIFO within each session. Empty-string key
     /// represents connection-scoped requests without ACP session identity.
     pub(crate) elicitations: BTreeMap<String, VecDeque<ElicitationPrompt>>,
@@ -360,6 +363,7 @@ impl Default for AgentPaneState {
             additional_workspace_roots: BTreeSet::new(),
             external_read_roots: BTreeSet::new(),
             test_reference_cache_base: None,
+            test_config_home: None,
             elicitations: BTreeMap::new(),
             approvals: VecDeque::new(),
             write_leases: crate::app::write_leases::WriteLeaseCoordinator::default(),

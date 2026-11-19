@@ -101,6 +101,9 @@ pub(crate) fn agents_app_in(
     let mut app = App::from_path(None).unwrap();
     drop(_cwd_restore);
     drop(_cwd_lock);
+    // Keep saved agent permissions out of the developer config tree and out
+    // of sibling tests: `allow_always` persists `agent-permissions.json`.
+    app.agents.test_config_home = Some(temp.path().join(".ee-test-config"));
     let fake = ScriptedFake::new(script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, fake)

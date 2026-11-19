@@ -3,7 +3,9 @@
 use super::super::*;
 
 use super::constants::{AGENT_TERMINAL_OUTPUT_TAIL_BYTES, AGENT_TERMINAL_STOP_ALL_MAX};
-use super::format::{owned_terminal_summary_line, prompt_blocks_with_context};
+use super::format::{
+    owned_terminal_summary_line, parse_config_option_value, prompt_blocks_with_context,
+};
 use super::state::{AgentPaneLayout, TerminalStopConfirmation};
 use super::thread_ui::{ExternalEditorRequest, ThreadUiState};
 impl App {
@@ -558,6 +560,23 @@ impl App {
             self.backend.status_message = Some(String::from(
                 "cannot switch models while a turn is active or paused; wait for it to settle",
             ));
+            return;
+        }
+        // An agent that advertises a `model` config option owns model
+        // selection through ACP config; only agents without that option (the
+        // orchestrator) take the `session/set_model` route.
+        if let Some(option) = self.agents.threads[active]
+            .host
+            .config_options()
+            .into_iter()
+            .find(|option| option.id.0.as_ref() == "model")
+        {
+            match parse_config_option_value(&option, model_id) {
+                Ok(value) => {
+                    self.queue_thread_config_option_change(active, option.id.clone(), value);
+                }
+                Err(message) => self.backend.status_message = Some(message),
+            }
             return;
         }
         let Some(host) = &self.agents.host else {

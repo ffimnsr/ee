@@ -133,6 +133,7 @@ pub(crate) fn mcp_app_in(
     let mut app = App::from_path(None).unwrap();
     drop(_cwd_restore);
     drop(_cwd_lock);
+    app.agents.test_config_home = Some(temp.path().join(".ee-test-config"));
     let fake = ScriptedFake::new(agent_script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, fake)

@@ -21,7 +21,7 @@ impl App {
         self.backend.status_message = Some(format!("setting mode: {}", mode_id.0));
     }
 
-    fn queue_thread_config_option_change(
+    pub(super) fn queue_thread_config_option_change(
         &mut self,
         thread_index: usize,
         config_id: ee_agent_protocol::SessionConfigId,

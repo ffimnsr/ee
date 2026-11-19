@@ -125,7 +125,7 @@ fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
         evidence_ids: summary.evidence_ids.len(),
         write_actions,
     };
-    assert_eq!(metrics.model_requests, 2);
+    assert_eq!(metrics.model_requests, 3, "write turn plus one bounded gate repair round");
     assert_eq!(metrics.approvals, 1);
     assert_eq!(metrics.write_actions, 1);
     assert!(
@@ -204,7 +204,11 @@ fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
         1,
         "only no-op warmup reaches the write bridge"
     );
-    assert_eq!(scripted.request_bodies().len(), 2, "denial must reach provider tool result");
+    assert_eq!(
+        scripted.request_bodies().len(),
+        3,
+        "denial must reach provider tool result after one bounded gate repair round"
+    );
     assert!(
         scripted.request_bodies()[1]["messages"]
             .as_array()
@@ -359,7 +363,7 @@ fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evide
             .any(|line| { line.contains("verification: Blocked") && line.contains("WriteFailed") }),
         "evidence audit log must record partial-apply blocker"
     );
-    assert_eq!(scripted.request_bodies().len(), 3);
+    assert_eq!(scripted.request_bodies().len(), 4);
 
     app.shutdown_agents();
     factory.shutdown();
@@ -421,7 +425,7 @@ fn phase_six_live_openrouter_pane_unavailable_terminal_validation_is_blocked() {
     assert_eq!(summary.blocker, Some(TurnBlocker::ValidationUnavailable));
     assert_eq!(fs::read_to_string(&target).expect("read agent write"), "after\n");
     assert!(!missing_cwd.exists());
-    assert_eq!(scripted.request_bodies().len(), 3);
+    assert_eq!(scripted.request_bodies().len(), 4);
 
     app.shutdown_agents();
     factory.shutdown();

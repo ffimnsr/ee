@@ -115,7 +115,7 @@ fn phase_six_live_openrouter_pane_repeated_selected_validation_stops_repair() {
     );
     assert_eq!(
         scripted.request_bodies().len(),
-        4,
+        5,
         "repair controller must stop before another model loop"
     );
     assert!(
@@ -232,7 +232,11 @@ fn phase_six_live_openrouter_pane_diagnostics_regression_reports_blocked_evidenc
     assert_eq!(fs::read_to_string(&target).expect("read diagnostics write"), "after\n");
     assert_eq!(app.backend.diagnostics.len(), 1, "post-write diagnostic reaches editor state");
     let bodies = scripted.request_bodies();
-    assert_eq!(bodies.len(), 3, "diagnostic failure triggers one bounded repair model round");
+    assert_eq!(
+        bodies.len(),
+        4,
+        "diagnostic failure triggers one bounded repair model round after the gate round"
+    );
     assert!(bodies.iter().any(|body| {
         body["messages"].as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -298,7 +302,7 @@ fn phase_six_live_openrouter_pane_stale_revision_after_evidence_is_blocked() {
         thread.terminal_evidence.as_ref().expect("stale evidence").blocker,
         Some(TurnBlocker::StaleRevision)
     );
-    assert_eq!(scripted.request_bodies().len(), 2);
+    assert_eq!(scripted.request_bodies().len(), 3);
 
     app.shutdown_agents();
     factory.shutdown();
