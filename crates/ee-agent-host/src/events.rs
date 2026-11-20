@@ -162,6 +162,14 @@ pub enum AgentEvent {
     },
     /// The agent requested permission for a tool call.
     PermissionRequested { session_id: SessionId, request: Box<PermissionRequestInfo> },
+    /// Declarative rules settled a permission request without a client
+    /// round-trip. Emitted so hosts can audit automatic decisions with the
+    /// same fidelity as manual answers.
+    PermissionAutoResolved {
+        session_id: SessionId,
+        tool_call: ToolCallUpdate,
+        outcome: RequestPermissionOutcome,
+    },
     /// A permission decision was recorded (from the user or cancellation).
     PermissionResolved {
         session_id: SessionId,

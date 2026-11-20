@@ -25,6 +25,7 @@ default = ["agents"]
 agents = [
     "dep:bzip2",
     "dep:ee-agent-protocol",
+    "dep:ee-agent-remote",
     "dep:flate2",
     "dep:ee-agent-host",
     "dep:ee-mcp",
@@ -48,6 +49,7 @@ crossterm.workspace = true
 dirs.workspace = true
 ee-agent-host = { workspace = true, optional = true }
 ee-agent-protocol = { workspace = true, optional = true }
+ee-agent-remote = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
 ee-plugin-api.workspace = true
 ee-plugin-runtime.workspace = true

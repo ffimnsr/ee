@@ -2578,6 +2578,11 @@ fn handle_permission_request(
     // Declarative allow/deny rules settle the request before any client
     // round-trip; only an `ask` verdict reaches the UI.
     if let Some(outcome) = inner.broker.preflight(&request.tool_call, &request.options) {
+        let _ = inner.events.send(AgentEvent::PermissionAutoResolved {
+            session_id: session_id.clone(),
+            tool_call: request.tool_call.clone(),
+            outcome: outcome.clone(),
+        });
         let _ = responder.respond(RequestPermissionResponse::new(outcome));
         return Ok(());
     }
@@ -2637,6 +2642,11 @@ fn handle_permission_request_v2(
         .filter_map(|option| serde_json::from_value(serde_json::to_value(option).ok()?).ok())
         .collect();
     if let Some(outcome) = inner.broker.preflight(&tool_call, &options) {
+        let _ = inner.events.send(AgentEvent::PermissionAutoResolved {
+            session_id: session_id.clone(),
+            tool_call: tool_call.clone(),
+            outcome: outcome.clone(),
+        });
         let v2_outcome: v2::RequestPermissionOutcome =
             serde_json::from_value(serde_json::to_value(outcome).expect("outcome"))
                 .expect("permission outcome maps between versions");

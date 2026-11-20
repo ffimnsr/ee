@@ -505,6 +505,19 @@ impl EditorSettings {
         if let Some(approval) = &patch.approval {
             merge_agent_approval(&mut self.agents.approval, approval, kind);
         }
+        if let Some(mode) = &patch.remote_permission_mode {
+            let normalized = mode.trim().to_ascii_lowercase();
+            // Repository layers may narrow (`rules`/`deny`) but must never
+            // widen the host's posture back to `ask`.
+            if kind.is_host_global() || matches!(normalized.as_str(), "rules" | "deny") {
+                self.agents.remote_permission_mode = Some(normalized);
+            } else {
+                eprintln!(
+                    "ee: warning: {kind} agents.remote_permission_mode may only narrow to rules or deny; ignoring layer",
+                    kind = kind.label()
+                );
+            }
+        }
         if let Some(permissions) = &patch.permissions {
             // Host-global config owns the full ruleset. Repository layers may
             // only add deny rules: allowing or asking from a checked-in file

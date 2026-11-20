@@ -33,7 +33,7 @@ mod agent_filesystem;
 #[cfg(feature = "agents")]
 mod agent_knowledge;
 #[cfg(feature = "agents")]
-mod agent_pane;
+pub(crate) mod agent_pane;
 #[cfg(feature = "agents")]
 mod agent_references;
 mod agents;

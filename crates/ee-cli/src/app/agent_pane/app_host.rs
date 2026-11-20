@@ -15,7 +15,7 @@ use super::thread_ui::ThreadUiState;
 /// Builds the host permission rules from the merged `[agents.permissions]`
 /// layer. A malformed ruleset fails closed to deny-all so it can never
 /// silently allow external agent permission requests.
-fn host_permission_rules(
+pub(crate) fn host_permission_rules(
     raw: Option<&serde_json::Value>,
     config_home: Option<&std::path::Path>,
 ) -> Arc<ee_agent_host::PermissionRules> {
@@ -200,13 +200,7 @@ impl App {
         if self.agents.host.is_some() {
             return;
         }
-        let servers: Vec<(String, crate::config::AgentServerSettings)> = self
-            .config
-            .agents
-            .servers
-            .iter()
-            .map(|(id, server)| (id.clone(), server.clone()))
-            .collect();
+        let servers = self.config.agents.servers.clone();
         let mut config = AgentManagerConfig::default();
         config.permission_rules = host_permission_rules(
             self.config.agents.permissions.as_ref(),
@@ -221,47 +215,16 @@ impl App {
         // undecided, unreadable, or revoked decisions).
         let workspace_ref_policy = self.workspace_secret_ref_policy();
         self.agents.launch_failures.clear();
-        for (id, server) in servers {
-            let env = if crate::secrets::resolve::agent_env_has_references(&server.env) {
-                let resolved = {
-                    match self.agents.secret_store() {
-                        None => Err(String::from("secrets store unavailable")),
-                        Some(store) => crate::secrets::resolve::resolve_agent_env(
-                            store,
-                            &server,
-                            workspace_ref_policy,
-                        )
-                        .map_err(|err| err.to_string()),
-                    }
-                };
-                match resolved {
-                    Ok(env) => env,
-                    Err(message) => {
-                        eprintln!("ee: warning: agent `{id}` launch aborted: {message}");
-                        self.agents.launch_failures.insert(id.clone(), message);
-                        continue;
-                    }
-                }
-            } else {
-                server.env.iter().map(|(key, value)| (key.clone(), value.raw.clone())).collect()
-            };
-            // Collect secret-like final values for stderr/diagnostics
-            // redaction (phase 5).
-            for (name, value) in &env {
-                if ee_agent_host::redact::is_secret_key(name) {
-                    self.agents.resolved_secret_values.push(value.clone());
-                }
-            }
-            config.agents.insert(
-                id.clone(),
-                ee_agent_host::AgentProcessConfig {
-                    command: server.command.clone(),
-                    args: server.args.clone(),
-                    env,
-                    cwd: server.cwd.clone(),
-                },
-            );
+        let launches = {
+            let store = self.agents.secret_store();
+            crate::agent_launch::resolve_agent_launches(&servers, store, workspace_ref_policy)
+        };
+        for (id, message) in launches.failures {
+            eprintln!("ee: warning: agent `{id}` launch aborted: {message}");
+            self.agents.launch_failures.insert(id, message);
         }
+        self.agents.resolved_secret_values.extend(launches.secret_values);
+        config.agents = launches.agents;
         // Always host policy-governed editor MCP for ACP-native agents. The
         // host default is already enabled; keep it explicit for editor
         // sessions. Explicit `[mcp.proxy]` configuration is still required

@@ -1,0 +1,33 @@
+[package]
+name = "ee-agent-remote"
+version = "0.11.12"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Headless remote-control host for ee agent mode: JSON-RPC, MCP, and web surfaces."
+categories = ["development-tools"]
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+# In-process fake ACP agent transport used by tests. Mirrors
+# `ee-agent-host/test-utils` and never enables it for default builds.
+test-utils = ["ee-agent-host/test-utils"]
+
+[dependencies]
+ee-agent-host.workspace = true
+ee-agent-protocol.workspace = true
+ee-mcp.workspace = true
+futures.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake", "connect"] }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+ee-agent-remote = { path = ".", features = ["test-utils"] }
+tempfile.workspace = true

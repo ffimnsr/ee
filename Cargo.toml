@@ -8,6 +8,7 @@ members = [
   "crates/ee-agent-openrouter",
   "crates/ee-agent-orchestrator",
   "crates/ee-agent-protocol",
+  "crates/ee-agent-remote",
   "crates/ee-chat-completions",
   "crates/ee-cli",
   "crates/ee-mcp",
@@ -17,6 +18,7 @@ members = [
   "crates/ee-plugin-runtime",
   "crates/ee-plugin-sdk",
   "crates/ee-ts-test-grammars",
+  "crates/ee-web-frontend",
   "crates/xi-core-lib",
   "crates/xi-core",
   "crates/xi-lsp-lib",
@@ -47,6 +49,11 @@ debug = 0
 # `lto` or `codegen-units` changes inlining and makes profiles unrepresentative.
 # `strip = "none"` is explicit so a future `strip` setting on `release` cannot
 # silently remove the symbols this profile exists to provide.
+# The web client ships as a wasm binary; optimize it for size only.
+[profile.release.package.ee-web-frontend]
+opt-level = "z"
+codegen-units = 1
+
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
@@ -169,6 +176,7 @@ ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", vers
 ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.12" }
 ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.12" }
 ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.12" }
+ee-agent-remote = { package = "ee-agent-remote", path = "crates/ee-agent-remote", version = "0.11.12" }
 ee-chat-completions = { package = "ee-chat-completions", path = "crates/ee-chat-completions", version = "0.11.12" }
 ee-mcp = { package = "ee-mcp", path = "crates/ee-mcp", version = "0.11.12" }
 ee-plugin-api = { package = "ee-plugin-api", path = "crates/ee-plugin-api", version = "0.11.12" }

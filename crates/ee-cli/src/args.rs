@@ -137,6 +137,51 @@ pub(crate) enum AgentCommands {
         #[arg(long, action = clap::ArgAction::SetTrue)]
         user: bool,
     },
+    /// Run the headless agent host without the editor
+    Serve {
+        /// Serve the remote JSON-RPC protocol over stdio (default transport)
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        stdio: bool,
+        /// Serve over WebSocket + HTTP health/static on this address instead of stdio
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<std::net::SocketAddr>,
+        /// Bearer token file (0600) required for --listen; read per connection
+        #[arg(long = "token-file", value_name = "FILE")]
+        token_file: Option<PathBuf>,
+        /// Static asset directory for the web client
+        #[arg(long = "static-dir", value_name = "DIR")]
+        static_dir: Option<PathBuf>,
+        /// Allow a non-loopback --listen address (use an SSH tunnel or TLS proxy)
+        #[arg(long = "allow-remote", action = clap::ArgAction::SetTrue)]
+        allow_remote: bool,
+        /// Workspace root the headless handler may touch; repeat for multiple roots
+        #[arg(long = "allow-root", value_name = "DIR")]
+        allow_roots: Vec<PathBuf>,
+        /// Approval posture: ask (default), rules, or deny
+        #[arg(long = "permission-mode", value_name = "MODE")]
+        permission_mode: Option<String>,
+        /// Append remote decisions to this audit log instead of the state dir
+        #[arg(long = "audit-log", value_name = "FILE")]
+        audit_log: Option<PathBuf>,
+        /// Enable durable per-session history under this directory
+        #[arg(long = "session-log-dir", value_name = "DIR")]
+        session_log_dir: Option<PathBuf>,
+    },
+    /// Serve agent control tools to an MCP driver over stdio
+    Mcp {
+        /// Workspace root the headless handler may touch; repeat for multiple roots
+        #[arg(long = "allow-root", value_name = "DIR")]
+        allow_roots: Vec<PathBuf>,
+        /// Approval posture: ask (default), rules, or deny
+        #[arg(long = "permission-mode", value_name = "MODE")]
+        permission_mode: Option<String>,
+        /// Append remote decisions to this audit log instead of the state dir
+        #[arg(long = "audit-log", value_name = "FILE")]
+        audit_log: Option<PathBuf>,
+        /// Enable durable per-session history under this directory
+        #[arg(long = "session-log-dir", value_name = "DIR")]
+        session_log_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -837,6 +837,13 @@
         "permissions": {
           "description": "Declarative `allow`/`ask`/`deny` permission rules for external agent\n`session/request_permission` calls (`[agents.permissions]` table)."
         },
+        "remote_permission_mode": {
+          "description": "Remote approval posture for headless drivers: `ask` (default), `rules`,\nor `deny`. Repository layers may narrow but not widen it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "servers": {
           "type": "object",
           "additionalProperties": {

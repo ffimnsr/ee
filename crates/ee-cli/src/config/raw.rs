@@ -164,6 +164,9 @@ pub(crate) struct AgentsToml {
     /// Declarative `allow`/`ask`/`deny` permission rules for external agent
     /// `session/request_permission` calls (`[agents.permissions]` table).
     pub permissions: Option<serde_json::Value>,
+    /// Remote approval posture for headless drivers: `ask` (default), `rules`,
+    /// or `deny`. Repository layers may narrow but not widen it.
+    pub remote_permission_mode: Option<String>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
     /// Named read-only reference sources (`[agents.references]`): a local

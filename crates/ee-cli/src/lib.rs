@@ -2,6 +2,9 @@
 // Runtime-only paths therefore remain intentionally unreachable in this library target.
 #[allow(dead_code)]
 mod agent_bootstrap;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
+mod agent_launch;
 #[allow(dead_code)]
 mod app;
 #[allow(dead_code)]
@@ -24,6 +27,9 @@ mod highlight;
 mod keymap;
 #[allow(dead_code)]
 mod logs;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
+mod mcp_cmd;
 pub mod perf;
 #[allow(dead_code)]
 mod picker;
@@ -39,6 +45,9 @@ mod registers;
 mod render_metrics;
 #[allow(dead_code)]
 mod secrets;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
+mod serve_cmd;
 #[allow(dead_code)]
 mod session;
 #[allow(dead_code)]

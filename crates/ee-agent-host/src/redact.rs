@@ -104,6 +104,14 @@ fn redact_sensitive_line(line: &str) -> String {
 
     let mut words = line.split_whitespace().map(str::to_string).collect::<Vec<_>>();
     for index in 0..words.len() {
+        let raw = words[index].trim_matches(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        });
+        // JSON Web Tokens: three base64url segments, header starts with `eyJ`.
+        if raw.starts_with("eyJ") && raw.matches('.').count() == 2 {
+            words[index] = String::from("***");
+            continue;
+        }
         let lower = words[index].to_ascii_lowercase();
         if lower == "bearer" && index + 1 < words.len() {
             words[index + 1] = String::from("***");
@@ -277,6 +285,7 @@ mod tests {
             "callback https://example.test/?access_token=query-secret\n",
             "Cookie: session=cookie-secret\n",
             "github pat ghp_1234567890abcdef\n",
+            "jwt eyJhbGciOiJIUzI1NiJ9.payload.signature\n",
             "API token is prose-secret\n",
             "-----BEGIN PRIVATE KEY-----\n",
             "private-key-material\n",
@@ -291,6 +300,7 @@ mod tests {
             "query-secret",
             "cookie-secret",
             "ghp_1234567890abcdef",
+            "eyJhbGciOiJIUzI1NiJ9.payload.signature",
             "prose-secret",
             "private-key-material",
         ] {

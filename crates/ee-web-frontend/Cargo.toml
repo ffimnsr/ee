@@ -1,0 +1,46 @@
+[package]
+name = "ee-web-frontend"
+version = "0.11.12"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Rust/WASM web chat frontend for the ee headless agent host."
+categories = ["development-tools"]
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.128"
+js-sys = "0.3.105"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.105"
+features = [
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlButtonElement",
+  "HtmlInputElement",
+  "HtmlTextAreaElement",
+  "Node",
+  "Text",
+  "Event",
+  "EventTarget",
+  "WebSocket",
+  "MessageEvent",
+  "CloseEvent",
+  "KeyboardEvent",
+  "BinaryType",
+  "Storage",
+  "Location",
+]
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -135,6 +135,8 @@ pub(crate) struct AgentsSettings {
     /// Declarative permission rules for external agent permission requests.
     /// `None` keeps the default ask-every-time behavior.
     pub permissions: Option<serde_json::Value>,
+    /// Remote approval posture for headless drivers.
+    pub remote_permission_mode: Option<String>,
     /// Frontend-resolved critic policy; translated to backend policy on use.
     pub rubber_duck: RubberDuckSettings,
     /// Durable workspace memory with persistence. Enabled by default when
@@ -160,6 +162,7 @@ impl Default for AgentsSettings {
             references: BTreeMap::new(),
             approval: AgentApprovalSettings::default(),
             permissions: None,
+            remote_permission_mode: None,
             rubber_duck: RubberDuckSettings::default(),
             workspace_memory: WorkspaceMemorySettings::default(),
             #[cfg(any(feature = "agents", test))]
@@ -326,6 +329,7 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
             alignment: Some(agents.approval.alignment.label().to_string()),
         }),
         permissions: agents.permissions.clone(),
+        remote_permission_mode: agents.remote_permission_mode.clone(),
         references: (!agents.references.is_empty()).then(|| {
             agents
                 .references

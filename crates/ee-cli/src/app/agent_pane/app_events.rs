@@ -412,6 +412,8 @@ impl App {
                     }
                 }
             }
+            // Rules already settled the request; no UI prompt exists to clear.
+            AgentEvent::PermissionAutoResolved { .. } => {}
         }
     }
 

@@ -35,6 +35,8 @@ mod app_commands;
 mod app_context;
 mod app_events;
 mod app_host;
+
+pub(crate) use app_host::host_permission_rules;
 mod app_keys;
 mod app_mode;
 mod app_persist;

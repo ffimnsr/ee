@@ -33,6 +33,8 @@ use xi_core_lib::vlf::store::VlfStore;
 #[cfg(feature = "agents")]
 mod agent_bootstrap;
 #[cfg(feature = "agents")]
+mod agent_launch;
+#[cfg(feature = "agents")]
 mod agent_registry;
 #[cfg(feature = "agents")]
 mod agent_setup;
@@ -47,7 +49,11 @@ mod highlight;
 mod keymap;
 mod logs;
 #[cfg(feature = "agents")]
+mod mcp_cmd;
+#[cfg(feature = "agents")]
 mod mcp_setup;
+#[cfg(feature = "agents")]
+mod serve_cmd;
 #[cfg(feature = "agents")]
 mod setup_prompt;
 // Host-local workspace trust policy (Phase 1 foundation); CLI surface for
@@ -301,6 +307,72 @@ fn main() -> io::Result<()> {
                 }
                 DoCommands::Agent { command: AgentCommands::Setup { user } } => {
                     cmd_config_setup_agent(user)
+                }
+                DoCommands::Agent {
+                    command:
+                        AgentCommands::Serve {
+                            stdio,
+                            listen,
+                            token_file,
+                            static_dir,
+                            allow_remote,
+                            allow_roots,
+                            permission_mode,
+                            audit_log,
+                            session_log_dir,
+                        },
+                } => {
+                    #[cfg(feature = "agents")]
+                    {
+                        serve_cmd::run(serve_cmd::ServeOptions {
+                            stdio,
+                            listen,
+                            token_file,
+                            static_dir,
+                            allow_remote,
+                            allow_roots,
+                            permission_mode,
+                            audit_log,
+                            session_log_dir,
+                        })
+                        .map_err(|error| {
+                            io::Error::new(error.kind(), format!("agent serve: {error}"))
+                        })?;
+                    }
+                    #[cfg(not(feature = "agents"))]
+                    {
+                        let _ = (
+                            stdio,
+                            listen,
+                            token_file,
+                            static_dir,
+                            allow_remote,
+                            allow_roots,
+                            permission_mode,
+                            audit_log,
+                            session_log_dir,
+                        );
+                        eprintln!("ee: agents feature is disabled in this build");
+                        std::process::exit(1);
+                    }
+                }
+                DoCommands::Agent {
+                    command:
+                        AgentCommands::Mcp { allow_roots, permission_mode, audit_log, session_log_dir },
+                } => {
+                    #[cfg(feature = "agents")]
+                    {
+                        mcp_cmd::run(allow_roots, permission_mode, audit_log, session_log_dir)
+                            .map_err(|error| {
+                                io::Error::new(error.kind(), format!("agent mcp: {error}"))
+                            })?;
+                    }
+                    #[cfg(not(feature = "agents"))]
+                    {
+                        let _ = (allow_roots, permission_mode, audit_log, session_log_dir);
+                        eprintln!("ee: agents feature is disabled in this build");
+                        std::process::exit(1);
+                    }
                 }
                 DoCommands::Trust { command } => match command {
                     WorkspaceTrustCommands::Grant => workspace_trust::cmd_trust_grant()?,

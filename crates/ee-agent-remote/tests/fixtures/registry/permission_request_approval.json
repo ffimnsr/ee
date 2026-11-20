@@ -1,0 +1,1 @@
+{"requestId":7,"sessionId":"sess-1","summary":"bash: cargo test","toolCall":{"toolCallId":"call-1","title":"Run tests","kind":"execute","status":"pending"},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject","kind":"reject_once"}],"expiresInMs":300000}
