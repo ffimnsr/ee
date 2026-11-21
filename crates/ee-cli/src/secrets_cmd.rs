@@ -1,4 +1,7 @@
 //! `ee do secrets` command.
+use std::io;
+use std::io::IsTerminal as _;
+
 use super::args::SecretsCommands;
 use super::*;
 

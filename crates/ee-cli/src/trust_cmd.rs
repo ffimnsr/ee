@@ -1,4 +1,7 @@
 //! `ee do agent trust` grant/revoke commands.
+use std::io;
+use std::time::{Duration, SystemTime};
+
 use super::args::{ALL_AGENT_TRUST_PROFILES, AgentTrustProfile};
 use super::*;
 

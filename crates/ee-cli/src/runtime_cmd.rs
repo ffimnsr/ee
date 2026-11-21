@@ -1,10 +1,17 @@
 //! `ee do runtime` report/fetch/build commands.
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
+use xi_core_lib::runtime_loader::{
+    RuntimeGrammarFailure, RuntimeGrammarHealth, RuntimeGrammarSource, RuntimeHealthReport,
+    RuntimeLanguageDetectionSource, RuntimeOperationError, RuntimeOperationErrorKind,
+    RuntimeQueryHealth, with_default_runtime_loader_mut,
+};
+
 use super::language_cmd::query_kind_label;
 use super::*;
 
 use std::io::IsTerminal;
-
-use xi_core_lib::runtime_loader::RuntimeGrammarFailure;
 
 pub(crate) fn read_runtime_probe(path: &Path) -> io::Result<(Option<String>, Option<String>)> {
     let file = std::fs::File::open(path)?;

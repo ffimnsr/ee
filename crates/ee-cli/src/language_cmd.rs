@@ -1,4 +1,10 @@
 //! Language-list diagnostics helpers plus `ee do language list`.
+use std::path::Path;
+
+use xi_core_lib::runtime_loader::{
+    RuntimeGrammarHealth, RuntimeQueryHealth, RuntimeQueryKind, with_default_runtime_loader_mut,
+};
+
 use super::runtime_cmd::{effective_runtime_language_rows, render_runtime_languages_report};
 use super::*;
 

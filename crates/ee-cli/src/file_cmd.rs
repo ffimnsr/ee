@@ -1,4 +1,11 @@
 //! `ee do file` line-check/head/tail commands.
+use std::io;
+use std::io::Write as _;
+use std::path::Path;
+
+use xi_core_lib::text_store::{ByteRange, TextChunkResult, TextStore};
+use xi_core_lib::vlf::store::VlfStore;
+
 use super::*;
 
 pub(crate) fn count_file_line_feeds(path: &Path) -> io::Result<u64> {

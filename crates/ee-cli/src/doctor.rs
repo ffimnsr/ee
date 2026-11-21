@@ -1,4 +1,7 @@
 //! `ee do doctor` command.
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
 use super::language_cmd::print_language_query_diagnostics;
 use super::*;
 

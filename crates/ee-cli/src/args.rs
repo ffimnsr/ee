@@ -1,5 +1,11 @@
 //! CLI argument definitions (clap surface).
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+
 use super::*;
+use crate::LONG_VERSION;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 

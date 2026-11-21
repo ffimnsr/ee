@@ -1,4 +1,12 @@
 //! `ee do validate`, `schema`, and shell-completion commands.
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use clap::CommandFactory;
+use clap_complete::{Shell, generate};
+
 use super::args::Cli;
 use super::*;
 
