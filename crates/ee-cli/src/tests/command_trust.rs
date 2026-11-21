@@ -764,6 +764,10 @@ mod e2e {
         wait_until(&mut app, "trusted terminal spawned", |app| {
             app.agents.terminals.tracked_count() == 1
         });
+        // No cwd in the request: the terminal must run in the app workspace,
+        // not in the process-global cwd (which parallel tests can move/remove).
+        let workspace = std::fs::canonicalize(&app.working_dir).expect("workspace canonical");
+        assert_eq!(app.agents.terminals.tracked_cwd(), Some(workspace));
         assert!(!app.agents.usage_ledger.is_empty());
         let _ = proxy_recv(&mut stream);
 

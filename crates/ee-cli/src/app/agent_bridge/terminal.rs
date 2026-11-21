@@ -767,6 +767,18 @@ impl AgentTerminals {
     pub(crate) fn tracked_count(&self) -> usize {
         self.inner.lock().expect("terminals poisoned").active.len()
     }
+
+    /// Working directory of the first tracked terminal (tests only).
+    #[cfg(test)]
+    pub(crate) fn tracked_cwd(&self) -> Option<PathBuf> {
+        self.inner
+            .lock()
+            .expect("terminals poisoned")
+            .active
+            .values()
+            .next()
+            .and_then(|track| track.cwd.clone())
+    }
 }
 
 fn tail_at_char_boundary(text: &str, max_bytes: usize) -> String {

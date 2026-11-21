@@ -713,8 +713,18 @@ impl App {
         rule_id: Option<String>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
-        let validation = self.validation_run_for_terminal(session_id, request);
-        let result = self.agents.terminals.spawn(request, agent_id);
+        // A request without a cwd runs in the active workspace, matching the
+        // safeguard inspection above. Inheriting the process-global cwd is not
+        // safe: tests and embedded hosts can change or remove it concurrently.
+        let mut request = request.clone();
+        if request.cwd.is_none() {
+            request.cwd = Some(
+                std::fs::canonicalize(&self.working_dir)
+                    .unwrap_or_else(|_| self.working_dir.clone()),
+            );
+        }
+        let validation = self.validation_run_for_terminal(session_id, &request);
+        let result = self.agents.terminals.spawn(&request, agent_id);
         match (&result, validation) {
             (Ok(response), Some(validation)) => {
                 if let Err(error) = self.agents.terminals.register_validation_run(
@@ -730,7 +740,7 @@ impl App {
                 }
             }
             (Err(_), Some(validation)) => {
-                self.record_unavailable_validation(session_id, request, validation);
+                self.record_unavailable_validation(session_id, &request, validation);
             }
             _ => {}
         }
