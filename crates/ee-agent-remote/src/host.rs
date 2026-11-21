@@ -104,10 +104,6 @@ impl RemoteSession {
     pub(crate) fn active_turn(&self) -> Option<u64> {
         *self.active_turn.lock().expect("remote turn poisoned")
     }
-
-    fn fallback_turn_id(&self) -> u64 {
-        self.turn_seq.fetch_add(1, Ordering::AcqRel) + 1
-    }
 }
 
 pub(crate) struct RemoteHostInner {
@@ -561,7 +557,13 @@ impl RemoteHost {
         let Ok(session) = self.session(&session_id.0) else {
             return;
         };
-        let turn_id = session.take_active_turn().unwrap_or_else(|| session.fallback_turn_id());
+        // Every terminal agent event belongs to a turn reserved by
+        // `turn/start`. A second terminal event (for example completion racing
+        // an interrupt) finds no reservation and must not emit another
+        // `turn/completed`; `turn/start` will reserve the next id.
+        let Some(turn_id) = session.take_active_turn() else {
+            return;
+        };
         let key = session_id.0.to_string();
         let entry = entry_for_turn(
             &key,
