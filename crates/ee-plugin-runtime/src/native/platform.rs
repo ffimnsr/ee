@@ -67,12 +67,15 @@ pub fn apply_linux_sandbox(
 #[cfg(target_os = "macos")]
 pub fn read_process_sample(pid: u32) -> Option<super::sandbox::ResourceSample> {
     let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
-    let mut info_ptr: libc::rusage_info_t = (&mut info as *mut libc::rusage_info_v4).cast();
-    // SAFETY: `info` is a live `rusage_info_v4` value and `info_ptr` points at
-    // it. `proc_pid_rusage` writes only within the buffer described by the
-    // requested flavor and does not retain the pointer.
-    let status =
-        unsafe { libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut info_ptr) };
+    // Apple's prototype takes `rusage_info_t *`, but the kernel writes the
+    // flavor-sized struct at the pointer value (the canonical call is
+    // `proc_pid_rusage(pid, flavor, (rusage_info_t *)&info)`), not through a
+    // `void **` indirection.
+    let buffer = (&mut info as *mut libc::rusage_info_v4).cast::<libc::rusage_info_t>();
+    // SAFETY: `buffer` points at the live `info` value and the flavor matches
+    // its type, so the kernel writes exactly `size_of::<rusage_info_v4>()`
+    // bytes into it and does not retain the pointer.
+    let status = unsafe { libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, buffer) };
     if status != 0 {
         return None;
     }
@@ -166,4 +169,15 @@ pub fn apply_windows_job_limits(
     _limits: &Limits,
 ) -> Result<(), PluginError> {
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_sample_reports_resident_memory() {
+        let sample = read_process_sample(std::process::id()).expect("sample current process");
+        assert!(sample.rss_bytes > 0, "resident size must be populated");
+    }
 }
