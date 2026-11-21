@@ -29,12 +29,24 @@ members = [
 default-members = ["crates/ee-cli"]
 exclude = ["fuzz"]
 
+# Default edit loop: no optimization, no debug info, incremental on. On
+# `ee-agent-opencode` with `CARGO_BUILD_JOBS=2`, cold builds dropped from 830 s
+# (`opt-level = 2` + `line-tables-only`) to 214 s; dropping only the line tables
+# was worth ~20% and ~5x smaller binaries. The `test` profile inherits this via
+# `dev`.
 [profile.dev]
+opt-level = 0
+lto = false
+debug = 0
+incremental = true
+
+# Manual debugging only (`cargo build --profile debug`). Keeps the previous dev
+# defaults: optimized code plus line tables, so gdb/lldb/rr can resolve
+# `file:line` while staying far below full DWARF. For a one-off line-table run
+# without switching profiles, set `CARGO_PROFILE_DEV_DEBUG=line-tables-only`.
+[profile.debug]
+inherits = "dev"
 opt-level = 2
-# Debug info dominates link time and target size: the `ee-cli` test binary is
-# ~1.41 GB, of which ~1.27 GB is `.debug_*` sections against 62 MB `.text`.
-# `line-tables-only` keeps `file:line` in panic backtraces at a fraction of the
-# cost. The `test` profile inherits this via `dev`.
 debug = "line-tables-only"
 
 # Bench binaries are the largest link inputs in the tree (~1.2 GB each) and are
