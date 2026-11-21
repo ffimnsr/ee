@@ -59,6 +59,30 @@ pub fn apply_linux_sandbox(
     Ok(())
 }
 
+/// Sample process RSS and CPU on macOS via `proc_pid_rusage`.
+///
+/// `ri_resident_size` is resident bytes; user and system times are in
+/// nanoseconds. Returns `None` when the kernel cannot describe the process,
+/// for example after it has already exited.
+#[cfg(target_os = "macos")]
+pub fn read_process_sample(pid: u32) -> Option<super::sandbox::ResourceSample> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let mut info_ptr: libc::rusage_info_t = (&mut info as *mut libc::rusage_info_v4).cast();
+    // SAFETY: `info` is a live `rusage_info_v4` value and `info_ptr` points at
+    // it. `proc_pid_rusage` writes only within the buffer described by the
+    // requested flavor and does not retain the pointer.
+    let status =
+        unsafe { libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut info_ptr) };
+    if status != 0 {
+        return None;
+    }
+    let cpu_nanos = info.ri_user_time.saturating_add(info.ri_system_time);
+    Some(super::sandbox::ResourceSample {
+        rss_bytes: info.ri_resident_size,
+        cpu_seconds: cpu_nanos as f64 / 1_000_000_000.0,
+    })
+}
+
 /// Non-Linux best effort: the manifest limits are enforced by the resource
 /// monitor, but no syscall filter is installed.
 #[cfg(not(target_os = "linux"))]

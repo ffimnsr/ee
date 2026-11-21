@@ -4,9 +4,10 @@
 //! allowlist without spawning a sandboxed process. The unsafe `pre_exec` and
 //! Windows Job Object application lives in [`super::platform`].
 //!
-//! Resource sampling is opportunistic: the client samples `/proc` on each pump
-//! or timeout tick instead of running a monitor thread. That keeps termination
-//! ordering deterministic and avoids a thread that can outlive the child.
+//! Resource sampling is opportunistic: the client samples the child on each
+//! pump or timeout tick instead of running a monitor thread. That keeps
+//! termination ordering deterministic and avoids a thread that can outlive the
+//! child. Linux reads `/proc`; macOS reads `proc_pid_rusage`.
 
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 /// `USER_HZ` is 100 on every mainstream Linux configuration. Deriving it would
 /// require `sysconf`, which this crate keeps out of safe code; the monitor is
 /// advisory and health reports carry the raw breach, not the exact tick rate.
+#[cfg(target_os = "linux")]
 const USER_HZ: f64 = 100.0;
 
 /// Sandbox enforcement switch.
@@ -96,7 +98,7 @@ impl ResourceMonitor {
     }
 
     /// Sample the process and return a breach, if any.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn poll_process(&mut self, pid: u32, now: Instant) -> Option<TerminationReason> {
         if !self.sample_due(now) {
             return None;
@@ -104,8 +106,8 @@ impl ResourceMonitor {
         read_process_sample(pid).and_then(|sample| self.observe(sample))
     }
 
-    /// Best-effort platforms without `/proc` report no breach.
-    #[cfg(not(target_os = "linux"))]
+    /// Best-effort platforms without a process sampling API report no breach.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn poll_process(&mut self, _pid: u32, now: Instant) -> Option<TerminationReason> {
         let _ = self.sample_due(now);
         None
@@ -120,6 +122,12 @@ pub fn read_process_sample(pid: u32) -> Option<ResourceSample> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let cpu_seconds = parse_cpu_seconds(&stat)?;
     Some(ResourceSample { rss_bytes, cpu_seconds })
+}
+
+/// Read a sample through the macOS process accounting API.
+#[cfg(target_os = "macos")]
+pub fn read_process_sample(pid: u32) -> Option<ResourceSample> {
+    super::platform::read_process_sample(pid)
 }
 
 #[cfg(target_os = "linux")]

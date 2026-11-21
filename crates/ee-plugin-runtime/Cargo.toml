@@ -31,8 +31,10 @@ sha2.workspace = true
 toml.workspace = true
 wasmtime = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 seccompiler.workspace = true
 
 [target.'cfg(windows)'.dependencies]
