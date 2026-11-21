@@ -33,23 +33,34 @@ tasks:
     description: Check that documentation builds without errors.
   install:
     commands:
-      - cargo install --root "$HOME/.local" --path crates/ee-cli --bin ee --all-features --force
-      - cargo install --root "$HOME/.local" --path crates/ee-agent-openrouter --bin ee-agent-openrouter --force
+      # One release build with one feature graph, then copy the binaries. This
+      # avoids three separate cargo-install compilations. Default ee-cli
+      # features keep agents on and vendored off, so system libgit2 and SQLite
+      # are linked through pkg-config like the local build loop.
+      - name: Build ee and agent binaries
+        command: cargo build --release --locked --offline -p ee-cli -p ee-agent-openrouter -p ee-agent-opencode --bin ee --bin ee-agent-openrouter --bin ee-agent-opencode
+      - name: Ensure install directory
+        command: install -d -m 0755 "$HOME/.local/bin"
+      - name: Install binaries
+        command: install -m 0755 target/release/ee target/release/ee-agent-openrouter target/release/ee-agent-opencode "$HOME/.local/bin/"
       - name: Install bundled tree-sitter runtime
         command: ./scripts/install-tree-sitter-runtime.sh --force
       - name: Install bundled plugins
         command: ./scripts/install-plugins.sh --force
-    description: Install ee-editor and OpenRouter ACP agent at ~/.local/bin using cargo, replacing previous installs.
+    description: Build ee-editor plus the OpenRouter and OpenCode ACP agents once in release with locked offline resolution, then copy them to ~/.local/bin. The editor links system libgit2 and SQLite; bench, test fixtures, and unused binaries are excluded.
   uninstall:
     commands:
       - pkill -TERM -f '[x]i-lsp-plugin' || true
       - pkill -TERM -x ee || true
       - pkill -TERM -x ee-agent-openrouter || true
+      - pkill -TERM -x ee-agent-opencode || true
       - cargo uninstall ee-cli 2>/dev/null || true
       - cargo uninstall ee-agent-openrouter 2>/dev/null || true
+      - cargo uninstall ee-agent-opencode 2>/dev/null || true
       - cargo uninstall --root "$HOME/.local" ee-cli 2>/dev/null || true
       - cargo uninstall --root "$HOME/.local" ee-agent-openrouter 2>/dev/null || true
-      - rm -f "$HOME/.local/bin/ee" "$HOME/.local/bin/ee-agent-openrouter" "$HOME/.cargo/bin/ee" "$HOME/.cargo/bin/ee-agent-openrouter"
+      - cargo uninstall --root "$HOME/.local" ee-agent-opencode 2>/dev/null || true
+      - rm -f "$HOME/.local/bin/ee" "$HOME/.local/bin/ee-agent-openrouter" "$HOME/.local/bin/ee-agent-opencode" "$HOME/.cargo/bin/ee" "$HOME/.cargo/bin/ee-agent-openrouter" "$HOME/.cargo/bin/ee-agent-opencode"
       - rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ee"
       - rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ee"
       - rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ee"

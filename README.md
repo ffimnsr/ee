@@ -641,7 +641,7 @@ This repository provides `tasks.yaml` (`mk`) for common development flows:
 - `test-stable`: run tests with the stable Rust toolchain
 - `docs-check`: build docs with rustdoc `-D warnings` (CI docs gate)
 - `ci`: full gate (format, lint, docs, tests) and record the test pass
-- `install`: install `ee` locally from `crates/ee-cli`
+- `install`: install `ee` plus the OpenRouter and OpenCode ACP agents locally
 - `install-githooks` / `uninstall-githooks`: manage the git hooks
 
 ## Design and architecture
