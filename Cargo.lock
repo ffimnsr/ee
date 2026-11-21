@@ -1430,7 +1430,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ee-agent-acp-server"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-agent-acp-server",
  "ee-agent-protocol",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-host"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-memory"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "chrono",
  "dirs",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-opencode"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "clap",
  "dirs",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-openrouter"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "clap",
  "dirs",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-orchestrator"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "base64 0.22.1",
  "ee-agent-acp-server",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-protocol"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "agent-client-protocol",
  "serde",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-remote"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "chrono",
  "ee-agent-host",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "ee-chat-completions"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-agent-acp-server",
  "ee-agent-orchestrator",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "ee-cli"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "ee-mcp"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "http",
  "reqwest 0.13.5",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "ee-plugin-api"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "futures",
  "schemars 1.2.2",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "ee-plugin-derive"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-plugin-api",
  "proc-macro2",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "ee-plugin-example-wasm"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-plugin-sdk",
  "serde_json",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "ee-plugin-runtime"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-plugin-api",
  "jsonschema",
@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "ee-plugin-sdk"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "ee-plugin-api",
  "ee-plugin-derive",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "ee-ts-test-grammars"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "ee-web-frontend"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "js-sys",
  "serde_json",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "chrono",
  "dirs",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core-lib"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "bytecount",
  "cc",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-lsp-lib"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "chrono",
  "ee-plugin-api",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rope"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "bytecount",
  "criterion",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rpc"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "jsonrpc-lite",
  "log",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-unicode"
-version = "0.11.13"
+version = "0.11.14"
 dependencies = [
  "criterion",
 ]

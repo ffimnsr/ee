@@ -42,6 +42,103 @@
 - add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
+## 0.11.14 - 2026-11-21
+
+### Features
+
+- auto-apply trusted-workspace writes inside the trust root (`ca0ded3`)
+- skip trusted-write auto-approval in read-only agent modes (`0b6daa6`)
+- improve contract on agent mode (`107685b`)
+- implement limits on agents (`767b1ff`)
+- update for stable prompt and runtime (`28b848f`)
+- add tool guidance (`7e72e2e`)
+- add workspace prompt context and mode policy (`eca7a58`)
+- add MCP prompt plane and DSH-shaped compaction checkpoint (`ad658fc`)
+- unify global instructions, runtime deltas, and compaction funnel (`33401b9`)
+- add append-only session log, stop gate, and checkpoint branch (`029ba67`)
+- add guidance on all tests (`714620e`)
+- add durable logs on agents (`e5fd190`)
+- add prompt cache breakpoints, mid-turn instructions, multimodal offload (`d8fa76e`)
+- add worktree isolation, background terminals, timeout tiers (`6f57f8b`)
+- add skill catalog, resumable subagents, approval classifier (`95fc0ce`)
+- update openrouter and opencode agent (`da93d41`)
+- opencode/openrouter calling parity gaps 4-5 (`05679b0`)
+- match opencode prompt-cache and tool-control calling behavior (`111158c`)
+- complete opencode/openrouter calling parity gaps 8-10 (`b4e226d`)
+- add sampling knobs, deep-merged provider options, phase timeouts (`a403786`)
+- add fix for bounded calls (`da4f186`)
+- add loop summary, streaming tool deltas, hosted tool continuation (`057bc1c`)
+- add provider compaction, agent config files, and usage probe (`fcc0715`)
+- land opencode/openrouter prompt-payload and catalog parity gaps (`2e33ab0`)
+- complete opencode/openrouter calling-parity part 6 (`8be1fb6`)
+- wire session affinity, continuation, and capability gates (`c8868ba`)
+- complete Part 8 parity improvements (`712cdc3`)
+- fork/branch from specific assistant response + agent_fork_selected_response keymap action (`effb9b2`)
+- add deterministic record/replay harness for provider transports (`f573e45`)
+- update the agent revert (`e66c1fb`)
+- add compact tool for agents to execute (`24fc8ad`)
+- add user-defined agents, commands, and prompt attachments (`f5fb79d`)
+- add file-backed memory entries under .agents/memories (`961719f`)
+- add memory entry create, update, and delete tools (`8c96613`)
+- add external read approval, session transfer, usage stats, and references (`f77d09f`)
+- remote agent (`13a7b27`)
+
+
+### Fixes
+
+- gaps on agents have been fixed (`9e93d47`)
+- complete harness gaps and enable agents by default (`6c155bb`)
+- complete approval classifier audit trail and ISSUES ticks (`3f51793`)
+- compact on overflow and make bounded tool output observable (`8653757`)
+- close part 7 slice r3 correctness findings (`02e1493`)
+- gate hosted tool replay on the producing route (`f3b71a8`)
+- audit and close the part 7 reported findings (`1c9b999`)
+- update failing tests (`4caa304`)
+- config schema drift (`c6bde31`)
+- isolate agent permission state and route /model through advertised config (`2b54a15`)
+- canonicalize paths on macOS and repair doc links (`974e579`)
+- dedupe terminal turn events and rename ee-cli snapshots (`2e86708`)
+- run trusted agent terminals in the app workspace (`1477615`)
+- stop mk install from re-cloning every grammar (`09f1fce`)
+- enforce resource limits on macOS (`8999e41`)
+- pass rusage buffer directly to proc_pid_rusage (`013cf49`)
+- convert mach ticks to seconds for macOS CPU limits (`2efca4d`)
+- keep final response summary out of chat transcript (`0986c9f`)
+- clear inherited git env for worktree commands (`b685a3b`)
+
+
+### Documentation
+
+- parity to dsh (`9c7e30b`)
+- add wiki changes (`1b65a77`)
+- update issues for parity gaps (`e047f91`)
+- update with divergence audit (`431bb08`)
+- add new findings for disparity (`ce7c8f8`)
+- add implementation for remote connection (`455bb2f`)
+
+
+### Maintenance
+
+- align agent crate names with ee-agent-* convention (`a76380f`)
+- split oversized provider and orchestrator files (`d7f6f7a`)
+- split fast dev profile from manual debug profile (`88d1625`)
+- compile ee-cli editor code once (`de668aa`)
+- link system libgit2/sqlite locally, vendor in CI/release (`9927fc5`)
+- increase job runner (`bba3827`)
+- drop aws-lc from the MCP HTTP client (`0dab6e5`)
+
+
+### Other Changes
+
+- update workflow for release (`80b95a7`)
+- update scripts (`a41c8dc`)
+- update hooks for git (`c7851bf`)
+- sync the mk runner and ci for test (`c8296cd`)
+- update vault with agents (`4e824cb`)
+- update task builder (`e60b316`)
+- update task runner (`869f852`)
+
+
 ## 0.11.13 - 2026-11-21
 
 ### Features
