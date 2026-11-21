@@ -37,17 +37,17 @@ tasks:
       # avoids three separate cargo-install compilations. Default ee-cli
       # features keep agents on and vendored off, so system libgit2 and SQLite
       # are linked through pkg-config like the local build loop.
-      - name: Build ee and agent binaries
-        command: cargo build --release --locked --offline -p ee-cli -p ee-agent-openrouter -p ee-agent-opencode --bin ee --bin ee-agent-openrouter --bin ee-agent-opencode
+      - name: Build ee, agent, and LSP plugin binaries
+        command: cargo build --release --locked --offline -p ee-cli -p ee-agent-openrouter -p ee-agent-opencode -p ee-xi-lsp-lib --bin ee --bin ee-agent-openrouter --bin ee-agent-opencode --bin xi-lsp-plugin
       - name: Ensure install directory
         command: install -d -m 0755 "$HOME/.local/bin"
       - name: Install binaries
         command: install -m 0755 target/release/ee target/release/ee-agent-openrouter target/release/ee-agent-opencode "$HOME/.local/bin/"
       - name: Install bundled tree-sitter runtime
-        command: ./scripts/install-tree-sitter-runtime.sh --force
+        command: ./scripts/install-tree-sitter-runtime.sh --force --ee-bin target/release/ee
       - name: Install bundled plugins
-        command: ./scripts/install-plugins.sh --force
-    description: Build ee-editor plus the OpenRouter and OpenCode ACP agents once in release with locked offline resolution, then copy them to ~/.local/bin. The editor links system libgit2 and SQLite; bench, test fixtures, and unused binaries are excluded.
+        command: ./scripts/install-plugins.sh --force --binary-path target/release/xi-lsp-plugin
+    description: Build ee-editor, the OpenRouter and OpenCode ACP agents, and the LSP plugin once in release with locked offline resolution, then copy the user-facing binaries to ~/.local/bin and install the plugin/runtime from those prebuilt artifacts. The editor links system libgit2 and SQLite; bench, test fixtures, and unused binaries are excluded.
   uninstall:
     commands:
       - pkill -TERM -f '[x]i-lsp-plugin' || true

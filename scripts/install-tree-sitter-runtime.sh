@@ -15,6 +15,8 @@ Options:
   --runtime-dir DIR  Directory that will receive installed runtime assets.
   --force            Replace existing staged sources and runtime outputs.
   --skip-load        Skip host-side dynamic library load validation after compile.
+  --release          Run the ee helper with the release profile.
+  --ee-bin PATH      Use an existing ee binary instead of `cargo run`.
   -h, --help         Show this help.
 
 Examples:
@@ -32,6 +34,8 @@ main() {
   local runtime_dir="$data_home/ee"
   local force=0
   local skip_load=0
+  local release=0
+  local ee_bin=""
   local command=()
 
   while (($# > 0)); do
@@ -51,6 +55,14 @@ main() {
       --skip-load)
         skip_load=1
         shift
+        ;;
+      --release)
+        release=1
+        shift
+        ;;
+      --ee-bin)
+        ee_bin="$2"
+        shift 2
         ;;
       -h|--help)
         usage
@@ -78,6 +90,12 @@ main() {
   fi
   if (( skip_load )); then
     build_cmd+=(--skip-load)
+  fi
+  if (( release )); then
+    build_cmd+=(--release)
+  fi
+  if [[ -n "$ee_bin" ]]; then
+    build_cmd+=(--ee-bin "$ee_bin")
   fi
 
   "${build_cmd[@]}"

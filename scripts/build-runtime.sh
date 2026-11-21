@@ -14,6 +14,8 @@ Options:
   --output-root DIR  Directory that will receive grammars/ and queries/.
   --force            Replace existing staged sources and grammar outputs.
   --skip-load        Skip host-side dynamic library load validation after compile.
+  --release          Run the ee helper with the release profile.
+  --ee-bin PATH      Use an existing ee binary instead of `cargo run`.
   -h, --help         Show this help.
 EOF
 }
@@ -23,6 +25,8 @@ main() {
   local output_root="target/runtime-package"
   local force=0
   local skip_load=0
+  local release=0
+  local ee_bin=""
 
   while (($# > 0)); do
     case "$1" in
@@ -42,6 +46,14 @@ main() {
         skip_load=1
         shift
         ;;
+      --release)
+        release=1
+        shift
+        ;;
+      --ee-bin)
+        ee_bin="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -53,15 +65,24 @@ main() {
     esac
   done
 
+  local ee_runner=()
+  if [[ -n "$ee_bin" ]]; then
+    ee_runner=("$ee_bin")
+  elif (( release )); then
+    ee_runner=(cargo run --release --locked -p ee-cli --)
+  else
+    ee_runner=(cargo run --locked -p ee-cli --)
+  fi
+
   local runtime_fetch_cmd=(
-    cargo run --locked -p ee-cli -- do runtime fetch --all --source-root "$source_root"
+    "${ee_runner[@]}" do runtime fetch --all --source-root "$source_root"
   )
   if (( force )); then
     runtime_fetch_cmd+=(--force)
   fi
 
   local runtime_build_cmd=(
-    cargo run --locked -p ee-cli -- do runtime build --all --source-root "$source_root" --output-root "$output_root"
+    "${ee_runner[@]}" do runtime build --all --source-root "$source_root" --output-root "$output_root"
   )
   if (( force )); then
     runtime_build_cmd+=(--force)

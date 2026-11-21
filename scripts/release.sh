@@ -499,7 +499,7 @@ main() {
   # lockfile stays authoritative everywhere else (CI, release workflow,
   # pre-commit hook), so every build gate below runs with --locked.
   cargo update --workspace
-  bash scripts/build-runtime.sh --force --source-root target/release-runtime-sources --output-root target/release-runtime
+  bash scripts/build-runtime.sh --release --force --source-root target/release-runtime-sources --output-root target/release-runtime
 
   cargo check --workspace --all-targets --quiet --locked
 

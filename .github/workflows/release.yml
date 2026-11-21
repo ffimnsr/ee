@@ -226,12 +226,14 @@ jobs:
               --force \
               --source-root target/runtime-sources \
               --output-root target/runtime-package \
+              --ee-bin "target/${{ matrix.target }}/release/ee" \
               --skip-load
           else
             bash scripts/build-runtime.sh \
               --force \
               --source-root target/runtime-sources \
-              --output-root target/runtime-package
+              --output-root target/runtime-package \
+              --ee-bin "target/${{ matrix.target }}/release/ee"
           fi
 
       - name: Prepare package metadata

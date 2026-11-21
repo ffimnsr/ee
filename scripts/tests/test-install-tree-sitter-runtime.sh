@@ -21,6 +21,8 @@ source_root=""
 output_root=""
 force=0
 skip_load=0
+release=0
+ee_bin=""
 
 while (($# > 0)); do
   case "$1" in
@@ -40,6 +42,14 @@ while (($# > 0)); do
       skip_load=1
       shift
       ;;
+    --release)
+      release=1
+      shift
+      ;;
+    --ee-bin)
+      ee_bin="$2"
+      shift 2
+      ;;
     *)
       printf 'unexpected arg: %s\n' "$1" >&2
       exit 1
@@ -48,7 +58,8 @@ while (($# > 0)); do
 done
 
 mkdir -p "$output_root"
-printf '%s\n%s\n%s\n%s\n' "$source_root" "$output_root" "$force" "$skip_load" >"$output_root/build-args.txt"
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+  "$source_root" "$output_root" "$force" "$skip_load" "$release" "$ee_bin" >"$output_root/build-args.txt"
 EOF
 chmod +x "$fake_build_script"
 
@@ -81,5 +92,15 @@ default_output="$(
 mapfile -t default_build_args <"$default_runtime_dir/build-args.txt"
 [[ "${default_build_args[1]}" == "$default_runtime_dir" ]]
 [[ "$default_output" == *"tree-sitter runtime installed at $default_runtime_dir"* ]]
+
+release_output="$(
+  EE_TREE_SITTER_BUILD_SCRIPT="$fake_build_script" \
+    bash "$script_path" --source-root "$source_root" --runtime-dir "$runtime_dir" \
+      --release --ee-bin /tmp/fake-ee
+)"
+mapfile -t release_build_args <"$runtime_dir/build-args.txt"
+[[ "${release_build_args[4]}" == "1" ]]
+[[ "${release_build_args[5]}" == "/tmp/fake-ee" ]]
+[[ "$release_output" == *"tree-sitter runtime installed at $runtime_dir"* ]]
 
 printf 'install tree-sitter runtime script passed\n'
