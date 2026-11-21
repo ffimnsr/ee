@@ -1,21 +1,14 @@
 //! Git-worktree isolation tests for write subagents.
 
 use std::path::Path;
-use std::process::Command;
 
 use super::super::*;
 use super::manager_harness;
 use crate::test_support::FakeModel;
-use crate::workspace_isolation::WorkspaceIsolationConfig;
+use crate::workspace_isolation::{WorkspaceIsolationConfig, git_command};
 
 fn run_git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .status()
-        .expect("git runs");
+    let status = git_command(root, args).status().expect("git runs");
     assert!(status.success(), "git {args:?} failed");
 }
 

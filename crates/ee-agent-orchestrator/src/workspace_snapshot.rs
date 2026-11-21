@@ -844,7 +844,7 @@ fn collect_files(
 }
 
 fn git_files(root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
-    let output = std::process::Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
+    let output = crate::workspace_isolation::git_command(root, args).output().ok()?;
     if !output.status.success() {
         return None;
     }

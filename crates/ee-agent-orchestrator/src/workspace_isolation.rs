@@ -394,19 +394,37 @@ pub(crate) fn sanitize_worktree_name(name: &str) -> String {
         .to_string()
 }
 
+/// Repository-identity variables a git hook or wrapper may export. Commands
+/// here always address an explicit `-C <root>`, so an inherited value would
+/// redirect discovery elsewhere. Git runs `pre-commit` hooks with a relative
+/// `GIT_INDEX_FILE=.git/index`, which makes `git worktree add` fail inside the
+/// new linked worktree (`fatal: .git/index: index file open failed: Not a
+/// directory`) when tests run from a commit hook.
+const INHERITED_GIT_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// Builds a git command pinned to `root` with inherited repository identity
+/// cleared; callers add the subcommand arguments.
+pub(crate) fn git_command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(args).env("GIT_OPTIONAL_LOCKS", "0");
+    for name in INHERITED_GIT_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, OrchestratorError> {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .map_err(|error| {
-            OrchestratorError::InvalidState(format!(
-                "failed to run git in {}: {error}",
-                root.display()
-            ))
-        })
+    git_command(root, args).output().map_err(|error| {
+        OrchestratorError::InvalidState(format!("failed to run git in {}: {error}", root.display()))
+    })
 }
 
 /// Normalizes a path for comparison without requiring it to exist.
@@ -467,14 +485,21 @@ mod tests {
     }
 
     fn run_git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .status()
-            .expect("git runs");
+        let status = git_command(root, args).status().expect("git runs");
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn git_command_clears_inherited_repository_identity() {
+        let command = git_command(Path::new("."), &["status"]);
+        let removed: Vec<&std::ffi::OsStr> =
+            command.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
+        for name in INHERITED_GIT_ENV {
+            assert!(
+                removed.contains(&std::ffi::OsStr::new(name)),
+                "{name} must be cleared for explicit-root git commands"
+            );
+        }
     }
 
     #[test]

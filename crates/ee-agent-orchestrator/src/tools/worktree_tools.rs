@@ -237,7 +237,6 @@ pub(crate) fn worktree_tools(
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -246,16 +245,11 @@ mod tests {
 
     use super::*;
     use crate::tools::{TerminalWaitLimits, ToolCallContext};
+    use crate::workspace_isolation::git_command;
     use crate::workspace_scope::WorkspaceScope;
 
     fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .output()
-            .expect("git runs")
+        git_command(dir, args).output().expect("git runs")
     }
 
     fn repo() -> tempfile::TempDir {
