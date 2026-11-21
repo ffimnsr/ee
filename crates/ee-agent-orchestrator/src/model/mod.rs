@@ -12,9 +12,9 @@
 //! memory budget by dropping the oldest messages first, recording truncation
 //! metadata so later phases can surface it.
 //!
-//! Layout: [`message`] holds roles and content blocks, [`request`] and
-//! [`response`] the two wire shapes, [`transcript`] the conversation builder, and
-//! [`error`] the adapter failure type.
+//! Layout: `message` holds roles and content blocks, `request` and
+//! `response` the two wire shapes, `transcript` the conversation builder, and
+//! `error` the adapter failure type.
 
 use std::future::Future;
 use std::pin::Pin;

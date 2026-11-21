@@ -9,7 +9,7 @@
 //! "HTTPS only" is enforced on every redirect hop, not just on the configured
 //! URL: `reqwest::redirect::Policy::limited` follows any scheme, so an HTTPS
 //! source could redirect to `http://` and downgrade the fetch to cleartext.
-//! [`redirect_policy`] re-checks the scheme after each hop and stops the chain
+//! `redirect_policy` re-checks the scheme after each hop and stops the chain
 //! when a redirect is not HTTPS or the hop budget is exhausted.
 
 use std::time::Duration;

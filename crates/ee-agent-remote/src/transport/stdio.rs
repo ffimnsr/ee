@@ -3,7 +3,7 @@
 //! One connection owns one [`Subscription`](crate::events::Subscription);
 //! approvals, notifications, and responses share the same bounded outbound
 //! queue. Handshake, overload, and dispatch behavior live in
-//! [`super::handler::ConnectionHandler`].
+//! `super::handler::ConnectionHandler`.
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};

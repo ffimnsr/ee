@@ -4,7 +4,7 @@
 //! not on the turn's own session id. The reference agent groups a whole agent
 //! tree under one affinity and derives `promptCacheKey` from it. This module
 //! lowers the normalized
-//! [`SessionContext`](ee_agent_orchestrator::SessionContext) into headers and
+//! [`SessionContext`] into headers and
 //! keeps the naming dialect provider-owned:
 //!
 //! - [`SessionHeaderStyle::OpenCode`] copies `x-opencode-*` exactly, because

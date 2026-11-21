@@ -9,8 +9,8 @@
 //! operations are performed through the framework's `ClientBridge`;
 //! server-side tools implement [`ServerTool`].
 //!
-//! Layout: [`definition`] holds the wire types, [`registry`] the server-side
-//! tools and their lookup, and [`executor`] the end-to-end execution pipeline.
+//! Layout: `definition` holds the wire types, `registry` the server-side
+//! tools and their lookup, and `executor` the end-to-end execution pipeline.
 
 mod definition;
 mod executor;

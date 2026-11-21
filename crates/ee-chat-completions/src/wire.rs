@@ -4,7 +4,7 @@
 //! dialect, not of a provider: buffered responses, Server-Sent Events framing,
 //! streamed delta accumulation, usage extraction, and the mapping between the
 //! wire shape and the normalized orchestrator transcript. Request assembly and
-//! transcript conversion live in [`crate::request`] and are re-exported here.
+//! transcript conversion live in `crate::request` and are re-exported here.
 //!
 //! [`AssistantTurn`] and the normalization helpers
 //! ([`response_from_turn`], [`content_text`], [`tool_call_id_of`]) are shared by

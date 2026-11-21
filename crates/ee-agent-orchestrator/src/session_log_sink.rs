@@ -266,7 +266,7 @@ impl SessionLogSink for FileSessionLogSink {
     ///
     /// Message bodies are always referenced; retained tool-output overflow is
     /// not, so this is the session-end sweep. The directory is derived from
-    /// [`sanitize_component`] and each candidate name must be a content hash,
+    /// `sanitize_component` and each candidate name must be a content hash,
     /// so neither a crafted session id nor a planted file can escape the root.
     fn prune_bodies(&self, session_id: &str, keep: &[String]) -> Result<usize, OrchestratorError> {
         let directory = self.session_dir(session_id).join("bodies");

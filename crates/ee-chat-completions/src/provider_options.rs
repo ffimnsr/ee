@@ -7,8 +7,8 @@
 //! instead of accepting an opaque JSON blob: a typo fails at startup with the
 //! variable name, and a value that may carry user data is never logged.
 //!
-//! `Debug` redacts [`ProviderOptions::metadata`] and
-//! [`ProviderOptions::safety_identifier`], so a diagnostic can print the whole
+//! `Debug` redacts `ProviderOptions::metadata` and
+//! `ProviderOptions::safety_identifier`, so a diagnostic can print the whole
 //! option set without disclosing a user identifier. There is deliberately no
 //! `Display` implementation.
 

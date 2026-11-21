@@ -13,7 +13,7 @@ use crate::tasks::TaskNode;
 use crate::tool_dependencies::ToolDependency;
 use crate::workspace_scope::WorkspaceScope;
 
-/// Boxed future returned by [`ServerTool::execute`].
+/// Boxed future returned by `ServerTool::execute`.
 pub type ToolFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// Context supplied to every tool invocation.

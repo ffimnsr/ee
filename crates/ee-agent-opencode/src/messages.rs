@@ -11,7 +11,8 @@
 //!   turn, keeping tool-call identity;
 //! - tool definitions become `{ name, description, input_schema }`;
 //! - buffered `text` / `thinking` / `tool_use` blocks plus `stop_reason` and
-//!   reported usage decode into the normalized [`ModelResponse`], and the SSE
+//!   reported usage decode into the normalized
+//!   [`ModelResponse`](ee_agent_orchestrator::ModelResponse), and the SSE
 //!   lifecycle (`message_start`, `content_block_*`, `message_delta`,
 //!   `message_stop`, `error`) decodes in arrival order.
 //!
@@ -20,8 +21,8 @@
 //! original call id, and the model sees the observation in order. A request
 //! encoded here is never replayed through another dialect.
 //!
-//! Layout: [`body`] encodes requests, [`decode`] decodes buffered and streaming
-//! responses, and [`codec`] owns the round trips and retry boundaries.
+//! Layout: `body` encodes requests, `decode` decodes buffered and streaming
+//! responses, and `codec` owns the round trips and retry boundaries.
 
 mod body;
 mod codec;

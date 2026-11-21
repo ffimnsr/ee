@@ -7,8 +7,8 @@
 //! the OpenAI Responses and Anthropic Messages codecs build their own bodies on
 //! the same transport and retry boundary.
 //!
-//! Layout: [`sse`] frames server-sent events, [`endpoint`] owns the authorized
-//! exchange, [`client`] is the Chat Completions codec, [`retry`] is the shared
+//! Layout: `sse` frames server-sent events, `endpoint` owns the authorized
+//! exchange, `client` is the Chat Completions codec, `retry` is the shared
 //! retry boundary, and the record/replay backends let a test run the same codec
 //! against a recorded provider exchange instead of the network.
 

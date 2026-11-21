@@ -9,7 +9,7 @@ use crate::tools::ToolDefinition;
 
 use super::ModelMessage;
 
-/// Normalized request handed to [`ModelAdapter::complete`].
+/// Normalized request handed to `ModelAdapter::complete`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelRequest {
@@ -32,7 +32,7 @@ pub struct ModelRequest {
     pub model_id: Option<String>,
     /// Prompt size measured by the provider on the previous call, when known.
     /// Adapters fit their output bound against this value; `None` falls back to
-    /// [`estimate_prompt_tokens`].
+    /// `estimate_prompt_tokens`.
     #[serde(default)]
     pub prompt_tokens: Option<u64>,
     /// Tool-call control for this request; the default keeps provider behavior.

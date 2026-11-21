@@ -1,6 +1,6 @@
 //! Per-model OpenCode catalog.
 //!
-//! The generated table in [`generated`] is the only routing truth for
+//! The generated table in `generated` is the only routing truth for
 //! `(surface, model)` pairs. Each row carries the protocol dialect, the trusted
 //! surface base URL, catalog limits, reasoning support, cost, and capability
 //! flags, so callers never substitute constants for model metadata.

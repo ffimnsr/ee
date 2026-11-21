@@ -393,7 +393,10 @@ mod tests {
         )
         .expect("update");
         assert!(!outcome.created);
-        assert!(outcome.entry.path.starts_with(second.path()));
+        // Entry paths are canonical; tempdirs on macOS resolve through
+        // `/var` -> `/private/var`, so compare against the canonical root.
+        let canonical_second = std::fs::canonicalize(second.path()).expect("canonical second root");
+        assert!(outcome.entry.path.starts_with(&canonical_second));
         assert!(!first.path().join(".agents/memories/testing.md").exists());
         assert!(std::fs::read_to_string(&path).expect("read").contains("New body."));
     }

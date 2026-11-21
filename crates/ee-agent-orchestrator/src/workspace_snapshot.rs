@@ -104,7 +104,7 @@ impl SnapshotEntry {
     /// Display path: relative for the primary root, `root/path` otherwise.
     #[must_use]
     pub fn display_path(&self, primary_root: &Path) -> String {
-        if Path::new(&self.root) == primary_root {
+        if Path::new(&self.root) == canonical_root(primary_root) {
             self.path.clone()
         } else {
             format!("{}/{}", self.root, self.path)
@@ -379,10 +379,11 @@ impl WorkspaceSnapshotStore {
         let snapshot = self.load_snapshot(session_id, &record.start)?.ok_or_else(|| {
             OrchestratorError::InvalidState(format!("start snapshot {} is missing", record.start))
         })?;
-        let primary = primary_root(roots)?;
+        let roots = canonical_roots(roots);
+        let primary = primary_root(&roots)?;
         let mut restored = Vec::new();
         for requested in paths {
-            let entry = find_entry(&snapshot, requested, &primary, roots);
+            let entry = find_entry(&snapshot, requested, &primary, &roots);
             match entry {
                 Some(entry) => {
                     let bytes = self.load_object(session_id, &entry.blob)?.ok_or_else(|| {
@@ -391,7 +392,7 @@ impl WorkspaceSnapshotStore {
                             entry.blob
                         ))
                     })?;
-                    let (root, relative) = resolve_entry_path(entry, &primary, roots)?;
+                    let (root, relative) = resolve_entry_path(entry, &primary, &roots)?;
                     let target = safe_join(&root, &relative)?;
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| {
@@ -455,6 +456,7 @@ impl WorkspaceSnapshotStore {
         turn: u64,
         origin: SnapshotOrigin,
     ) -> Result<WorkspaceSnapshot, OrchestratorError> {
+        let roots = canonical_roots(roots);
         let mut files = Vec::new();
         for (index, root) in roots.iter().enumerate() {
             files.extend(collect_files(root, index == 0, &self.config)?);
@@ -657,6 +659,22 @@ impl WorkspaceSnapshotStore {
     fn session_dir(root: &Path, session_id: &str) -> PathBuf {
         root.join(sanitize_component(session_id))
     }
+}
+
+fn canonical_root(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Canonicalizes roots and drops duplicate aliases while preserving order.
+fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut canonical = Vec::with_capacity(roots.len());
+    for root in roots {
+        let root = canonical_root(root);
+        if !canonical.contains(&root) {
+            canonical.push(root);
+        }
+    }
+    canonical
 }
 
 fn snapshot_id(entries: &[SnapshotEntry]) -> String {
@@ -921,6 +939,43 @@ mod tests {
                 .iter()
                 .all(|file| file.patch.as_deref().is_some_and(|patch| patch.contains("changed")))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn display_path_matches_a_symlinked_primary_root() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = workspace.path();
+        let holder = tempfile::tempdir().expect("holder");
+        let alias = holder.path().join("workspace-alias");
+        symlink(root, &alias).expect("symlink workspace");
+        let entry = SnapshotEntry {
+            root: std::fs::canonicalize(root)
+                .expect("canonical root")
+                .to_string_lossy()
+                .into_owned(),
+            path: "a.rs".to_string(),
+            blob: "deadbeef".to_string(),
+            size: 1,
+        };
+        assert_eq!(entry.display_path(&alias), "a.rs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_roots_dedupe_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = workspace.path();
+        let holder = tempfile::tempdir().expect("holder");
+        let alias = holder.path().join("workspace-alias");
+        symlink(root, &alias).expect("symlink workspace");
+        let roots = canonical_roots(&[root.to_path_buf(), alias]);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], std::fs::canonicalize(root).expect("canonical root"));
     }
 
     #[test]

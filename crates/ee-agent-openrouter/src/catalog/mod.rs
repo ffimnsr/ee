@@ -1,6 +1,6 @@
 //! Per-model OpenRouter catalog.
 //!
-//! The generated table in [`generated`] is metadata, not routing: OpenRouter
+//! The generated table in `generated` is metadata, not routing: OpenRouter
 //! serves every model through the same base URL, so a catalog row can never
 //! change the endpoint, the credential, or the selected protocol on its own.
 //! Rows supply the values the request path needs — limits, modalities, reasoning

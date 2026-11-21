@@ -144,7 +144,10 @@ pub(crate) fn discover_workspace(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec
 
 /// Discovers user-global skills under an explicit `ee` config directory.
 pub(crate) fn discover_user(config_root: &Path) -> Vec<SkillEntry> {
-    let root = config_root.join(USER_SKILLS_DIR);
+    // Canonicalize up front: macOS temp/config paths can traverse symlinks
+    // (`/var` -> `/private/var`), and `read_manifest` compares the canonical
+    // manifest path against this root.
+    let root = canonical_or_owned(&config_root.join(USER_SKILLS_DIR));
     let mut manifests = Vec::new();
     collect_flat_manifests(&root, &mut manifests);
     let mut entries = Vec::new();
@@ -517,6 +520,23 @@ mod tests {
         assert_eq!(messages[0].message.trust, TrustLevel::WorkspaceInstructionUntrusted);
         assert_eq!(messages[1].message.trust, TrustLevel::UserInstructionTrusted);
         assert!(messages[1].message.text_content().contains("global: Global"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_skills_discover_through_a_symlinked_config_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config");
+        let alias = temp.path().join("config-alias");
+        write(&config.join("skills/global/SKILL.md"), &skill("global", "Global", "Body."));
+        symlink(&config, &alias).expect("symlink config");
+        let entries = discover_user(&alias);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "global");
+        assert_eq!(entries[0].scope, SkillScope::User);
+        assert_eq!(entries[0].display_path, "global/SKILL.md");
     }
 
     #[test]
