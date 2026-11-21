@@ -384,3 +384,59 @@ fn runtime_build_skips_unchanged_rev_pinned_grammar_on_second_run() {
     assert!(forced_failures.is_empty());
     assert!(forced[0].built, "--force must recompile even when fresh");
 }
+
+#[test]
+fn runtime_build_reuses_rev_pinned_checkout_without_network() {
+    let _guard = env_lock();
+    let temp_dir = TempDir::new().unwrap();
+    let (repo, tag_rev, _branch_name, branch_rev) = create_demo_git_repo(&temp_dir);
+    let loader = demo_git_loader(&repo, "rev", &tag_rev, "tree_sitter_demo");
+    let source_root = temp_dir.path().join("sources");
+    let output_root = temp_dir.path().join("runtime");
+
+    let (first, first_failures) = loader
+        .build_runtime_assets(
+            &[String::from("Demo")],
+            false,
+            &source_root,
+            &output_root,
+            false,
+            true,
+        )
+        .unwrap();
+    assert!(first_failures.is_empty());
+    assert_eq!(first.len(), 1);
+
+    let staged = fs::read_dir(&source_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join(".git").is_dir())
+        .expect("staged grammar checkout");
+
+    // Move the checkout off the pin and make the remote unreachable. A
+    // rev-pinned source must resolve and restore the pin from local objects
+    // instead of fetching over the network.
+    run_git_fixture(&staged, &["checkout", "--force", &branch_rev]);
+    run_git_fixture(&staged, &["remote", "set-url", "origin", "/nonexistent/ee-offline-grammar"]);
+
+    let (second, second_failures) = loader
+        .build_runtime_assets(
+            &[String::from("Demo")],
+            false,
+            &source_root,
+            &output_root,
+            false,
+            true,
+        )
+        .unwrap();
+    assert!(
+        second_failures.is_empty(),
+        "rev-pinned rebuild must not need the remote: {second_failures:?}"
+    );
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        git_output(&staged, &["rev-parse", "HEAD"]),
+        tag_rev,
+        "checkout must return to the pinned rev"
+    );
+}

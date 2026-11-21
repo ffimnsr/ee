@@ -9,13 +9,16 @@ use semver::Version;
 use serde::Deserialize;
 use tree_sitter_loader::Loader;
 
+// Re-exported so existing `runtime_loader::grammar::run_git` callers keep working.
+pub use super::git_ops::{git_rev_parse, run_git};
+
 use super::grammar_layout::candidate_dir_matches_language;
 use super::helpers::{
     bundled_repo_runtime_root, cargo_registry_src_root, copy_runtime_query_file,
     default_symbol_name, effective_host_triple, effective_target_triple,
-    looks_like_runtime_grammar_source, normalize_lookup_key, redact_git_command_args,
-    redact_git_url_credentials, runtime_output_query_dir, runtime_query_dir_name,
-    sanitize_path_component, stable_hash_hex, workspace_root_from_current_dir,
+    looks_like_runtime_grammar_source, normalize_lookup_key, redact_git_url_credentials,
+    runtime_output_query_dir, runtime_query_dir_name, sanitize_path_component, stable_hash_hex,
+    workspace_root_from_current_dir,
 };
 use super::types::{
     GrammarCrateSpec, GrammarFetchPlan, GrammarGitSpec, QUERIES_DIR_NAME, RuntimeGrammarSource,
@@ -474,22 +477,27 @@ pub fn fetch_git_grammar_source(
                 source_dir.display()
             )));
         }
-        // Fast path for rev-pinned sources: if the staged checkout is already
-        // at the pinned rev, skip the network fetch and checkout entirely so
-        // build --all / mk install stays incremental.
-        if let (None, None, Some(rev)) = (&spec.branch, &spec.tag, &spec.rev) {
-            let pinned_local = git_rev_parse(
+        // Rev pins are immutable. When the pinned object is already staged,
+        // reuse it without any network operation so repeated installs stay
+        // incremental and still work without connectivity.
+        if let (None, None, Some(rev)) = (&spec.branch, &spec.tag, &spec.rev)
+            && let Ok(pinned_local) = git_rev_parse(
                 source_dir,
                 &format!("{rev}^{{commit}}"),
                 &format!("rev `{rev}`"),
                 &source_label,
-            );
+            )
+        {
             let head = git_rev_parse(source_dir, "HEAD^{commit}", "HEAD", &source_label);
-            if let (Ok(pinned_local), Ok(head)) = (pinned_local, head)
+            if let Ok(head) = head
                 && head == pinned_local
             {
                 return Ok(rev.clone());
             }
+            run_git(Some(source_dir), ["checkout", "--force", &pinned_local]).map_err(|error| {
+                RuntimeOperationError::grammar_source(format!("{source_label}: {error}"))
+            })?;
+            return Ok(rev.clone());
         }
     } else {
         run_git(None, ["clone", "--no-checkout", &spec.url, &source_dir.display().to_string()])
@@ -537,66 +545,6 @@ pub fn fetch_git_grammar_source(
         RuntimeOperationError::grammar_source(format!("{source_label}: {error}"))
     })?;
     Ok(resolved_rev)
-}
-
-pub fn git_rev_parse(
-    source_dir: &Path,
-    revision: &str,
-    display_ref: &str,
-    source_label: &str,
-) -> Result<String, RuntimeOperationError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(source_dir)
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg(revision)
-        .output()
-        .map_err(|error| {
-            RuntimeOperationError::grammar_source(format!(
-                "{source_label}: failed starting `git rev-parse` in {}: {error}",
-                source_dir.display(),
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(RuntimeOperationError::grammar_source(format!(
-            "{source_label}: missing {display_ref} in {}{}",
-            source_dir.display(),
-            if stderr.is_empty() { String::new() } else { format!(": {stderr}") }
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub fn run_git<I, S>(current_dir: Option<&Path>, args: I) -> Result<(), RuntimeOperationError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args = args.into_iter().map(|value| value.as_ref().to_string()).collect::<Vec<_>>();
-    let display_args = redact_git_command_args(&args);
-    let mut command = Command::new("git");
-    if let Some(current_dir) = current_dir {
-        command.current_dir(current_dir);
-    }
-    command.args(&args);
-    let output = command.output().map_err(|error| {
-        RuntimeOperationError::grammar_source(format!(
-            "failed starting `git {}`: {error}",
-            display_args
-        ))
-    })?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(RuntimeOperationError::grammar_source(format!(
-        "`git {}` failed{}",
-        display_args,
-        if stderr.is_empty() { String::new() } else { format!(": {stderr}") }
-    )))
 }
 
 // ---------------------------------------------------------------------------

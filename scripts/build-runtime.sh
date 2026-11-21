@@ -91,7 +91,10 @@ main() {
     runtime_build_cmd+=(--skip-load)
   fi
 
+  printf 'fetching grammar sources into %s\n' "$source_root" >&2
   "${runtime_fetch_cmd[@]}"
+
+  printf 'fetch complete; building runtime assets into %s\n' "$output_root" >&2
   "${runtime_build_cmd[@]}"
 }
 

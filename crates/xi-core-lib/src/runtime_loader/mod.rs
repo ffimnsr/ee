@@ -2,6 +2,7 @@ mod build_stamps;
 pub mod builtin;
 mod builtin_catalog_generated;
 pub mod errors;
+mod git_ops;
 pub mod grammar;
 mod grammar_layout;
 pub mod helpers;
