@@ -31,9 +31,8 @@
 #   --ext EXT        fixture extension (default txt; rs exercises syntax render)
 #   --json PATH      write the probe's machine-readable JSON artifact
 #   --profile P      cargo profile: test (default) or profiling
-#   --jobs N         cargo jobs cap (default 2; the repo has heavy crates and
-#                    parallel rustc jobs are the usual OOM source on 16 GiB
-#                    boxes; raise only if memory allows)
+#   --jobs N         cargo jobs cap (default 3; the 4-core host keeps one core
+#                    free for the editor, override with CARGO_BUILD_JOBS)
 #   --bin PATH       use an existing test binary (skips the cargo build)
 #   --print-only     print commands without running them
 #   -h, --help       show this help
@@ -76,7 +75,7 @@ ext=""
 json_path=""
 bin_path=""
 do_build=1
-jobs=2
+jobs=3
 duration=""
 print_only=0
 extra=()
@@ -190,8 +189,8 @@ case "$target_dir" in
     *) target_dir="$repo_root/$target_dir" ;;
 esac
 
-# On 16 GiB boxes the parallel rustc job count is the usual OOM trigger, so
-# the script caps it by default (see --jobs).
+# On a 4-core host the script caps rustc at 3 jobs by default so one core
+# stays free; override with --jobs or CARGO_BUILD_JOBS.
 if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
     jobs="$CARGO_BUILD_JOBS"
 fi

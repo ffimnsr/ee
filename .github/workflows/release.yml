@@ -76,6 +76,9 @@ jobs:
             echo "ci_green=false" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
+
       - name: Run quality gates
         run: |
           cargo fmt --all --check
@@ -197,6 +200,9 @@ jobs:
       - name: Derive reproducible build timestamp
         shell: bash
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "${GITHUB_ENV}"
+
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
 
       - name: Build release binaries
         run: |

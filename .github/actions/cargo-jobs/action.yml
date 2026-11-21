@@ -1,0 +1,15 @@
+name: Configure cargo jobs
+description: Use every CPU the runner exposes for cargo builds.
+
+runs:
+  using: composite
+  steps:
+    - name: Detect CPU count
+      shell: bash
+      run: |
+        # Linux runners have nproc; macOS runners have sysctl. The repo config
+        # caps jobs at 3 for the 4-core dev host, so CI overrides it with the
+        # runner's full width.
+        jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+        echo "CARGO_BUILD_JOBS=${jobs}" >> "${GITHUB_ENV}"
+        echo "cargo jobs: ${jobs}"

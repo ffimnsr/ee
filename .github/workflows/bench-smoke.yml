@@ -33,4 +33,7 @@ jobs:
         with:
           make-default: false
       - uses: Swatinem/rust-cache@v2
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
+
       - run: cargo bench -p ee-cli --bench vlf --no-run --locked --features vendored

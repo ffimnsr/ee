@@ -36,6 +36,8 @@ jobs:
           - xi_unicode_text
     steps:
       - uses: actions/checkout@v6
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src

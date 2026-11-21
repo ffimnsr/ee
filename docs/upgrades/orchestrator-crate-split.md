@@ -74,9 +74,9 @@ facade = core + runtime + state + planning + subagents + plugins
   `crate::` references, computes SCCs, and fails when a forbidden edge appears
   or the largest SCC grows. This replaces "don't add cycles" with a checkable
   rule and is the exit gate for Phase 1.
-- Trial `CARGO_BUILD_JOBS=3` and `4` on this 4-core host under
-  `scripts/run-tests-memguard.sh` for the cold build only. If memory holds,
-  this is the cheapest win and may change the split's ROI.
+- `build.jobs = 3` is the local default (4-core host, one core headroom).
+  Measure `4` again only if memory stays comfortable under
+  `scripts/run-tests-memguard.sh`.
 
 Exit: reproducible baseline and a layering check that currently reports the
 88-module SCC.
@@ -158,7 +158,7 @@ Exit: local SCCs only, layering script green, full crate test suite green.
 
 | scenario | today | after split (estimate) |
 | --- | --- | --- |
-| cold unit | 98.4 s (58.6 frontend + 39.8 codegen) | ~60-75 s with `jobs=2`; lower with `jobs=3-4` |
+| cold unit | 98.4 s (58.6 frontend + 39.8 codegen) | ~60-75 s at the default `jobs = 3`; lower at `jobs = 4` |
 | edit `plugin_runtime` | recompiles the 70k-LOC crate | recompiles plugins crate + dependents |
 | edit a `core` type | recompiles everything | recompiles all layers (worst case unchanged) |
 
@@ -167,9 +167,9 @@ Caveats:
 - Total CPU work does not drop; cross-crate boundaries add rlib/metadata
   overhead and can duplicate some monomorphization. Wall-time gain comes from
   parallel frontends across crates.
-- On this 4-core host with `CARGO_BUILD_JOBS=2` the ceiling is roughly 2x on
-  the frontend. If `jobs=3-4` is memory-safe, it is a better first move than a
-  split.
+- On this 4-core host the default `jobs = 3` gives roughly a 3x frontend
+  ceiling, limited by the dependency DAG. Measure `jobs = 4` only if memory
+  stays comfortable under `scripts/run-tests-memguard.sh`.
 - Edits to `core` or `runtime` still cascade; the split mainly isolates leaf
   subsystems (plugins, state, planning, subagents) and shortens cold builds.
 

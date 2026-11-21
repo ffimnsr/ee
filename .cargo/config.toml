@@ -1,3 +1,8 @@
+# 4-core host: cap rustc jobs at 3 so the editor/rust-analyzer keeps a core.
+# Override per run with `CARGO_BUILD_JOBS` or `cargo -j`.
+[build]
+jobs = 3
+
 # Use mold on Linux x86_64 for faster links. rustc still appends its own
 # `-fuse-ld=lld`, so this argument has to come last, which `link-arg` does.
 # Requires `mold` (or `ld.mold`) on PATH; install it with your package manager

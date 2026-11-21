@@ -47,6 +47,9 @@ jobs:
           shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
@@ -74,6 +77,9 @@ jobs:
         with:
           shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
+
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
 
       - name: Check documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
@@ -151,6 +157,9 @@ jobs:
           shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
 
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
+
       - name: Build project
         run: cargo build --workspace --locked --features ee-cli/vendored
 
@@ -199,6 +208,9 @@ jobs:
         with:
           shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
+
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
 
       - name: Run tests
         run: cargo test --workspace --locked --features ee-cli/vendored
@@ -254,6 +266,9 @@ jobs:
         with:
           shared-key: ee-rust-${{ github.job }}-${{ runner.os }}
           cache-on-failure: "true"
+
+      - name: Configure cargo jobs
+        uses: ./.github/actions/cargo-jobs
 
       # clippy and rustdoc only compile feature-gated code; this runs it.
       - name: Run tests with all features
