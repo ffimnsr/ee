@@ -36,6 +36,9 @@ agents = [
     "dep:tracing",
     "dep:zip",
 ]
+# Portable self-contained build for CI/release: vendored libgit2 and SQLite.
+# Local builds leave this off and link the system libraries via pkg-config.
+vendored = ["git2/vendored-libgit2", "ee-agent-host?/vendored"]
 
 [dependencies]
 arboard.workspace = true

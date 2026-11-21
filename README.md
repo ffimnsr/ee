@@ -127,6 +127,10 @@ export PATH="$HOME/.local/bin:$PATH"
 - Rust `1.95` or newer
 - Unix-like shell for `install.sh`
 - `cargo` toolchain for local development and builds
+- `libgit2` 1.9.x and SQLite 3.34.1+ development files with `pkg-config` for
+  local builds. Local builds link the system libraries; CI and release builds
+  pass the `vendored` feature (`cargo build -p ee-cli --features agents,vendored`)
+  to bundle them for portable artifacts.
 - `mold` linker on Linux x86_64. The checked-in `.cargo/config.toml` passes
   `-fuse-ld=mold`; install it with your package manager (`pacman -S mold`,
   `apt-get install mold`). CI installs it with `rui314/setup-mold`.

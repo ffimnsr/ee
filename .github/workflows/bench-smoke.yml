@@ -33,4 +33,4 @@ jobs:
         with:
           make-default: false
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench -p ee-cli --bench vlf --no-run --locked
+      - run: cargo bench -p ee-cli --bench vlf --no-run --locked --features vendored

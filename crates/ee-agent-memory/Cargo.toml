@@ -9,6 +9,11 @@ repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+# Build the bundled SQLite instead of linking the system library. CI and
+# release artifacts enable this; local builds use pkg-config by default.
+vendored = ["rusqlite/bundled"]
+
 [dependencies]
 serde.workspace = true
 sha2.workspace = true

@@ -12,6 +12,8 @@ rust-version.workspace = true
 [features]
 # In-process fake ACP agent transport used by tests (host and ee-cli).
 test-utils = []
+# Build vendored native libraries (SQLite) instead of using system ones.
+vendored = ["ee-agent-memory/vendored"]
 
 [dependencies]
 ee-agent-protocol.workspace = true

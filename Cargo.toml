@@ -100,7 +100,10 @@ fern = "0.6.2"
 fs2 = "0.4"
 futures = "0.3"
 # Git integration only inspects local repositories; omit HTTPS/SSH transports and their native TLS dependencies.
-git2 = { version = "0.20.4", default-features = false, features = ["vendored-libgit2"] }
+# Vendoring is opt-in through the `vendored` feature on the packages that link
+# these libraries: local builds use the system libgit2/libsqlite3, while
+# CI/release (musl, macOS) pass `vendored` for a portable self-contained build.
+git2 = { version = "0.20.4", default-features = false }
 insta = "1.48.0"
 jsonrpc-lite = "0.7.0"
 lsp-server = "0.7.9"
@@ -119,7 +122,9 @@ ratatui = "0.29"
 regex = "1.12.3"
 regex-syntax = "0.8.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "chrono"] }
+# System SQLite locally; `vendored = ["rusqlite/bundled"]` restores the bundled
+# build for CI and release artifacts.
+rusqlite = { version = "0.40.2", features = ["chrono"] }
 schemars = { version = "1.0", features = ["derive"] }
 semver = "1.0"
 signal-hook = "0.3"

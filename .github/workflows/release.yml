@@ -81,12 +81,12 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
-          cargo bench --workspace --no-run --locked
+          cargo bench --workspace --no-run --locked --features ee-cli/vendored
 
       - name: Run test suite when CI result is unavailable
         if: github.ref_type != 'tag' || steps.ci_status.outputs.ci_green != 'true'
         run: |
-          cargo test --workspace --locked
+          cargo test --workspace --locked --features ee-cli/vendored
 
       - name: Skip duplicate tests after green CI
         if: github.ref_type == 'tag' && steps.ci_status.outputs.ci_green == 'true'
@@ -205,7 +205,7 @@ jobs:
             export CC_x86_64_unknown_linux_musl=musl-gcc
           fi
 
-          cargo build --locked --release -p ee-cli --features agents --target ${{ matrix.target }}
+          cargo build --locked --release -p ee-cli --features agents,vendored --target ${{ matrix.target }}
           cargo build --locked --release -p ee-agent-openrouter --target ${{ matrix.target }}
           cargo build --locked --release -p ee-xi-lsp-lib --bin xi-lsp-plugin --target ${{ matrix.target }}
 
