@@ -79,11 +79,26 @@ pub fn read_process_sample(pid: u32) -> Option<super::sandbox::ResourceSample> {
     if status != 0 {
         return None;
     }
-    let cpu_nanos = info.ri_user_time.saturating_add(info.ri_system_time);
+    let cpu_ticks = info.ri_user_time.saturating_add(info.ri_system_time);
+    let mut timebase = mach2::mach_time::mach_timebase_info { numer: 0, denom: 0 };
+    // SAFETY: `timebase` is a valid out-parameter of the documented type.
+    let timebase_status = unsafe { mach2::mach_time::mach_timebase_info(&mut timebase) };
+    if timebase_status != 0 || timebase.denom == 0 {
+        return None;
+    }
     Some(super::sandbox::ResourceSample {
         rss_bytes: info.ri_resident_size,
-        cpu_seconds: cpu_nanos as f64 / 1_000_000_000.0,
+        cpu_seconds: mach_ticks_to_seconds(cpu_ticks, timebase.numer, timebase.denom),
     })
+}
+
+/// Convert mach absolute time ticks to seconds using the host timebase.
+#[cfg(any(target_os = "macos", test))]
+fn mach_ticks_to_seconds(ticks: u64, numer: u32, denom: u32) -> f64 {
+    if denom == 0 {
+        return 0.0;
+    }
+    (u128::from(ticks) * u128::from(numer)) as f64 / u128::from(denom) as f64 / 1_000_000_000.0
 }
 
 /// Non-Linux best effort: the manifest limits are enforced by the resource
@@ -171,10 +186,18 @@ pub fn apply_windows_job_limits(
     Ok(())
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn mach_ticks_convert_to_seconds() {
+        assert!((mach_ticks_to_seconds(1_000_000_000, 1, 1) - 1.0).abs() < 1e-9);
+        // Apple Silicon timebase: 125/3. Ten seconds of CPU is ~240M ticks.
+        assert!((mach_ticks_to_seconds(240_000_000, 125, 3) - 10.0).abs() < 1e-9);
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn self_sample_reports_resident_memory() {
         let sample = read_process_sample(std::process::id()).expect("sample current process");

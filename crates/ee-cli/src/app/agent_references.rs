@@ -316,7 +316,7 @@ impl ReferenceCache {
         args.push(String::from("--"));
         args.push(repository.to_string());
         args.push(temp.display().to_string());
-        run_git_bounded(&args, None)?;
+        run_git_bounded(&args, &self.base)?;
         match std::fs::rename(&temp, root) {
             Ok(()) => Ok(()),
             Err(_) if root.is_dir() => {
@@ -335,10 +335,10 @@ impl ReferenceCache {
         let mut fetch = vec![String::from("fetch"), String::from("--depth"), String::from("1")];
         fetch.push(String::from("origin"));
         fetch.push(branch.unwrap_or("HEAD").to_string());
-        run_git_bounded(&fetch, Some(root))?;
+        run_git_bounded(&fetch, root)?;
         run_git_bounded(
             &[String::from("reset"), String::from("--hard"), String::from("FETCH_HEAD")],
-            Some(root),
+            root,
         )
     }
 }
@@ -383,12 +383,17 @@ fn nonce() -> u128 {
 }
 
 /// Runs one bounded git command with nulled input and capped diagnostics.
-fn run_git_bounded(args: &[String], cwd: Option<&Path>) -> Result<(), String> {
+///
+/// `cwd` is required: git children must never inherit the process-wide
+/// directory, which another thread can move or delete while the child starts.
+fn run_git_bounded(args: &[String], cwd: &Path) -> Result<(), String> {
     let mut command = Command::new("git");
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| {
         format!("cannot run git {}: {error}", args.first().map_or("", String::as_str))
     })?;
