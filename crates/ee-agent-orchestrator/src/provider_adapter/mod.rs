@@ -44,13 +44,13 @@ use ee_agent_acp_server::{
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
     DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, EXPORT_SESSION_COMMAND_NAME,
-    IMPORT_SESSION_COMMAND_NAME, Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME,
-    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId,
-    SessionModeState, SessionUpdate, StopReason, TextContent, branch_available_command,
-    compact_available_command, diff_available_command, discard_available_command,
-    export_session_available_command, import_session_available_command, is_resume_command,
-    parse_slash_command, primary_agent_available_command, resume_available_command,
-    revert_available_command, rubber_duck_available_command,
+    FINAL_RESPONSE_MESSAGE_ID_PREFIX, IMPORT_SESSION_COMMAND_NAME, Implementation, MessageId,
+    PRIMARY_AGENT_COMMAND_NAME, REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId,
+    SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
+    branch_available_command, compact_available_command, diff_available_command,
+    discard_available_command, export_session_available_command, import_session_available_command,
+    is_resume_command, parse_slash_command, primary_agent_available_command,
+    resume_available_command, revert_available_command, rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -261,9 +261,13 @@ fn emit_final_response(
     next_final_response: &AtomicU64,
 ) -> Result<(), ProviderError> {
     let id = next_final_response.fetch_add(1, Ordering::Relaxed);
-    sink.agent_message_chunk(format!("ee-final-response-{id}"), final_response.to_string()).map_err(
-        |error| ProviderError::BackendFailure(format!("failed to emit final response: {error}")),
+    sink.agent_message_chunk(
+        format!("{FINAL_RESPONSE_MESSAGE_ID_PREFIX}{id}"),
+        final_response.to_string(),
     )
+    .map_err(|error| {
+        ProviderError::BackendFailure(format!("failed to emit final response: {error}"))
+    })
 }
 
 /// One turn's telemetry inputs, grouped so the recorder call stays readable.

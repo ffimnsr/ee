@@ -248,7 +248,7 @@ pub(super) fn replay_conversation(
             }
             ConversationRole::Agent | ConversationRole::FinalResponse => {
                 let message_id = if message.role == ConversationRole::FinalResponse {
-                    format!("ee-final-response-replay-{}", index + 1)
+                    format!("{FINAL_RESPONSE_MESSAGE_ID_PREFIX}replay-{}", index + 1)
                 } else {
                     format!("replay-a-{}", index + 1)
                 };

@@ -550,3 +550,49 @@ fn tool_call_update_without_status_field_keeps_in_progress_label() {
         })
     });
 }
+
+#[test]
+fn final_response_summary_goes_to_the_evidence_log_not_the_transcript() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "answer")))
+        .emit(wire::session_update(
+            "s1",
+            wire::agent_message_chunk(
+                "ee-final-response-1",
+                "planned tasks: 1, completed: 0; no files changed; completion: unverified",
+            ),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    let evidence_base = tempfile::tempdir().expect("evidence log base");
+    app.agents.test_export_base = Some(evidence_base.path().to_path_buf());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hi");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "reply completed", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].message_pairs().len() == 2
+    });
+
+    assert_eq!(
+        app.agents.threads[0].message_pairs(),
+        vec![
+            (String::from("you"), String::from("hi")),
+            (String::from("fake"), String::from("answer")),
+        ],
+        "the evidence-derived summary is diagnostics, never chat prose"
+    );
+    let log_text: String = fs::read_dir(evidence_base.path().join("agent-evidence"))
+        .expect("evidence log directory")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".log"))
+        .map(|entry| fs::read_to_string(entry.path()).expect("read evidence log"))
+        .collect();
+    assert!(
+        log_text
+            .contains("planned tasks: 1, completed: 0; no files changed; completion: unverified"),
+        "the summary must stay auditable: {log_text}"
+    );
+}

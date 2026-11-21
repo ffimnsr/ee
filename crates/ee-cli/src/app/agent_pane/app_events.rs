@@ -9,7 +9,8 @@ use ee_agent_host::{
 };
 use ee_agent_protocol::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationMode, RequestPermissionOutcome, SessionId, SessionUpdate,
+    ElicitationAction, ElicitationMode, FINAL_RESPONSE_MESSAGE_ID_PREFIX, RequestPermissionOutcome,
+    SessionId, SessionUpdate,
 };
 
 use super::super::*;
@@ -435,6 +436,26 @@ impl App {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let text = content_block_text(&chunk.content);
                 let message_id = chunk.message_id.as_ref().map(|id| id.0.to_string());
+                if message_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with(FINAL_RESPONSE_MESSAGE_ID_PREFIX))
+                {
+                    // Providers append their evidence-derived completion summary
+                    // on the assistant text surface under a reserved id. It is
+                    // host diagnostics, not model prose: keep it out of the
+                    // transcript like `TurnEvidenceUpdated` and retain it only
+                    // in the private evidence audit log.
+                    let session_id = self.agents.threads[thread_index].session_id.clone();
+                    self.append_evidence_log(
+                        &session_id,
+                        &format!(
+                            "{} final response: {}",
+                            format_evidence_timestamp(SystemTime::now()),
+                            text.trim()
+                        ),
+                    );
+                    return;
+                }
                 let thread = &mut self.agents.threads[thread_index];
                 let response_group = thread.ensure_response_group();
                 thread.push_message(

@@ -99,6 +99,15 @@ pub use agent_client_protocol::{
 /// and [`Builder::on_receive_notification`].
 pub use agent_client_protocol::{on_receive_notification, on_receive_request};
 
+/// Assistant message-id namespace EE providers reserve for the
+/// evidence-derived final-response summary they append at the end of a turn.
+///
+/// ACP has no terminal-state field, so providers carry the summary as one
+/// extra `agent_message_chunk` under this prefix.  Clients that separate model
+/// prose from host diagnostics match the prefix instead of rendering the
+/// summary as chat content.
+pub const FINAL_RESPONSE_MESSAGE_ID_PREFIX: &str = "ee-final-response-";
+
 /// String form of the legacy ACP version the host speaks, used for
 /// user-facing status.
 ///
