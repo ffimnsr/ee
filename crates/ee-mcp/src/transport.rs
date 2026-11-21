@@ -8,7 +8,7 @@
 //! no-HTTP+SSE policy (the deprecated transport is simply never built).
 
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use rmcp::transport::child_process::TokioChildProcess;
 
@@ -119,6 +119,17 @@ fn spawn_stderr_reader(
     });
 }
 
+/// Installs the ring crypto provider needed by reqwest's
+/// `rustls-no-provider` build. Idempotent per process.
+fn install_crypto_provider() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        // Another component may already have installed a provider; either way
+        // reqwest has one available after this call.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Builds an rmcp Streamable HTTP client transport for a configured server.
 ///
 /// # Errors
@@ -160,6 +171,7 @@ pub fn build_http_transport(
         }
         builder = builder.custom_headers(headers);
     }
+    install_crypto_provider();
     Ok(StreamableHttpClientTransport::with_client(reqwest::Client::new(), builder))
 }
 
@@ -190,6 +202,21 @@ mod tests {
         buffer.push("ok\n".as_bytes());
         assert_eq!(buffer.as_string(), "ok\n");
         assert!(!buffer.truncated());
+    }
+
+    #[tokio::test]
+    async fn http_transport_builds_with_ring_provider() {
+        let config = McpServerConfig {
+            id: "srv".to_string(),
+            kind: McpServerKind::StreamableHttp(crate::config::StreamableHttpConfig {
+                url: "https://example.com".to_string(),
+                headers: BTreeMap::new(),
+            }),
+            timeout_ms: 1000,
+        };
+        // reqwest 0.13 is built with `rustls-no-provider`; client construction
+        // panics unless the ring provider was installed first.
+        build_http_transport(&config).expect("build http transport");
     }
 
     #[test]

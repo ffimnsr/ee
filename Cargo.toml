@@ -122,6 +122,10 @@ ratatui = "0.29"
 regex = "1.12.3"
 regex-syntax = "0.8.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
+# Provider for the MCP HTTP client's `reqwest` 0.13 `rustls-no-provider` build.
+# Keep the rustls major in lockstep with reqwest 0.13: the installed default
+# provider is only visible to the rustls version reqwest links against.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # System SQLite locally; `vendored = ["rusqlite/bundled"]` restores the bundled
 # build for CI and release artifacts.
 rusqlite = { version = "0.40.2", features = ["chrono"] }
