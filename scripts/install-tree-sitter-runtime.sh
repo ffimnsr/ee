@@ -8,9 +8,13 @@ Usage: scripts/install-tree-sitter-runtime.sh [options] [-- command...]
 
 Build tree-sitter runtime assets into user bundled-runtime directory for local
 testing and optionally run command with EE_RUNTIME_DIR pointed at installed
-runtime.
+runtime. The default install contains only
+`scripts/runtime-default-languages.txt`; pass `--all` or `--language` for more.
 
 Options:
+  --all              Build every configured runtime language.
+  --languages LIST   Comma- or space-separated language ids.
+  --language LANG    Add one language id; repeat for several languages.
   --source-root DIR  Directory used to stage grammar source trees.
   --runtime-dir DIR  Directory that will receive installed runtime assets.
   --force            Replace existing staged sources and runtime outputs.
@@ -21,7 +25,8 @@ Options:
 
 Examples:
   scripts/install-tree-sitter-runtime.sh
-  scripts/install-tree-sitter-runtime.sh -- cargo test -p ee-cli
+  scripts/install-tree-sitter-runtime.sh --all
+  scripts/install-tree-sitter-runtime.sh --language python -- cargo test -p ee-cli
 EOF
 }
 
@@ -36,10 +41,23 @@ main() {
   local skip_load=0
   local release=0
   local ee_bin=""
+  local -a language_args=()
   local command=()
 
   while (($# > 0)); do
     case "$1" in
+      --all)
+        language_args+=(--all)
+        shift
+        ;;
+      --languages)
+        language_args+=(--languages "$2")
+        shift 2
+        ;;
+      --language)
+        language_args+=(--language "$2")
+        shift 2
+        ;;
       --source-root)
         source_root="$2"
         shift 2
@@ -82,6 +100,11 @@ main() {
 
   local build_cmd=(
     bash "$build_script"
+  )
+  if ((${#language_args[@]} > 0)); then
+    build_cmd+=("${language_args[@]}")
+  fi
+  build_cmd+=(
     --source-root "$source_root"
     --output-root "$runtime_dir"
   )

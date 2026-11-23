@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [features]
 # Agents mode ships by default; use `--no-default-features` for agent-free builds.
-default = ["agents"]
+default = ["agents", "runtime-packs"]
 agents = [
     "dep:bzip2",
     "dep:ee-agent-protocol",
@@ -37,6 +37,9 @@ agents = [
     "dep:tracing",
     "dep:zip",
 ]
+# Download and unpack prebuilt runtime grammar packs. Kept separate from
+# `agents` so a no-agent build can still install a grammar pack.
+runtime-packs = ["dep:flate2", "dep:reqwest", "dep:tar"]
 # Portable self-contained build for CI/release: vendored libgit2 and SQLite.
 # Local builds leave this off and link the system libraries via pkg-config.
 vendored = ["git2/vendored-libgit2", "ee-agent-host?/vendored"]

@@ -468,12 +468,36 @@ pub(crate) enum RuntimeCommands {
         /// Skip host-side dynamic library load validation after compile
         #[arg(long, action = clap::ArgAction::SetTrue)]
         skip_load: bool,
+        /// Exit non-zero when any selected grammar fails to fetch or build
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        strict: bool,
         /// Print full output paths instead of short references
         #[arg(short, long)]
         verbose: bool,
         /// Trust ancestor `.ee.toml` runtime grammar overrides in current workspace
         #[arg(long, action = clap::ArgAction::SetTrue)]
         trust_workspace: bool,
+    },
+    /// Install prebuilt grammar assets for selected languages
+    Install {
+        /// Install every configured runtime language
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        all: bool,
+        /// Install only selected runtime languages
+        #[arg(value_name = "LANGUAGE")]
+        languages: Vec<String>,
+        /// Install from a local language pack instead of downloading one
+        #[arg(long, value_name = "FILE")]
+        pack: Option<PathBuf>,
+        /// Expected SHA-256 of the language pack
+        #[arg(long = "sha256", value_name = "HEX")]
+        sha256: Option<String>,
+        /// Re-download and overwrite existing grammar libraries
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        force: bool,
+        /// Print installed file paths
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 

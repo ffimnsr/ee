@@ -257,7 +257,7 @@ download_ee() {
     echo "${_releases}" | grep -q 'API rate limit exceeded' &&
         err "GitHub API rate limit exceeded. Please try again later."
 
-    _package_url="$(echo "${_releases}" | grep '"browser_download_url"' | cut -d '"' -f 4 | grep -- "${_arch}\.tar\.gz$")" ||
+    _package_url="$(echo "${_releases}" | grep '"browser_download_url"' | cut -d '"' -f 4 | grep -- "${_arch}\.tar\.gz$" | grep -v '/ee-language-pack-')" ||
         err "${PACKAGE_NAME} has not been packaged for your architecture (${_arch})."
 
     _filename=$(basename "${_package_url}")
@@ -362,6 +362,8 @@ install_runtime_assets() {
     ensure try_sudo mkdir -p -- "${RUNTIME_DIR}"
     ensure try_sudo cp -R -- "${_runtime_src}/." "${RUNTIME_DIR}/"
     echo "Installed tree-sitter runtime to ${RUNTIME_DIR}"
+    echo "Default runtime grammars: rust, toml, yaml"
+    echo "Install more with: ee do runtime install <language> (or --all)"
 }
 
 validate_plugin_manifest() {

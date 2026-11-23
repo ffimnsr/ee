@@ -78,7 +78,7 @@ use crate::file_cmd::{cmd_file_head, cmd_file_line_check, cmd_file_tail};
 use crate::language_cmd::cmd_language_list;
 use crate::plugins_cmd::{cmd_plugins_list, cmd_plugins_schema, cmd_plugins_validate};
 use crate::runtime_cmd::{
-    cmd_runtime, cmd_runtime_build, cmd_runtime_fetch, cmd_runtime_languages,
+    cmd_runtime, cmd_runtime_build, cmd_runtime_fetch, cmd_runtime_install, cmd_runtime_languages,
 };
 use crate::schema_cmd::{cmd_completions, cmd_schema_check, cmd_schema_generate, cmd_validate};
 use crate::secrets_cmd::cmd_secrets;
@@ -337,6 +337,7 @@ pub fn run_cli() -> io::Result<()> {
                             output_root,
                             force,
                             skip_load,
+                            strict,
                             verbose,
                             trust_workspace,
                         }) => cmd_runtime_build(
@@ -346,8 +347,24 @@ pub fn run_cli() -> io::Result<()> {
                             output_root.as_deref(),
                             force,
                             skip_load,
+                            strict,
                             verbose,
                             trust_workspace,
+                        ),
+                        Some(RuntimeCommands::Install {
+                            all,
+                            languages,
+                            pack,
+                            sha256,
+                            force,
+                            verbose,
+                        }) => cmd_runtime_install(
+                            &languages,
+                            all,
+                            pack.as_deref(),
+                            sha256.as_deref(),
+                            force,
+                            verbose,
                         ),
                     }
                 }

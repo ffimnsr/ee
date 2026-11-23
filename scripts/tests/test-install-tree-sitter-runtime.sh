@@ -23,9 +23,22 @@ force=0
 skip_load=0
 release=0
 ee_bin=""
+languages=""
 
 while (($# > 0)); do
   case "$1" in
+    --all)
+      languages+=" --all"
+      shift
+      ;;
+    --languages)
+      languages+=" --languages=$2"
+      shift 2
+      ;;
+    --language)
+      languages+=" --language=$2"
+      shift 2
+      ;;
     --source-root)
       source_root="$2"
       shift 2
@@ -58,8 +71,8 @@ while (($# > 0)); do
 done
 
 mkdir -p "$output_root"
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-  "$source_root" "$output_root" "$force" "$skip_load" "$release" "$ee_bin" >"$output_root/build-args.txt"
+printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+  "$source_root" "$output_root" "$force" "$skip_load" "$release" "$ee_bin" "$languages" >"$output_root/build-args.txt"
 EOF
 chmod +x "$fake_build_script"
 
@@ -102,5 +115,22 @@ mapfile -t release_build_args <"$runtime_dir/build-args.txt"
 [[ "${release_build_args[4]}" == "1" ]]
 [[ "${release_build_args[5]}" == "/tmp/fake-ee" ]]
 [[ "$release_output" == *"tree-sitter runtime installed at $runtime_dir"* ]]
+
+language_output="$(
+  EE_TREE_SITTER_BUILD_SCRIPT="$fake_build_script" \
+    bash "$script_path" --source-root "$source_root" --runtime-dir "$runtime_dir" \
+      --language python --language go
+)"
+mapfile -t language_build_args <"$runtime_dir/build-args.txt"
+[[ "${language_build_args[6]}" == " --language=python --language=go" ]]
+[[ "$language_output" == *"tree-sitter runtime installed at $runtime_dir"* ]]
+
+all_output="$(
+  EE_TREE_SITTER_BUILD_SCRIPT="$fake_build_script" \
+    bash "$script_path" --source-root "$source_root" --runtime-dir "$runtime_dir" --all
+)"
+mapfile -t all_build_args <"$runtime_dir/build-args.txt"
+[[ "${all_build_args[6]}" == " --all" ]]
+[[ "$all_output" == *"tree-sitter runtime installed at $runtime_dir"* ]]
 
 printf 'install tree-sitter runtime script passed\n'

@@ -456,6 +456,47 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "runtime",
+        "install",
+        "python",
+        "--pack",
+        "pack.tar.gz",
+        "--sha256",
+        "abc",
+        "--force",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Install {
+                    all: false,
+                    force: true,
+                    ref languages,
+                    ..
+                }),
+                ..
+            }
+        }) if languages == &[String::from("python")]
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "runtime", "install", "--all"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Install { all: true, .. }),
+                ..
+            }
+        })
+    ));
+
     let cli =
         crate::Cli::try_parse_from(["ee", "do", "validate", "--config", "custom.ee.toml"]).unwrap();
 

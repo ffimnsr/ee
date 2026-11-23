@@ -161,7 +161,7 @@ Macro gains a `with_git_source` variant (or table form) mapping to `RuntimeGramm
 - `cargo fmt`, `cargo clippy --workspace`, `cargo test --quiet --workspace --all-features --locked`.
 - `./scripts/build-runtime.sh` full run.
 - Update README language list + CHANGELOG entry; tick ISSUES.md items.
-- Exit: CI-equivalent local pass; runtime package contains all new grammars + queries.
+- Exit: CI-equivalent local pass; default runtime package contains the core grammars + queries, and the language pack contains all new grammars.
 
 ### Phase 6 — Follow-ups
 - Optional: `ee do runtime fetch --language <lang>` per-language UX verified.

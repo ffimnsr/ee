@@ -21,6 +21,7 @@ fn main() {
     let rustc_version = rustc_version();
     let build_date = build_date();
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned());
+    let build_target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_owned());
     let dirty_suffix = if dirty { " dirty" } else { "" };
     let long_version = format!(
         "{pkg_version} (git {hash}{dirty_suffix}, commit {commit_date}, built {build_date}, profile {cargo_profile}, {rustc_version})"
@@ -33,6 +34,7 @@ fn main() {
     println!("cargo:rustc-env=EE_RUSTC_VERSION={rustc_version}");
     println!("cargo:rustc-env=EE_BUILD_DATE={build_date}");
     println!("cargo:rustc-env=EE_LONG_VERSION={long_version}");
+    println!("cargo:rustc-env=EE_BUILD_TARGET={build_target}");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
@@ -40,6 +42,7 @@ fn main() {
     emit_git_reruns(&repo_root);
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=RUSTC");
 }
 

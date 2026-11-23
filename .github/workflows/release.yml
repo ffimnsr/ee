@@ -215,27 +215,6 @@ jobs:
           cargo build --locked --release -p ee-agent-openrouter --target ${{ matrix.target }}
           cargo build --locked --release -p ee-xi-lsp-lib --bin xi-lsp-plugin --target ${{ matrix.target }}
 
-      - name: Build bundled runtime assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            export CC=musl-gcc
-            bash scripts/build-runtime.sh \
-              --force \
-              --source-root target/runtime-sources \
-              --output-root target/runtime-package \
-              --ee-bin "target/${{ matrix.target }}/release/ee" \
-              --skip-load
-          else
-            bash scripts/build-runtime.sh \
-              --force \
-              --source-root target/runtime-sources \
-              --output-root target/runtime-package \
-              --ee-bin "target/${{ matrix.target }}/release/ee"
-          fi
-
       - name: Prepare package metadata
         id: meta
         shell: bash
@@ -249,9 +228,64 @@ jobs:
           fi
 
           BASENAME="ee-${VERSION}-${{ matrix.target }}"
+          PACKNAME="ee-language-pack-${VERSION}-${{ matrix.target }}"
 
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "basename=${BASENAME}" >> "${GITHUB_OUTPUT}"
+          echo "packname=${PACKNAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build prebuilt language pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET="${{ matrix.target }}"
+          rm -rf target/runtime-all target/runtime-all-sources
+
+          build_args=(
+            --all
+            --force
+            --strict
+            --source-root target/runtime-all-sources
+            --output-root target/runtime-all
+            --ee-bin "target/${TARGET}/release/ee"
+          )
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export CC=musl-gcc
+            build_args+=(--skip-load)
+          fi
+
+          bash scripts/build-runtime.sh "${build_args[@]}"
+          PACK="${{ steps.meta.outputs.packname }}.tar.gz"
+          python3 scripts/language-pack.py build \
+            --runtime-root target/runtime-all \
+            --output "${PACK}" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --target "${TARGET}"
+          shasum -a 256 "${PACK}" \
+            | awk -v name="${PACK}" '{print $1 "  " name}' \
+            > "${PACK}.sha256"
+
+      - name: Build default runtime assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET="${{ matrix.target }}"
+          rm -rf target/runtime-package
+
+          build_args=(
+            --strict
+            --source-root target/runtime-all-sources
+            --output-root target/runtime-package
+            --ee-bin "target/${TARGET}/release/ee"
+          )
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export CC=musl-gcc
+            build_args+=(--skip-load)
+          fi
+
+          bash scripts/build-runtime.sh "${build_args[@]}"
 
       - name: Package archive
         shell: bash
@@ -294,13 +328,20 @@ jobs:
           set -euo pipefail
 
           BASENAME="${{ steps.meta.outputs.basename }}"
+          PACKNAME="${{ steps.meta.outputs.packname }}"
           cosign sign-blob --yes --bundle "${BASENAME}.tar.gz.sigstore.json" "${BASENAME}.tar.gz"
+          cosign sign-blob --yes --bundle "${PACKNAME}.tar.gz.sigstore.json" "${PACKNAME}.tar.gz"
           cosign sign-blob --yes --bundle "${BASENAME}.spdx.json.sigstore.json" "${BASENAME}.spdx.json"
 
       - name: Attest archive provenance
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}
+
+      - name: Attest language pack provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.meta.outputs.packname }}.tar.gz
 
       - name: Upload release bundle
         uses: actions/upload-artifact@v7
@@ -312,6 +353,9 @@ jobs:
             ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}.sigstore.json
             ${{ steps.meta.outputs.basename }}.spdx.json
             ${{ steps.meta.outputs.basename }}.spdx.json.sigstore.json
+            ${{ steps.meta.outputs.packname }}.tar.gz
+            ${{ steps.meta.outputs.packname }}.tar.gz.sha256
+            ${{ steps.meta.outputs.packname }}.tar.gz.sigstore.json
 
   publish:
     name: Publish release
@@ -336,7 +380,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          compgen -G '*.tar.gz' > /dev/null || {
+          compgen -G 'ee-[0-9]*.tar.gz' > /dev/null || {
             echo 'no platform archives were produced; refusing to publish' >&2
             exit 1
           }

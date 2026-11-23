@@ -214,6 +214,10 @@ For test-focused local setup, install runtime into user runtime directory
 scripts/install-tree-sitter-runtime.sh
 ```
 
+That installs the default runtime languages (`rust`, `toml`, `yaml`). Pass
+`--all` or `--language <id>` to install more grammars locally; the release
+language pack is the no-toolchain path.
+
 Install bundled plugins into user config plugin directory
 (`~/.config/ee/plugins` or `XDG_CONFIG_HOME/ee/plugins`) with:
 
@@ -244,15 +248,42 @@ New runtime languages should be described in runtime language metadata with a gr
 Release artifacts should build runtime assets first:
 
 ```sh
+# Default package: rust, toml, yaml from scripts/runtime-default-languages.txt
 scripts/build-runtime.sh --output-root target/runtime-package
+
+# Full grammar set for the downloadable language pack
+scripts/build-runtime.sh --all --output-root target/runtime-all
+python3 scripts/language-pack.py build \
+  --runtime-root target/runtime-all \
+  --output ee-language-pack.tar.gz \
+  --version 0.11.14 \
+  --target x86_64-unknown-linux-musl
 ```
 
-Archive that runtime tree next to the release binary as:
+Archive the default runtime tree next to the release binary as:
 
 - `share/ee/` on Linux and macOS
 - `runtime/` on Windows
 
 The official installer copies that bundled runtime tree into the resolved bundled runtime root instead of downloading grammars on first launch.
+
+The default runtime intentionally ships only `rust`, `toml`, and `yaml`. The
+complete grammar set is published per target as
+`ee-language-pack-<version>-<target>.tar.gz`; install another language without
+a C compiler, Rust toolchain, cargo registry, or git checkout:
+
+```sh
+ee do runtime install python
+ee do runtime install --all
+```
+
+The CLI verifies the published SHA-256 before unpacking. Cosign signature bundles
+are attached to each pack for manual verification with `cosign verify-blob`.
+For offline or mirrored packs use `--pack <file> --sha256 <hex>`; mirrors can set
+`EE_LANGUAGE_PACK_BASE_URL` (HTTPS only). Building from source remains available
+with `ee do runtime fetch/build --language <language>`. The queries directory
+still contains the full bundled query corpus, so installing a grammar does not
+need a query download.
 
 ## Configuration
 

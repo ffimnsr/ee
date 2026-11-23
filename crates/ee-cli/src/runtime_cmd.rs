@@ -162,6 +162,11 @@ pub(crate) fn render_runtime_report(report: &RuntimeHealthReport) -> String {
         out.push_str(&format!("grammar path: {}\n", grammar_path.display()));
     }
     out.push_str(&format!("grammar: {}\n", grammar_health_label(&report.grammar_status)));
+    if matches!(report.grammar_status, RuntimeGrammarHealth::Missing)
+        && let Some(language_id) = &report.language_id
+    {
+        out.push_str(&format!("install with: ee do runtime install {language_id}\n"));
+    }
     out.push_str("queries:\n");
     for query_report in &report.query_reports {
         out.push_str(&format!(
@@ -549,6 +554,7 @@ pub(crate) fn cmd_runtime_build(
     output_root: Option<&Path>,
     force: bool,
     skip_load: bool,
+    strict: bool,
     verbose: bool,
     trust_workspace: bool,
 ) {
@@ -572,6 +578,9 @@ pub(crate) fn cmd_runtime_build(
     })
     .unwrap_or_else(|error| exit_with_runtime_operation_error("runtime build failed", error));
     report_runtime_failures(&failures);
+    if strict && !failures.is_empty() {
+        std::process::exit(EXIT_RUNTIME_ASSET);
+    }
 
     let paint = CliColor::new();
     let built_count = built.iter().filter(|grammar| grammar.built).count();
@@ -633,5 +642,36 @@ pub(crate) fn cmd_runtime_build(
                 paint_source_reference(&paint, &short_source_reference(&grammar.source_pin))
             );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_runtime_install(
+    languages: &[String],
+    all: bool,
+    pack: Option<&Path>,
+    sha256: Option<&str>,
+    force: bool,
+    verbose: bool,
+) {
+    #[cfg(feature = "runtime-packs")]
+    {
+        if let Err(error) =
+            crate::runtime_pack::install(languages, all, pack, sha256, force, verbose)
+        {
+            eprintln!("runtime install failed: {error}");
+            if let Some(hint) = error.hint() {
+                eprintln!("hint: {hint}");
+            }
+            std::process::exit(EXIT_RUNTIME_ASSET);
+        }
+    }
+    #[cfg(not(feature = "runtime-packs"))]
+    {
+        let _ = (languages, all, pack, sha256, force, verbose);
+        eprintln!(
+            "runtime install failed: this build was built without the `runtime-packs` feature"
+        );
+        std::process::exit(EXIT_RUNTIME_ASSET);
     }
 }

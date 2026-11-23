@@ -86,6 +86,8 @@ mod registers;
 #[allow(dead_code)]
 mod render_metrics;
 mod runtime_cmd;
+#[cfg(feature = "runtime-packs")]
+mod runtime_pack;
 mod schema_cmd;
 #[allow(dead_code)]
 mod secrets;

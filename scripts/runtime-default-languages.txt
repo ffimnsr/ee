@@ -1,0 +1,7 @@
+# Runtime grammars shipped in the default release package.
+# Keep this list small: other languages install from the prebuilt language pack
+# with `ee do runtime install <language>`, or build from source with
+# `ee do runtime build --language <language>`.
+rust
+toml
+yaml
