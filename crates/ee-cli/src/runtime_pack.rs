@@ -25,6 +25,7 @@ const PACK_SCHEMA_VERSION: u32 = 1;
 const PACK_MANIFEST_NAME: &str = "manifest.json";
 const PACK_GRAMMAR_DIR: &str = "grammars/";
 const PACK_ASSET_PREFIX: &str = "ee-language-pack";
+const PACK_MARKER_FILE: &str = ".language-pack-installed";
 const MAX_PACK_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PACK_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -111,6 +112,7 @@ pub(crate) fn install(
     fs::create_dir_all(&destination)?;
 
     if !force && targets.iter().all(|target| destination.join(&target.file_name).is_file()) {
+        record_pack_grammars(&destination, &targets)?;
         println!(
             "runtime grammars already installed in {} (use --force to reinstall)",
             destination.display()
@@ -138,6 +140,7 @@ pub(crate) fn install(
     };
 
     install_from_pack(&pack, &targets, &destination)?;
+    record_pack_grammars(&destination, &targets)?;
 
     println!(
         "installed {} grammar librar{} into {}",
@@ -226,6 +229,33 @@ fn grammar_destination() -> Result<PathBuf, RuntimePackError> {
         loader.runtime_roots().grammar_dir_for(RuntimeConfigSource::User)
     })
     .ok_or_else(|| RuntimePackError::new("user runtime root is unavailable"))
+}
+
+/// Record pack-installed grammar files so `mk install` can prune stale full
+/// runtime builds without deleting languages the user explicitly activated.
+fn record_pack_grammars(
+    destination: &Path,
+    targets: &[InstallTarget],
+) -> Result<(), RuntimePackError> {
+    let marker = destination.join(PACK_MARKER_FILE);
+    let mut names = fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for target in targets {
+        names.insert(target.file_name.clone());
+    }
+    let mut contents = String::new();
+    for name in names {
+        contents.push_str(&name);
+        contents.push('\n');
+    }
+    let temporary = temporary_path(&marker);
+    fs::write(&temporary, contents)?;
+    replace_file(&temporary, &marker)
 }
 
 fn fetch_pack(expected_sha256: Option<&str>, force: bool) -> Result<PathBuf, RuntimePackError> {
@@ -789,9 +819,14 @@ mod tests {
         );
 
         install_from_pack(&pack, &[target("libtree-sitter-rust.so")], &destination).unwrap();
+        record_pack_grammars(&destination, &[target("libtree-sitter-rust.so")]).unwrap();
 
         assert_eq!(fs::read(destination.join("libtree-sitter-rust.so")).unwrap(), wanted);
         assert!(!destination.join("libtree-sitter-python.so").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(PACK_MARKER_FILE)).unwrap(),
+            "libtree-sitter-rust.so\n"
+        );
     }
 
     #[test]

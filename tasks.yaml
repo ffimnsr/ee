@@ -46,11 +46,15 @@ tasks:
       # Runtime install is incremental on purpose: staged grammar checkouts
       # and build stamps make a repeat install a no-op. `--force` there would
       # re-clone every git-pinned grammar and recompile every shared library.
-      - name: Install bundled tree-sitter runtime
-        command: ./scripts/install-tree-sitter-runtime.sh --ee-bin target/release/ee
+      # `mk install` is a developer bootstrap: prune stale full-runtime
+      # grammars, then build only scripts/runtime-default-languages.txt.
+      # User-installed language packs recorded by `ee do runtime install` are
+      # preserved. Use `ee do runtime install <language>` for extras.
+      - name: Install default tree-sitter runtime
+        command: "./scripts/install-tree-sitter-runtime.sh --ee-bin target/release/ee --clean-grammars --languages \"$(grep -Ev '^[[:space:]]*(#|$)' scripts/runtime-default-languages.txt | paste -sd, -)\""
       - name: Install bundled plugins
         command: ./scripts/install-plugins.sh --force --binary-path target/release/xi-lsp-plugin
-    description: Build ee-editor, the OpenRouter and OpenCode ACP agents, and the LSP plugin once in release with locked offline resolution, then copy the user-facing binaries to ~/.local/bin and install the plugin/runtime from those prebuilt artifacts. The runtime install is incremental so repeated installs do not re-clone grammars. The editor links system libgit2 and SQLite; bench, test fixtures, and unused binaries are excluded.
+    description: Build ee-editor, the OpenRouter and OpenCode ACP agents, and the LSP plugin once in release with locked offline resolution, then copy the user-facing binaries to ~/.local/bin and install the plugin/runtime from those prebuilt artifacts. Runtime install rebuilds only the default grammars (rust, toml, yaml) and prunes stale full-runtime grammars while preserving user-installed language packs. The editor links system libgit2 and SQLite; bench, test fixtures, and unused binaries are excluded.
   uninstall:
     commands:
       - pkill -TERM -f '[x]i-lsp-plugin' || true

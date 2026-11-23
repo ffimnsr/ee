@@ -133,4 +133,45 @@ mapfile -t all_build_args <"$runtime_dir/build-args.txt"
 [[ "${all_build_args[6]}" == " --all" ]]
 [[ "$all_output" == *"tree-sitter runtime installed at $runtime_dir"* ]]
 
+clean_runtime_dir="$tmpdir/clean-runtime"
+mkdir -p "$clean_runtime_dir/grammars"
+printf 'stale grammar\n' >"$clean_runtime_dir/grammars/libtree-sitter-old.so"
+printf 'kept grammar\n' >"$clean_runtime_dir/grammars/libtree-sitter-kept.so"
+printf 'libtree-sitter-kept.so\n' >"$clean_runtime_dir/grammars/.language-pack-installed"
+
+clean_output="$(
+  EE_TREE_SITTER_BUILD_SCRIPT="$fake_build_script" \
+    bash "$script_path" --source-root "$source_root" --runtime-dir "$clean_runtime_dir" \
+      --clean-grammars --language rust
+)"
+mapfile -t clean_build_args <"$clean_runtime_dir/build-args.txt"
+[[ "${clean_build_args[6]}" == " --language=rust" ]]
+[[ ! -f "$clean_runtime_dir/grammars/libtree-sitter-old.so" ]]
+[[ -f "$clean_runtime_dir/grammars/libtree-sitter-kept.so" ]]
+[[ -f "$clean_runtime_dir/grammars/.language-pack-installed" ]]
+[[ -z "$(find "$clean_runtime_dir" -maxdepth 1 -name 'grammars.clean.*' -print -quit)" ]]
+[[ "$clean_output" == *"tree-sitter runtime installed at $clean_runtime_dir"* ]]
+
+failing_build_script="$tmpdir/failing-build-runtime.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$failing_build_script"
+chmod +x "$failing_build_script"
+
+restore_runtime_dir="$tmpdir/restore-runtime"
+mkdir -p "$restore_runtime_dir/grammars"
+printf 'stale grammar\n' >"$restore_runtime_dir/grammars/libtree-sitter-old.so"
+printf 'kept grammar\n' >"$restore_runtime_dir/grammars/libtree-sitter-kept.so"
+printf 'libtree-sitter-kept.so\n' >"$restore_runtime_dir/grammars/.language-pack-installed"
+
+if EE_TREE_SITTER_BUILD_SCRIPT="$failing_build_script" \
+  bash "$script_path" --source-root "$source_root" --runtime-dir "$restore_runtime_dir" \
+    --clean-grammars --language rust >/dev/null 2>&1; then
+  printf 'expected clean runtime build failure to propagate\n' >&2
+  exit 1
+fi
+
+[[ -f "$restore_runtime_dir/grammars/libtree-sitter-old.so" ]]
+[[ -f "$restore_runtime_dir/grammars/libtree-sitter-kept.so" ]]
+[[ -f "$restore_runtime_dir/grammars/.language-pack-installed" ]]
+[[ -z "$(find "$restore_runtime_dir" -maxdepth 1 -name 'grammars.clean.*' -print -quit)" ]]
+
 printf 'install tree-sitter runtime script passed\n'

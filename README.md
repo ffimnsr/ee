@@ -116,6 +116,12 @@ The installer supports `bash`, `zsh`, and `fish` completions and installs the bi
 
 On Linux and macOS the installer also places bundled runtime assets under `~/.local/share/ee`, which matches the release runtime layout resolved relative to `~/.local/bin/ee`.
 
+`mk install` is the developer bootstrap: it rebuilds only the default runtime
+grammars (`rust`, `toml`, `yaml` from `scripts/runtime-default-languages.txt`)
+and prunes stale full-runtime grammars. Grammars installed with
+`ee do runtime install <language>` are recorded and preserved; reinstall them
+with `ee do runtime install --all` after an `mk install` if the marker is removed.
+
 If `~/.local/bin` is not on your `PATH`, add it to your shell profile:
 
 ```sh
@@ -216,7 +222,8 @@ scripts/install-tree-sitter-runtime.sh
 
 That installs the default runtime languages (`rust`, `toml`, `yaml`). Pass
 `--all` or `--language <id>` to install more grammars locally; the release
-language pack is the no-toolchain path.
+language pack is the no-toolchain path. `--clean-grammars` prunes stale grammar
+libraries while preserving those recorded by `ee do runtime install`.
 
 Install bundled plugins into user config plugin directory
 (`~/.config/ee/plugins` or `XDG_CONFIG_HOME/ee/plugins`) with:

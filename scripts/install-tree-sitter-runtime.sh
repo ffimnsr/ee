@@ -17,6 +17,7 @@ Options:
   --language LANG    Add one language id; repeat for several languages.
   --source-root DIR  Directory used to stage grammar source trees.
   --runtime-dir DIR  Directory that will receive installed runtime assets.
+  --clean-grammars   Remove grammar libraries not recorded by `ee do runtime install` before building.
   --force            Replace existing staged sources and runtime outputs.
   --skip-load        Skip host-side dynamic library load validation after compile.
   --release          Run the ee helper with the release profile.
@@ -40,6 +41,7 @@ main() {
   local force=0
   local skip_load=0
   local release=0
+  local clean_grammars=0
   local ee_bin=""
   local -a language_args=()
   local command=()
@@ -65,6 +67,10 @@ main() {
       --runtime-dir)
         runtime_dir="$2"
         shift 2
+        ;;
+      --clean-grammars)
+        clean_grammars=1
+        shift
         ;;
       --force)
         force=1
@@ -121,7 +127,38 @@ main() {
     build_cmd+=(--ee-bin "$ee_bin")
   fi
 
-  "${build_cmd[@]}"
+  local grammar_dir="$runtime_dir/grammars"
+  local grammar_backup=""
+  if (( clean_grammars )) && [[ -d "$grammar_dir" ]]; then
+    grammar_backup="$runtime_dir/grammars.clean.$$"
+    rm -rf "$grammar_backup"
+    mv "$grammar_dir" "$grammar_backup"
+    mkdir -p "$grammar_dir"
+    local marker="$grammar_backup/.language-pack-installed"
+    if [[ -f "$marker" ]]; then
+      cp "$marker" "$grammar_dir/"
+      while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        if [[ "$name" == */* || "$name" == "." || "$name" == ".." ]]; then
+          continue
+        fi
+        if [[ -f "$grammar_backup/$name" ]]; then
+          cp "$grammar_backup/$name" "$grammar_dir/$name"
+        fi
+      done <"$marker"
+    fi
+  fi
+
+  if ! "${build_cmd[@]}"; then
+    if [[ -n "$grammar_backup" ]]; then
+      rm -rf "$grammar_dir"
+      mv "$grammar_backup" "$grammar_dir"
+    fi
+    exit 1
+  fi
+  if [[ -n "$grammar_backup" ]]; then
+    rm -rf "$grammar_backup"
+  fi
 
   if ((${#command[@]} == 0)); then
     printf 'tree-sitter runtime installed at %s\n' "$runtime_dir"
