@@ -452,6 +452,11 @@ mod tests {
         let guardrails = temp.path().join(".agents/guardrails.md");
         std::fs::create_dir_all(guardrails.parent().expect("parent")).expect("guardrails dir");
         std::fs::write(&guardrails, "Never force-push.").expect("write guardrails");
+        // prompt_bundle canonicalizes workspace roots, so macOS temp dirs resolve
+        // through the /var -> /private/var symlink. Compare against the same form.
+        let expected_path = std::fs::canonicalize(temp.path())
+            .expect("canonical temp")
+            .join(".agents/guardrails.md");
         let roots = vec![temp.path().to_path_buf()];
         let mode = SessionModeId::new("write");
         let bundle = prompt_bundle(PromptBundleInputs {
@@ -478,7 +483,7 @@ mod tests {
             .expect("guardrails section injected");
         assert_eq!(message.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
         assert!(message.message.text_content().contains("Never force-push."));
-        assert_eq!(message.path, guardrails.display().to_string());
+        assert_eq!(message.path, expected_path.display().to_string());
     }
 
     #[test]

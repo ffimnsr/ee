@@ -1,7 +1,7 @@
 //! Propose → Probe → Compose → Select driver plus reflection and run state.
 //!
 //! The driver owns ordering, budget accounting, and run summaries. Stage work
-//! lives in [`stages`]; stream scheduling lives in [`stream`].
+//! lives in `stages`; stream scheduling lives in `stream`.
 
 use std::path::Path;
 
