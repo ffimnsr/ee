@@ -89,6 +89,8 @@ pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 /// Startup diagnostic used whenever no usable OpenCode key is configured.
 pub const MISSING_API_KEY: &str = "OPENCODE_API_KEY is not set; export it before starting ee";
 
+/// Full per-surface catalog for `--ee-config-choices`.
+pub use manifest::remote_choices;
 /// Builds the setup manifest emitted by `ee-agent-opencode --ee-config`.
 pub use manifest::setup_manifest;
 

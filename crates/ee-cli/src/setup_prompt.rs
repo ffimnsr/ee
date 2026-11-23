@@ -4,6 +4,7 @@
 //! identically.
 
 use std::io::{self, Write as _};
+use std::process::{Command, Stdio};
 
 use crate::secrets;
 
@@ -130,6 +131,150 @@ pub(crate) fn prompt_selection(
     }
 }
 
+/// Shortest list that opens a searchable picker instead of printing entries.
+const FZF_MIN_CHOICES: usize = 8;
+
+/// Prompts over a curated list, but opens a fuzzy finder (`fzf`, else `skim`'s
+/// `sk`) over the complete value set when the input can fetch more values
+/// remotely. Aborting the picker falls back to the numbered curated list, so the
+/// default/skip rules still apply.
+pub(crate) fn prompt_searchable_selection(
+    label: &str,
+    choices: &[(String, String)],
+    default: Option<&str>,
+    required: bool,
+    fetch_all: impl FnOnce() -> Result<Vec<(String, String)>, String>,
+) -> Result<Option<String>, String> {
+    if choices.len() >= FZF_MIN_CHOICES
+        && let Some(picker) = SearchPicker::detect()
+    {
+        match fetch_all() {
+            Ok(all) if all.len() > choices.len() => {
+                if let PickerOutcome::Value(value) = picker_select(picker, label, &all)? {
+                    return Ok(Some(value));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("warning: cannot fetch the full {label} list: {error}"),
+        }
+    }
+    prompt_selection(label, choices, default, required)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPicker {
+    Fzf,
+    Skim,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PickerOutcome {
+    Value(String),
+    Skipped,
+    Unavailable,
+}
+
+impl SearchPicker {
+    /// First installed fuzzy finder; both accept the fzf-style flags used below.
+    fn detect() -> Option<Self> {
+        [Self::Fzf, Self::Skim].into_iter().find(|picker| picker.installed())
+    }
+
+    fn binary(self) -> &'static str {
+        match self {
+            Self::Fzf => "fzf",
+            Self::Skim => "sk",
+        }
+    }
+
+    fn installed(self) -> bool {
+        Command::new(self.binary())
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
+/// Opens a fuzzy finder over tab-separated `value<TAB>label` records.
+fn picker_select(
+    picker: SearchPicker,
+    label: &str,
+    choices: &[(String, String)],
+) -> Result<PickerOutcome, String> {
+    let mut child = match Command::new(picker.binary())
+        .args(["--delimiter=\t", "--with-nth=2..", "--print-query"])
+        .arg("--prompt")
+        .arg(format!("{label}> "))
+        .arg("--header")
+        .arg("Enter selects · type an exact id to use it · Esc skips")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("warning: cannot start {}: {error}", picker.binary());
+            return Ok(PickerOutcome::Unavailable);
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        for (value, choice_label) in choices {
+            if writeln!(stdin, "{}", fzf_record(value, choice_label)).is_err() {
+                break;
+            }
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("cannot wait for {}: {error}", picker.binary()))?;
+    Ok(interpret_picker_output(&String::from_utf8_lossy(&output.stdout), output.status.code()))
+}
+
+/// One picker record; embedded tabs/newlines would corrupt the protocol.
+fn fzf_record(value: &str, label: &str) -> String {
+    format!("{}\t{}", sanitize_field(value), sanitize_field(label))
+}
+
+fn sanitize_field(text: &str) -> String {
+    text.replace(['\t', '\n', '\r'], " ")
+}
+
+/// Mirrors `fzf --print-query`: line 1 is the query, line 2 (optional) is the
+/// selected record. Exit code 1 means "no match", which is the picker's
+/// "Other" path: the typed text becomes the exact value. An interrupt (130)
+/// or any other failure skips without selecting whatever text was typed.
+fn interpret_picker_output(stdout: &str, exit_code: Option<i32>) -> PickerOutcome {
+    match exit_code {
+        Some(0) => {}
+        Some(1) => {
+            let query = stdout.lines().next().unwrap_or_default().trim();
+            return if query.is_empty() {
+                PickerOutcome::Skipped
+            } else {
+                PickerOutcome::Value(String::from(query))
+            };
+        }
+        _ => return PickerOutcome::Skipped,
+    }
+    let mut lines = stdout.lines();
+    let query = lines.next().unwrap_or_default().trim();
+    if let Some(selection) = lines.next().filter(|line| !line.trim().is_empty()) {
+        let value = selection.split('\t').next().unwrap_or_default().trim();
+        if !value.is_empty() {
+            return PickerOutcome::Value(String::from(value));
+        }
+    }
+    if query.is_empty() {
+        PickerOutcome::Skipped
+    } else {
+        PickerOutcome::Value(String::from(query))
+    }
+}
+
 /// Reads a value without terminal echo (prompted only once the caller has
 /// already established the value is a secret).
 pub(crate) fn read_hidden_value(
@@ -212,6 +357,32 @@ mod tests {
         for invalid in ["0", "4", "opencode", "1.5"] {
             assert_eq!(interpret_selection(invalid, &choices), SelectionOutcome::Invalid);
         }
+    }
+
+    #[test]
+    fn picker_output_prefers_the_selection_then_falls_back_to_the_typed_query() {
+        assert_eq!(
+            interpret_picker_output("gpt\ngpt-5.5\tgpt-5.5\n", Some(0)),
+            PickerOutcome::Value(String::from("gpt-5.5"))
+        );
+        assert_eq!(
+            interpret_picker_output("custom-id\n", Some(1)),
+            PickerOutcome::Value(String::from("custom-id")),
+            "exit code 1 is `no match`, so the typed value is used verbatim"
+        );
+        assert_eq!(interpret_picker_output("\n", Some(0)), PickerOutcome::Skipped);
+        for exit_code in [Some(130), Some(2), None] {
+            assert_eq!(
+                interpret_picker_output("gpt\ngpt-5.5\tgpt-5.5\n", exit_code),
+                PickerOutcome::Skipped,
+                "aborting or failing never selects whatever text was typed"
+            );
+        }
+    }
+
+    #[test]
+    fn fzf_records_escape_delimiters() {
+        assert_eq!(fzf_record("model", "model\tlabel\nnext"), "model\tmodel label next");
     }
 
     #[test]

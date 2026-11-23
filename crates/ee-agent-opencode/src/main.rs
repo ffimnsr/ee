@@ -19,12 +19,18 @@ use ee_agent_acp_server::{AcpAgentServer, AcpAgentServerConfig, env_or_dotenv, l
 use ee_agent_opencode::config::{self, Args, Config};
 use ee_agent_opencode::critic::opencode_multi_model_provider;
 use ee_agent_opencode::discovery::{self, HttpMetadataFetcher};
-use ee_agent_opencode::routes::{self, OpenCodeRoute};
+use ee_agent_opencode::routes::{self, OpenCodeRoute, OpenCodeSurface};
 use ee_agent_opencode::usage::{self, UsageProbe};
 use serde_json::{Value, json};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Setup-only flag, handled before clap so it never joins the normal ACP
+    // argument set: the host re-invokes this binary per input to fetch choices.
+    if let Some(key) = choices_request_key(std::env::args().skip(1)) {
+        print_choices_request(&key);
+        return;
+    }
     let args = Args::parse();
     if args.ee_config {
         print_manifest();
@@ -56,6 +62,46 @@ fn print_manifest() {
         Ok(manifest) => println!("{manifest}"),
         Err(error) => {
             eprintln!("ee-agent-opencode: failed to serialize setup manifest: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Extracts the input key from a `--ee-config-choices` request.
+fn choices_request_key<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if let Some(key) = arg.strip_prefix("--ee-config-choices=") {
+            return Some(key.to_owned());
+        }
+        if arg == "--ee-config-choices" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// Prints the full choice list for one input, scoped by the surface the host
+/// already collected (passed back as `OPENCODE_SURFACE`).
+fn print_choices_request(key: &str) {
+    let surface = std::env::var(config::SURFACE_ENV)
+        .ok()
+        .and_then(|value| OpenCodeSurface::parse(value.trim()).ok());
+    let Some(surface) = surface else {
+        eprintln!(
+            "ee-agent-opencode: --ee-config-choices needs {} to be \"zen\" or \"go\"",
+            config::SURFACE_ENV
+        );
+        std::process::exit(1);
+    };
+    let Some(choices) = config::remote_choices(surface, key) else {
+        eprintln!("ee-agent-opencode: `{key}` does not accept remote choices");
+        std::process::exit(1);
+    };
+    match serde_json::to_string(&choices) {
+        Ok(encoded) => println!("{encoded}"),
+        Err(error) => {
+            eprintln!("ee-agent-opencode: failed to serialize choices: {error}");
             std::process::exit(1);
         }
     }
@@ -380,6 +426,21 @@ mod tests {
         assert!(manifest.env_vars[0].secret);
         assert!(manifest.env_vars[0].required);
         assert!(!encoded.contains("sk-"), "the manifest names the secret, never its value");
+    }
+
+    #[test]
+    fn choices_request_flag_accepts_both_spellings_and_ignores_other_args() {
+        fn args(values: &[&str]) -> Vec<String> {
+            values.iter().map(|value| String::from(*value)).collect()
+        }
+
+        assert_eq!(choices_request_key(args(&["--ee-config-choices=model"])), Some("model".into()));
+        assert_eq!(
+            choices_request_key(args(&["--ee-config-choices", "critic_model"])),
+            Some("critic_model".into())
+        );
+        assert_eq!(choices_request_key(args(&["--list-models", "--json"])), None);
+        assert_eq!(choices_request_key(args(&["--ee-config-choices"])), None);
     }
 
     #[test]

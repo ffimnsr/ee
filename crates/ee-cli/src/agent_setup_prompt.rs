@@ -10,18 +10,25 @@ use std::collections::BTreeMap;
 use ee_agent_protocol::setup::{SetupChoice, SetupInput, SetupManifest};
 
 use crate::secrets;
-use crate::setup_prompt::{confirm, prompt_selection, prompt_value, read_hidden_value};
+use crate::setup_prompt::{
+    confirm, prompt_searchable_selection, prompt_selection, prompt_value, read_hidden_value,
+};
 
 /// Collects every environment value the manifest declares.
+///
+/// `fetch_remote` is called only for inputs that set [`SetupInput::remote_choices`]
+/// and only when the host can offer a searchable picker; it receives the values
+/// collected so far as environment for the agent process.
 pub(crate) fn collect_setup_values(
     manifest: &SetupManifest,
+    fetch_remote: impl Fn(&str, &BTreeMap<String, String>) -> Result<Vec<SetupChoice>, String>,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut env_values = BTreeMap::new();
     let mut selected_inputs = BTreeMap::new();
     let mut secret_store = None;
 
     collect_env_values(manifest, &mut env_values, &mut secret_store)?;
-    collect_manifest_inputs(manifest, &mut env_values, &mut selected_inputs)?;
+    collect_manifest_inputs(manifest, &mut env_values, &mut selected_inputs, &fetch_remote)?;
 
     Ok(env_values)
 }
@@ -79,6 +86,7 @@ fn collect_manifest_inputs(
     manifest: &SetupManifest,
     env_values: &mut BTreeMap<String, String>,
     selected_inputs: &mut BTreeMap<String, String>,
+    fetch_remote: &impl Fn(&str, &BTreeMap<String, String>) -> Result<Vec<SetupChoice>, String>,
 ) -> Result<(), String> {
     let include_advanced = should_collect_advanced(manifest)?;
     let mut last_section: Option<&str> = None;
@@ -94,7 +102,7 @@ fn collect_manifest_inputs(
             last_section = Some(section);
         }
 
-        let value = prompt_manifest_input(input, selected_inputs)?;
+        let value = prompt_manifest_input(input, selected_inputs, env_values, fetch_remote)?;
         if let Some(value) = value {
             selected_inputs.insert(input.key.clone(), value.clone());
             env_values.insert(input.config.env.clone(), value);
@@ -127,8 +135,26 @@ fn should_collect_advanced(manifest: &SetupManifest) -> Result<bool, String> {
 fn prompt_manifest_input(
     input: &SetupInput,
     selected_inputs: &BTreeMap<String, String>,
+    env_values: &BTreeMap<String, String>,
+    fetch_remote: &impl Fn(&str, &BTreeMap<String, String>) -> Result<Vec<SetupChoice>, String>,
 ) -> Result<Option<String>, String> {
     let choices = applicable_choices(input, selected_inputs);
+    if input.remote_choices && !choices.is_empty() {
+        let collected = env_values.clone();
+        return prompt_searchable_selection(
+            &input.label,
+            &choices,
+            input.default.as_deref(),
+            input.required,
+            || {
+                fetch_remote(&input.key, &collected).map(|all| {
+                    all.into_iter()
+                        .map(|choice| (choice.value.clone(), choice.display().to_owned()))
+                        .collect()
+                })
+            },
+        );
+    }
     if choices.is_empty() {
         return prompt_value(&input.label, input.default.as_deref(), input.required);
     }
@@ -194,6 +220,7 @@ mod tests {
                     when: None,
                 },
             ],
+            remote_choices: false,
             advanced: false,
             config: SetupInputConfig { env: String::from("OPENCODE_MODEL") },
         }

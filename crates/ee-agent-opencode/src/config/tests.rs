@@ -479,7 +479,8 @@ fn setup_manifest_offers_surface_scoped_model_selections() {
     assert!(surface.choices[1].display().contains(routes::GO_API_ROOT));
 
     let model = manifest.inputs.iter().find(|input| input.key == "model").expect("model");
-    let models_for = |surface: &str| {
+    assert!(model.remote_choices, "the host may search the full catalog on demand");
+    let curated_ids = |surface: &str| {
         model
             .choices
             .iter()
@@ -493,29 +494,47 @@ fn setup_manifest_offers_surface_scoped_model_selections() {
             .collect::<Vec<_>>()
     };
 
-    assert!(models_for("zen").contains(&"gpt-5.5"), "zen choices list documented models");
-    assert!(
-        models_for("go").contains(&"kimi-k3"),
-        "go choices list documented models instead of a free-form prompt"
-    );
-    for choice in &model.choices {
-        let when = choice.when.as_ref().expect("model choices carry a surface condition");
-        let surface = match when.value.as_str() {
-            "zen" => OpenCodeSurface::Zen,
-            "go" => OpenCodeSurface::Go,
-            other => panic!("unexpected surface condition {other}"),
-        };
+    for (surface, named) in [
+        (OpenCodeSurface::Zen, ["deepseek-v4.1-flash", "glm-5.3-flash", "glm-5.3", "kimi-k3"]),
+        (OpenCodeSurface::Go, ["deepseek-v4.1-flash", "glm-5.3-flash", "glm-5.3", "qwen3.8-flash"]),
+    ] {
+        let ids = curated_ids(surface.as_str());
+        assert!(!ids.is_empty(), "{} offers curated model choices", surface.as_str());
         assert!(
-            routes::resolve_route(surface, &choice.value).is_ok(),
-            "selectable model `{}` must resolve on {}",
-            choice.value,
-            surface.as_str()
+            ids.len() <= 12,
+            "{} keeps the default list short: {} ids",
+            surface.as_str(),
+            ids.len()
         );
+        for id in &ids {
+            assert!(
+                routes::resolve_route(surface, id).is_ok(),
+                "curated id `{id}` must resolve on {}",
+                surface.as_str()
+            );
+        }
+        for id in named {
+            assert!(
+                ids.contains(&id),
+                "{} curated list keeps the requested `{id}`: {ids:?}",
+                surface.as_str()
+            );
+        }
+        let mut last = 0;
+        for id in &ids {
+            let cost = routes::resolve_route(surface, id)
+                .expect("curated id routes")
+                .cost()
+                .map_or(0, |cost| cost.input_micros + 3 * cost.output_micros);
+            assert!(cost >= last, "{surface:?} curated ids are ordered by usage allowance");
+            last = cost;
+        }
     }
 
     let critic = manifest.inputs.iter().find(|input| input.key == "critic_model").expect("critic");
     assert!(!critic.required, "the critic stays optional");
-    assert_eq!(critic.choices.len(), model.choices.len(), "critic reuses the model catalog");
+    assert!(critic.remote_choices, "the critic can search the full catalog too");
+    assert_eq!(critic.choices.len(), model.choices.len(), "critic reuses the curated catalog");
 
     let mode = manifest.inputs.iter().find(|input| input.key == "rubber_duck_mode").expect("mode");
     assert_eq!(
@@ -525,6 +544,45 @@ fn setup_manifest_offers_surface_scoped_model_selections() {
 
     let timeout = manifest.inputs.iter().find(|input| input.key == "timeout_ms").expect("timeout");
     assert!(timeout.advanced, "low-level knobs stay behind the advanced gate");
+}
+
+#[test]
+fn remote_choices_return_only_the_selected_surface() {
+    for surface in [OpenCodeSurface::Zen, OpenCodeSurface::Go] {
+        let model = remote_choices(surface, "model").expect("model accepts remote choices");
+        let catalog = routes::chat_model_ids(surface);
+
+        assert!(model.len() >= catalog.len(), "the full routable catalog is returned");
+        assert!(
+            model.iter().all(|choice| routes::resolve_route(surface, &choice.value).is_ok()),
+            "every remote choice resolves on {}",
+            surface.as_str()
+        );
+        assert!(
+            model.iter().all(|choice| catalog.contains(&choice.value.as_str())),
+            "remote choices stay on the requested surface"
+        );
+        let other = match surface {
+            OpenCodeSurface::Zen => OpenCodeSurface::Go,
+            OpenCodeSurface::Go => OpenCodeSurface::Zen,
+        };
+        let other_catalog = routes::chat_model_ids(other);
+        assert!(
+            !model.iter().any(|choice| {
+                !catalog.contains(&choice.value.as_str())
+                    && other_catalog.contains(&choice.value.as_str())
+            }),
+            "no {} id leaks into the {} list",
+            other.as_str(),
+            surface.as_str()
+        );
+        assert_eq!(
+            remote_choices(surface, "critic_model").map(|choices| choices.len()),
+            Some(model.len()),
+            "the critic reuses the same catalog"
+        );
+        assert!(remote_choices(surface, "surface").is_none());
+    }
 }
 
 #[test]

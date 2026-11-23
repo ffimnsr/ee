@@ -59,8 +59,16 @@ pub struct SetupInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
     /// Suggested values; an empty list leaves the input free-form.
+    ///
+    /// Agents should keep this list short and high-value: hosts render every
+    /// entry, so a full provider catalog belongs in [`Self::remote_choices`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<SetupChoice>,
+    /// Whether the host may fetch the complete value set from the agent with
+    /// `--ee-config-choices <key>` plus the values collected so far as
+    /// environment variables, then offer a searchable selection.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote_choices: bool,
     /// Whether setup clients may hide this input behind an advanced-options gate.
     #[serde(default, skip_serializing_if = "is_false")]
     pub advanced: bool,
@@ -141,6 +149,7 @@ mod tests {
                 required: false,
                 section: None,
                 choices: Vec::new(),
+                remote_choices: false,
                 advanced: false,
                 config: SetupInputConfig { env: String::from("EXAMPLE_MODEL") },
             }],

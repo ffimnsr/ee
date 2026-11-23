@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ee_agent_protocol::setup::{SETUP_MANIFEST_SCHEMA_VERSION, SetupManifest};
+use ee_agent_protocol::setup::{SETUP_MANIFEST_SCHEMA_VERSION, SetupChoice, SetupManifest};
 
 use crate::agent_registry::{self, RegistryAgent};
 use crate::agent_setup_prompt::collect_setup_values;
@@ -80,7 +80,9 @@ fn setup_local_agent(
     println!("Setting up {}.", manifest.agent.display_name);
     let server_id =
         prompt_server_name(&manifest.agent.display_name, default_server_name(make_default))?;
-    let env = collect_setup_values(&manifest)?;
+    let env = collect_setup_values(&manifest, |key, collected| {
+        read_choices(&candidate.path, key, collected)
+    })?;
     configure_agent_setup(&server_id, &candidate.path, &[], &env, scope, make_default)?;
     Ok(server_id)
 }
@@ -398,17 +400,52 @@ fn select_agent(candidates: &[SetupCandidate]) -> Result<&SetupCandidate, String
 }
 
 fn read_manifest(path: &Path) -> Result<SetupManifest, String> {
+    let bytes = run_setup_command(path, &["--ee-config"], &BTreeMap::new(), "setup manifest")?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("setup manifest from {} is not UTF-8", path.display()))?;
+    let manifest = serde_json::from_str(&text)
+        .map_err(|error| format!("invalid setup manifest from {}: {error}", path.display()))?;
+    validate_manifest(manifest)
+}
+
+/// Reads the complete choice list for one remotely fetched input, passing the
+/// values collected so far so the agent scopes the catalog (for example by
+/// surface). Called only while an interactive searchable picker is offered.
+fn read_choices(
+    path: &Path,
+    key: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<SetupChoice>, String> {
+    let bytes = run_setup_command(path, &["--ee-config-choices", key], env, "choice list")?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("choice list from {} is not UTF-8", path.display()))?;
+    let choices: Vec<SetupChoice> = serde_json::from_str(&text)
+        .map_err(|error| format!("invalid choice list from {}: {error}", path.display()))?;
+    if choices.iter().any(|choice| choice.value.trim().is_empty()) {
+        return Err(format!("agent setup manifest has an empty remote choice for `{key}`"));
+    }
+    Ok(choices)
+}
+
+/// Runs one bounded setup-only agent command and returns its stdout.
+fn run_setup_command(
+    path: &Path,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let invocation = args.join(" ");
     let mut command = Command::new(path);
-    command.arg("--ee-config").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command.args(args).envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     // A just-written agent binary can be momentarily unexecutable while a
     // concurrent `fork` in this process still holds its write descriptor.
     let mut child = crate::agent_registry::spawn_retrying_text_busy(&mut command, |error| {
-        format!("cannot run {} --ee-config: {error}", path.display())
+        format!("cannot run {} {invocation}: {error}", path.display())
     })?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| format!("cannot capture setup manifest from {}", path.display()))?;
+        .ok_or_else(|| format!("cannot capture {what} from {}", path.display()))?;
     let output_reader = thread::spawn(move || read_bounded(stdout));
     let deadline = Instant::now() + MANIFEST_TIMEOUT;
     let status = loop {
@@ -422,29 +459,21 @@ fn read_manifest(path: &Path) -> Result<SetupManifest, String> {
             let _ = child.kill();
             let _ = child.wait();
             let _ = output_reader.join();
-            return Err(format!("{} --ee-config timed out", path.display()));
+            return Err(format!("{} {invocation} timed out", path.display()));
         }
         thread::sleep(Duration::from_millis(10));
     };
     let (bytes, truncated) = output_reader
         .join()
-        .map_err(|_| format!("setup manifest reader panicked for {}", path.display()))?
-        .map_err(|error| format!("cannot read setup manifest from {}: {error}", path.display()))?;
+        .map_err(|_| format!("{what} reader panicked for {}", path.display()))?
+        .map_err(|error| format!("cannot read {what} from {}: {error}", path.display()))?;
     if !status.success() {
-        return Err(format!("{} --ee-config exited with {status}", path.display()));
+        return Err(format!("{} {invocation} exited with {status}", path.display()));
     }
     if truncated {
-        return Err(format!(
-            "setup manifest from {} exceeds {MAX_MANIFEST_BYTES} bytes",
-            path.display()
-        ));
+        return Err(format!("{what} from {} exceeds {MAX_MANIFEST_BYTES} bytes", path.display()));
     }
-
-    let text = String::from_utf8(bytes)
-        .map_err(|_| format!("setup manifest from {} is not UTF-8", path.display()))?;
-    let manifest = serde_json::from_str(&text)
-        .map_err(|error| format!("invalid setup manifest from {}: {error}", path.display()))?;
-    validate_manifest(manifest)
+    Ok(bytes)
 }
 
 fn read_bounded(mut reader: impl io::Read) -> io::Result<(Vec<u8>, bool)> {
@@ -664,6 +693,39 @@ mod tests {
         assert_eq!(manifest.agent.display_name, "Example");
     }
 
+    /// The host re-invokes the agent with the values collected so far, so a
+    /// remote choice list is scoped without shipping the whole catalog.
+    #[cfg(unix)]
+    #[test]
+    fn remote_choices_receive_the_previously_collected_environment() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let agent = temp.path().join("ee-agent-example");
+        fs::write(&agent, "#!/bin/sh\nprintf '[{\"value\":\"%s-model\"}]' \"$OPENCODE_SURFACE\"\n")
+            .expect("write agent");
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).expect("make executable");
+
+        let env = BTreeMap::from([(String::from("OPENCODE_SURFACE"), String::from("zen"))]);
+        let choices = read_choices(&agent, "model", &env).expect("read choices");
+
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].value, "zen-model");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_choices_reject_empty_values() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let agent = temp.path().join("ee-agent-example");
+        fs::write(&agent, "#!/bin/sh\nprintf '[{\\\"value\\\":\\\"\\\"}]'\n").expect("write agent");
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).expect("make executable");
+
+        assert!(read_choices(&agent, "model", &BTreeMap::new()).is_err());
+    }
+
     fn conditional_choice_manifest(input: &str) -> SetupManifest {
         SetupManifest {
             schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
@@ -684,6 +746,7 @@ mod tests {
                         label: None,
                         when: None,
                     }],
+                    remote_choices: false,
                     advanced: false,
                     config: SetupInputConfig { env: String::from("EXAMPLE_SURFACE") },
                 },
@@ -701,6 +764,7 @@ mod tests {
                             value: String::from("zen"),
                         }),
                     }],
+                    remote_choices: false,
                     advanced: false,
                     config: SetupInputConfig { env: String::from("EXAMPLE_MODEL") },
                 },
@@ -736,6 +800,7 @@ mod tests {
                 required: false,
                 section: None,
                 choices: Vec::new(),
+                remote_choices: false,
                 advanced: false,
                 config: SetupInputConfig { env: String::from("EXAMPLE_MODEL") },
             }],
@@ -790,6 +855,36 @@ mod tests {
                 .expect("surface and model stay explicit inputs");
             assert!(input.default.is_none(), "{env} is never defaulted for the user");
             assert!(input.required, "{env} is mandatory");
+        }
+    }
+
+    /// The manifest carries two curated per-surface lists, so it must stay under
+    /// the host's bounded-read cap instead of shipping the merged catalog.
+    #[test]
+    fn opencode_manifest_fits_the_host_byte_cap() {
+        let manifest = ee_agent_opencode::config::setup_manifest();
+        let bytes = serde_json::to_vec(&manifest).expect("manifest serializes");
+
+        assert!(
+            bytes.len() <= MAX_MANIFEST_BYTES,
+            "manifest is {} bytes; host cap is {MAX_MANIFEST_BYTES}",
+            bytes.len()
+        );
+    }
+
+    /// Curated selections stay small and point at remotely searchable catalogs.
+    #[test]
+    fn opencode_manifest_curates_models_and_advertises_remote_search() {
+        let manifest = ee_agent_opencode::config::setup_manifest();
+
+        for key in ["model", "critic_model"] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.key == key)
+                .unwrap_or_else(|| panic!("manifest declares `{key}`"));
+            assert!(input.remote_choices, "`{key}` offers the full catalog on demand");
+            assert!(!input.choices.is_empty(), "`{key}` still shows curated defaults");
         }
     }
 
