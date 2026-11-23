@@ -59,6 +59,15 @@ pub const IMPORT_SESSION_COMMAND_NAME: &str = "import-session";
 /// name; when omitted the provider lists the available primary agents.
 pub const PRIMARY_AGENT_COMMAND_NAME: &str = "primary-agent";
 
+/// The advertised slash-command name for reflecting on the last task and
+/// writing at most one contrast-backed experience entry. The optional
+/// argument overrides the library domain.
+pub const REFLECT_COMMAND_NAME: &str = "reflect";
+
+/// The advertised slash-command name for the recursive harness improvement
+/// loop. Arguments: `k=N`, `mode=parallel|sequential`, `workers=N`, `dry-run`.
+pub const HARNESS_COMMAND_NAME: &str = "harness";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -146,6 +155,32 @@ pub fn rubber_duck_available_command() -> AvailableCommand {
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional focused question",
+    )))
+}
+
+/// The `/reflect` command advertised by providers that can curate a session
+/// reflection into the workspace experience library.
+#[must_use]
+pub fn reflect_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        REFLECT_COMMAND_NAME,
+        "Reflect on the last task and write at most one contrast-backed experience entry after confirmation.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional domain override",
+    )))
+}
+
+/// The `/harness` command advertised by providers that can run the recursive
+/// harness improvement loop over the last task.
+#[must_use]
+pub fn harness_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        HARNESS_COMMAND_NAME,
+        "Run one task through Propose -> Probe -> Compose -> Select and reflect on the result.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "k=N mode=parallel|sequential workers=N dry-run",
     )))
 }
 

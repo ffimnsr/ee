@@ -204,7 +204,25 @@ pub struct SessionSetModeParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSetModeResult {
-    /// Whether the agent accepted the mode.
+    /// Whether the mode was applied.
+    pub applied: bool,
+}
+
+/// `session/set-model` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetModelParams {
+    /// Target session.
+    pub session_id: String,
+    /// Model id advertised by the agent.
+    pub model_id: String,
+}
+
+/// `session/set-model` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetModelResult {
+    /// Whether the model was applied.
     pub applied: bool,
 }
 

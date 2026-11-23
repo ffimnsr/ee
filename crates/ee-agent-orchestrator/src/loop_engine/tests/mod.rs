@@ -151,6 +151,59 @@ async fn steer_message_is_visible_before_the_next_model_call() {
 }
 
 #[tokio::test]
+async fn middleware_warning_appends_at_exactly_the_configured_call() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))]),
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-2", "echo", json!({}))]),
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-3", "echo", json!({}))]),
+        ModelResponse::new().text("done").completed(),
+    ]);
+    let (sink, client, _rx) = plumbing();
+    let transcript_out = Arc::new(Mutex::new(Vec::new()));
+    let options = LoopOptions {
+        middleware: Some(crate::middleware::MiddlewareSpec {
+            warn_no_artifact_after_calls: Some(2),
+            hint_on_error_signature: Vec::new(),
+            verify_after_write: false,
+        }),
+        transcript_out: Some(transcript_out.clone()),
+        ..LoopOptions::default()
+    };
+    let engine = engine_with_options(
+        OrchestratorConfig::default(),
+        Arc::new(model),
+        echo_tool(),
+        EventRecorder::new(),
+        options,
+    );
+
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    engine
+        .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+        .await
+        .expect("turn completes");
+
+    let transcript = transcript_out.lock().expect("transcript output poisoned").clone();
+    let results: Vec<ToolResult> = transcript
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            ModelContent::ToolResult { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 3);
+    assert!(!results[0].text_output.contains("Middleware warning"));
+    assert!(results[1].text_output.contains("Middleware warning"));
+    assert!(
+        !results[2].text_output.contains("Middleware warning"),
+        "the warning fires once per turn"
+    );
+    assert!(results.iter().all(|result| result.success), "hooks never block a result");
+    assert!(results[1].text_output.contains("echoed"), "the original tool output is preserved");
+}
+
+#[tokio::test]
 async fn until_hook_ends_the_loop_after_the_named_step() {
     let model = FakeModel::new(vec![
         ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))]),

@@ -9,17 +9,20 @@ pub(crate) mod context;
 pub(crate) mod delegation;
 pub(crate) mod error;
 pub(crate) mod global;
+pub(crate) mod guardrails;
 pub(crate) mod mcp;
 pub(crate) mod remote;
 pub(crate) mod render;
 pub(crate) mod repeat_guard;
 pub(crate) mod runtime_context;
+pub(crate) mod scripts;
 pub(crate) mod sections;
 pub(crate) mod skills;
 pub(crate) mod tool_guidance;
+pub(crate) mod tool_guidance_override;
 pub(crate) mod workspace;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ee_agent_protocol::SessionModeId;
@@ -156,6 +159,8 @@ pub(crate) struct PromptInputs<'a> {
     pub advertised_tools: &'a [String],
     /// Configured MCP server names, in session order.
     pub mcp_servers: &'a [String],
+    /// Tool names whose built-in guidance a discovered file replaces.
+    pub overridden_guidance_tools: &'a [String],
     /// Section set to emit.
     pub preset: PromptPreset,
 }
@@ -195,7 +200,10 @@ pub(crate) fn build(inputs: &PromptInputs<'_>) -> Result<PromptBundle, PromptErr
             if mode_policy == ModePolicy::Plan {
                 sections.push(Section::for_slot(&PLAN_POLICY, PLAN_POLICY_TEXT)?);
             }
-            sections.extend(tool_guidance::sections(inputs.advertised_tools)?);
+            let overridden: BTreeSet<String> =
+                inputs.overridden_guidance_tools.iter().cloned().collect();
+            sections
+                .extend(tool_guidance::sections_excluding(inputs.advertised_tools, &overridden)?);
             if let Some(section) = mcp::stable_section(inputs.mcp_servers)? {
                 sections.push(section);
             }
@@ -278,6 +286,7 @@ mod tests {
             turn_guidance: None,
             advertised_tools: &[],
             mcp_servers: &[],
+            overridden_guidance_tools: &[],
             preset: PromptPreset::Standard,
         }
     }
@@ -434,6 +443,22 @@ mod tests {
                 assert!(!stable.contains(needle), "{advertised:?} must omit {needle}");
             }
         }
+    }
+
+    #[test]
+    fn harness_editing_guidance_requires_both_read_and_edit_tools() {
+        let tools = names(&["read_file", "ee_replace_text"]);
+        let mut inputs = inputs("test", "test-model");
+        inputs.advertised_tools = &tools;
+        let stable = build(&inputs).expect("builds").stable;
+        assert!(stable.contains("earliest observed divergence"));
+        assert!(stable.contains("KEEP_BASE"));
+
+        let read_only = names(&["read_file"]);
+        inputs.advertised_tools = &read_only;
+        let stable = build(&inputs).expect("builds").stable;
+        assert!(!stable.contains("earliest observed divergence"));
+        assert!(!stable.contains("KEEP_BASE"));
     }
 
     #[test]

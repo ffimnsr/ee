@@ -229,6 +229,7 @@ fn builtin_tools_register_under_session() {
             "create_terminal",
             "delete_memory",
             "kill_terminal",
+            "load_experience",
             "load_memory",
             "load_skill",
             "read_file",
@@ -239,7 +240,7 @@ fn builtin_tools_register_under_session() {
             "write_file"
         ]
     );
-    assert_eq!(registry.len(), 13);
+    assert_eq!(registry.len(), 14);
 }
 
 #[tokio::test]
@@ -399,6 +400,55 @@ async fn load_memory_loads_by_name_and_searches_by_tag() {
     assert!(searched.success, "{}", searched.text_output);
     assert!(searched.text_output.contains("Use rustfmt."));
     assert!(searched.text_output.contains("testing"), "tag match is included");
+}
+
+#[tokio::test]
+async fn load_experience_loads_by_domain_and_sequence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dir = temp.path().join(".agents/experience/rust/entries/1-task");
+    std::fs::create_dir_all(&dir).expect("experience dir");
+    std::fs::write(
+        dir.join("EXPERIENCE.md"),
+        "---\nseq: 1\ndomain: rust\ntask: task\nconfidence: high\n---\n## Edits\ncomponent: tool_guidance.md\nchange: added rule\nobserved: candidate reopened outputs\nverdict: helped\n## Experience\ncue: cue\nlesson: lesson\nevidence: evidence\n",
+    )
+    .expect("write experience");
+    let mut registry = ToolRegistry::new();
+    registry.register_builtins(&SessionId::new("s-1")).expect("builtins register");
+    let tool = registry.get("load_experience").expect("load_experience registered");
+    let (sink, client, _rx) = plumbing();
+    drop(sink);
+    let context = ToolCallContext {
+        task: task_fixture(),
+        transcript: Vec::new(),
+        events: EventRecorder::new(),
+        scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
+        model_id: None,
+        terminal_wait: TerminalWaitLimits::default(),
+    };
+
+    let loaded = tool
+        .execute(
+            json!({ "domain": "rust" }),
+            client.clone(),
+            watch::channel(false).1,
+            context.clone(),
+        )
+        .await;
+    assert!(loaded.success, "{}", loaded.text_output);
+    assert!(loaded.text_output.contains("lesson: lesson"));
+    let structured = loaded.structured_output.expect("structured");
+    assert_eq!(structured["seq"], 1);
+    assert_eq!(structured["confidence"], "high");
+    assert_eq!(structured["no_entry"], false);
+
+    let missing =
+        tool.execute(json!({}), client.clone(), watch::channel(false).1, context.clone()).await;
+    assert_eq!(missing.error_kind, Some(ToolErrorKind::InvalidArguments));
+
+    let unknown = tool
+        .execute(json!({ "domain": "missing" }), client, watch::channel(false).1, context)
+        .await;
+    assert_eq!(unknown.error_kind, Some(ToolErrorKind::InvalidArguments));
 }
 
 #[tokio::test]

@@ -177,6 +177,9 @@ pub(crate) struct LoopOptions {
     /// when the runtime can execute it; root turns set this from the runtime's
     /// shared handle.
     pub compact_tool: Option<CompactToolHook>,
+    /// Validated declarative middleware hooks for this turn. `None` leaves the
+    /// tool results byte-identical to a turn without the file.
+    pub middleware: Option<crate::middleware::MiddlewareSpec>,
 }
 
 pub use crate::loop_hooks::{UntilFn, UntilPredicate};
@@ -214,6 +217,7 @@ impl Default for LoopOptions {
             metrics: None,
             compaction_checkpoint: None,
             compact_tool: None,
+            middleware: None,
         }
     }
 }

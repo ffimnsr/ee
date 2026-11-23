@@ -188,6 +188,83 @@ pub(crate) enum AgentCommands {
         #[arg(long = "session-log-dir", value_name = "DIR")]
         session_log_dir: Option<PathBuf>,
     },
+    /// Recursive harness improvement loop
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommands,
+    },
+}
+
+/// `ee do agent harness` subcommands.
+#[derive(Debug, Subcommand)]
+pub(crate) enum HarnessCommands {
+    /// Run one task through Propose -> Probe -> Compose -> Select
+    Improve(Box<HarnessImproveArgs>),
+    /// Run the deterministic demo loop with no model credentials
+    Demo {
+        /// Directory that receives the demo workspace and run root
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
+}
+
+/// `ee do agent harness improve` options.
+#[derive(Debug, Args)]
+pub(crate) struct HarnessImproveArgs {
+    /// Workspace whose `.agents` tree is the base harness and whose files are the task source
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub(crate) workspace: PathBuf,
+    /// Task prompt handed to every rollout
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) prompt: Option<String>,
+    /// Read the task prompt from a file instead of --prompt
+    #[arg(long = "prompt-file", value_name = "FILE")]
+    pub(crate) prompt_file: Option<PathBuf>,
+    /// Experience-library domain (defaults to the workspace directory name)
+    #[arg(long, value_name = "NAME")]
+    pub(crate) domain: Option<String>,
+    /// Recursion depth; 1 is the single-step default
+    #[arg(long, default_value_t = 1)]
+    pub(crate) k: usize,
+    /// Candidate execution mode
+    #[arg(long, value_enum, default_value_t = HarnessModeArg::Parallel)]
+    pub(crate) mode: HarnessModeArg,
+    /// Domain concurrency for stream runs
+    #[arg(long, default_value_t = 2)]
+    pub(crate) workers: usize,
+    /// Print the plan without any model call
+    #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
+    pub(crate) dry_run: bool,
+    /// Run directory (defaults to the ee state directory)
+    #[arg(long = "run-root", value_name = "DIR")]
+    pub(crate) run_root: Option<PathBuf>,
+    /// Scratch experience-library root for measurement runs
+    #[arg(long = "library-root", value_name = "DIR")]
+    pub(crate) library_root: Option<PathBuf>,
+    /// Improver model override; defaults to the configured agent default
+    #[arg(long = "improver-model", value_name = "ID")]
+    pub(crate) improver_model: Option<String>,
+    /// Improver reasoning-effort label
+    #[arg(long = "improver-effort", value_name = "LABEL")]
+    pub(crate) improver_effort: Option<String>,
+    /// Maximum improver model steps per session
+    #[arg(long = "improver-steps", default_value_t = 12)]
+    pub(crate) improver_steps: usize,
+    /// Improver wall-clock timeout in seconds
+    #[arg(long = "improver-timeout", default_value_t = 300)]
+    pub(crate) improver_timeout: u64,
+    /// Approve writing the reflection entry into the workspace library
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) yes: bool,
+}
+
+/// Candidate execution mode on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum HarnessModeArg {
+    /// Independent candidates against the base harness
+    Parallel,
+    /// Chained steps; each composition becomes the next base
+    Sequential,
 }
 
 #[derive(Debug, Subcommand)]

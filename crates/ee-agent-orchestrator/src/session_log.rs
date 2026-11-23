@@ -216,6 +216,44 @@ pub struct ToolRecord {
     pub iteration: usize,
 }
 
+/// One harness improvement ledger report (I43).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HarnessLedgerReport {
+    /// Task the improvement loop ran for.
+    pub task_id: String,
+    /// Run root, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_root: Option<String>,
+    /// Identity rollouts consumed.
+    pub rollouts: u64,
+    /// Identity improvement sessions consumed.
+    pub sessions: u64,
+    /// Selection sessions tracked outside the identity.
+    pub selection_sessions: u64,
+    /// Validator retries tracked outside the identity.
+    pub retry_sessions: u64,
+    /// Reflection sessions tracked outside the identity.
+    pub reflection_sessions: u64,
+    /// Dead rollouts recorded but not used.
+    pub dead_rollouts: u64,
+    /// Whether the base harness delivered no reference run.
+    pub base_failed: bool,
+}
+
+/// One persisted harness ledger report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HarnessLedgerRecord {
+    /// Monotonic append sequence within the session.
+    pub seq: u64,
+    /// Session that recorded the report.
+    pub session_id: String,
+    /// Report payload.
+    #[serde(flatten)]
+    pub report: HarnessLedgerReport,
+}
+
 /// One append-only log record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -248,6 +286,8 @@ pub enum SessionLogRecord {
     Usage(UsageRecord),
     /// One tool execution completed.
     Tool(ToolRecord),
+    /// One harness improvement loop finished and reported spend.
+    HarnessLedger(HarnessLedgerRecord),
     /// A recovery checkpoint was persisted.
     Checkpoint {
         /// Append sequence.
@@ -302,6 +342,7 @@ impl SessionLogRecord {
             Self::Truncation(record) => record.seq,
             Self::Usage(record) => record.seq,
             Self::Tool(record) => record.seq,
+            Self::HarnessLedger(record) => record.seq,
         }
     }
 
@@ -319,6 +360,7 @@ impl SessionLogRecord {
             Self::Truncation(record) => &record.session_id,
             Self::Usage(record) => &record.session_id,
             Self::Tool(record) => &record.session_id,
+            Self::HarnessLedger(record) => &record.session_id,
         }
     }
 
@@ -349,6 +391,11 @@ impl SessionLogRecord {
                 record.seq = seq;
                 record.session_id = session_id.to_string();
                 Self::Tool(record)
+            }
+            Self::HarnessLedger(mut record) => {
+                record.seq = seq;
+                record.session_id = session_id.to_string();
+                Self::HarnessLedger(record)
             }
             other => other,
         }
@@ -693,6 +740,30 @@ impl SessionLog {
             duration_ms,
             turn: state.turn,
             iteration: state.iteration,
+        });
+        self.commit(&mut state, record).inspect_err(|error| {
+            state.failure = Some(error.to_string());
+        })
+    }
+
+    /// Records one harness improvement ledger report.
+    ///
+    /// The report is written after the loop returns, so `usage_stats` can show
+    /// improvement spend next to task spend from the same append-only log.
+    pub fn record_harness_ledger(
+        &self,
+        report: HarnessLedgerReport,
+    ) -> Result<(), OrchestratorError> {
+        let mut state = self.state.lock().expect("session log state poisoned");
+        self.ensure_initialized(&mut state)?;
+        if let Err(error) = self.check_capacity(&state, 0) {
+            state.failure = Some(error.to_string());
+            return Err(error);
+        }
+        let record = SessionLogRecord::HarnessLedger(HarnessLedgerRecord {
+            seq: state.next_seq,
+            session_id: self.session_id.clone(),
+            report,
         });
         self.commit(&mut state, record).inspect_err(|error| {
             state.failure = Some(error.to_string());

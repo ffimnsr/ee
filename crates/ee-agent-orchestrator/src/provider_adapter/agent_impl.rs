@@ -16,7 +16,7 @@ use super::conversation::restore_runtime_from_checkpoint;
 use super::conversation::session_compaction_history;
 use super::conversation::session_snapshot;
 use super::conversation::validate_mcp_servers;
-use super::conversation::{RuntimePromptInputs, runtime_prompt_bundle};
+use super::prompt_bundle::{RuntimePromptInputs, runtime_prompt_bundle};
 use super::session_identity;
 use super::*;
 
@@ -427,6 +427,13 @@ impl AgentProvider for OrchestratorProvider {
                 mcp_servers.iter().map(|descriptor| descriptor.name.clone()).collect();
             let background_jobs = runtime.background_jobs_snapshot();
             let global_config_root = crate::prompt::skills::user_config_root_from_env();
+            // Declarative middleware is active only while a valid workspace or
+            // user file exists; a missing file clears it for following turns.
+            runtime.set_middleware_spec(crate::middleware::discover(
+                &workspace,
+                &workspace_roots,
+                global_config_root.as_deref(),
+            ));
             runtime.reload_user_agents(&workspace, &workspace_roots, global_config_root.as_deref());
             runtime.reload_user_commands(
                 &workspace,
@@ -612,6 +619,56 @@ impl AgentProvider for OrchestratorProvider {
                     &sessions,
                 )?;
                 return Ok(turn.prompt_result);
+            }
+            // `/reflect` curates the last task into the workspace experience
+            // library. The write is approval-gated and emits one bounded summary.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == REFLECT_COMMAND_NAME
+            {
+                let history = model_history(&model_transcript);
+                record_user_message(&conversation, prompt_text.clone());
+                return super::reflect_command::handle_reflect_command(
+                    super::reflect_command::ReflectCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        client: client.clone(),
+                        cancel: cancel.clone(),
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        workspace: &workspace,
+                        history,
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                )
+                .await;
+            }
+            // `/harness` runs the recursive improvement loop for the last task
+            // through the checked-in CLI child process.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == HARNESS_COMMAND_NAME
+            {
+                let history = model_history(&model_transcript);
+                record_user_message(&conversation, prompt_text.clone());
+                return super::harness_command::handle_harness_command(
+                    super::harness_command::HarnessCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        cancel: cancel.clone(),
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        workspace: &workspace,
+                        history,
+                        session_log: runtime.session_log_for(&session_id.to_string()),
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                )
+                .await;
             }
             // `/diff` reports the files and patches one turn changed, using
             // the start/end workspace snapshots captured around it.

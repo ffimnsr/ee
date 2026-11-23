@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use ee_agent_remote::protocol::{
     HistoryTailParams, InitializeParams, Method, PermissionApprovalRequest,
     PermissionsPendingParams, PermissionsRespondParams, SessionCloseParams, SessionListParams,
-    SessionNewParams, SessionResumeParams, SessionSetModeParams, SessionUpdateNotification,
-    StatusChangedNotification, TurnCompletedNotification, TurnInterruptParams, TurnStartParams,
+    SessionNewParams, SessionResumeParams, SessionSetModeParams, SessionSetModelParams,
+    SessionUpdateNotification, StatusChangedNotification, TurnCompletedNotification,
+    TurnInterruptParams, TurnStartParams,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -47,6 +48,7 @@ fn every_request_fixture_parses_and_round_trips() {
     round_trip::<SessionResumeParams>(Method::SessionResume, "session_resume");
     round_trip::<SessionCloseParams>(Method::SessionClose, "session_close");
     round_trip::<SessionSetModeParams>(Method::SessionSetMode, "session_set_mode");
+    round_trip::<SessionSetModelParams>(Method::SessionSetModel, "session_set_model");
     round_trip::<TurnStartParams>(Method::TurnStart, "turn_start");
     round_trip::<TurnInterruptParams>(Method::TurnInterrupt, "turn_interrupt");
     round_trip::<PermissionsPendingParams>(Method::PermissionsPending, "permissions_pending");
@@ -83,6 +85,7 @@ fn every_registered_method_has_a_fixture_file() {
             Method::SessionResume => "session_resume",
             Method::SessionClose => "session_close",
             Method::SessionSetMode => "session_set_mode",
+            Method::SessionSetModel => "session_set_model",
             Method::TurnStart => "turn_start",
             Method::TurnInterrupt => "turn_interrupt",
             Method::PermissionsPending => "permissions_pending",
@@ -116,6 +119,7 @@ fn every_fixture_file_belongs_to_a_registered_method() {
             "session_resume",
             "session_close",
             "session_set_mode",
+            "session_set_model",
             "turn_start",
             "turn_interrupt",
             "permissions_pending",

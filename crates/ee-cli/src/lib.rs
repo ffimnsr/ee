@@ -56,6 +56,9 @@ mod file_cmd;
 mod folds;
 #[allow(dead_code)]
 mod git;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
+mod harness_cmd;
 #[allow(dead_code)]
 mod highlight;
 #[allow(dead_code)]
@@ -117,8 +120,8 @@ pub use entry::run_cli as run;
 #[cfg(test)]
 pub(crate) use args::{
     ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentTrustCommands, AgentTrustProfile, Cli, Commands,
-    ConfigCommands, DoCommands, FileCommands, LanguageCommands, PluginCommands, RuntimeCommands,
-    SecretsCommands,
+    ConfigCommands, DoCommands, FileCommands, HarnessCommands, HarnessModeArg, LanguageCommands,
+    PluginCommands, RuntimeCommands, SecretsCommands,
 };
 #[cfg(test)]
 pub(crate) use doctor::doctor_report;

@@ -36,7 +36,8 @@ serde_json.workspace = true
 serde_yaml_ng.workspace = true
 sha2.workspace = true
 similar.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "process"] }
+toml.workspace = true
 tracing.workspace = true
 # Grapheme-safe cuts for bounded tool output; already a workspace dependency.
 unicode-segmentation.workspace = true

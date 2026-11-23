@@ -28,6 +28,7 @@ agents = [
     "dep:ee-agent-remote",
     "dep:flate2",
     "dep:ee-agent-host",
+    "dep:ee-agent-harnessing",
     "dep:ee-mcp",
     "dep:reqwest",
     "dep:rmcp",
@@ -51,6 +52,7 @@ clap_complete.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 ee-agent-host = { workspace = true, optional = true }
+ee-agent-harnessing = { path = "../ee-agent-harnessing", optional = true }
 ee-agent-protocol = { workspace = true, optional = true }
 ee-agent-remote = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
@@ -78,7 +80,7 @@ similar.workspace = true
 tar = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
 unicode-width.workspace = true

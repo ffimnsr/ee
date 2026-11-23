@@ -31,7 +31,7 @@ use crate::ui::{self, ui};
 use crate::workspace_trust;
 use crate::{INPUT_POLL_TIMEOUT, MAX_INPUT_EVENTS_PER_TICK};
 #[cfg(feature = "agents")]
-use crate::{mcp_cmd, serve_cmd};
+use crate::{harness_cmd, mcp_cmd, serve_cmd};
 
 fn is_repeated_arrow_motion(event: &Event) -> bool {
     let Event::Key(key) = event else { return false };
@@ -276,6 +276,18 @@ pub fn run_cli() -> io::Result<()> {
                     #[cfg(not(feature = "agents"))]
                     {
                         let _ = (allow_roots, permission_mode, audit_log, session_log_dir);
+                        eprintln!("ee: agents feature is disabled in this build");
+                        std::process::exit(1);
+                    }
+                }
+                DoCommands::Agent { command: AgentCommands::Harness { command } } => {
+                    #[cfg(feature = "agents")]
+                    {
+                        harness_cmd::run(command)?;
+                    }
+                    #[cfg(not(feature = "agents"))]
+                    {
+                        let _ = command;
                         eprintln!("ee: agents feature is disabled in this build");
                         std::process::exit(1);
                     }

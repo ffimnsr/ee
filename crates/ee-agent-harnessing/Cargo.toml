@@ -1,0 +1,24 @@
+[package]
+name = "ee-agent-harnessing"
+version = "0.1.0"
+edition = "2024"
+description = "Recursive harness improvement loop (Harness2 adaptation)"
+license = "MIT"
+
+[lib]
+name = "ee_agent_harnessing"
+path = "src/lib.rs"
+
+[dependencies]
+ee-agent-orchestrator = { path = "../ee-agent-orchestrator" }
+ee-agent-remote = { path = "../ee-agent-remote" }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

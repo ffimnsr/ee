@@ -226,6 +226,7 @@ impl OrchestratorRuntime {
             session_logs,
             last_turn_transcript: Arc::new(Mutex::new(Vec::new())),
             workspace_scope: Arc::new(Mutex::new(None)),
+            middleware_spec: Mutex::new(None),
             session_move_target: Arc::new(Mutex::new(None)),
             pending_title: Arc::new(Mutex::new(None)),
             read_only_tools: std::sync::atomic::AtomicBool::new(false),
@@ -545,6 +546,20 @@ impl OrchestratorRuntime {
         self.session_move_target.lock().expect("session move target poisoned").clone()
     }
 
+    /// Replaces the declarative middleware hook set for following turns.
+    ///
+    /// `None` disables middleware entirely, keeping tool results byte-identical
+    /// to a session that never had a middleware file.
+    pub fn set_middleware_spec(&self, spec: Option<crate::middleware::MiddlewareSpec>) {
+        *self.middleware_spec.lock().expect("middleware spec poisoned") = spec;
+    }
+
+    /// Snapshot of the declarative middleware hooks for one turn.
+    #[must_use]
+    pub(crate) fn middleware_spec(&self) -> Option<crate::middleware::MiddlewareSpec> {
+        self.middleware_spec.lock().expect("middleware spec poisoned").clone()
+    }
+
     /// Restricts the advertised tool set to read-class tools for following
     /// turns. Plan mode sets this; execution policy still denies mutations.
     pub fn set_read_only_tools(&self, enabled: bool) {
@@ -773,6 +788,13 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn config(&self) -> &OrchestratorConfig {
         &self.config
+    }
+    /// Session log handle for one session, when durable logging is enabled.
+    pub(crate) fn session_log_for(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<crate::session_log::SessionLog>> {
+        self.session_logs.as_ref().map(|store| store.log_for(session_id))
     }
     /// Registers a server-side tool for the loop engine.
     pub fn register_tool(&self, tool: Arc<dyn ServerTool>) -> Result<(), OrchestratorError> {

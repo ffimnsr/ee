@@ -232,6 +232,9 @@ pub struct OrchestratorRuntime {
     /// instruction discovery. Set by the provider adapter per session and
     /// updated by `session_move`.
     workspace_scope: crate::workspace_scope::WorkspaceScopeSlot,
+    /// Validated declarative middleware for the current workspace. Reloaded by
+    /// the provider adapter per prompt; `None` keeps turns byte-identical.
+    middleware_spec: Mutex<Option<crate::middleware::MiddlewareSpec>>,
     /// Session working directory requested by `session_move`. It outlives the
     /// tool call so later prompts and instruction discovery keep using the
     /// moved directory instead of the adapter's original workspace.

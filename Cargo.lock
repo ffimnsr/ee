@@ -1442,6 +1442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-agent-harnessing"
+version = "0.1.0"
+dependencies = [
+ "ee-agent-orchestrator",
+ "ee-agent-remote",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ee-agent-host"
 version = "0.11.14"
 dependencies = [
@@ -1540,6 +1555,7 @@ dependencies = [
  "similar 3.2.0",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "unicode-segmentation",
 ]
@@ -1606,6 +1622,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "ee-agent-acp-server",
+ "ee-agent-harnessing",
  "ee-agent-host",
  "ee-agent-opencode",
  "ee-agent-openrouter",

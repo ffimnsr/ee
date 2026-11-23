@@ -74,6 +74,10 @@ impl LoopEngine {
         let mut measured_prompt_tokens: Option<u64> = None;
         let mut detector = StuckDetector::new(self.config.stuck);
         let mut repeat_guard = RepeatGuard::new(RepeatGuardConfig::default());
+        // Declarative middleware is per-turn: counters reset, caps apply, and
+        // hooks only append text to local tool results.
+        let mut middleware =
+            self.options.middleware.clone().map(crate::middleware::MiddlewareState::new);
         let graph_handle = self.graph.clone();
         // Per-turn token usage aggregated across every model call; rounds
         // with unknown usage are skipped, never counted as zero.
@@ -697,7 +701,7 @@ impl LoopEngine {
                             summary,
                         });
                     }
-                    let result = match executed {
+                    let mut result = match executed {
                         Ok(executed) => {
                             compact_repeated_web_fetch(&intent, executed, &mut observed_web_sources)
                         }
@@ -727,6 +731,14 @@ impl LoopEngine {
                         return Err(OrchestratorError::Stuck(reason.to_string()));
                     }
                     let path = crate::tool_cache::path_argument(&intent.arguments);
+                    if let Some(middleware) = middleware.as_mut()
+                        && let Some(note) = middleware.after_tool_call(&intent.name, class, &result)
+                    {
+                        if !result.text_output.trim().is_empty() {
+                            result.text_output.push_str("\n\n");
+                        }
+                        result.text_output.push_str(&note);
+                    }
                     match class {
                         Some(class) => {
                             transcript.push_tool_result_classified(

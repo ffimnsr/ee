@@ -160,6 +160,7 @@ impl OrchestratorRuntime {
                 workspace_instructions: self.workspace_instruction_tracker(),
                 metrics: Some(self.metrics.clone()),
                 session_context: Some(self.session_context_snapshot()),
+                middleware: self.middleware_spec(),
                 ..LoopOptions::default()
             },
         );
@@ -305,6 +306,7 @@ impl OrchestratorRuntime {
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
                 session_context: Some(self.session_context_snapshot()),
+                middleware: self.middleware_spec(),
                 ..LoopOptions::default()
             },
         )

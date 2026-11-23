@@ -29,6 +29,8 @@ pub const SESSION_RESUME: &str = "session/resume";
 pub const SESSION_CLOSE: &str = "session/close";
 /// `session/set_mode` request.
 pub const SESSION_SET_MODE: &str = "session/set_mode";
+/// Select the model used by an idle session.
+pub const SESSION_SET_MODEL: &str = "session/set-model";
 /// `turn/start` request.
 pub const TURN_START: &str = "turn/start";
 /// `turn/interrupt` request.
@@ -76,6 +78,7 @@ pub enum Method {
     SessionClose,
     /// Change the session mode.
     SessionSetMode,
+    SessionSetModel,
     /// Start a turn; returns immediately.
     TurnStart,
     /// Interrupt the running turn.
@@ -98,7 +101,7 @@ pub enum Method {
 
 impl Method {
     /// All registry entries, in registry order.
-    pub const ALL: [Method; 16] = [
+    pub const ALL: [Method; 17] = [
         Method::Initialize,
         Method::Initialized,
         Method::SessionList,
@@ -106,6 +109,7 @@ impl Method {
         Method::SessionResume,
         Method::SessionClose,
         Method::SessionSetMode,
+        Method::SessionSetModel,
         Method::TurnStart,
         Method::TurnInterrupt,
         Method::PermissionsPending,
@@ -128,6 +132,7 @@ impl Method {
             Self::SessionResume => SESSION_RESUME,
             Self::SessionClose => SESSION_CLOSE,
             Self::SessionSetMode => SESSION_SET_MODE,
+            Self::SessionSetModel => SESSION_SET_MODEL,
             Self::TurnStart => TURN_START,
             Self::TurnInterrupt => TURN_INTERRUPT,
             Self::PermissionsPending => PERMISSIONS_PENDING,
@@ -150,6 +155,7 @@ impl Method {
             | Self::SessionResume
             | Self::SessionClose
             | Self::SessionSetMode
+            | Self::SessionSetModel
             | Self::TurnStart
             | Self::TurnInterrupt
             | Self::PermissionsPending
@@ -188,6 +194,7 @@ impl Method {
             Self::SessionResume => "SessionResumeParams",
             Self::SessionClose => "SessionCloseParams",
             Self::SessionSetMode => "SessionSetModeParams",
+            Self::SessionSetModel => "SessionSetModelParams",
             Self::TurnStart => "TurnStartParams",
             Self::TurnInterrupt => "TurnInterruptParams",
             Self::PermissionsPending => "PermissionsPendingParams",
@@ -349,7 +356,7 @@ mod tests {
             .into_iter()
             .filter(|method| method.kind() == MethodKind::ServerRequest)
             .count();
-        assert_eq!((requests, notifications, server_requests), (11, 4, 1));
+        assert_eq!((requests, notifications, server_requests), (12, 4, 1));
     }
 
     #[test]

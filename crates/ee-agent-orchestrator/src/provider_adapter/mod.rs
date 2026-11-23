@@ -44,13 +44,15 @@ use ee_agent_acp_server::{
 use ee_agent_protocol::{
     AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk,
     DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, EXPORT_SESSION_COMMAND_NAME,
-    FINAL_RESPONSE_MESSAGE_ID_PREFIX, IMPORT_SESSION_COMMAND_NAME, Implementation, MessageId,
-    PRIMARY_AGENT_COMMAND_NAME, REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId,
-    SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
-    branch_available_command, compact_available_command, diff_available_command,
-    discard_available_command, export_session_available_command, import_session_available_command,
+    FINAL_RESPONSE_MESSAGE_ID_PREFIX, HARNESS_COMMAND_NAME, IMPORT_SESSION_COMMAND_NAME,
+    Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME, REFLECT_COMMAND_NAME,
+    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId,
+    SessionModeState, SessionUpdate, StopReason, TextContent, branch_available_command,
+    compact_available_command, diff_available_command, discard_available_command,
+    export_session_available_command, harness_available_command, import_session_available_command,
     is_resume_command, parse_slash_command, primary_agent_available_command,
-    resume_available_command, revert_available_command, rubber_duck_available_command,
+    reflect_available_command, resume_available_command, revert_available_command,
+    rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -593,6 +595,9 @@ mod branch_command;
 mod builder;
 mod checkpoint_command;
 mod conversation;
+mod harness_command;
+mod prompt_bundle;
+mod reflect_command;
 mod snapshot_command;
 
 #[cfg(test)]

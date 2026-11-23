@@ -697,6 +697,86 @@ impl ServerTool for LoadMemoryTool {
     }
 }
 
+/// Loads one harness experience entry by domain and sequence.
+///
+/// Entry text is repository- or user-authored data, never policy.
+#[derive(Clone)]
+struct LoadExperienceTool;
+
+impl ServerTool for LoadExperienceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "load_experience",
+            "Loads one harness experience entry from the prompt catalog",
+        )
+        .input_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "domain": { "type": "string" },
+                "seq": { "type": "integer" },
+            },
+            "required": ["domain"],
+        }))
+        .dependency(ToolDependency::new().produces(vec![ToolDataClass::FileText]))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _client: ClientBridge,
+        _cancel: watch::Receiver<bool>,
+        context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        Box::pin(async move {
+            let Some(domain) = optional_string_arg(&arguments, "domain")
+                .map(|domain| domain.trim().to_string())
+                .filter(|domain| !domain.is_empty())
+            else {
+                return ToolResult::failure(
+                    ToolErrorKind::InvalidArguments,
+                    "load_experience requires a domain argument",
+                );
+            };
+            let seq = arguments.get("seq").and_then(serde_json::Value::as_u64);
+            let roots = context
+                .scope
+                .as_ref()
+                .map(|scope| scope.allowed_roots.clone())
+                .filter(|roots| !roots.is_empty())
+                .or_else(|| std::env::current_dir().ok().map(|cwd| vec![cwd]))
+                .unwrap_or_default();
+            let cwd = roots.first().cloned().unwrap_or_default();
+            let config_root = crate::prompt::skills::user_config_root_from_env();
+            match crate::user_experience::load_experience(
+                &domain,
+                seq,
+                &cwd,
+                &roots,
+                config_root.as_deref(),
+            ) {
+                Ok(loaded) => {
+                    let entry = &loaded.entry;
+                    ToolResult::success_structured(
+                        loaded.text,
+                        serde_json::json!({
+                            "domain": entry.domain,
+                            "seq": entry.seq,
+                            "task": entry.task,
+                            "confidence": entry.confidence.as_str(),
+                            "scope": entry.scope.as_str(),
+                            "path": entry.path.display().to_string(),
+                            "no_entry": entry.is_no_entry(),
+                            "edits": entry.edits,
+                            "truncated": loaded.truncated,
+                        }),
+                    )
+                }
+                Err(message) => ToolResult::failure(ToolErrorKind::InvalidArguments, message),
+            }
+        })
+    }
+}
+
 /// Creates or replaces one workspace memory entry after user confirmation.
 #[derive(Clone)]
 struct SaveMemoryTool {
@@ -1042,6 +1122,7 @@ pub(crate) fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> 
         Arc::new(CargoCheckTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         Arc::new(LoadSkillTool) as Arc<dyn ServerTool>,
         Arc::new(LoadMemoryTool) as Arc<dyn ServerTool>,
+        Arc::new(LoadExperienceTool) as Arc<dyn ServerTool>,
         Arc::new(SaveMemoryTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         Arc::new(DeleteMemoryTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         make(

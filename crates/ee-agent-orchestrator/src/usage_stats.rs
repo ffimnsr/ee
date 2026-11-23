@@ -24,6 +24,8 @@ use crate::usage::ModelUsage;
 pub const MAX_TOOL_ROWS: usize = 16;
 /// Maximum model rows returned (the N highest-record models).
 pub const MAX_MODEL_ROWS: usize = 32;
+/// Maximum per-task rows returned for one session.
+pub const MAX_TASK_ROWS: usize = 64;
 
 /// Token and cost totals for one scope.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,67 @@ pub struct UsageStats {
     pub by_model: Vec<ModelUsageRow>,
     /// Tool statistics for the most-called tools.
     pub tools: Vec<ToolUsageRow>,
+    /// Per-task step and tool-error rows, in log order.
+    pub tasks: Vec<TaskUsageRow>,
+    /// Whether older task rows were dropped at [`MAX_TASK_ROWS`].
+    pub tasks_truncated: bool,
+    /// Optional tool-error trend keyed by harness adoption time.
+    pub trend: Option<HarnessTrend>,
+    /// Improvement-loop spend recorded in this session.
+    pub harness: HarnessSpendTotals,
+}
+
+/// Improvement-loop spend totals (tracked outside the task token totals).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessSpendTotals {
+    /// Harness runs recorded.
+    pub runs: u64,
+    /// Identity rollouts.
+    pub rollouts: u64,
+    /// Identity improvement sessions.
+    pub sessions: u64,
+    /// Selection sessions.
+    pub selection_sessions: u64,
+    /// Validator retries.
+    pub retry_sessions: u64,
+    /// Reflection sessions.
+    pub reflection_sessions: u64,
+    /// Dead rollouts.
+    pub dead_rollouts: u64,
+    /// Runs whose base harness delivered nothing.
+    pub base_failed_runs: u64,
+}
+
+/// Deterministic per-task step and tool-error row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskUsageRow {
+    /// Root task id recorded at the turn start.
+    pub task_id: String,
+    /// Turns attributed to the task.
+    pub turns: u64,
+    /// Model requests (agent loop steps).
+    pub model_steps: u64,
+    /// Completed tool calls.
+    pub tool_calls: u64,
+    /// Failed tool calls.
+    pub tool_failures: u64,
+    /// Failures per 10,000 calls.
+    pub error_rate_bps: u64,
+}
+
+/// Tool-error trend at one harness adoption sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTrend {
+    /// Experience entry sequence the harness was adopted at.
+    pub harness_seq: u64,
+    /// Tasks recorded in this session.
+    pub tasks: u64,
+    /// Completed tool calls.
+    pub tool_calls: u64,
+    /// Failed tool calls.
+    pub tool_failures: u64,
+    /// Failures per 10,000 calls.
+    pub error_rate_bps: u64,
 }
 
 /// Collects deterministic usage and tool statistics from one session log.
@@ -110,6 +173,22 @@ pub struct UsageStats {
 ///
 /// Fails when the log cannot be read.
 pub fn collect_usage_stats(log: &SessionLog) -> Result<UsageStats, OrchestratorError> {
+    collect_usage_stats_at(log, None)
+}
+
+/// Collects usage statistics with an optional harness-adoption sequence.
+///
+/// When `harness_seq` is present the report carries a tool-error trend row
+/// stamped with that experience sequence, so the paper's E.4 refinement signal
+/// is visible next to task spend.
+///
+/// # Errors
+///
+/// Fails when the log cannot be read.
+pub fn collect_usage_stats_at(
+    log: &SessionLog,
+    harness_seq: Option<u64>,
+) -> Result<UsageStats, OrchestratorError> {
     let mut stats = UsageStats {
         session_id: log.session_id().to_string(),
         messages: 0,
@@ -120,14 +199,38 @@ pub fn collect_usage_stats(log: &SessionLog) -> Result<UsageStats, OrchestratorE
         totals: UsageTotals::default(),
         by_model: Vec::new(),
         tools: Vec::new(),
+        tasks: Vec::new(),
+        tasks_truncated: false,
+        trend: None,
+        harness: HarnessSpendTotals::default(),
     };
     let mut by_model: BTreeMap<String, (u64, UsageTotals)> = BTreeMap::new();
     let mut durations: BTreeMap<String, (u64, u64, Vec<u64>)> = BTreeMap::new();
+    let mut tasks: Vec<TaskUsageRow> = Vec::new();
+    let mut current: Option<TaskUsageRow> = None;
     for record in log.records()? {
         match record {
             SessionLogRecord::Message(_) => stats.messages += 1,
-            SessionLogRecord::ModelRequest(_) => stats.model_requests += 1,
-            SessionLogRecord::TurnStarted { .. } => stats.turns += 1,
+            SessionLogRecord::ModelRequest(_) => {
+                stats.model_requests += 1;
+                if let Some(task) = current.as_mut() {
+                    task.model_steps += 1;
+                }
+            }
+            SessionLogRecord::TurnStarted { task_id, .. } => {
+                stats.turns += 1;
+                if let Some(task) = current.take() {
+                    tasks.push(finalize_task(task));
+                }
+                current = Some(TaskUsageRow {
+                    task_id,
+                    turns: 1,
+                    model_steps: 0,
+                    tool_calls: 0,
+                    tool_failures: 0,
+                    error_rate_bps: 0,
+                });
+            }
             SessionLogRecord::Usage(record) => {
                 stats.usage_records += 1;
                 stats.totals.add(&record.usage);
@@ -138,6 +241,12 @@ pub fn collect_usage_stats(log: &SessionLog) -> Result<UsageStats, OrchestratorE
             }
             SessionLogRecord::Tool(record) => {
                 stats.tool_calls += 1;
+                if let Some(task) = current.as_mut() {
+                    task.tool_calls += 1;
+                    if !record.success {
+                        task.tool_failures += 1;
+                    }
+                }
                 let entry = durations.entry(record.tool_name).or_default();
                 entry.0 += 1;
                 if !record.success {
@@ -145,9 +254,31 @@ pub fn collect_usage_stats(log: &SessionLog) -> Result<UsageStats, OrchestratorE
                 }
                 entry.2.push(record.duration_ms);
             }
+            SessionLogRecord::HarnessLedger(record) => {
+                let report = &record.report;
+                stats.harness.runs += 1;
+                stats.harness.rollouts += report.rollouts;
+                stats.harness.sessions += report.sessions;
+                stats.harness.selection_sessions += report.selection_sessions;
+                stats.harness.retry_sessions += report.retry_sessions;
+                stats.harness.reflection_sessions += report.reflection_sessions;
+                stats.harness.dead_rollouts += report.dead_rollouts;
+                if report.base_failed {
+                    stats.harness.base_failed_runs += 1;
+                }
+            }
             _ => {}
         }
     }
+    if let Some(task) = current.take() {
+        tasks.push(finalize_task(task));
+    }
+    if tasks.len() > MAX_TASK_ROWS {
+        let drop = tasks.len() - MAX_TASK_ROWS;
+        tasks.drain(0..drop);
+        stats.tasks_truncated = true;
+    }
+    stats.tasks = tasks;
 
     let mut models = by_model
         .into_iter()
@@ -178,7 +309,26 @@ pub fn collect_usage_stats(log: &SessionLog) -> Result<UsageStats, OrchestratorE
     });
     tools.truncate(MAX_TOOL_ROWS);
     stats.tools = tools;
+    if let Some(seq) = harness_seq {
+        let failures: u64 = stats.tasks.iter().map(|task| task.tool_failures).sum();
+        stats.trend = Some(HarnessTrend {
+            harness_seq: seq,
+            tasks: stats.tasks.len() as u64,
+            tool_calls: stats.tool_calls,
+            tool_failures: failures,
+            error_rate_bps: error_rate_bps(stats.tool_calls, failures),
+        });
+    }
     Ok(stats)
+}
+
+fn finalize_task(mut task: TaskUsageRow) -> TaskUsageRow {
+    task.error_rate_bps = error_rate_bps(task.tool_calls, task.tool_failures);
+    task
+}
+
+fn error_rate_bps(calls: u64, failures: u64) -> u64 {
+    failures.saturating_mul(10_000).checked_div(calls).unwrap_or(0)
 }
 
 /// Nearest-rank percentile over an already-sorted sample set.
@@ -240,6 +390,41 @@ impl UsageStatsTool {
                 tool.name, tool.calls, tool.failures, tool.p50_ms, tool.p95_ms, tool.max_ms,
             ));
         }
+        for task in &stats.tasks {
+            out.push_str(&format!(
+                "\ntask {}: turns={} steps={} tool-calls={} failures={} error-rate-bps={}",
+                task.task_id,
+                task.turns,
+                task.model_steps,
+                task.tool_calls,
+                task.tool_failures,
+                task.error_rate_bps,
+            ));
+        }
+        if let Some(trend) = &stats.trend {
+            out.push_str(&format!(
+                "\nharness-seq {}: tasks={} tool-calls={} failures={} error-rate-bps={}",
+                trend.harness_seq,
+                trend.tasks,
+                trend.tool_calls,
+                trend.tool_failures,
+                trend.error_rate_bps,
+            ));
+        }
+        if stats.harness.runs > 0 {
+            let harness = &stats.harness;
+            out.push_str(&format!(
+                "\nharness spend: runs={} rollouts={} sessions={} selection={} retries={} reflection={} dead={} base-failed={}",
+                harness.runs,
+                harness.rollouts,
+                harness.sessions,
+                harness.selection_sessions,
+                harness.retry_sessions,
+                harness.reflection_sessions,
+                harness.dead_rollouts,
+                harness.base_failed_runs,
+            ));
+        }
         out
     }
 }
@@ -252,7 +437,13 @@ impl ServerTool for UsageStatsTool {
         )
         .input_schema(json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "harness_seq": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Experience entry sequence the harness was adopted at; adds a tool-error trend row."
+                }
+            },
             "additionalProperties": false,
         }))
         .side_effect_class(SideEffectClass::Read)
@@ -266,8 +457,22 @@ impl ServerTool for UsageStatsTool {
         _context: ToolCallContext,
     ) -> ToolFuture<ToolResult> {
         let log = self.log.clone();
+        let harness_seq = match _arguments.get("harness_seq") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_u64().filter(|seq| *seq > 0) {
+                Some(seq) => Some(seq),
+                None => {
+                    return Box::pin(async {
+                        ToolResult::failure(
+                            ToolErrorKind::InvalidArguments,
+                            "usage_stats: harness_seq must be a positive integer",
+                        )
+                    });
+                }
+            },
+        };
         Box::pin(async move {
-            match collect_usage_stats(&log) {
+            match collect_usage_stats_at(&log, harness_seq) {
                 Ok(stats) => match serde_json::to_value(&stats) {
                     Ok(value) => ToolResult::success_structured(Self::render(&stats), value),
                     Err(error) => {
@@ -285,10 +490,19 @@ impl ServerTool for UsageStatsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_log::HarnessLedgerReport;
 
     fn log_with_usage_and_tools() -> Arc<SessionLog> {
         let log = Arc::new(SessionLog::in_memory("s-1"));
         log.record_turn_started("task-1").expect("turn");
+        log.record_model_request(
+            Vec::new(),
+            &[],
+            String::from("projection"),
+            &crate::budget::BudgetSnapshot::default(),
+            None,
+        )
+        .expect("model request");
         log.record_usage(
             &ModelUsage::new().with_input_tokens(100).with_output_tokens(20).with_cost_micros(5),
             Some("model-a"),
@@ -335,6 +549,67 @@ mod tests {
         assert_eq!(read.p95_ms, 30);
         assert_eq!(read.max_ms, 30);
         assert_eq!(stats.tools[0].name, "read_file", "most-called tool first");
+        assert_eq!(stats.tasks.len(), 1);
+        assert_eq!(stats.tasks[0].task_id, "task-1");
+        assert_eq!(stats.tasks[0].turns, 1);
+        assert_eq!(stats.tasks[0].model_steps, 1);
+        assert_eq!(stats.tasks[0].tool_calls, 4);
+        assert_eq!(stats.tasks[0].tool_failures, 1);
+        assert_eq!(stats.tasks[0].error_rate_bps, 2_500);
+        assert!(stats.trend.is_none());
+    }
+
+    #[test]
+    fn harness_spend_is_visible_next_to_task_spend() {
+        let log = SessionLog::in_memory("s-3");
+        log.record_turn_started("task-1").expect("turn");
+        log.record_harness_ledger(HarnessLedgerReport {
+            task_id: String::from("task-1"),
+            run_root: None,
+            rollouts: 8,
+            sessions: 6,
+            selection_sessions: 1,
+            retry_sessions: 1,
+            reflection_sessions: 1,
+            dead_rollouts: 2,
+            base_failed: false,
+        })
+        .expect("ledger");
+        let stats = collect_usage_stats(&log).expect("stats");
+        assert_eq!(stats.harness.runs, 1);
+        assert_eq!(stats.harness.rollouts, 8);
+        assert_eq!(stats.harness.sessions, 6);
+        assert_eq!(stats.harness.selection_sessions, 1);
+        assert_eq!(stats.harness.retry_sessions, 1);
+        assert_eq!(stats.harness.reflection_sessions, 1);
+        assert_eq!(stats.harness.dead_rollouts, 2);
+        assert_eq!(stats.harness.base_failed_runs, 0);
+        let text = UsageStatsTool::render(&stats);
+        assert!(text.contains("harness spend: runs=1 rollouts=8 sessions=6"), "{text}");
+    }
+
+    #[test]
+    fn task_rows_and_harness_trend_follow_the_log_order() {
+        let log = SessionLog::in_memory("s-2");
+        log.record_turn_started("task-a").expect("turn a");
+        log.record_tool("read_file", true, None, 4).expect("tool");
+        log.record_tool("read_file", false, Some("backend"), 9).expect("tool");
+        log.record_turn_started("task-b").expect("turn b");
+        log.record_tool("write_file", true, None, 3).expect("tool");
+        let stats = collect_usage_stats_at(&log, Some(7)).expect("stats");
+        assert_eq!(stats.tasks.len(), 2);
+        assert_eq!(stats.tasks[0].task_id, "task-a");
+        assert_eq!(stats.tasks[0].tool_calls, 2);
+        assert_eq!(stats.tasks[0].error_rate_bps, 5_000);
+        assert_eq!(stats.tasks[1].task_id, "task-b");
+        assert_eq!(stats.tasks[1].error_rate_bps, 0);
+        assert!(!stats.tasks_truncated);
+        let trend = stats.trend.expect("trend");
+        assert_eq!(trend.harness_seq, 7);
+        assert_eq!(trend.tasks, 2);
+        assert_eq!(trend.tool_calls, 3);
+        assert_eq!(trend.tool_failures, 1);
+        assert_eq!(trend.error_rate_bps, 3_333);
     }
 
     #[test]
@@ -372,7 +647,37 @@ mod tests {
             .await;
         assert!(result.success);
         assert!(result.text_output.contains("read_file"));
+        assert!(result.text_output.contains("task-1"));
         let structured = result.structured_output.expect("structured");
         assert_eq!(structured["totals"]["input_tokens"], 145);
+        assert_eq!(structured["tasks"][0]["task_id"], "task-1");
+    }
+
+    #[tokio::test]
+    async fn usage_stats_tool_rejects_invalid_trend_sequence() {
+        let tool = UsageStatsTool::new(log_with_usage_and_tools());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        let task = crate::tasks::TaskNode::new(crate::tasks::TaskId::new("t"), "t", "d");
+        let result = tool
+            .execute(
+                json!({ "harness_seq": 0 }),
+                ee_agent_acp_server::ClientBridge::new_for_test(
+                    std::time::Duration::from_secs(1),
+                    tx,
+                ),
+                cancel_rx,
+                ToolCallContext {
+                    task,
+                    transcript: Vec::new(),
+                    events: crate::events::EventRecorder::new(),
+                    scope: None,
+                    model_id: None,
+                    terminal_wait: crate::tools::TerminalWaitLimits::default(),
+                },
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.text_output.contains("harness_seq"));
     }
 }

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/ee-agent-acp-server",
   "crates/ee-agent-host",
+  "crates/ee-agent-harnessing",
   "crates/ee-agent-memory",
   "crates/ee-agent-opencode",
   "crates/ee-agent-openrouter",

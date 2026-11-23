@@ -353,6 +353,10 @@ pub struct OrchestratorConfig {
     /// Prompt attachment, mention, and image normalization limits.
     #[serde(default)]
     pub prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig,
+    /// Where editable harness components come from. `Workspace` is the default
+    /// and keeps prompt assembly byte-identical to a session without an override.
+    #[serde(default)]
+    pub harness_source: crate::harness_source::HarnessSource,
 }
 
 /// Extra instruction sources for the prompt payload.
@@ -530,6 +534,7 @@ impl Default for OrchestratorConfig {
             snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
             prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig::default(),
+            harness_source: crate::harness_source::HarnessSource::default(),
         }
     }
 }
@@ -758,6 +763,7 @@ mod tests {
             snapshots: crate::workspace_snapshot::WorkspaceSnapshotConfig::default(),
             instructions: InstructionSourceConfig::default(),
             prompt_attachments: crate::prompt_attachments::PromptAttachmentConfig::default(),
+            harness_source: crate::harness_source::HarnessSource::default(),
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");

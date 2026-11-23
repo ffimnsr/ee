@@ -56,12 +56,19 @@ pub(crate) const TOOL_READ: Slot = Slot {
         "tool:read-text-file",
         "tool:load-skill",
         "tool:load-memory",
+        "tool:load-experience",
     ],
 };
 pub(crate) const TOOL_WRITE: Slot = Slot {
     name: "TOOL_WRITE",
     order: 1200,
-    registrations: &["tool:write", "tool:file-create", "tool:fs-mutate", "tool:memory-write"],
+    registrations: &[
+        "tool:write",
+        "tool:file-create",
+        "tool:fs-mutate",
+        "tool:memory-write",
+        "tool:harness-editing",
+    ],
 };
 pub(crate) const TOOL_EDIT: Slot =
     Slot { name: "TOOL_EDIT", order: 1300, registrations: &["tool:edit"] };

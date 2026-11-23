@@ -504,6 +504,7 @@ impl OrchestratorRuntime {
                 checkpoint: Some(handle),
                 execution_log: Some(execution_log),
                 session_context: Some(self.session_context_snapshot()),
+                middleware: self.middleware_spec(),
                 ..LoopOptions::default()
             },
         );

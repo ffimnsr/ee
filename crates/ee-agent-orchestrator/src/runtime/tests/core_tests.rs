@@ -24,6 +24,40 @@ fn usage_stats_tool_registers_only_with_session_logging() {
     assert!(!runtime.tool_names().contains(&String::from("usage_stats")));
 }
 
+#[tokio::test]
+async fn middleware_spec_reaches_the_runtime_tool_loop() {
+    let model = FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-1", "echo", json!({}))]),
+        ModelResponse::new().tool_intents(vec![ToolIntent::new("tc-2", "echo", json!({}))]),
+        ModelResponse::new().text("done").completed(),
+    ]);
+    let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), Arc::new(model));
+    runtime.register_tool(echo_tool()).expect("echo registers");
+    runtime.set_middleware_spec(Some(crate::middleware::MiddlewareSpec {
+        warn_no_artifact_after_calls: Some(1),
+        hint_on_error_signature: Vec::new(),
+        verify_after_write: false,
+    }));
+
+    let (sink, client, _rx) = plumbing();
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    runtime.run_turn(prompt("hello"), sink, client, cancel_rx).await.expect("turn succeeds");
+
+    let warnings = runtime
+        .last_turn_transcript()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            crate::model::ModelContent::ToolResult { result, .. } => {
+                Some(result.text_output.clone())
+            }
+            _ => None,
+        })
+        .filter(|text| text.contains("Middleware warning"))
+        .count();
+    assert_eq!(warnings, 1, "the runtime propagates the spec into the tool loop");
+}
+
 #[test]
 fn user_agent_selection_sets_model_steps_and_permission_overlay() {
     let default = Arc::new(FakeModel::new(Vec::new()));

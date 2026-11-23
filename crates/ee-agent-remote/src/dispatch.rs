@@ -87,6 +87,7 @@ impl RemoteHost {
             Method::SessionResume => self.handle_session_resume(params).await,
             Method::SessionClose => self.handle_session_close(params).await,
             Method::SessionSetMode => self.handle_session_set_mode(params).await,
+            Method::SessionSetModel => self.handle_session_set_model(params).await,
             Method::TurnStart => self.handle_turn_start(caller, params).await,
             Method::TurnInterrupt => self.handle_turn_interrupt(caller, params).await,
             Method::PermissionsPending => self.handle_permissions_pending(params),
@@ -245,6 +246,13 @@ impl RemoteHost {
             .await
             .map_err(RemoteError::from)?;
         Ok(json!(SessionSetModeResult { applied: true }))
+    }
+
+    async fn handle_session_set_model(&self, params: Option<Value>) -> Result<Value, RemoteError> {
+        let params: SessionSetModelParams = parse_params(Method::SessionSetModel, params)?;
+        let session = self.session(&params.session_id)?;
+        session.thread.set_model(params.model_id).await.map_err(RemoteError::from)?;
+        Ok(json!(SessionSetModelResult { applied: true }))
     }
 
     async fn handle_turn_start(

@@ -297,6 +297,8 @@ pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol:
         compact_available_command(),
         primary_agent_available_command(),
         rubber_duck_available_command(),
+        reflect_available_command(),
+        harness_available_command(),
         branch_available_command(),
         revert_available_command(),
         diff_available_command(),
@@ -394,158 +396,9 @@ pub(super) fn default_model_labels(
         )
 }
 
-/// Inputs for one prompt-bundle build.
-pub(super) struct PromptBundleInputs<'a> {
-    pub(super) cwd: &'a std::path::Path,
-    pub(super) workspace_roots: &'a [std::path::PathBuf],
-    pub(super) provider: &'a str,
-    pub(super) model: &'a str,
-    pub(super) mode: &'a SessionModeId,
-    pub(super) policy: &'a ToolPolicy,
-    pub(super) advertised_tools: &'a [String],
-    pub(super) mcp_servers: &'a [String],
-    /// Test seam for trusted user instructions and user skill catalogs;
-    /// `None` disables both user-global planes. Production resolves the config
-    /// root from the environment and passes it explicitly.
-    pub(super) global_config_root: Option<&'a std::path::Path>,
-    /// Rendered background terminal job status, when any job is tracked.
-    pub(super) background_jobs: Option<&'a str>,
-    /// Configured remote instructions, already fetched for this session.
-    pub(super) remote_instructions: &'a [crate::prompt::WorkspaceMessage],
-    /// Selected user-defined primary agent, when one is active. Its body is
-    /// injected through the trust plane that matches its scope.
-    pub(super) user_agent: Option<&'a crate::user_agents::UserAgentDefinition>,
-}
-
-/// Builds the stable prompt and runtime snapshot for one session mode.
-pub(super) fn prompt_bundle(inputs: PromptBundleInputs<'_>) -> Result<PromptBundle, ProviderError> {
-    let mut bundle = crate::prompt::build(&PromptInputs {
-        mode: inputs.mode,
-        provider: inputs.provider,
-        model: inputs.model,
-        cwd: inputs.cwd,
-        workspace_roots: inputs.workspace_roots,
-        sandbox: SandboxMode::from_policy(inputs.policy),
-        allow_execute: inputs.policy.allow_execute,
-        approval: ApprovalMode::from_policy(inputs.policy),
-        allow_delegate: inputs.policy.allow_delegate,
-        agent: AgentIdentity {
-            name: "root",
-            depth: 0,
-            max_depth: Some(inputs.policy.max_delegate_depth),
-        },
-        turn_guidance: None,
-        advertised_tools: inputs.advertised_tools,
-        mcp_servers: inputs.mcp_servers,
-        preset: PromptPreset::Standard,
-    })
-    .map_err(|error| ProviderError::BackendFailure(format!("prompt assembly failed: {error}")))?;
-    // Background job status is derived per turn from live terminal state and
-    // participates in the runtime-snapshot delta hash like every other section.
-    if let Some(text) = inputs.background_jobs
-        && let Some(runtime) = bundle.runtime.as_mut()
-    {
-        let slot = crate::prompt::sections::BACKGROUND_JOBS;
-        runtime
-            .push_section(crate::prompt::context::RuntimeSection::new(slot.name, slot.order, text));
-    }
-    // Recompute every turn: instruction files are attack surface, so a stale
-    // snapshot is never carried in history. `TurnSystemContext` replays only
-    // the current snapshot ahead of the current prompt.
-    bundle.global = match inputs.global_config_root {
-        Some(root) => crate::prompt::global::discover_at(root),
-        None => Vec::new(),
-    };
-    bundle.workspace = crate::prompt::workspace::discover(inputs.cwd, inputs.workspace_roots);
-    // Configured remote sources are explicit operator requests and ride the
-    // same untrusted workspace plane; they are fetched once per session.
-    bundle.workspace.extend(inputs.remote_instructions.iter().cloned());
-    // Skill catalogs ride in the workspace plane: repository skills are
-    // untrusted, user-global skills are trusted relative to workspace text.
-    bundle.workspace.extend(crate::prompt::skills::catalog_messages(
-        inputs.cwd,
-        inputs.workspace_roots,
-        inputs.global_config_root,
-    ));
-    // Memory catalogs ride the same planes as skills: repository entries are
-    // untrusted, user-global entries are trusted relative to workspace text.
-    bundle.workspace.extend(crate::user_memories::catalog_messages(
-        inputs.cwd,
-        inputs.workspace_roots,
-        inputs.global_config_root,
-    ));
-    // A selected primary agent's body is the session's role prompt. Personal
-    // definitions are trusted relative to workspace content; project files are
-    // attacker-controlled in shared workspaces and ride the untrusted plane.
-    if let Some(agent) = inputs.user_agent {
-        use crate::trust::TrustLevel;
-        let trust = match agent.scope {
-            crate::user_agents::UserAgentScope::User => TrustLevel::UserInstructionTrusted,
-            crate::user_agents::UserAgentScope::Workspace => {
-                TrustLevel::WorkspaceInstructionUntrusted
-            }
-        };
-        let message = ModelMessage::text(
-            ModelRole::User,
-            format!("User-defined agent `{}` instructions:\n\n{}", agent.name, agent.prompt),
-        )
-        .with_trust(trust)
-        .with_metadata([
-            ("ee_prompt".to_string(), "user_agent_prompt".to_string()),
-            ("ee_agent".to_string(), agent.name.clone()),
-        ]);
-        let message = WorkspaceMessage { path: agent.path.display().to_string(), message };
-        match agent.scope {
-            crate::user_agents::UserAgentScope::User => bundle.global.push(message),
-            crate::user_agents::UserAgentScope::Workspace => bundle.workspace.push(message),
-        }
-    }
-    Ok(bundle)
-}
-
-/// Inputs for [`runtime_prompt_bundle`].
-#[derive(Clone, Copy)]
-pub(super) struct RuntimePromptInputs<'a> {
-    pub(super) cwd: &'a std::path::Path,
-    pub(super) workspace_roots: &'a [std::path::PathBuf],
-    pub(super) mode: &'a SessionModeId,
-    pub(super) mcp_servers: &'a [String],
-    pub(super) global_config_root: Option<&'a std::path::Path>,
-    pub(super) background_jobs: Option<&'a str>,
-    pub(super) remote_instructions: &'a [crate::prompt::WorkspaceMessage],
-}
-
-/// Builds the prompt planes for the runtime's current selection: the
-/// mid-session model route and the active user-defined primary agent.
-pub(super) fn runtime_prompt_bundle(
-    runtime: &OrchestratorRuntime,
-    models: &crate::model_registry::ModelRegistry,
-    inputs: RuntimePromptInputs<'_>,
-) -> Result<PromptBundle, ProviderError> {
-    let (provider, model) = runtime
-        .selected_model()
-        .and_then(|id| models.info(&id).map(|info| (info.identity.provider_id.clone(), id)))
-        .unwrap_or_else(|| default_model_labels(models));
-    let policy = runtime.policy();
-    let user_agent = runtime.active_user_agent();
-    prompt_bundle(PromptBundleInputs {
-        cwd: inputs.cwd,
-        workspace_roots: inputs.workspace_roots,
-        provider: &provider,
-        model: &model,
-        mode: inputs.mode,
-        policy: policy.policy(),
-        advertised_tools: &runtime.advertised_tool_names(),
-        mcp_servers: inputs.mcp_servers,
-        global_config_root: inputs.global_config_root,
-        background_jobs: inputs.background_jobs,
-        remote_instructions: inputs.remote_instructions,
-        user_agent: user_agent.as_ref(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::prompt_bundle::{PromptBundleInputs, prompt_bundle};
     use super::*;
     use crate::trust::TrustLevel;
 
@@ -570,6 +423,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: temp.path(),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,
@@ -593,6 +447,252 @@ mod tests {
     }
 
     #[test]
+    fn prompt_bundle_carries_guardrails_with_scope_trust() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let guardrails = temp.path().join(".agents/guardrails.md");
+        std::fs::create_dir_all(guardrails.parent().expect("parent")).expect("guardrails dir");
+        std::fs::write(&guardrails, "Never force-push.").expect("write guardrails");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+
+        let message = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_guardrails_scope"))
+            .expect("guardrails section injected");
+        assert_eq!(message.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(message.message.text_content().contains("Never force-push."));
+        assert_eq!(message.path, guardrails.display().to_string());
+    }
+
+    #[test]
+    fn prompt_bundle_applies_tool_guidance_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let override_file = temp.path().join(".agents/tool_guidance.md");
+        std::fs::create_dir_all(override_file.parent().expect("parent")).expect("override dir");
+        std::fs::write(&override_file, "## write_file\nWrite one whole file at a time.\n")
+            .expect("write override");
+        let roots = vec![temp.path().to_path_buf()];
+        let tools = vec!["read_file".to_string(), "write_file".to_string()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &tools,
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+
+        assert!(
+            !bundle.stable.contains("`write_file` replaces the whole file"),
+            "the override replaces the builtin write guidance"
+        );
+        assert!(bundle.stable.contains("Use `read_file`"), "other guidance stays intact");
+        let message = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_tool_guidance_scope"))
+            .expect("override section injected");
+        assert_eq!(message.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(
+            message.message.text_content().contains("Write one whole file at a time."),
+            "override body reaches the prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_bundle_catalogs_scripts_for_terminal_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join(".agents/scripts/report.py");
+        std::fs::create_dir_all(script.parent().expect("parent")).expect("scripts dir");
+        std::fs::write(&script, "print('ok')\n").expect("write script");
+        let roots = vec![temp.path().to_path_buf()];
+        let tools = vec!["create_terminal".to_string()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &tools,
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+
+        let message = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_scripts_scope"))
+            .expect("script catalog injected");
+        assert_eq!(message.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        assert!(message.message.text_content().contains(".agents/scripts/report.py"));
+
+        let read_only = vec!["read_file".to_string()];
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &read_only,
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+        assert!(
+            bundle
+                .workspace
+                .iter()
+                .all(|message| !message.message.metadata.contains_key("ee_scripts_scope")),
+            "no terminal tool means no script catalog"
+        );
+    }
+
+    #[test]
+    fn prompt_bundle_injects_a_bounded_experience_catalog() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join(".agents/experience/rust/entries/1-task");
+        std::fs::create_dir_all(&dir).expect("experience dir");
+        std::fs::write(
+            dir.join("EXPERIENCE.md"),
+            "---\nseq: 1\ndomain: rust\ntask: task\nconfidence: medium\n---\n## Edits\ncomponent: tool_guidance.md\nchange: added rule\nobserved: contrast\nverdict: helped\n## Experience\ncue: reopen written outputs\nlesson: add verify-after-write\nevidence: c2 vs base\n",
+        )
+        .expect("write experience");
+        let roots = vec![temp.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let bundle = prompt_bundle(PromptBundleInputs {
+            cwd: temp.path(),
+            workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+        })
+        .expect("bundle");
+
+        let catalog = bundle
+            .workspace
+            .iter()
+            .find(|message| message.message.metadata.contains_key("ee_experience_scope"))
+            .expect("experience catalog injected");
+        assert_eq!(catalog.message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        let text = catalog.message.text_content();
+        assert!(text.contains("reopen written outputs"));
+        assert!(text.contains("load_experience"));
+    }
+
+    #[test]
+    fn prompt_bundle_renders_an_override_harness_source() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let candidate = tempfile::tempdir().expect("candidate");
+        let agents = candidate.path().join(".agents");
+        std::fs::create_dir_all(agents.join("skills/atlas")).expect("candidate dirs");
+        std::fs::write(agents.join("guardrails.md"), "Candidate rule.\n").expect("guardrails");
+        std::fs::write(
+            agents.join("skills/atlas/SKILL.md"),
+            "---\nname: atlas\ndescription: graph lookup\n---\nUse the graph.\n",
+        )
+        .expect("skill");
+        let roots = vec![workspace.path().to_path_buf()];
+        let mode = SessionModeId::new("write");
+        let inputs = PromptBundleInputs {
+            cwd: workspace.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
+        };
+        let workspace_bundle = prompt_bundle(inputs).expect("workspace bundle");
+
+        let candidate_bundle = prompt_bundle(PromptBundleInputs {
+            cwd: workspace.path(),
+            workspace_roots: &roots,
+            provider: "test",
+            model: "test-model",
+            mode: &mode,
+            policy: &ToolPolicy::default(),
+            advertised_tools: &[],
+            mcp_servers: &[],
+            global_config_root: None,
+            background_jobs: None,
+            remote_instructions: &[],
+            user_agent: None,
+            harness_source: crate::harness_source::HarnessSource::Override(
+                candidate.path().to_path_buf(),
+            ),
+        })
+        .expect("candidate bundle");
+
+        assert!(candidate_bundle.workspace.iter().any(|message| {
+            message.message.metadata.contains_key("ee_guardrails_scope")
+                && message.message.text_content().contains("Candidate rule.")
+        }));
+        assert!(
+            candidate_bundle
+                .workspace
+                .iter()
+                .any(|message| message.message.text_content().contains("graph lookup"))
+        );
+        assert!(
+            workspace_bundle.workspace.is_empty(),
+            "the workspace session is unchanged by the candidate files"
+        );
+        assert_eq!(workspace_bundle.stable, candidate_bundle.stable);
+    }
+
+    #[test]
     fn prompt_bundle_loads_workspace_instructions_as_untrusted() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("AGENTS.md"), "project rule").expect("write rule");
@@ -601,6 +701,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: temp.path(),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,
@@ -636,6 +737,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: temp.path(),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,
@@ -674,6 +776,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: temp.path(),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,
@@ -743,6 +846,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: std::path::Path::new("/workspace"),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,
@@ -770,6 +874,7 @@ mod tests {
         let bundle = prompt_bundle(PromptBundleInputs {
             cwd: std::path::Path::new("/workspace"),
             workspace_roots: &roots,
+            harness_source: crate::harness_source::HarnessSource::Workspace,
             provider: "test",
             model: "test-model",
             mode: &mode,

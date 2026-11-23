@@ -210,6 +210,37 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "harness",
+        "improve",
+        "--workspace",
+        ".",
+        "--prompt",
+        "do the task",
+        "--k",
+        "2",
+        "--mode",
+        "sequential",
+        "--dry-run",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Harness {
+                    command: crate::HarnessCommands::Improve(args)
+                }
+            }
+        }) if args.k == 2
+            && args.dry_run
+            && args.mode == crate::HarnessModeArg::Sequential
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "grant"]).unwrap();
 
     assert!(matches!(

@@ -304,6 +304,31 @@ mod tests {
     "produces": []
   },
   {
+    "name": "load_experience",
+    "description": "Loads one harness experience entry from the prompt catalog",
+    "inputSchema": {
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "domain"
+      ],
+      "type": "object"
+    },
+    "sideEffect": "read",
+    "sideEffectSubclass": null,
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": [
+      "file_text"
+    ]
+  },
+  {
     "name": "load_memory",
     "description": "Loads or searches memory entries listed in the prompt catalog",
     "inputSchema": {
