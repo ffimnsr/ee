@@ -196,3 +196,107 @@ Ordered by dependency; R1–R2 are foundations, R3–R6 the headless bridge, R7�
 - Explicitly out of scope: ACP-to-ACP relaying (excluded by decision), hosted always-on relay service, multi-tenant auth (OAuth), and mobile push. Reopen only with an explicit design decision.
 
 Delivery gates for each item: `cargo fmt --all -- --check`; `cargo clippy -q -D warnings` on touched crates; targeted `cargo test --quiet -p <crate> <module>` per the escalation rules (`scripts/run-ee-cli-touched-tests.sh` for ee-cli touch points); hermetic tests via `FakeAgentTransport` only — no network, no provider keys, no real `~/.config` plugin tree (`EE_TEST_DISABLE_USER_PLUGINS` discipline); mem-guarded full package only when the change is crate-wide.
+
+# Recursive Harnessing — Harness2 Adaptation (2026-11-23)
+
+Source: arXiv 2610.14224v1 (Google "Harness²: Recursive Agent Harnessing for an Open World") + vendored clone `harness-example/harness2/`. **Detailed implementation plan: [docs/PLAN-HARNESS.md](docs/PLAN-HARNESS.md)** — schemas, file maps, fixed decisions D1–D10, sequencing, and the harness2→ee module map live there; items below are summaries. Distinct from `docs/upgrades/PLAN-harness.md` (DSH prompt-sections parity, landed): this part adapts Harness2's improvement loop — the harness editing itself from execution evidence — and builds on the section registry that plan delivered.
+
+## Part 11 — Phases and items
+
+### Phase H0 — Prompt-content transfers (no new machinery)
+
+- [ ] **I28 — Editor-pattern guidance transfers.**
+  - [ ] **Problem:** built-in tool guidance and role prompts contain none of the improver discipline Harness2 encodes (divergence-first edits, evidence-moment rule, `KEEP_BASE` as a valid answer, form preference order skill > script > subagent > hook > always-on prose, deliverable-shape rule).
+  - [ ] **Fix:** add these blocks to `prompt/tool_guidance.rs` guidance and the delegation/review sections; hermetic tests assert rendering conditions and section byte budgets. Plan §5.
+  - [ ] **Acceptance:** guidance blocks render only when relevant tools are advertised; no config or schema changes; targeted module tests green.
+- [ ] **I29 — Selector criteria into the reviewer role.**
+  - [ ] **Problem:** review prompts lack the fixed artifact-choice criteria order (delivery → conformance → fidelity → internal consistency → operational fitness → finish) and the "plainer artifact is valid" rule.
+  - [ ] **Fix:** write the criteria order into the `reviewer` role body in `subagent_roles.rs`. Plan §5 (H0.3).
+  - [ ] **Acceptance:** reviewer role test asserts criteria presence and order; no behavior change beyond role text.
+
+### Phase H1 — Editable component surface completion
+
+- [ ] **I30 — Guardrails file component.**
+  - [ ] **Problem:** always-on constraints are merged into the system prompt; users and improvers cannot edit a bounded guardrails component.
+  - [ ] **Fix:** discover `.agents/guardrails.md` + `$XDG_CONFIG_HOME/ee/guardrails.md` via `markdown_config.rs`; render one trust-labeled untrusted section after the system prompt; 32 KiB cap; absent file emits nothing. Plan §6.
+  - [ ] **Acceptance:** prompt bundle carries labeled guardrails; workspace-over-user precedence; malformed/oversized skipped with warning; hermetic tests.
+- [ ] **I31 — Tool-guidance override file.**
+  - [ ] **Problem:** `TOOL_GUIDANCE` is a hardcoded const; not user- or improver-editable.
+  - [ ] **Fix:** `.agents/tool_guidance.md` (untrusted, trust-labeled) augments/overrides the builtin section per tool; const stays default fallback; bounds mirror skills. Plan §6.
+  - [ ] **Acceptance:** override wins with label; absent tree emits nothing; builtin fallback intact; tests mirror `prompt/skills.rs` suite.
+- [ ] **I32 — Scripts convention.**
+  - [ ] **Problem:** no bounded scripts component; agents hand-roll repeated deterministic operations.
+  - [ ] **Fix:** `.agents/scripts/` + user mirror, extension allowlist (`sh`, `py`), bounded discovery, catalog line into tool guidance; execution stays the existing terminal approval path. Plan §6.
+  - [ ] **Acceptance:** discovery bounds and allowlist enforced; catalog renders; no new execution surface.
+- [ ] **I33 — Declarative middleware hooks (needs I26).**
+  - [ ] **Problem:** no file-level middleware an improver can edit; prose cannot enforce behavior ("prose can be stopped reading; a hook cannot").
+  - [ ] **Fix:** `.agents/middleware.toml` strict-parse; bounded hook set executed at existing loop boundaries: `warn_no_artifact_after_calls`, `hint_on_error_signature` (bounded), `verify_after_write`; per-turn use caps; unknown key ⇒ loud warning + file ignored; gated behind I26 flag `agents.middleware`. Plan §6, decision D3.
+  - [ ] **Acceptance:** hook fires at exactly N calls; caps enforced; hooks append text and never block valid completion; malformed file ignored loudly; flag off ⇒ byte-identical sessions.
+
+### Phase H2 — Harnessing-level recursion (validation, experience library, reflector)
+
+- [ ] **I34 — Harness-edit validation layer.**
+  - [ ] **Problem:** no validation before adopting harness edits — the paper's three discard rules (skill trigger line, script existence, frontmatter) and autotrigger repair have no ee equivalent.
+  - [ ] **Fix:** pure module `harness_validation.rs`: trigger-line rule (skill named verbatim in always-on text), script-reference existence/bounds/allowlist, frontmatter validation, reserved/duplicate names, autotrigger repair with recorded repairs. Plan §7, mirror `tree.py validate`.
+  - [ ] **Acceptance:** unit matrix covers every discard rule; repairs are recorded, never silent; one retry with validator message then inherit (adopted by I39/I41).
+- [ ] **I35 — Experience library `.agents/experience/`.**
+  - [ ] **Problem:** no per-domain durable record of what harness edits did — lessons, verdicts, or adopted trees; "experience" has zero graph matches.
+  - [ ] **Fix:** `user_experience.rs` mirroring `user_memories.rs`: `experience/<domain>/{INDEX.md, entries/<seq>-<slug>/{harness/, EXPERIENCE.md}}`; verdict vocabulary `helped|hurt|no-observed-effect|confounded`; `NO_ENTRY` valid; bounded cue catalog per session; `load_experience` read-only tool; streaming retention (only earlier `seq` visible online). Plan §7, mirror `library.py`.
+  - [ ] **Acceptance:** tests mirror the `user_memories.rs` suite plus retention; one lesson per task bound; whole adopted tree stored, never a summary.
+- [ ] **I36 — Reflector: `/reflect` command + post-session hook.**
+  - [ ] **Problem:** sessions end without contrast-backed lesson extraction; existing `reflection.rs` is in-turn self-review only, nothing persists across tasks.
+  - [ ] **Fix:** builtin `harness_reflector` role reads a redacted session projection (session-log tool records + workspace snapshot diff), emits `<edits>` verdict rows + at most one `<experience>` block; writes through the approval-gated path (pattern of `user_memory_write.rs`); grader/rubric/score material refused at projection build (decision D5); manual `/reflect` first, automatic hook flag-gated later. Plan §7, mirror `selection.py` reflector.
+  - [ ] **Acceptance:** parser round-trips; vocabulary enforced; one-lesson bound; `NO_ENTRY` writes edits-only entry; write honors approval; leak guard tested.
+
+### Phase H3 — Task-level recursion loop (new crate `ee-agent-harnessing`; requires H1+H2+I26)
+
+- [ ] **I37 — Evidence export (rollout views).**
+  - [ ] **Problem:** the append-only session log has no improver-facing projection — bounded per-turn records, redaction, grader-leak guards, and the improver context-dir layout do not exist.
+  - [ ] **Fix:** `rollout_view.rs` seam in the orchestrator + context-dir builder in the harnessing crate (`context/{task,source,harness,library,rollouts,mission}.md`); redaction reuses the R12 layer; truncation bounds mirror `context.py _write_rollout`. Plan §8.
+  - [ ] **Acceptance:** hermetic; redaction and truncation asserts; build refuses grader-verdict content.
+- [ ] **I38 — Per-session harness source.**
+  - [ ] **Problem:** components resolve from the workspace only; a probe cannot mount a candidate harness without mutating the workspace.
+  - [ ] **Fix:** `HarnessSource { Workspace, Override(PathBuf) }` in `OrchestratorConfig`; prompt assembly resolves guardrails/tool-guidance/scripts/skills roots from it; default `Workspace` keeps today's behavior byte-identical. Plan §8, decision D1 seam.
+  - [ ] **Acceptance:** override session renders candidate files; workspace sessions unchanged; small additive seam with tests.
+- [ ] **I39 — Propose stage.**
+  - [ ] **Problem:** no scoped improver sessions that edit component files from reference-run evidence.
+  - [ ] **Fix:** driver obtains k references, builds the evidence dir, spawns evidence-checked `harness_editor_inv` + `harness_editor_dom` roles whose file writes are scoped to a candidate dir; I34 validation with one retry, second failure inherits current harness (recorded fallback). Plan §8, mirror `recursion.py _run_stage`.
+  - [ ] **Acceptance:** fake-transport tests; validator-retry-inherits path; scoped writes; INV and DOM prompts stay scoped (ablation: scoping worth 2.9–3.7 pts).
+- [ ] **I40 — Probe stage.**
+  - [ ] **Problem:** no matched re-roll of a candidate harness.
+  - [ ] **Fix:** one headless re-roll per candidate via the `ee-agent-remote` host under matched model/env config, mounting the candidate through I38; existing timeouts/cancellation; rollout view captured per probe. Plan §8, decision D9.
+  - [ ] **Acceptance:** hermetic; candidate files mounted, workspace untouched; probe isolation asserted.
+- [ ] **I41 — Compose stage.**
+  - [ ] **Problem:** candidates are alternatives with no evidence-tied merge step.
+  - [ ] **Fix:** `harness_composer` reads the full pool + diffs, emits one composed tree plus notes `kept|revised|dropped -> <edit> -> <trajectory moment with counts>`; merge/adopt-one/keep-base all valid; non-delivering-rollout edits unsafe unless overwhelming evidence; I34 gates the composed tree. Plan §8, mirror the composer prompt.
+  - [ ] **Acceptance:** notes parser; validation retry/inherit; rule recorded in notes and enforced by prompt contract.
+- [ ] **I42 — Selection stage.**
+  - [ ] **Problem:** no anonymized best-of-k deliverable pick, so k>1 recursion has no final answer rule.
+  - [ ] **Fix:** pool = k finals with seeded-shuffle anon ids (deterministic per task/k/mode); base deliverable is a valid candidate and the selector is told so; fenced ```choice + ≤6-line `<why>` naming the deciding criterion and the runner-up's cost; parse failure falls back to the reference. Plan §8, mirror `selection.py`.
+  - [ ] **Acceptance:** id determinism; parse and fallback tested; base-can-win path exercised.
+- [ ] **I43 — Budget ledger + driver surface.**
+  - [ ] **Problem:** no spend accounting for improvement loops and no default-off way to run one.
+  - [ ] **Fix:** ledger derived from session-log usage records asserting R=4k rollouts / P=3k sessions per task, hard caps, typed budget errors, totals visible in `usage_stats`; `/harness k=N mode=parallel|sequential` slash command + manual CLI path, both behind I26 flags, default `k=0`; dry-run prints the plan without model calls. Plan §8, decisions D6/D10, mirror `ledger.py`.
+  - [ ] **Acceptance:** identity asserts; caps; dry-run hermetic; improvement spend visible next to task spend.
+
+### Phase H4 — Measurement
+
+- [ ] **I44 — Harness-edit regression suite.**
+  - [ ] **Problem:** a harness edit can regress a domain with nothing catching it before it enters the library.
+  - [ ] **Fix:** per-domain fixtures on `evaluation.rs` + the record/replay provider; deterministic deliverable checks only (no LLM judge in CI); suite must stay green on the base harness. Plan §9.
+  - [ ] **Acceptance:** suite green on base; a deliberately bad edit (missing trigger line) is caught.
+- [ ] **I45 — Steps and tool-error metrics.**
+  - [ ] **Problem:** `usage_stats` (I23) lacks per-task step counts and tool-error-rate trend against harness adoption time — the paper's E.4 refinement signal.
+  - [ ] **Fix:** extend `usage_stats.rs` with step-count and tool-error-rate rows plus an optional trend view keyed by experience `seq`; surfaced through the existing `usage_stats` tool. Plan §9.
+  - [ ] **Acceptance:** deterministic from the session log; trend visible after I35 lands.
+- [ ] **I46 — Leave-one-out library evaluation.**
+  - [ ] **Problem:** no way to verify experience entries actually transfer rather than accumulate.
+  - [ ] **Fix:** offline harnessing-crate mode re-running a task with its own entry excluded from the completed library, reporting per-domain deltas; eval-only, never an online path. Plan §9, mirror the paper's E.2 protocol.
+  - [ ] **Acceptance:** hermetic; exclusion correctness; delta report.
+
+## Part 11.1 — Sequencing and gates
+
+- H0 lands immediately with no dependencies; H1 items I30–I32 are independent, I33 needs I26; H2 order I34 → I35 → I36; H3 requires H1+H2 plus the I38 seam and is entirely default-off and flag-gated; H4 starts after H1 (I44) and after H2 (I46).
+- Default-off guarantee: nothing in H1–H3 changes a session unless the corresponding file exists (and, for middleware/recursion, the flag is on); H0 changes only prompt text.
+- Delivery gates identical to Part 10.1: fmt, clippy on touched crates, targeted `cargo test --quiet` per escalation rules, hermetic `FakeAgentTransport` tests with `EE_TEST_DISABLE_USER_PLUGINS` discipline, mem-guarded full package only as the manual gate.
+- Explicitly out of scope: LLM-judge score loops (label-free by design, decision D5), plugin-code authoring by improvers (D3), model-weight changes, and replaying completed tasks online (streaming retention only; leave-one-out is offline eval).

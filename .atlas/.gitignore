@@ -1,0 +1,15 @@
+# atlas-managed local-state git policy v1 — durable markdown records stay committed.
+/*
+!/.gitignore
+!/memories/
+!/decisions/
+!/feedback/
+!/memoir/
+!/overview/
+!/artifacts/
+!/memories/**/*.md
+!/decisions/**/*.md
+!/feedback/**/*.md
+!/memoir/**/*.md
+!/overview/**/*.md
+!/artifacts/**/*.md

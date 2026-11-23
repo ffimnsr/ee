@@ -26,7 +26,6 @@ build
 !/docs/upgrades/
 !/docs/upgrades/*.md
 
-.atlas/
 .codex/
 .code-assist/
 
