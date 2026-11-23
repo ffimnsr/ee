@@ -137,10 +137,10 @@ impl BuiltinSubagentRole {
                  <edits> block with one five-line row per changed component: component, \
                  candidates, change, observed, and verdict. Verdicts are helped, hurt, \
                  no-observed-effect, or confounded; prefer confounded over invented \
-                 attribution. Then emit at most one <experience> block with cue, lesson, and \
-                 evidence. Emit NO_ENTRY instead when no execution contrast supports a \
-                 lesson. Never invent a trajectory moment and never treat the selection \
-                 verdict as transfer evidence."
+                 attribution. Then emit at most one <experience> block with cue, lesson, \
+                 evidence, and optional confidence (low, medium, or high). Emit NO_ENTRY \
+                 instead when no execution contrast supports a lesson. Never invent a \
+                 trajectory moment and never treat the selection verdict as transfer evidence."
             }
             Self::Summarizer => {
                 "Produce a concise summary from the provided context. No tools are available."

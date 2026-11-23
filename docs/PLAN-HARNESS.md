@@ -1,6 +1,6 @@
 # PLAN-HARNESS — Recursive Harnessing Adaptation (Harness2 → ee agents mode)
 
-Status: **planned, not started** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces.
+Status: **implemented (Part 11 phases H0–H4 landed 2026-11-23)** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces.
 
 Sources:
 
@@ -89,7 +89,7 @@ Gaps (nothing exists for these — verified zero graph matches):
 
 **D7 — Lessons need contrasts.** The reflector may write at most one lesson per task, only from execution contrasts; verdicts are `helped | hurt | no observed effect | confounded`, with `confounded` preferred over invented attribution; `NO_ENTRY` is valid. Streaming retention: online, a task sees only earlier entries; leave-one-out reading exists only in the offline eval mode (I46).
 
-**D8 — Improver roles are builtin and evidence-checked.** `harness_editor_inv`, `harness_editor_dom`, `harness_composer`, `harness_selector`, `harness_reflector` are builtin role definitions in the `subagent_roles.rs` pattern (code-controlled prompts, own context, bounded steps, evidence verification on return). They are not user-plane markdown agents.
+**D8 — Improver roles are builtin and evidence-checked.** `harness_reflector` is a builtin role definition in the `subagent_roles.rs` pattern (code-controlled prompt, own context, bounded steps) and is used by manual `/reflect`. The driver roles (`harness_editor_inv`, `harness_editor_dom`, `harness_composer`, `harness_selector`) are fixed mission contracts in `ee-agent-harnessing` that run as isolated host sessions; their returned tree is checked by I34 rather than by a subagent evidence verifier, and the harness itself owns context and step bounds. They are not user-plane markdown agents either way. **Implementation note:** `ImproverRole::builtin_role_name` keys the session cache with those names; adding full subagent-role definitions is not required for the loop's correctness.
 
 **D9 — Probes reuse the headless host.** Candidate re-rolls run through `ee-agent-remote` under matched model/env config, one rollout per candidate, with existing timeouts and cancellation.
 
@@ -157,7 +157,7 @@ Bounds follow the existing discipline (per-file 64 KiB, catalog 8 KiB, bounded s
 
 ### I32 — Scripts convention
 
-- `.agents/scripts/` + user-plane mirror; bounded discovery; extension allowlist (`sh`, `py`); catalog line rendered into tool guidance: "prefer a script for repeated deterministic extraction/conversion/checking; run via the terminal tool under the existing approval gate".
+- `.agents/scripts/` + user-plane mirror; bounded discovery; extension allowlist (`sh`, `py`); catalog message on the workspace prompt plane, rendered only when a terminal tool is advertised: "prefer a script for repeated deterministic extraction/conversion/checking; run via the terminal tool under the existing approval gate".
 - Execution stays the existing terminal approval path — no new execution surface.
 - Tests: discovery bounds, allowlist enforcement, catalog rendering.
 
@@ -187,7 +187,7 @@ Bounds follow the existing discipline (per-file 64 KiB, catalog 8 KiB, bounded s
   - reserved-name and duplicate-name checks;
   - editable-surface naming rules (lowercase/digits/`_`/`-` components, mirror `read_tree(rejected=...)`): off-surface files are rejected by name in the error so the editor can fix them;
   - **always-on byte cap**: total always-on text (system + guardrails + tool guidance) has a hard budget with a stated reason (every token competes with the agent's output budget), and every diff summary surfaces `always_on_char_delta` so composition sees what prose costs.
-- API: `validate(tree) -> Verdict { ok, repairs_applied, errors, census }` — census counts (files, skills, scripts, subagents) are recorded like `tree.py validate`'s return; repairs are recorded, never silent.
+- API: `validate(tree) -> Verdict { ok, repairs_applied, errors, census }` — census counts (files, skills, scripts, subagents) are recorded like `tree.py validate`'s return; repairs are recorded, never silent. The driver records census, always-on characters, and the delta for every accepted candidate, and includes them in the validator report carried into a retry.
 - Second-pass detail from `recursion.py`: when a candidate is partially valid, the valid subset is written back into the session's `context/harness/` before the retry — the retry reads a fresh context copy, so it must carry this attempt's edits; a tree that comes back empty is rejected ("edit the files, do not delete them all").
 - Tests: unit matrix mirroring the three "discard the proposal" rules from the paper's editor prompt, plus cap/reject/empty cases.
 
@@ -215,14 +215,14 @@ evidence: edits row above; contrast between run c2 and base run b1
 ```
 
 - `NO_ENTRY` entries (edits rows but no lesson) are valid and retained.
-- Streaming retention: the catalog shows only entries with `seq` below the current task's; the reflector is the only writer.
+- Streaming retention: the catalog shows only entries with `seq` below the current task's; the reflector is the only writer. **Implementation note:** the online prompt catalog is domain-labeled (so a session sees every domain's cue with `[domain #seq]`) while driver evidence and leave-one-out filtering scope by the task domain; `HarnessTask::with_excluded_experience_seq` hides exactly one entry for leave-one-out without hiding later entries.
 - Tests mirror the `user_memories.rs` suite (precedence, bounds, malformed skip, catalog bytes, retention).
 
 ### I36 — Reflector: `/reflect` + post-session hook
 
-- New builtin role `harness_reflector` (D8). Input evidence mirrors `reflect_adoption`: the chosen harness + every non-base candidate's probe + **a copy of the base harness for diffing** + a decisions file (composition notes) + an `adoption.json` mapping the selector's anonymous ids to rollout labels plus the selection's `<why>` — so the reflector can audit the reasoning, not just the verdict. Tool records + workspace snapshot diff come from the existing I19/I23 surfaces.
+- New builtin role `harness_reflector` (D8). Input evidence mirrors `reflect_adoption`: the chosen harness + every non-base candidate's probe and harness diff + **a copy of the base harness for diffing** + a decisions file (composition notes) + an `adoption.json` mapping the selector's anonymous ids to rollout labels plus the selection's `<why>` — so the reflector can audit the reasoning, not just the verdict. Tool records + workspace snapshot diff come from the existing I19/I23 surfaces.
 - The reflector session runs on a **curated copy** of the reflection context (mirror `_distil` copying the root minus the raw selection record): the adoption summary is in, raw selection internals are out.
-- Output contract (mirror `selection.py` parsing): an `<edits>` block with one five-line row per changed component (`component / candidates / change / observed / verdict`) and at most one `<experience>` block (`cue / lesson / evidence / confidence`); `NO_ENTRY` replaces the block when contrasts are absent. Parsed lessons require all of cue/lesson/evidence non-empty; `edits.md` is stored separately from the lesson; the grader-verdict assert also runs on the parsed experience itself.
+- Output contract (mirror `selection.py` parsing): an `<edits>` block with one five-line row per changed component (`component / candidates / change / observed / verdict`) and at most one `<experience>` block (`cue / lesson / evidence / confidence`); `NO_ENTRY` replaces the block when contrasts are absent. Parsed lessons require all of cue/lesson/evidence non-empty; `confidence` is optional (`low | medium | high`, default medium) and invalid values are rejected; the edits block is stored in `EXPERIENCE.md` separately from the lesson block; the grader-verdict assert also runs on the parsed experience itself.
 - Writes: through the existing approval-gated write path (`user_memory_write.rs` pattern); the entry and `INDEX.md` update are one transaction-ish write batch.
 - Cost accounting (mirror the paper): selection and reflection spend is tracked **outside** the R/P ledger identity, on the run record — the identity stays R=4k / P=3k.
 - Surface: manual `/reflect` for one-off sessions, and the reflector runs as the final stage of every `/harness` run — mirror of `schedule.py`, which reflects after each task in the stream. No automatic editor-session hook: out of scope.
@@ -236,11 +236,12 @@ evidence: edits row above; contrast between run c2 and base run b1
 ### I47 — Task adapter seam (added in the second pass)
 
 - The loop's input contract, mirror `spec.py BenchmarkAdapter` (method/substrate/benchmark stay separate axes): one `HarnessTask` type supplying the task prompt (the current session's user prompt, answer-key-free by construction), source files (workspace roots + I20 attachments), `delivered(run)` (final response + files written per the I19 snapshot diff), `deliverable_text` / `deliverable_assets` (bounded render, exact names — never a whole run dir), `domain_of(task)` for library scoping, and the base harness dir. Single-task mode adapts the current session; stream mode (I43) feeds a task list.
-- Tests: adapter contract unit tests; delivered() against snapshot diffs.
+- Tests: adapter contract unit tests; delivered() against snapshot diffs. **Implementation note:** `deliverable_text`/`deliverable_assets` are the adapter's bounded render accessors; the CLI channel fills asset content so selection and reflection see rendered artifacts.
 
 ### I37 — Evidence export (rollout views)
 
-- `rollout_view.rs` (orchestrator seam): builds an improver-facing view from a session: bounded per-turn records (tool name, ok/error class, duration, result digest), final deliverable pointer, workspace diff summary. Redaction reuses the R12 redaction layer; truncation bounds mirror `context.py _write_rollout`.
+- `rollout_view.rs` (orchestrator seam): builds an improver-facing view from a session: bounded per-turn records (tool name, ok/error class, duration, result digest), final deliverable pointer, workspace diff summary. Redaction reuses the R12 redaction layer; truncation bounds mirror `context.py _write_rollout`. The CLI host builds the same shape from live session updates because child session logs are not reachable across the remote boundary; `rollout_view::build` remains the seam for in-process session-log hosts.
+- **Implementation note:** selector evidence carries the adapter's rendered asset content (bounded), not just names, so the `OPEN THESE` rule has something to open.
 - Context-dir builder in the harnessing crate (mirror `context.py build`): `context/task.md`, `context/source/`, `context/harness/`, `context/library/`, `context/rollouts/*.md`, `context/decisions/<label>.md` (composition notes carried into later stages, mirror sequential-mode `decisions`), plus a `mission.md` per stage. Build-time grader-leak guard (D5) asserted at **three points**, mirror `context.py`: the harness dir, the library dir, and the whole context root.
 - Second-pass details from `context.py`:
   - the mission describes **only the evidence that landed** (the builder returns what it wrote; the mission never references an absent dir);
@@ -252,12 +253,14 @@ evidence: edits row above; contrast between run c2 and base run b1
 ### I38 — Per-session harness source
 
 - `HarnessSource { Workspace, Override(PathBuf) }` in `OrchestratorConfig`, defaulting to `Workspace`; the prompt-assembly seam resolves guardrails/tool-guidance/scripts/skills roots from the source. This is the only orchestrator change the probe stage needs: a probe session mounts the candidate directory without touching the workspace.
+- **Implementation note:** the production driver mounts a candidate by giving each probe its own copied workspace under the run root and materializing the candidate `.agents` tree there; host sessions expose workspace roots but not `OrchestratorConfig`, so the override seam is exercised by tests and remains available to programmatic sessions. Both paths leave the user's workspace untouched.
 - Tests: an override session renders candidate files; workspace sessions are byte-identical to today.
 
 ### I39 — Propose
 
 - Driver: obtain k reference executions (existing runtime); build the evidence context dir; spawn `harness_editor_inv` and `harness_editor_dom` sessions (SubagentManager, evidence-checked); each returns an edited copy of the component files (their file-tool writes are scoped to a candidate dir via existing workspace-isolation patterns).
 - Improver session isolation, mirror `proposer.py`: the session runs in a temp workspace with the context dir copied in and the edited harness subtree **harvested back** on completion; filesystem scope denies everything outside the session dir (reuse the `prepare_isolation` / `workspace_isolation.rs` patterns); the environment is scrubbed to a keep-list; per-session state roots are isolated. Improver sessions never see other tasks' state.
+- **Implementation note:** the host's allowed root is the run root, so the original workspace is never mounted for a child session, and each session writes only its own candidate directory. Host configuration exposes a root list rather than a per-session deny scope; stronger per-session filesystem sandboxing and environment scrubbing remain deployment concerns (see risk table).
 - Improver channel config, mirror `ChannelSpec`: the improver model, effort, step budget, and timeout are configurable and **independent of the executor model** (the paper's default improver differs from the executor, and its Figure 8 shows same-model also works — ee exposes both). Model-id form validated with a named error.
 - Candidate acceptance: run the I34 validator; one retry with the validator message (and the partially-valid tree persisted back into the retry context); second failure inherits the current harness (recorded as fallback, mirror `recursion.py _run_stage`). An empty returned tree is rejected, not treated as KEEP_BASE.
 - Tests: fake transport; validator-retry-inherits path; scoped writes; isolation asserts; empty-tree rejection.
@@ -289,6 +292,7 @@ evidence: edits row above; contrast between run c2 and base run b1
 - Recording discipline, mirror `_roll_many`: concurrent stages run under a bounded width, but the ledger is written after the pool drains, in stable label order — a concurrent run records the same sequence as a serial one. **Dead rollouts are recorded, never raised** (ok/delivered/error per run); if no base rollout delivers, the task short-circuits to a recorded `base-failed` state with modes skipped, not a crash; a mode exception records the traceback tail and continues to the next mode.
 - Driver surface: `/harness k=N mode=parallel|sequential` slash command + a manual `ee do agent harness improve` CLI path, always registered and advertised — invocation is the only gate, matching harness2; `k` defaults to 1; dry-run mode prints the plan (references, candidates, compositions) without model calls. Driver options: improver model override (I39 channel), workers, domain/task selection for stream runs.
 - Stream mode, mirror `schedule.py`: per-domain ordered tasks (concurrency across domains only, `--workers`); seeded shuffle built from sorted order so each domain's stream is independent of the others; a frozen domain order that is missing a domain is a loud error, not an arbitrary placement. Library roots are scoped per run identity (workspace + mode + k), so measurement runs never cross-contaminate the daily library — a scratch root for experiments, the workspace library for daily use.
+- **Implementation note:** `run_stream` is the harnessing-crate driver API for callers that already hold a task list; the CLI and `/harness` surface run one task per invocation. Per-run library scoping is expressed with `HarnessTask::with_library_root` and the CLI `--library-root`.
 - Tests: identity asserts; caps; dry-run hermetic; stable-order recording under concurrency; dead-rollout and base-failed paths; stream order determinism.
 
 ### I48 — Run state, resume, and improver session cache
@@ -303,6 +307,7 @@ evidence: edits row above; contrast between run c2 and base run b1
 ### I44 — Harness-edit regression suite
 
 - Per-domain fixtures on `evaluation.rs` + record/replay: deterministic deliverable checks only (file exists, shape, content assertions); a harness edit that regresses a domain fails CI before it can enter the library.
+- **Implementation note:** the fixtures live in `ee-agent-harnessing::regression` and run the real driver through a deterministic `FixtureChannel`, because the checks assert driver deliverables rather than editor evaluation outcomes; no LLM judge or network provider is involved.
 - Tests: suite green on the base harness; a deliberately bad edit (missing trigger line) is caught.
 
 ### I45 — Steps and tool-error metrics
@@ -312,7 +317,7 @@ evidence: edits row above; contrast between run c2 and base run b1
 
 ### I46 — Leave-one-out library evaluation
 
-- Offline harnessing-crate mode: re-run a task with its own entry excluded from the completed library; report per-domain deltas (mirror the paper's E.2 protocol). Eval-only; never an online path.
+- Offline harnessing-crate mode: re-run a task with its own entry excluded from the completed library; report per-domain deltas (mirror the paper's E.2 protocol). Eval-only; never an online path. The exclusion is by `(task domain, seq)`: `HarnessTask::with_excluded_experience_seq` hides exactly the task's own entry while later entries remain visible, so the delta measures that entry rather than the whole tail of the library.
 - Tests: hermetic; exclusion correctness.
 
 ### I49 — Deterministic demo driver (added in the second pass)

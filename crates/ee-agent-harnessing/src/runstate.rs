@@ -89,6 +89,9 @@ pub fn fingerprint_task(task: &HarnessTask) -> Fingerprint {
         }
         None => hasher.update([0]),
     }
+    for seq in &task.excluded_experience_seqs {
+        hasher.update(seq.to_le_bytes());
+    }
     hasher.update(
         task.library_root.as_deref().map(Path::to_string_lossy).unwrap_or_default().as_bytes(),
     );

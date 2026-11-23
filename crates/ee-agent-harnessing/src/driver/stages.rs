@@ -48,8 +48,11 @@ pub(crate) fn library_cues(task: &HarnessTask) -> Vec<String> {
     let registry = ExperienceRegistry::discover(task.library_root(), &[], None);
     let mut cues = Vec::new();
     let mut used = 0usize;
-    for entry in
-        registry.filtered(Some(task.domain_of()), task.library_before_seq).into_iter().take(32)
+    for entry in registry
+        .filtered(Some(task.domain_of()), task.library_before_seq)
+        .into_iter()
+        .filter(|entry| !task.excludes_experience(entry.seq))
+        .take(32)
     {
         let summary = entry.cue.clone().unwrap_or_else(|| {
             let components: Vec<&str> =
@@ -97,6 +100,7 @@ pub(crate) struct ReflectInputs<'a> {
     pub(crate) chosen: &'a HarnessTree,
     pub(crate) finals: &'a [(Candidate, HarnessTree, RunRecord)],
     pub(crate) references: &'a [RunRecord],
+    pub(crate) probes: &'a [(String, HarnessTree, RunRecord)],
     pub(crate) adoption: Option<AdoptionRecord>,
     pub(crate) decisions: &'a [(String, String)],
     pub(crate) selection: &'a Selection,
@@ -167,7 +171,7 @@ impl StageRuntime<'_> {
         let stage = request.stage.clone();
         let evidence = request.evidence;
         let candidate_dir = self.run_root.join("candidates").join(&stage);
-        let first = self
+        let first = match self
             .invoke(
                 Invocation {
                     role: request.role,
@@ -180,9 +184,29 @@ impl StageRuntime<'_> {
                 },
                 ledger,
             )
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(HarnessError::Channel(error)) => {
+                let detail = truncate_chars(&error, 240);
+                tracing::warn!(
+                    stage = %stage,
+                    %detail,
+                    "improver session failed; inheriting the current harness"
+                );
+                ledger.record(LedgerKind::ImprovementSession, stage.clone(), "failed")?;
+                return Ok(ImproverReply {
+                    tree: request.base,
+                    notes: format!(
+                        "inherited the current harness after a channel failure: {detail}"
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let verdict = self.validate_candidate(&first.tree, &base, &candidate_dir)?;
         if verdict.ok {
+            record_verdict(&stage, &verdict);
             return Ok(ImproverReply { tree: verdict.tree, notes: first.notes });
         }
         tracing::warn!(
@@ -195,7 +219,7 @@ impl StageRuntime<'_> {
         retry_evidence.harnesses.push((String::from("attempt"), verdict.tree.clone()));
         retry_evidence.observations = Some(validator_report(&verdict));
         let retry_dir = self.run_root.join("candidates").join(format!("{stage}-retry"));
-        let retry = self
+        let retry = match self
             .invoke(
                 Invocation {
                     role: request.role,
@@ -208,9 +232,29 @@ impl StageRuntime<'_> {
                 },
                 ledger,
             )
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(HarnessError::Channel(error)) => {
+                let detail = truncate_chars(&error, 240);
+                tracing::warn!(
+                    stage = %stage,
+                    %detail,
+                    "improver retry failed; inheriting the current harness"
+                );
+                ledger.record(LedgerKind::ImprovementRetry, format!("retry-{stage}"), "failed")?;
+                return Ok(ImproverReply {
+                    tree: request.base,
+                    notes: format!(
+                        "inherited the current harness after a retry channel failure: {detail}"
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let retry_verdict = self.validate_candidate(&retry.tree, &base, &retry_dir)?;
         if retry_verdict.ok {
+            record_verdict(&stage, &retry_verdict);
             return Ok(ImproverReply { tree: retry_verdict.tree, notes: retry.notes });
         }
         let reason = validator_summary(&retry_verdict);
@@ -269,7 +313,7 @@ impl StageRuntime<'_> {
                 inputs
                     .dropped
                     .iter()
-                    .map(|(_, cause)| format!("- {cause}"))
+                    .map(|(label, cause)| format!("- {label}: {cause}"))
                     .collect::<Vec<_>>()
                     .join("\n")
             ))
@@ -286,7 +330,7 @@ impl StageRuntime<'_> {
             selector,
             observations,
         };
-        let reply = self
+        let reply = match self
             .invoke(
                 Invocation {
                     role: ImproverRole::Selector,
@@ -299,7 +343,29 @@ impl StageRuntime<'_> {
                 },
                 ledger,
             )
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                let detail = truncate_chars(&error.to_string(), 240);
+                tracing::warn!(%detail, "selector session failed; applying the neutral fallback");
+                if let Err(record_error) =
+                    ledger.record(LedgerKind::SelectionSession, "select", "failed")
+                {
+                    tracing::warn!(%record_error, "selector failure could not be recorded");
+                }
+                let selection = neutral_fallback(&inputs.pool);
+                let adoption = AdoptionRecord {
+                    anonymous_ids: pool.ids.clone(),
+                    selection_why: selection.why.join("\n"),
+                };
+                return Ok(SelectionOutcome {
+                    selection,
+                    adoption: Some(adoption),
+                    raw_reply: None,
+                });
+            }
+        };
         let raw_reply = Some(reply.notes.clone());
         let (selection, adoption) = match parse_choice(&reply.notes, &pool) {
             Ok(selection) => {
@@ -357,6 +423,16 @@ impl StageRuntime<'_> {
                     label: candidate.label.clone(),
                     rollout: record.rollout.render(MAX_ROLLOUT_BYTES),
                 })
+                .chain(inputs.probes.iter().map(|(label, _, record)| CandidateProbe {
+                    label: label.clone(),
+                    rollout: record.rollout.render(MAX_ROLLOUT_BYTES),
+                }))
+                .collect(),
+            candidate_harnesses: inputs
+                .finals
+                .iter()
+                .map(|(candidate, tree, _)| (candidate.label.clone(), tree.clone()))
+                .chain(inputs.probes.iter().map(|(label, tree, _)| (label.clone(), tree.clone())))
                 .collect(),
             decisions,
             adoption: inputs.adoption.clone(),
@@ -383,7 +459,7 @@ impl StageRuntime<'_> {
             selector: Vec::new(),
             observations: Some(projection),
         };
-        let reply = self
+        let reply = match self
             .invoke(
                 Invocation {
                     role: ImproverRole::Reflector,
@@ -396,7 +472,20 @@ impl StageRuntime<'_> {
                 },
                 ledger,
             )
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                let detail = truncate_chars(&error.to_string(), 240);
+                tracing::warn!(%detail, "reflector session failed; no lesson written");
+                if let Err(record_error) =
+                    ledger.record(LedgerKind::ReflectionSession, "reflect", "failed")
+                {
+                    tracing::warn!(%record_error, "reflector failure could not be recorded");
+                }
+                return Ok((None, None));
+            }
+        };
         let output = match harness_reflection::parse_reflection(&reply.notes) {
             Ok(output) => output,
             Err(error) => {
@@ -548,10 +637,43 @@ fn validator_report(verdict: &Verdict) -> String {
         text.push_str(&format!("- warning {warning}\n"));
     }
     text.push_str(&format!(
-        "\nalways-on characters: {} (delta {:+})\n",
-        verdict.always_on_chars, verdict.always_on_char_delta
+        "\nalways-on characters: {} (delta {:+})\ncensus: files={} skills={} scripts={} subagents={}\n",
+        verdict.always_on_chars,
+        verdict.always_on_char_delta,
+        verdict.census.files,
+        verdict.census.skills,
+        verdict.census.scripts,
+        verdict.census.subagents,
     ));
     truncate_chars(&text, MAX_VALIDATOR_REPORT_BYTES)
+}
+
+/// Records a validated candidate's census, cost delta, and repairs.
+///
+/// Autotrigger repairs are never silent: a repaired trigger line changes the
+/// adopted tree, so it must appear in the operator log even when validation
+/// accepts the candidate.
+fn record_verdict(stage: &str, verdict: &Verdict) {
+    tracing::info!(
+        stage = %stage,
+        files = verdict.census.files,
+        skills = verdict.census.skills,
+        scripts = verdict.census.scripts,
+        subagents = verdict.census.subagents,
+        always_on_chars = verdict.always_on_chars,
+        always_on_char_delta = verdict.always_on_char_delta,
+        repairs = verdict.repairs_applied.len(),
+        "harness candidate validated"
+    );
+    for repair in &verdict.repairs_applied {
+        tracing::info!(
+            stage = %stage,
+            file = %repair.file,
+            rule = ?repair.rule,
+            detail = %repair.detail,
+            "harness candidate repair applied"
+        );
+    }
 }
 
 fn validator_summary(verdict: &Verdict) -> String {

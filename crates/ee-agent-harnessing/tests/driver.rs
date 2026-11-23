@@ -382,6 +382,71 @@ async fn selector_parse_failure_falls_back_to_the_base() {
 }
 
 #[tokio::test]
+async fn improver_channel_failure_inherits_the_base_and_keeps_the_identity() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let run_root = root.path().join("run");
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        Arc::new(|request| match request.role {
+            ImproverRole::Inv => Err(HarnessError::Channel(String::from("editor timed out"))),
+            ImproverRole::Dom => {
+                Ok(ImproverReply { tree: dom_tree(), notes: String::from("kept") })
+            }
+            ImproverRole::Composer => Ok(ImproverReply {
+                tree: composed_tree(),
+                notes: String::from("kept -> guardrails.md -> probe-0-inv delivered"),
+            }),
+            ImproverRole::Selector => panic!("k=1 must bypass the selector session"),
+            ImproverRole::Reflector => {
+                Ok(ImproverReply { tree: HarnessTree::default(), notes: reflection_notes() })
+            }
+        }),
+    );
+    let task = task(&workspace);
+    let run = run_task(&channel, &task, &config(1), &run_root, None).await.expect("run");
+    assert_eq!(run.ledger.sessions, 3, "the failed editor still consumes its identity slot");
+    assert_eq!(run.ledger.rollouts, 4);
+    assert_eq!(run.selection.chosen.as_deref(), Some("composed-0"));
+}
+
+#[tokio::test]
+async fn selector_and_reflector_session_errors_do_not_fail_the_run() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let run_root = root.path().join("run");
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delegated deliverable"))),
+        Arc::new(|request| match request.role {
+            ImproverRole::Inv => {
+                Ok(ImproverReply { tree: inv_tree(), notes: String::from("kept") })
+            }
+            ImproverRole::Dom => {
+                Ok(ImproverReply { tree: dom_tree(), notes: String::from("kept") })
+            }
+            ImproverRole::Composer => Ok(ImproverReply {
+                tree: composed_tree(),
+                notes: String::from("kept -> guardrails.md -> probe-0-inv delivered"),
+            }),
+            ImproverRole::Selector => {
+                Err(HarnessError::Channel(String::from("selector timed out")))
+            }
+            ImproverRole::Reflector => {
+                Err(HarnessError::Channel(String::from("reflector timed out")))
+            }
+        }),
+    );
+    let task = task(&workspace);
+    let run = run_task(&channel, &task, &config(2), &run_root, None).await.expect("run");
+    assert!(run.selection.fallback);
+    assert_eq!(run.selection.chosen.as_deref(), Some("ref-0"));
+    assert_eq!(run.ledger.selection_sessions, 1);
+    assert_eq!(run.ledger.reflection_sessions, 1);
+    assert!(run.reflection.is_none());
+    assert!(run.reflected_path.is_none());
+}
+
+#[tokio::test]
 async fn base_failure_short_circuits_with_a_recorded_state() {
     let root = tempfile::tempdir().expect("root");
     let workspace = prepare_workspace(root.path());

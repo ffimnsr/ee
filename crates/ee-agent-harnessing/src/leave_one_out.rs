@@ -92,7 +92,7 @@ pub async fn run_leave_one_out(
         let task_root = root.join(&fixture.domain).join(&fixture.task.id);
         let with_entry =
             run_task(channel, &fixture.task, config, &task_root.join("with-entry"), None).await?;
-        let excluded = fixture.task.clone().with_library_before_seq(fixture.own_seq);
+        let excluded = fixture.task.clone().with_excluded_experience_seq(fixture.own_seq);
         let without_entry =
             run_task(channel, &excluded, config, &task_root.join("without-entry"), None).await?;
         rows.push(DeltaRow {
@@ -211,7 +211,8 @@ mod tests {
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(workspace.join(".agents")).expect("agents");
         std::fs::write(workspace.join(".agents/guardrails.md"), "base rule\n").expect("base");
-        save_entry(&workspace, &entry(1, "prior-entry cue"), None).expect("entry");
+        save_entry(&workspace, &entry(1, "own-entry cue"), None).expect("own entry");
+        save_entry(&workspace, &entry(2, "later-entry cue"), None).expect("later entry");
         let channel = CueChannel::new();
         let task = HarnessTask::new("t1", "do the task", "rust", &workspace);
         let fixtures = vec![LeaveOneOutFixture { domain: String::from("rust"), task, own_seq: 1 }];
@@ -224,12 +225,14 @@ mod tests {
         assert_eq!(report.rows[0].delivered_delta, 0);
         let seen = channel.seen.lock().expect("seen").clone();
         assert!(
-            seen.iter().any(|cues| cues.contains("prior-entry cue")),
-            "the with-entry run must see the entry"
+            seen.iter()
+                .any(|cues| cues.contains("own-entry cue") && cues.contains("later-entry cue")),
+            "the with-entry run must see both entries"
         );
         assert!(
-            seen.iter().any(|cues| !cues.contains("prior-entry cue")),
-            "the without-entry run must exclude the entry"
+            seen.iter()
+                .any(|cues| !cues.contains("own-entry cue") && cues.contains("later-entry cue")),
+            "the without-entry run must exclude only the task's own entry"
         );
     }
 

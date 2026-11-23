@@ -135,7 +135,35 @@ impl ImproverModel {
         if self.timeout_secs == 0 || self.timeout_secs > 3_600 {
             return Err("improver timeout_secs must be 1-3600".into());
         }
+        if let Some(model_id) = &self.model_id
+            && (model_id.trim() != model_id
+                || model_id.is_empty()
+                || model_id.len() > 128
+                || model_id.chars().any(char::is_whitespace))
+        {
+            return Err(format!("improver model id {model_id:?} is not a valid model identifier"));
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn improver_policy_validates_bounds_and_model_id() {
+        let mut policy = ImproverModel {
+            model_id: Some(String::from("provider/model-1")),
+            effort: None,
+            max_steps: 12,
+            timeout_secs: 30,
+        };
+        policy.validate().expect("valid policy");
+        policy.model_id = Some(String::from("two words"));
+        assert!(policy.validate().is_err());
+        policy.model_id = Some(String::new());
+        assert!(policy.validate().is_err());
     }
 }
 

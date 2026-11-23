@@ -21,13 +21,29 @@ use crate::user_experience::{
 };
 
 /// Maximum size of one reflection projection.
-pub const MAX_PROJECTION_BYTES: usize = 64 * 1024;
+pub const MAX_PROJECTION_BYTES: usize = 160 * 1024;
 /// Maximum bytes retained from one candidate rollout.
 pub const MAX_ROLLOUT_BYTES: usize = 8 * 1024;
 /// Maximum tool records included in one projection.
 pub const MAX_TOOL_RECORDS: usize = 64;
 /// Maximum bytes retained from the workspace diff.
 pub const MAX_WORKSPACE_DIFF_BYTES: usize = 16 * 1024;
+/// Maximum bytes retained from the task prompt in the projection.
+const MAX_TASK_BYTES: usize = 8 * 1024;
+/// Maximum bytes retained from composition decisions.
+const MAX_DECISIONS_BYTES: usize = 16 * 1024;
+/// Maximum bytes retained from the selection rationale.
+const MAX_SELECTION_WHY_BYTES: usize = 4 * 1024;
+/// Budget for one rendered harness (base or chosen).
+const MAX_HARNESS_RENDER_BYTES: usize = 16 * 1024;
+/// Maximum bytes retained from one harness file inside the projection.
+const MAX_HARNESS_FILE_BYTES: usize = 4 * 1024;
+/// Total budget for candidate rollout evidence.
+const MAX_CANDIDATE_ROLLOUTS_BYTES: usize = 16 * 1024;
+/// Total budget for candidate harness diffs.
+const MAX_CANDIDATE_DIFFS_BYTES: usize = 16 * 1024;
+/// Maximum bytes retained from one changed candidate file.
+const MAX_CANDIDATE_DIFF_FILE_BYTES: usize = 4 * 1024;
 
 /// Case-insensitive markers that indicate grader or scoring material.
 const GRADER_MARKERS: &[&str] =
@@ -79,6 +95,8 @@ pub struct ReflectionEvidence {
     pub base_harness: Option<HarnessTree>,
     /// Non-base candidate probes.
     pub candidates: Vec<CandidateProbe>,
+    /// Candidate harnesses, for per-candidate diffing against the base.
+    pub candidate_harnesses: Vec<(String, HarnessTree)>,
     /// Composition notes.
     pub decisions: Option<String>,
     /// Anonymized adoption record.
@@ -101,6 +119,9 @@ pub struct ReflectionLesson {
     pub lesson: String,
     /// Execution-contrast evidence.
     pub evidence: String,
+    /// Optional confidence stated by the reflector; invalid values are
+    /// rejected during parsing.
+    pub confidence: Option<ExperienceConfidence>,
 }
 
 /// Parsed reflector reply.
@@ -115,26 +136,50 @@ pub struct ReflectionOutput {
 /// Builds the curated, bounded projection sent to the reflector.
 pub fn build_projection(evidence: &ReflectionEvidence) -> Result<String, String> {
     let mut parts = Vec::new();
-    parts.push(format!("# Reflection Evidence\n\n## Task\n\n{}", evidence.task.trim()));
+    parts.push(format!(
+        "# Reflection Evidence\n\n## Task\n\n{}",
+        truncate_chars(evidence.task.trim(), MAX_TASK_BYTES)
+    ));
     parts.push(format!("## Domain\n\n{}", evidence.domain.trim()));
     if let Some(base) = &evidence.base_harness {
-        parts.push(render_harness("Base Harness", base)?);
+        parts.push(render_harness("Base Harness", base, MAX_HARNESS_RENDER_BYTES)?);
     }
-    parts.push(render_harness("Chosen Harness", &evidence.chosen_harness)?);
+    parts.push(render_harness(
+        "Chosen Harness",
+        &evidence.chosen_harness,
+        MAX_HARNESS_RENDER_BYTES,
+    )?);
     if let Some(base) = &evidence.base_harness {
         parts.push(render_diff(base, &evidence.chosen_harness));
     }
+    let mut rollout_budget = MAX_CANDIDATE_ROLLOUTS_BYTES;
     for candidate in &evidence.candidates {
         assert_no_grader_material(&candidate.label, &candidate.rollout)?;
-        parts.push(format!(
-            "## Candidate Probe `{}`\n\n{}",
-            candidate.label,
-            truncate_chars(candidate.rollout.trim(), MAX_ROLLOUT_BYTES)
-        ));
+        if rollout_budget == 0 {
+            continue;
+        }
+        let limit = rollout_budget.min(MAX_ROLLOUT_BYTES);
+        let rollout = truncate_chars(candidate.rollout.trim(), limit);
+        rollout_budget = rollout_budget.saturating_sub(rollout.len());
+        parts.push(format!("## Candidate Probe `{}`\n\n{rollout}", candidate.label));
+    }
+    if let Some(base) = &evidence.base_harness {
+        let mut diff_budget = MAX_CANDIDATE_DIFFS_BYTES;
+        for (label, tree) in &evidence.candidate_harnesses {
+            if diff_budget == 0 {
+                break;
+            }
+            let diff = render_candidate_diff(base, tree, diff_budget)?;
+            diff_budget = diff_budget.saturating_sub(diff.len());
+            parts.push(format!("## Candidate Harness Diff `{label}`\n\n{diff}"));
+        }
     }
     if let Some(decisions) = &evidence.decisions {
         assert_no_grader_material("composition decisions", decisions)?;
-        parts.push(format!("## Composition Decisions\n\n{}", decisions.trim()));
+        parts.push(format!(
+            "## Composition Decisions\n\n{}",
+            truncate_chars(decisions.trim(), MAX_DECISIONS_BYTES)
+        ));
     }
     if let Some(adoption) = &evidence.adoption {
         assert_no_grader_material("selection rationale", &adoption.selection_why)?;
@@ -144,7 +189,7 @@ pub fn build_projection(evidence: &ReflectionEvidence) -> Result<String, String>
         }
         parts.push(format!(
             "## Adoption Map\n\n{map}\n## Selection Rationale\n\n{}",
-            adoption.selection_why.trim()
+            truncate_chars(adoption.selection_why.trim(), MAX_SELECTION_WHY_BYTES)
         ));
     }
     if !evidence.tool_records.is_empty() {
@@ -181,11 +226,20 @@ pub fn build_projection(evidence: &ReflectionEvidence) -> Result<String, String>
     Ok(projection)
 }
 
-fn render_harness(title: &str, tree: &HarnessTree) -> Result<String, String> {
+fn render_harness(title: &str, tree: &HarnessTree, max_bytes: usize) -> Result<String, String> {
     let mut text = format!("## {title}\n");
+    let mut used = 0usize;
     for (path, content) in &tree.files {
         assert_no_grader_material(path, content)?;
-        text.push_str(&format!("\n### {path}\n\n```markdown\n{}\n```\n", content.trim_end()));
+        if used >= max_bytes {
+            text.push_str("\n… [harness truncated]\n");
+            break;
+        }
+        let budget = max_bytes.saturating_sub(used);
+        let body = truncate_chars(content.trim_end(), MAX_HARNESS_FILE_BYTES.min(budget));
+        let block = format!("\n### {path}\n\n```markdown\n{body}\n```\n");
+        used = used.saturating_add(block.len());
+        text.push_str(&block);
     }
     Ok(text)
 }
@@ -203,6 +257,50 @@ fn render_diff(base: &HarnessTree, chosen: &HarnessTree) -> String {
         }
     }
     if lines.is_empty() { "- no component changes".to_string() } else { lines.join("\n") }
+}
+
+/// Renders a candidate's changed component bodies against the base harness.
+///
+/// A path-only diff cannot support per-edit verdicts: the reflector must see
+/// what changed. Bodies are bounded per file so one candidate cannot consume
+/// the whole projection budget.
+fn render_candidate_diff(
+    base: &HarnessTree,
+    candidate: &HarnessTree,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let paths: BTreeSet<&String> = base.files.keys().chain(candidate.files.keys()).collect();
+    let mut out = String::new();
+    for path in paths {
+        if out.len() >= max_bytes {
+            out.push_str("\n… [candidate diff truncated]\n");
+            break;
+        }
+        let before = base.files.get(path);
+        let after = candidate.files.get(path);
+        if before == after {
+            continue;
+        }
+        let content = after.or(before).map(String::as_str).unwrap_or_default();
+        assert_no_grader_material(path, content)?;
+        let marker = match (before, after) {
+            (Some(_), Some(_)) => "~",
+            (Some(_), None) => "-",
+            (None, Some(_)) => "+",
+            (None, None) => continue,
+        };
+        out.push_str(&format!("\n### {marker} {path}\n\n"));
+        if after.is_some() {
+            let budget = max_bytes.saturating_sub(out.len());
+            out.push_str("```markdown\n");
+            out.push_str(&truncate_chars(
+                content.trim_end(),
+                MAX_CANDIDATE_DIFF_FILE_BYTES.min(budget),
+            ));
+            out.push_str("\n```\n");
+        }
+    }
+    if out.is_empty() { Ok(String::from("no component changes")) } else { Ok(out) }
 }
 
 /// Public leak guard shared with the harnessing context builder.
@@ -224,9 +322,14 @@ fn assert_no_grader_material(label: &str, text: &str) -> Result<(), String> {
 
 /// Parses the reflector reply.
 pub fn parse_reflection(reply: &str) -> Result<ReflectionOutput, String> {
-    let edits_block = tagged_block(reply, "edits")
-        .ok_or_else(|| String::from("reflector reply is missing an <edits> block"))?;
-    let edits = parse_edit_rows(&edits_block)?;
+    let edits_blocks = tagged_blocks(reply, "edits");
+    if edits_blocks.len() != 1 {
+        return Err(format!(
+            "reflector emitted {} <edits> blocks; exactly one is required",
+            edits_blocks.len()
+        ));
+    }
+    let edits = parse_edit_rows(&edits_blocks[0])?;
     let experience_blocks = tagged_blocks(reply, "experience");
     if experience_blocks.len() > 1 {
         return Err(format!(
@@ -249,10 +352,6 @@ pub fn parse_reflection(reply: &str) -> Result<ReflectionOutput, String> {
         )?;
     }
     Ok(ReflectionOutput { edits, experience })
-}
-
-fn tagged_block(reply: &str, tag: &str) -> Option<String> {
-    tagged_blocks(reply, tag).into_iter().next()
 }
 
 fn tagged_blocks(reply: &str, tag: &str) -> Vec<String> {
@@ -329,10 +428,15 @@ fn parse_lesson(block: &str) -> Result<Option<ReflectionLesson>, String> {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("experience block is missing non-empty `{key}`"))
     };
+    let confidence = match fields.get("confidence").map(|value| value.trim()) {
+        None | Some("") => None,
+        Some(value) => Some(value.parse::<ExperienceConfidence>()?),
+    };
     Ok(Some(ReflectionLesson {
         cue: required("cue")?,
         lesson: required("lesson")?,
         evidence: required("evidence")?,
+        confidence,
     }))
 }
 
@@ -347,6 +451,8 @@ pub fn build_entry(
     if output.edits.is_empty() {
         return Err(String::from("reflection has no edit rows"));
     }
+    let confidence =
+        output.experience.as_ref().and_then(|lesson| lesson.confidence).unwrap_or(confidence);
     let mut entry = ExperienceEntry {
         seq,
         domain: domain.to_string(),
@@ -412,6 +518,10 @@ mod tests {
                 label: "c1".to_string(),
                 rollout: "reopened outputs at step 11".to_string(),
             }],
+            candidate_harnesses: vec![(
+                "c1".to_string(),
+                tree(&[("guardrails.md", "verify writes\n")]),
+            )],
             decisions: Some("kept verify rule".to_string()),
             adoption: Some(AdoptionRecord {
                 anonymous_ids: BTreeMap::from([("a1".to_string(), "c1".to_string())]),
@@ -440,6 +550,7 @@ mod tests {
         let projection = build_projection(&evidence()).expect("projection");
         assert!(projection.contains("add parser coverage"));
         assert!(projection.contains("Candidate Probe `c1`"));
+        assert!(projection.contains("Candidate Harness Diff `c1`"));
         assert!(projection.contains("Adoption Map"));
         assert!(projection.contains("Tool Records"));
         assert!(projection.contains("Workspace Diff"));
@@ -473,6 +584,21 @@ mod tests {
         assert_eq!(output.edits[0].candidates, vec!["c1".to_string()]);
         let lesson = output.experience.expect("lesson");
         assert_eq!(lesson.cue, "writes not reopened");
+        assert_eq!(lesson.confidence, None);
+    }
+
+    #[test]
+    fn parsed_confidence_is_validated_and_overrides_the_default() {
+        let output = parse_reflection(&reply(
+            "cue: cue\nlesson: lesson\nevidence: evidence\nconfidence: high",
+        ))
+        .expect("parses");
+        let entry =
+            build_entry(&output, 1, "rust", "task", ExperienceConfidence::Low).expect("entry");
+        assert_eq!(entry.confidence, ExperienceConfidence::High);
+
+        let invalid = reply("cue: cue\nlesson: lesson\nevidence: evidence\nconfidence: certain");
+        assert!(parse_reflection(&invalid).is_err());
     }
 
     #[test]
@@ -490,6 +616,14 @@ mod tests {
         );
         let error = parse_reflection(&text).expect_err("one lesson bound");
         assert!(error.contains("at most one"), "{error}");
+    }
+
+    #[test]
+    fn exactly_one_edits_block_is_required() {
+        let text = format!("{}\n{}", reply("NO_ENTRY"), reply("NO_ENTRY"));
+        let error = parse_reflection(&text).expect_err("one edits block");
+        assert!(error.contains("exactly one"), "{error}");
+        assert!(parse_reflection("no blocks").is_err());
     }
 
     #[test]

@@ -68,14 +68,12 @@ pub const MISSION_SELECTOR: &str = concat!(
 );
 
 /// Reflector contract.
-pub const MISSION_REFLECTOR: &str = concat!(
-    "Reflect on the improvement run from the curated evidence. Emit exactly one <edits> block ",
-    "with one five-line row per changed component (component, candidates, change, observed, ",
-    "verdict), then at most one <experience> block with cue, lesson, and evidence. ",
-    "NO_ENTRY is the valid answer when no execution contrast supports a lesson. Never invent ",
-    "a trajectory moment, never treat selection as transfer evidence, and never emit more ",
-    "than one lesson."
-);
+pub const MISSION_REFLECTOR: &str = "Reflect on the improvement run from the curated evidence. Emit exactly one <edits> block \
+    with one five-line row per changed component (component, candidates, change, observed, \
+    verdict), then at most one <experience> block with cue, lesson, evidence, and optional \
+    confidence (low, medium, or high). NO_ENTRY is the valid answer when no execution contrast \
+    supports a lesson. Never invent a trajectory moment, never treat selection as transfer \
+    evidence, and never emit more than one lesson.";
 
 /// Execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +366,7 @@ pub async fn run_task(
     let cues = library_cues(task);
     let mut current_base = base_tree.clone();
     let mut finals: Vec<(Candidate, HarnessTree, RunRecord)> = Vec::new();
+    let mut probe_records: Vec<(String, HarnessTree, RunRecord)> = Vec::new();
     let mut decisions: Vec<(String, String)> = Vec::new();
     for step in 0..config.k {
         let step_base = match config.mode {
@@ -413,6 +412,7 @@ pub async fn run_task(
                 &run_root.join(format!("harness/step-{step}/probe-{}", role.as_str())),
             )?;
             let record = runtime.run_rollout(&label, &harness_dir, &mut ledger).await?;
+            probe_records.push((label.clone(), tree.clone(), record.clone()));
             probes.push((label, tree, record));
         }
         let compose_stage = format!("step-{step}-compose");
@@ -555,6 +555,7 @@ pub async fn run_task(
                     chosen: &chosen_tree,
                     finals: &finals,
                     references: &references,
+                    probes: &probe_records,
                     adoption,
                     decisions: &decisions,
                     selection: &selection,

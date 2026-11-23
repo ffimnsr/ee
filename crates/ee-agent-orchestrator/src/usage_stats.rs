@@ -433,7 +433,7 @@ impl ServerTool for UsageStatsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "usage_stats",
-            "Report deterministic session usage: token/cost totals per model and per-tool call counts with success and duration percentiles. Computed from the session log; no secrets or client handles.",
+            "Report deterministic session usage: token/cost totals per model, per-tool call counts with success and duration percentiles, per-task step and tool-error rows, and recursive-harness spend. Computed from the session log; no secrets or client handles.",
         )
         .input_schema(json!({
             "type": "object",

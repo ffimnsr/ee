@@ -4,6 +4,7 @@
 //! domain, a workspace-shaped base harness, bounded source files, and the rule
 //! for what counts as delivered.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ee_agent_orchestrator::harness_validation::HarnessTree;
@@ -44,6 +45,10 @@ pub struct HarnessTask {
     /// Streaming-retention cutoff: only library entries with a strictly
     /// smaller sequence are visible. `None` exposes every completed entry.
     pub library_before_seq: Option<u64>,
+    /// Specific library sequences excluded from this run's cue catalog.
+    /// Leave-one-out evaluation excludes only the task's own entry; later
+    /// entries stay visible.
+    pub excluded_experience_seqs: BTreeSet<u64>,
     /// Experience-library root. `None` uses the task workspace; measurement
     /// runs set a scratch root so they never contaminate the daily library.
     pub library_root: Option<PathBuf>,
@@ -66,6 +71,7 @@ impl HarnessTask {
             source_roots: Vec::new(),
             attachments: Vec::new(),
             library_before_seq: None,
+            excluded_experience_seqs: BTreeSet::new(),
             library_root: None,
         }
     }
@@ -84,11 +90,25 @@ impl HarnessTask {
     }
 
     /// Excludes the task's own experience entry (and every later entry) from
-    /// the online library cues. Used only by the offline leave-one-out eval.
+    /// the online library cues. Used for streaming retention.
     #[must_use]
     pub fn with_library_before_seq(mut self, seq: u64) -> Self {
         self.library_before_seq = Some(seq);
         self
+    }
+
+    /// Excludes one specific experience sequence from the library cues while
+    /// keeping later entries visible. Used only by leave-one-out evaluation.
+    #[must_use]
+    pub fn with_excluded_experience_seq(mut self, seq: u64) -> Self {
+        self.excluded_experience_seqs.insert(seq);
+        self
+    }
+
+    /// Whether a discovered entry must be hidden from this task's cues.
+    #[must_use]
+    pub fn excludes_experience(&self, seq: u64) -> bool {
+        self.excluded_experience_seqs.contains(&seq)
     }
 
     /// Validates the contract before any model call.
@@ -233,7 +253,12 @@ fn collect_source_files(root: &Path, directory: &Path, depth: usize, files: &mut
         if IGNORED.contains(&name) || name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_source_files(root, &path, depth + 1, files);
         } else if let Some(file) = read_source_file(&path, root) {
             files.push(file);

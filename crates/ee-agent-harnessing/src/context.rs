@@ -16,10 +16,13 @@ use ee_agent_remote::redact::Redactor;
 
 use crate::channel::Deliverable;
 use crate::error::{HarnessError, HarnessResult};
-use crate::task::{HarnessTask, names_only, render_deliverable};
+use crate::task::{HarnessTask, render_deliverable};
 
 /// Maximum bytes written to one context markdown file.
 pub const MAX_CONTEXT_FILE_BYTES: usize = 64 * 1024;
+/// Maximum bytes written to the observations file. Reflection projections are
+/// larger than ordinary evidence files because they carry the candidate pool.
+pub const MAX_OBSERVATIONS_BYTES: usize = 160 * 1024;
 /// Maximum bytes retained from one rollout in a context file.
 pub const MAX_ROLLOUT_BYTES: usize = 32 * 1024;
 /// Maximum bytes retained from one deliverable body.
@@ -177,13 +180,30 @@ pub fn build(root: &Path, evidence: &StageEvidence) -> HarnessResult<PathBuf> {
         present.push("selector/");
     }
     if let Some(observations) = &evidence.observations {
-        write_checked(&directory.join("observations.md"), observations, &redactor)?;
+        write_checked_with(
+            &directory.join("observations.md"),
+            observations,
+            &redactor,
+            MAX_OBSERVATIONS_BYTES,
+        )?;
         present.push("observations.md");
     }
 
     if present.is_empty() {
         return Err(HarnessError::State(
             "no renderable trajectory, deliverable, or harness evidence; adapting on nothing"
+                .into(),
+        ));
+    }
+    let has_trajectory = evidence.rollouts.iter().any(|(_, view)| view.has_trajectory());
+    if !has_trajectory
+        && evidence.deliverables.is_empty()
+        && evidence.selector.is_empty()
+        && evidence.observations.is_none()
+    {
+        return Err(HarnessError::State(
+            "no rollout has a renderable trajectory and no deliverable, selector candidate, or \
+             observation exists; the proposer would be adapting on nothing"
                 .into(),
         ));
     }
@@ -195,12 +215,6 @@ pub fn build(root: &Path, evidence: &StageEvidence) -> HarnessResult<PathBuf> {
     );
     write_checked(&directory.join("mission.md"), &mission, &redactor)?;
     Ok(directory)
-}
-
-/// Names-only deliverable text used by selector evidence.
-#[must_use]
-pub fn names_only_text(deliverable: &Deliverable) -> String {
-    names_only(deliverable)
 }
 
 fn redacted_tree(tree: &HarnessTree, redactor: &Redactor) -> HarnessTree {

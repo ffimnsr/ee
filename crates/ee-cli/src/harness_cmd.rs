@@ -31,7 +31,8 @@ const MAX_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_WORKSPACE_DEPTH: usize = 4;
 const MAX_ASSET_BYTES: usize = 64 * 1024;
 const MAX_ASSETS: usize = 32;
-const MAX_OUTPUT_CHARS: usize = 16 * 1024;
+const MAX_OUTPUT_CHARS: usize = 256 * 1024;
+const MAX_SELECTOR_ASSET_TOTAL_BYTES: usize = 256 * 1024;
 
 /// Runs one `ee do agent harness` subcommand.
 pub(crate) fn run(command: HarnessCommands) -> io::Result<()> {
@@ -133,6 +134,7 @@ async fn improve(options: ImproveOptions) -> io::Result<()> {
         max_workers: options.workers,
         resume: true,
     };
+    config.validate().map_err(to_io)?;
     if options.dry_run {
         let plan = ee_agent_harnessing::driver::dry_run_plan(&task, &config);
         print!("{}", plan.render());
@@ -169,18 +171,22 @@ fn start_host(
     workspace: &Path,
     run_root: &Path,
 ) -> io::Result<(RemoteHost, Arc<ee_agent_remote::HeadlessHandler>, String)> {
-    // Isolation boundary: each rollout/improver session gets its own bounded
-    // workspace under the run root, and the candidate `.agents` tree is mounted
-    // there. The configured agent process itself keeps its normal environment
-    // and OS permissions; deploy harness runs inside an extra sandbox when the
-    // task's inputs are untrusted.
-    let (config, options) = crate::serve_cmd::build_host_inputs(
+    // Isolation boundary: every rollout/improver session runs under the run
+    // root, and the candidate `.agents` tree is mounted in its own copied
+    // workspace there. The user's workspace contributes trust/secret policy
+    // only; child sessions are never granted it as an allowed root.
+    let (mut config, options) = crate::serve_cmd::build_host_inputs(
         vec![workspace.to_path_buf(), run_root.to_path_buf()],
         Some(RemotePermissionMode::Ask.as_str().to_string()),
-        None,
-        None,
+        Some(run_root.join("agent-audit.log")),
+        Some(run_root.join("agent-sessions")),
     )
     .map_err(|error| io::Error::new(error.kind(), format!("agent host: {error}")))?;
+    let isolated_root = std::fs::canonicalize(run_root).unwrap_or_else(|_| run_root.to_path_buf());
+    config.allowed_roots.retain(|root| root == &isolated_root);
+    if config.allowed_roots.is_empty() {
+        config.allowed_roots.push(isolated_root);
+    }
     let agent_id = config
         .default_agent
         .clone()
@@ -726,11 +732,15 @@ fn copy_dir(
         }
         let relative = path.strip_prefix(root).unwrap_or(&path);
         let destination = target.join(relative);
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             std::fs::create_dir_all(&destination)?;
             copy_dir(root, target, &path, depth + 1, budget)?;
-        } else if path.is_file() {
-            let metadata = std::fs::symlink_metadata(&path)?;
+        } else if file_type.is_file() {
             if metadata.len() > MAX_ASSET_BYTES as u64 {
                 continue;
             }
@@ -760,12 +770,17 @@ fn collect_files(root: &Path, directory: &Path, depth: usize, files: &mut BTreeS
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             if name == ".agents" {
                 continue;
             }
             collect_files(root, &path, depth + 1, files);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             files.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
         }
     }
@@ -783,16 +798,37 @@ fn delivery(text: &str, added: &[PathBuf], workspace: &Path) -> Option<Deliverab
     if text.trim().is_empty() && added.is_empty() {
         return None;
     }
+    // Selector evidence must show rendered artifacts, not just their names.
+    // Each asset is bounded and the total is capped so one run cannot flood
+    // the selection context.
+    let mut remaining = MAX_SELECTOR_ASSET_TOTAL_BYTES;
     let assets = added
         .iter()
         .map(|path| {
-            let bytes = std::fs::symlink_metadata(workspace.join(path))
+            let full = workspace.join(path);
+            let bytes = std::fs::symlink_metadata(&full)
                 .map(|metadata| metadata.len() as usize)
                 .unwrap_or(0);
-            DeliverableAsset { name: path.display().to_string(), bytes, content: None }
+            let content = read_asset_text(&full, MAX_ASSET_BYTES.min(remaining));
+            if let Some(text) = &content {
+                remaining = remaining.saturating_sub(text.len());
+            }
+            DeliverableAsset { name: path.display().to_string(), bytes, content }
         })
         .collect();
     Some(Deliverable { text: text.to_string(), assets })
+}
+
+fn read_asset_text(path: &Path, limit: usize) -> Option<String> {
+    if limit == 0 {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 // ── Reflection approval ──────────────────────────────────────────────────────
@@ -903,6 +939,7 @@ mod tests {
         assert_eq!(deliverable.assets.len(), 1);
         assert_eq!(deliverable.assets[0].name, "out.txt");
         assert_eq!(deliverable.assets[0].bytes, 5);
+        assert_eq!(deliverable.assets[0].content.as_deref(), Some("done\n"));
         assert!(delivery("", &[], root.path()).is_none());
         assert!(delivery("", &added, root.path()).is_some());
     }

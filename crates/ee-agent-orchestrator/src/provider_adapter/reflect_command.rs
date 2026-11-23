@@ -61,6 +61,7 @@ pub(super) async fn handle_reflect_command(
         chosen_harness: chosen.clone(),
         base_harness: None,
         candidates: Vec::new(),
+        candidate_harnesses: Vec::new(),
         decisions: None,
         adoption: None,
         tool_records,
