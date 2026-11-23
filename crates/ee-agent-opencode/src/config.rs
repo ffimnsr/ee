@@ -70,11 +70,11 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are an agent running inside ee edit
 /// holds the key and presents it to the selected surface.
 pub const API_KEY_DESCRIPTION: &str = "OpenCode API key for the selected surface. ee stores it in the encrypted secret store and sends it only as a bearer token to the selected surface; billing, balances, usage limits, and account management stay with OpenCode.";
 /// Surface input label shown during setup.
-pub const SURFACE_LABEL: &str = "OpenCode surface (required): \"zen\" for pay-as-you-go at https://opencode.ai/zen/v1, \"go\" for subscription plans at https://opencode.ai/zen/go/v1";
+pub const SURFACE_LABEL: &str = "OpenCode surface";
 /// Model input label shown during setup.
-pub const MODEL_LABEL: &str = "Exact model id for the selected surface (required), as documented, e.g. gpt-5.5 on zen or kimi-k3 on go; pass the bare id, not an OpenCode TUI alias such as opencode/gpt-5.5";
+pub const MODEL_LABEL: &str = "Model for the selected surface (bare documented id; not an OpenCode TUI alias such as opencode/gpt-5.5)";
 /// Critic input label shown during setup.
-pub const CRITIC_LABEL: &str = "Optional second-opinion critic model id on the same surface, from a different vendor, e.g. grok-4.5 while the root model is gpt-5.5; leave empty to run without a critic";
+pub const CRITIC_LABEL: &str = "Optional critic model on the same surface (a different vendor is recommended; leave empty to run without a critic)";
 /// Default request timeout: 120 seconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Default model context-window size in tokens, used when the catalog carries

@@ -543,6 +543,7 @@ fn agent_setup_writes_complete_server_to_global_config_only() {
         Path::new("/home/example/.local/bin/ee-agent-openrouter"),
         &[String::from("--stdio")],
         &values,
+        true,
         &env,
     )
     .expect("configure global agent");
@@ -593,6 +594,7 @@ fn agent_setup_local_scope_writes_secret_references_into_workspace_config() {
                 String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
             ),
         ]),
+        true,
         &env,
     )
     .expect("configure workspace agent");
@@ -646,6 +648,7 @@ fn agent_setup_local_scope_without_secrets_writes_only_workspace_config() {
         Path::new("/home/example/.local/bin/ee-agent-helper"),
         &[],
         &values,
+        true,
         &env,
     )
     .expect("configure workspace agent");
@@ -656,6 +659,43 @@ fn agent_setup_local_scope_without_secrets_writes_only_workspace_config() {
         "no secret refs, no user-layer write"
     );
 }
+#[test]
+fn critic_agent_setup_keeps_the_primary_default_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let env = test_config_environment(temp.path());
+    std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+    std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+
+    configure_agent_server_with_env(
+        ConfigScope::Local,
+        "agent",
+        Path::new("/home/example/.local/bin/ee-agent-opencode"),
+        &[],
+        &BTreeMap::new(),
+        true,
+        &env,
+    )
+    .expect("configure primary agent");
+
+    let path = configure_agent_server_with_env(
+        ConfigScope::Local,
+        "critic",
+        Path::new("/home/example/.local/bin/ee-agent-opencode"),
+        &[],
+        &BTreeMap::new(),
+        false,
+        &env,
+    )
+    .expect("configure critic agent");
+
+    let workspace: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(workspace["agents"]["default_agent"].as_str(), Some("agent"));
+    assert_eq!(
+        workspace["agents"]["servers"]["critic"]["command"].as_str(),
+        Some("/home/example/.local/bin/ee-agent-opencode")
+    );
+}
+
 #[test]
 fn rubber_duck_setup_writes_mode_and_backend_to_chosen_scope() {
     let temp = tempfile::tempdir().unwrap();

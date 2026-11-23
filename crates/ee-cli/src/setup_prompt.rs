@@ -53,6 +53,83 @@ pub(crate) fn prompt_value(
     }
 }
 
+/// Result of interpreting one raw selection entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectionOutcome {
+    /// The user selected a listed value (or typed an exact listed value).
+    Value(String),
+    /// The user selected the trailing "Other" entry.
+    Other,
+    /// The user pressed Enter without typing.
+    Empty,
+    /// The input matches neither an index nor a listed value.
+    Invalid,
+}
+
+/// Interprets a raw selection against numbered choices. `len + 1` is reserved
+/// for the "Other" entry, so callers can offer a custom value without allowing
+/// accidental typos to become configuration.
+pub(crate) fn interpret_selection(raw: &str, choices: &[(String, String)]) -> SelectionOutcome {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return SelectionOutcome::Empty;
+    }
+    if let Ok(index) = trimmed.parse::<usize>() {
+        if index == choices.len() + 1 {
+            return SelectionOutcome::Other;
+        }
+        if let Some((value, _)) = index.checked_sub(1).and_then(|index| choices.get(index)) {
+            return SelectionOutcome::Value(value.clone());
+        }
+        return SelectionOutcome::Invalid;
+    }
+    if let Some((value, _)) = choices.iter().find(|(value, _)| value == trimmed) {
+        return SelectionOutcome::Value(value.clone());
+    }
+    SelectionOutcome::Invalid
+}
+
+/// Prompts for one value from a numbered list. A trailing "Other" entry lets
+/// the user type an exact value that is not in the suggested set.
+pub(crate) fn prompt_selection(
+    label: &str,
+    choices: &[(String, String)],
+    default: Option<&str>,
+    required: bool,
+) -> Result<Option<String>, String> {
+    println!("{label}:");
+    for (index, (_, choice_label)) in choices.iter().enumerate() {
+        println!("  {}) {choice_label}", index + 1);
+    }
+    println!("  {}) Other (type an exact value)", choices.len() + 1);
+
+    let range_end = choices.len() + 1;
+    let hint = match default {
+        Some(default) => format!(" (press Enter for {default})"),
+        None if required => String::new(),
+        None => String::from(" (press Enter to skip)"),
+    };
+    loop {
+        let raw = prompt_line(&format!("Select [1-{range_end}]{hint}: "))?;
+        match interpret_selection(&raw, choices) {
+            SelectionOutcome::Value(value) => return Ok(Some(value)),
+            SelectionOutcome::Other => return prompt_value("Exact value", None, true),
+            SelectionOutcome::Empty => {
+                if let Some(default) = default {
+                    return Ok(Some(default.to_owned()));
+                }
+                if !required {
+                    return Ok(None);
+                }
+                eprintln!("{label} is required.");
+            }
+            SelectionOutcome::Invalid => {
+                eprintln!("Enter a number from 1 through {range_end}, or an exact listed value.")
+            }
+        }
+    }
+}
+
 /// Reads a value without terminal echo (prompted only once the caller has
 /// already established the value is a secret).
 pub(crate) fn read_hidden_value(
@@ -115,6 +192,25 @@ mod tests {
         }
         for invalid in ["", "1KEY", "A-B", "A B", "KEY:VALUE"] {
             assert!(!validate_env_name(invalid), "{invalid} should be invalid");
+        }
+    }
+
+    #[test]
+    fn selection_interprets_indices_exact_values_other_and_invalid_input() {
+        let choices = vec![
+            (String::from("zen"), String::from("zen: pay-as-you-go")),
+            (String::from("go"), String::from("go: subscription")),
+        ];
+
+        assert_eq!(interpret_selection("2", &choices), SelectionOutcome::Value(String::from("go")));
+        assert_eq!(
+            interpret_selection("zen", &choices),
+            SelectionOutcome::Value(String::from("zen"))
+        );
+        assert_eq!(interpret_selection("3", &choices), SelectionOutcome::Other);
+        assert_eq!(interpret_selection("", &choices), SelectionOutcome::Empty);
+        for invalid in ["0", "4", "opencode", "1.5"] {
+            assert_eq!(interpret_selection(invalid, &choices), SelectionOutcome::Invalid);
         }
     }
 

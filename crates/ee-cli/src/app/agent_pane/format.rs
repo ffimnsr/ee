@@ -204,12 +204,13 @@ pub(super) fn plan_entry_priority_label(priority: PlanEntryPriority) -> &'static
 
 pub(super) fn thread_display_name(
     index: usize,
-    agent_id: &str,
     session_name: Option<&str>,
     session_title: Option<&str>,
 ) -> String {
-    let label =
-        session_name.or(session_title).filter(|title| !title.trim().is_empty()).unwrap_or(agent_id);
+    let label = session_name
+        .or(session_title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(super::constants::AGENT_DISPLAY_NAME);
     format!("{}.{}", index + 1, label)
 }
 

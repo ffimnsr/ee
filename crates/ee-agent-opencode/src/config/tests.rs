@@ -168,6 +168,7 @@ fn setup_manifest_requires_explicit_selectors_and_a_secret_key() {
     assert_eq!(model.config.env, MODEL_ENV);
     assert!(surface.default.is_none(), "no surface is chosen by default");
     assert!(model.default.is_none(), "no model is chosen by default");
+    assert!(surface.required && model.required, "surface and model are mandatory inputs");
     // An installed agent must not pin a whole-turn timeout: the reference
     // defaults to unbounded total with phase budgets.
     let timeout = manifest.inputs.iter().find(|input| input.key == "timeout_ms").expect("timeout");
@@ -183,11 +184,14 @@ fn manifest_text() -> Vec<String> {
     text.extend(
         manifest.env_vars.iter().flat_map(|env| vec![env.name.clone(), env.description.clone()]),
     );
-    text.extend(
-        manifest.inputs.iter().flat_map(|input| {
-            vec![input.key.clone(), input.label.clone(), input.config.env.clone()]
-        }),
-    );
+    text.extend(manifest.inputs.iter().flat_map(|input| {
+        let mut lines = vec![input.key.clone(), input.label.clone(), input.config.env.clone()];
+        for choice in &input.choices {
+            lines.push(choice.value.clone());
+            lines.push(choice.display().to_owned());
+        }
+        lines
+    }));
     text
 }
 
@@ -460,6 +464,67 @@ fn config_error_messages_are_deterministic() {
         .to_string(),
         "route endpoint \"http://gateway.example/v1\" is not a credential-safe origin: plain http"
     );
+}
+
+#[test]
+fn setup_manifest_offers_surface_scoped_model_selections() {
+    let manifest = setup_manifest();
+
+    let surface = manifest.inputs.iter().find(|input| input.key == "surface").expect("surface");
+    assert_eq!(
+        surface.choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["zen", "go"]
+    );
+    assert!(surface.choices[0].display().contains(routes::ZEN_API_ROOT));
+    assert!(surface.choices[1].display().contains(routes::GO_API_ROOT));
+
+    let model = manifest.inputs.iter().find(|input| input.key == "model").expect("model");
+    let models_for = |surface: &str| {
+        model
+            .choices
+            .iter()
+            .filter(|choice| {
+                choice
+                    .when
+                    .as_ref()
+                    .is_some_and(|when| when.input == "surface" && when.value == surface)
+            })
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    assert!(models_for("zen").contains(&"gpt-5.5"), "zen choices list documented models");
+    assert!(
+        models_for("go").contains(&"kimi-k3"),
+        "go choices list documented models instead of a free-form prompt"
+    );
+    for choice in &model.choices {
+        let when = choice.when.as_ref().expect("model choices carry a surface condition");
+        let surface = match when.value.as_str() {
+            "zen" => OpenCodeSurface::Zen,
+            "go" => OpenCodeSurface::Go,
+            other => panic!("unexpected surface condition {other}"),
+        };
+        assert!(
+            routes::resolve_route(surface, &choice.value).is_ok(),
+            "selectable model `{}` must resolve on {}",
+            choice.value,
+            surface.as_str()
+        );
+    }
+
+    let critic = manifest.inputs.iter().find(|input| input.key == "critic_model").expect("critic");
+    assert!(!critic.required, "the critic stays optional");
+    assert_eq!(critic.choices.len(), model.choices.len(), "critic reuses the model catalog");
+
+    let mode = manifest.inputs.iter().find(|input| input.key == "rubber_duck_mode").expect("mode");
+    assert_eq!(
+        mode.choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["off", "manual", "automatic"]
+    );
+
+    let timeout = manifest.inputs.iter().find(|input| input.key == "timeout_ms").expect("timeout");
+    assert!(timeout.advanced, "low-level knobs stay behind the advanced gate");
 }
 
 #[test]

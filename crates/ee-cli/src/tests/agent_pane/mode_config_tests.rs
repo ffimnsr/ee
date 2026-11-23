@@ -161,6 +161,10 @@ fn mode_slash_command_opens_expanded_composer_picker() {
         rendered[composer_row - 1].contains("mode:plan"),
         "footer must update after /mode plan: {rendered:#?}"
     );
+    assert!(
+        rendered[composer_row - 1].contains("agent:agent"),
+        "footer must show the stable agent label, not the server id: {rendered:#?}"
+    );
 }
 
 #[test]

@@ -16,8 +16,18 @@ use std::str::FromStr;
 
 use globset::GlobBuilder;
 
+/// Walks up from `start` to the nearest directory containing `.git`.
+///
+/// Relative starts are anchored to the current directory first. Without that,
+/// an empty parent such as `Path::new(".ee.toml").parent()` would resolve
+/// `.git` against the process cwd and return an empty path, which later fails
+/// when a caller canonicalizes the workspace root.
 pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
+    let mut dir = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
     loop {
         if dir.join(".git").exists() {
             return Some(dir);
@@ -181,5 +191,29 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     match GlobBuilder::new(pattern).build() {
         Ok(glob) => glob.compile_matcher().is_match(text),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::tests::helpers::CurrentDirGuard;
+
+    use super::find_git_root;
+
+    #[test]
+    fn relative_start_is_anchored_to_the_current_directory() {
+        let _lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _restore = CurrentDirGuard::capture();
+        let temp = tempfile::tempdir().expect("temp directory");
+        std::fs::create_dir(temp.path().join(".git")).expect("fake git directory");
+        std::env::set_current_dir(temp.path()).expect("enter fake repository");
+
+        // `Path::new(".ee.toml").parent()` is `Some("")`; the resolver must
+        // treat it as the cwd rather than returning an unusable empty path.
+        let root = find_git_root(Path::new(""));
+
+        assert_eq!(root, Some(std::env::current_dir().expect("current directory")));
     }
 }

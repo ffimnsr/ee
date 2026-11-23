@@ -35,6 +35,8 @@ mod agent_launch;
 mod agent_registry;
 #[cfg(feature = "agents")]
 mod agent_setup;
+#[cfg(feature = "agents")]
+mod agent_setup_prompt;
 #[allow(dead_code)]
 mod app;
 mod args;

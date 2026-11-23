@@ -435,12 +435,14 @@ pub(crate) fn configure_global_agent_server(
     command: &Path,
     args: &[String],
     env_values: &BTreeMap<String, String>,
+    make_default: bool,
 ) -> Result<PathBuf, String> {
     configure_global_agent_server_with_env(
         agent_id,
         command,
         args,
         env_values,
+        make_default,
         &ConfigEnvironment::from_process(),
     )
 }
@@ -451,9 +453,18 @@ pub(super) fn configure_global_agent_server_with_env(
     command: &Path,
     args: &[String],
     env_values: &BTreeMap<String, String>,
+    make_default: bool,
     env: &ConfigEnvironment,
 ) -> Result<PathBuf, String> {
-    configure_agent_server_with_env(ConfigScope::Global, agent_id, command, args, env_values, env)
+    configure_agent_server_with_env(
+        ConfigScope::Global,
+        agent_id,
+        command,
+        args,
+        env_values,
+        make_default,
+        env,
+    )
 }
 
 #[cfg(feature = "agents")]
@@ -465,6 +476,7 @@ pub(crate) fn configure_local_agent_server(
     command: &Path,
     args: &[String],
     env_values: &BTreeMap<String, String>,
+    make_default: bool,
 ) -> Result<PathBuf, String> {
     configure_agent_server_with_env(
         ConfigScope::Local,
@@ -472,6 +484,7 @@ pub(crate) fn configure_local_agent_server(
         command,
         args,
         env_values,
+        make_default,
         &ConfigEnvironment::from_process(),
     )
 }
@@ -483,6 +496,7 @@ pub(super) fn configure_agent_server_with_env(
     command: &Path,
     args: &[String],
     env_values: &BTreeMap<String, String>,
+    make_default: bool,
     env: &ConfigEnvironment,
 ) -> Result<PathBuf, String> {
     let command =
@@ -490,7 +504,9 @@ pub(super) fn configure_agent_server_with_env(
     mutate_config_at_scope(scope, env, |root| {
         let agents = ensure_named_table(root, "agents", "agents")?;
         agents.insert(String::from("enabled"), toml::Value::Boolean(true));
-        agents.insert(String::from("default_agent"), toml::Value::String(agent_id.to_owned()));
+        if make_default {
+            agents.insert(String::from("default_agent"), toml::Value::String(agent_id.to_owned()));
+        }
         let servers = ensure_named_table(agents, "servers", "agents.servers")?;
         let mut server = toml::map::Map::new();
         server.insert(String::from("command"), toml::Value::String(command.to_owned()));

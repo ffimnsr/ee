@@ -210,7 +210,7 @@ fn elicitation_widgets_resolve_form_requests() {
 
     wait_until(&mut app, "elicitation prompt appears", |app| app.agents.elicitation().is_some());
     let elicitation = app.agents.elicitation().expect("prompt present");
-    assert_eq!(elicitation.agent_label, "1.fake");
+    assert_eq!(elicitation.agent_label, "1.agent");
     assert_eq!(elicitation.message, "fill the form");
     assert_eq!(elicitation.fields.len(), 3);
     assert!(elicitation.unsupported_reason.is_none());
@@ -408,7 +408,7 @@ fn url_elicitation_shows_full_url_host_and_choice() {
             url: Some(url),
             url_host: Some(host),
             ..
-        } if agent == "1.fake"
+        } if agent == "1.agent"
             && message == "authorize the agent"
             && host == "example.com"
             && url.contains("https://example.com/authorize?client=ee")

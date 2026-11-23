@@ -52,7 +52,7 @@ fn agents_enabled_creates_pane_and_sends_lazy_session_new() {
     assert_eq!(app.agents.layout, AgentPaneLayout::Full);
     assert_eq!(app.mode, Mode::Agent);
     assert_eq!(app.agents.threads[0].session_id, "s1");
-    assert_eq!(app.agents.threads[0].display_name, "1.fake");
+    assert_eq!(app.agents.threads[0].display_name, "1.agent");
 
     let agent = fake.agent();
     assert!(!agent.requests_by_method("initialize").is_empty(), "initialize must be sent");

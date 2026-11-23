@@ -171,7 +171,7 @@ fn long_agent_responses_scroll_by_visual_rows() {
         app.agents.threads[0]
             .message_pairs()
             .iter()
-            .any(|(nick, text)| nick == "fake" && text == &response)
+            .any(|(nick, text)| nick == "agent" && text == &response)
     });
 
     let pane = crate::ui::agents_pane_rect_for(

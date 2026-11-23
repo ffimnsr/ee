@@ -151,7 +151,8 @@ fn normalize_stdin_bytes(mut bytes: Vec<u8>) -> Result<Zeroizing<String>, Secret
 }
 
 /// Hidden terminal source: crossterm raw mode disables echo on every
-/// supported platform, so typed characters never appear on screen.
+/// supported platform, and each accepted character is echoed as `*` so the
+/// user gets visible typing feedback without exposing the secret.
 pub(crate) struct HiddenTerminalSecretSource;
 
 impl SecretValueSource for HiddenTerminalSecretSource {
@@ -166,7 +167,7 @@ fn read_hidden_terminal_secret() -> Result<Zeroizing<String>, SecretsCliError> {
 
     enable_raw_mode().map_err(|e| SecretsCliError::Store(SecretStoreError::Io(e)))?;
     let result = (|| {
-        eprint!("secret value: ");
+        eprint!("secret value (hidden, * per character): ");
         io::stderr().flush().map_err(|e| SecretsCliError::Store(SecretStoreError::Io(e)))?;
         let mut value = String::new();
         loop {
@@ -174,7 +175,12 @@ fn read_hidden_terminal_secret() -> Result<Zeroizing<String>, SecretsCliError> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Enter => break,
                     KeyCode::Backspace => {
-                        value.pop();
+                        if value.pop().is_some() {
+                            eprint!("\u{8} \u{8}");
+                            io::stderr()
+                                .flush()
+                                .map_err(|e| SecretsCliError::Store(SecretStoreError::Io(e)))?;
+                        }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Err(SecretsCliError::Cancelled);
@@ -184,6 +190,10 @@ fn read_hidden_terminal_secret() -> Result<Zeroizing<String>, SecretsCliError> {
                         if value.len() > MAX_SECRET_VALUE_BYTES {
                             return Err(SecretsCliError::SecretTooLarge);
                         }
+                        eprint!("*");
+                        io::stderr()
+                            .flush()
+                            .map_err(|e| SecretsCliError::Store(SecretStoreError::Io(e)))?;
                     }
                     _ => {}
                 },

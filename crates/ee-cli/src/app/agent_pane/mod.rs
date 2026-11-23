@@ -59,7 +59,7 @@ mod thread_ui;
 // referenced through `crate::app` re-exports or from test code.
 #[allow(unused_imports)]
 pub(crate) use constants::{
-    AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH,
+    AGENT_DISPLAY_NAME, AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH,
 };
 #[allow(unused_imports)]
 pub(crate) use format::{format_duration, turn_metrics_label};

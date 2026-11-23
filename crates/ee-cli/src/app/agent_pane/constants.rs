@@ -6,6 +6,9 @@
 pub(crate) const AGENTS_PANE_RIGHT_WIDTH: u16 = 48;
 /// Height of the bottom-split agents pane.
 pub(crate) const AGENTS_PANE_BOTTOM_HEIGHT: u16 = 14;
+/// Product-facing agent name. The configured server id stays an internal
+/// routing key and never replaces this label in the pane.
+pub(crate) const AGENT_DISPLAY_NAME: &str = "agent";
 /// Nick column width inside transcript lines.
 pub(crate) const AGENTS_NICK_COL_WIDTH: usize = 10;
 /// Maximum transcript items retained per thread.

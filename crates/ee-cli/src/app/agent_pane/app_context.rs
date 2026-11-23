@@ -27,7 +27,6 @@ impl App {
         thread.session_name = Some(name.clone());
         thread.display_name = thread_display_name(
             thread.index,
-            &thread.agent_id,
             thread.session_name.as_deref(),
             thread.session_title.as_deref(),
         );

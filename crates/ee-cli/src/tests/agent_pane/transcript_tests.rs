@@ -83,9 +83,9 @@ fn assistant_chunks_with_reused_message_ids_stay_in_their_turn() {
         app.agents.threads[0].message_pairs(),
         vec![
             (String::from("you"), String::from("first question")),
-            (String::from("fake"), String::from("first reply")),
+            (String::from("agent"), String::from("first reply")),
             (String::from("you"), String::from("second question")),
-            (String::from("fake"), String::from("second reply")),
+            (String::from("agent"), String::from("second reply")),
         ]
     );
 }
@@ -119,7 +119,7 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
         pairs,
         vec![
             (String::from("you"), String::from("hi")),
-            (String::from("fake"), String::from("hello")),
+            (String::from("agent"), String::from("hello")),
             (String::from("think"), String::from("hmm")),
         ]
     );
@@ -580,7 +580,7 @@ fn final_response_summary_goes_to_the_evidence_log_not_the_transcript() {
         app.agents.threads[0].message_pairs(),
         vec![
             (String::from("you"), String::from("hi")),
-            (String::from("fake"), String::from("answer")),
+            (String::from("agent"), String::from("answer")),
         ],
         "the evidence-derived summary is diagnostics, never chat prose"
     );

@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 use ee_agent_protocol::setup::{SETUP_MANIFEST_SCHEMA_VERSION, SetupManifest};
 
 use crate::agent_registry::{self, RegistryAgent};
+use crate::agent_setup_prompt::collect_setup_values;
 use crate::setup_prompt::{
-    confirm, prompt_line, prompt_value, read_hidden_value, validate_env_name, validate_server_name,
+    confirm, prompt_line, prompt_selection, prompt_value, validate_env_name, validate_server_name,
 };
 use crate::{config, secrets};
 
@@ -42,8 +43,8 @@ pub(crate) fn run(user: bool) -> Result<(), String> {
     let candidates = collect_candidates()?;
     let candidate = select_agent(&candidates)?;
     match candidate {
-        SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope)?,
-        SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope)?,
+        SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope, true)?,
+        SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope, true)?,
     };
     setup_rubber_duck(&candidates, scope)
 }
@@ -73,18 +74,21 @@ fn collect_candidates() -> Result<Vec<SetupCandidate>, String> {
 fn setup_local_agent(
     candidate: &AgentCandidate,
     scope: config::ConfigScope,
+    make_default: bool,
 ) -> Result<String, String> {
     let manifest = read_manifest(&candidate.path)?;
     println!("Setting up {}.", manifest.agent.display_name);
-    let server_id = prompt_server_name(&manifest.agent.display_name, &manifest.agent.id)?;
+    let server_id =
+        prompt_server_name(&manifest.agent.display_name, default_server_name(make_default))?;
     let env = collect_setup_values(&manifest)?;
-    configure_agent_setup(&server_id, &candidate.path, &[], &env, scope)?;
+    configure_agent_setup(&server_id, &candidate.path, &[], &env, scope, make_default)?;
     Ok(server_id)
 }
 
 fn setup_registry_agent(
     agent: &RegistryAgent,
     scope: config::ConfigScope,
+    make_default: bool,
 ) -> Result<String, String> {
     println!("{} {}", agent.name, agent.version);
     if !agent.description.trim().is_empty() {
@@ -105,7 +109,7 @@ fn setup_registry_agent(
         return Err(String::from("agent setup cancelled"));
     }
 
-    let server_id = prompt_server_name(&agent.name, &agent.id)?;
+    let server_id = prompt_server_name(&agent.name, default_server_name(make_default))?;
     let prepared = agent.prepare()?;
     match agent_registry::bootstrap_first_run_config(
         agent,
@@ -125,7 +129,14 @@ fn setup_registry_agent(
     // Registry launch metadata carries no secret marker; provider credentials
     // stay agent-owned. Workspace-scope secret references (from local
     // manifests) resolve only when the workspace trust decision allows it.
-    configure_agent_setup(&server_id, &prepared.command, &prepared.args, &prepared.env, scope)?;
+    configure_agent_setup(
+        &server_id,
+        &prepared.command,
+        &prepared.args,
+        &prepared.env,
+        scope,
+        make_default,
+    )?;
     println!(
         "Configured external agent {}. Authentication remains agent-owned.",
         prepared.display_name
@@ -143,15 +154,28 @@ fn configure_agent_setup(
     args: &[String],
     env_values: &BTreeMap<String, String>,
     scope: config::ConfigScope,
+    make_default: bool,
 ) -> Result<(), String> {
     let has_secret_references = has_secret_references(env_values);
     match scope {
         config::ConfigScope::Global => {
-            let path = config::configure_global_agent_server(agent_id, command, args, env_values)?;
+            let path = config::configure_global_agent_server(
+                agent_id,
+                command,
+                args,
+                env_values,
+                make_default,
+            )?;
             println!("Configured agent `{agent_id}` in {}.", path.display());
         }
         config::ConfigScope::Local => {
-            let path = config::configure_local_agent_server(agent_id, command, args, env_values)?;
+            let path = config::configure_local_agent_server(
+                agent_id,
+                command,
+                args,
+                env_values,
+                make_default,
+            )?;
             println!("Configured agent `{agent_id}` in {}.", path.display());
             if has_secret_references {
                 println!(
@@ -161,13 +185,17 @@ fn configure_agent_setup(
             }
         }
     }
-    match scope {
-        config::ConfigScope::Global => {
-            println!("Agents mode enabled. Default agent: {agent_id} (user config).");
+    if make_default {
+        match scope {
+            config::ConfigScope::Global => {
+                println!("Agents mode enabled. Default agent: {agent_id} (user config).");
+            }
+            config::ConfigScope::Local => {
+                println!("Agents mode enabled. Default agent: {agent_id} (workspace config).");
+            }
         }
-        config::ConfigScope::Local => {
-            println!("Agents mode enabled. Default agent: {agent_id} (workspace config).");
-        }
+    } else {
+        println!("Configured agent `{agent_id}`; the default agent is unchanged.");
     }
     Ok(())
 }
@@ -221,10 +249,24 @@ fn setup_rubber_duck(
     candidates: &[SetupCandidate],
     scope: config::ConfigScope,
 ) -> Result<(), String> {
-    if !confirm("Enable rubber duck critic? [y/N]: ")? {
+    println!(
+        "\nRubber duck critic (ee-level second opinion; separate from the agent's own rubber-duck mode)"
+    );
+    if !confirm("Enable the ee-level rubber duck critic? [y/N]: ")? {
         return Ok(());
     }
-    println!("Rubber duck backend:");
+
+    let mode_choices = vec![
+        (String::from("manual"), String::from("manual: review only when you ask")),
+        (String::from("automatic"), String::from("automatic: review risky turns")),
+    ];
+    let mode =
+        match prompt_selection("Critic mode", &mode_choices, Some("manual"), true)?.as_deref() {
+            Some("automatic") => config::RubberDuckModeSetting::Automatic,
+            _ => config::RubberDuckModeSetting::Manual,
+        };
+
+    println!("Critic backend:");
     println!("  1) Internal model (EE host model)");
     println!("  2) External agent server");
     let backend = loop {
@@ -243,18 +285,10 @@ fn setup_rubber_duck(
         RubberDuckBackendChoice::ExternalAgent => {
             let candidate = select_agent(candidates)?;
             let agent_id = match candidate {
-                SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope)?,
-                SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope)?,
+                SetupCandidate::Local(candidate) => setup_local_agent(candidate, scope, false)?,
+                SetupCandidate::Registry(agent) => setup_registry_agent(agent, scope, false)?,
             };
             (None, Some(agent_id))
-        }
-    };
-    let mode = loop {
-        let value = prompt_line("Rubber duck mode (manual/automatic, default manual): ")?;
-        match value.trim() {
-            "" | "manual" => break config::RubberDuckModeSetting::Manual,
-            "automatic" => break config::RubberDuckModeSetting::Automatic,
-            _ => eprintln!("Mode must be manual or automatic."),
         }
     };
     let path = config::configure_rubber_duck(
@@ -474,6 +508,27 @@ fn validate_manifest(manifest: SetupManifest) -> Result<SetupManifest, String> {
             ));
         }
     }
+    for input in &manifest.inputs {
+        for choice in &input.choices {
+            if choice.value.trim().is_empty() {
+                return Err(format!(
+                    "agent setup manifest has an empty choice for `{}`",
+                    input.key
+                ));
+            }
+            if let Some(when) = &choice.when
+                && (when.input.trim().is_empty()
+                    || when.value.trim().is_empty()
+                    || when.input == input.key
+                    || !input_keys.contains(&when.input))
+            {
+                return Err(format!(
+                    "agent setup manifest choice `{}` for `{}` references an invalid condition",
+                    choice.value, input.key
+                ));
+            }
+        }
+    }
     Ok(manifest)
 }
 
@@ -485,66 +540,21 @@ fn validate_env_name_manifest(name: &str) -> Result<(), String> {
     }
 }
 
-fn collect_setup_values(manifest: &SetupManifest) -> Result<BTreeMap<String, String>, String> {
-    let mut values = BTreeMap::new();
-    let mut secret_store = None;
-
-    for env in &manifest.env_vars {
-        println!(
-            "{}{}: {}",
-            env.name,
-            if env.required { " (required)" } else { " (optional)" },
-            env.description
-        );
-        let value = if env.secret {
-            let value = read_hidden_value(env.required)?;
-            value
-                .map(|value| {
-                    let secret_name = secrets::SecretName::new(&format!(
-                        "agent.{}.{}",
-                        manifest.agent.id, env.name
-                    ))
-                    .map_err(|error| {
-                        format!("cannot store secret `{}`: invalid name: {error}", env.name)
-                    })?;
-                    let reference =
-                        secrets::SecretReference::from_name(secret_name.clone()).to_string();
-                    let store = secret_store.get_or_insert_with(secrets::SecretStore::default);
-                    let store = store
-                        .as_ref()
-                        .map_err(|error| format!("cannot open encrypted secrets store: {error}"))?;
-                    store
-                        .set(&secret_name, &value)
-                        .map_err(|error| format!("cannot store secret `{}`: {error}", env.name))?;
-                    Ok::<String, String>(reference)
-                })
-                .transpose()?
-        } else {
-            prompt_value(&env.name, None, env.required)?
-        };
-        if let Some(value) = value {
-            values.insert(env.name.clone(), value);
-        }
-    }
-
-    for input in &manifest.inputs {
-        let value = prompt_value(&input.label, input.default.as_deref(), input.default.is_some())?;
-        if let Some(value) = value {
-            values.insert(input.config.env.clone(), value);
-        }
-    }
-    Ok(values)
+/// Default `[agents.servers.<name>]` key. Primary setup uses `agent`; the
+/// separate ee-level critic uses `agent-critic` so the two entries never
+/// overwrite each other by default.
+fn default_server_name(make_default: bool) -> &'static str {
+    if make_default { "agent" } else { "agent-critic" }
 }
 
-/// Asks for the `[agents.servers.<name>]` key. Defaults to the agent's own
-/// id; a custom name lets one binary run as several servers (for example with
-/// different model env). Restricts to TOML bare-key and secret-store-safe
-/// characters so the name survives config serialization unchanged.
+/// Asks for the `[agents.servers.<name>]` key. A custom name lets one binary
+/// run as several servers (for example with different model env). Restricts to
+/// TOML bare-key and secret-store-safe characters so the name survives config
+/// serialization unchanged.
 fn prompt_server_name(display_name: &str, default: &str) -> Result<String, String> {
     loop {
-        let value =
-            prompt_value(&format!("Agent server name for {display_name}"), Some(default), true)?
-                .expect("required prompt always returns a value");
+        let value = prompt_value(&format!("Server name for {display_name}"), Some(default), true)?
+            .expect("required prompt always returns a value");
         if validate_server_name(&value) {
             return Ok(value);
         }
@@ -561,9 +571,17 @@ fn has_secret_references(env_values: &BTreeMap<String, String>) -> bool {
 mod tests {
     use std::fs;
 
-    use ee_agent_protocol::setup::{SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig};
+    use ee_agent_protocol::setup::{
+        SetupAgent, SetupChoice, SetupChoiceWhen, SetupEnvVar, SetupInput, SetupInputConfig,
+    };
 
     use super::*;
+
+    #[test]
+    fn default_server_names_keep_primary_and_critic_entries_distinct() {
+        assert_eq!(default_server_name(true), "agent");
+        assert_eq!(default_server_name(false), "agent-critic");
+    }
 
     #[test]
     fn internal_slot_choice_maps_builtin_slots_and_rejects_rest() {
@@ -646,6 +664,57 @@ mod tests {
         assert_eq!(manifest.agent.display_name, "Example");
     }
 
+    fn conditional_choice_manifest(input: &str) -> SetupManifest {
+        SetupManifest {
+            schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
+            agent: SetupAgent {
+                id: String::from("example"),
+                display_name: String::from("Example"),
+            },
+            env_vars: Vec::new(),
+            inputs: vec![
+                SetupInput {
+                    key: String::from("surface"),
+                    label: String::from("Surface"),
+                    default: None,
+                    required: true,
+                    section: None,
+                    choices: vec![SetupChoice {
+                        value: String::from("zen"),
+                        label: None,
+                        when: None,
+                    }],
+                    advanced: false,
+                    config: SetupInputConfig { env: String::from("EXAMPLE_SURFACE") },
+                },
+                SetupInput {
+                    key: String::from("model"),
+                    label: String::from("Model"),
+                    default: None,
+                    required: true,
+                    section: None,
+                    choices: vec![SetupChoice {
+                        value: String::from("gpt-5.5"),
+                        label: None,
+                        when: Some(SetupChoiceWhen {
+                            input: String::from(input),
+                            value: String::from("zen"),
+                        }),
+                    }],
+                    advanced: false,
+                    config: SetupInputConfig { env: String::from("EXAMPLE_MODEL") },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_choice_conditions_that_reference_unknown_inputs() {
+        assert!(validate_manifest(conditional_choice_manifest("surface")).is_ok());
+        assert!(validate_manifest(conditional_choice_manifest("missing")).is_err());
+        assert!(validate_manifest(conditional_choice_manifest("model")).is_err());
+    }
+
     #[test]
     fn manifest_rejects_duplicate_environment_destinations() {
         let manifest = SetupManifest {
@@ -664,6 +733,10 @@ mod tests {
                 key: String::from("model"),
                 label: String::from("Model"),
                 default: Some(String::from("default")),
+                required: false,
+                section: None,
+                choices: Vec::new(),
+                advanced: false,
                 config: SetupInputConfig { env: String::from("EXAMPLE_MODEL") },
             }],
         };
@@ -716,6 +789,7 @@ mod tests {
                 .find(|input| input.config.env == env)
                 .expect("surface and model stay explicit inputs");
             assert!(input.default.is_none(), "{env} is never defaulted for the user");
+            assert!(input.required, "{env} is mandatory");
         }
     }
 
@@ -726,7 +800,13 @@ mod tests {
         let manifest = ee_agent_opencode::config::setup_manifest();
         let mut text = vec![manifest.agent.display_name.clone()];
         text.extend(manifest.env_vars.iter().map(|env| env.description.clone()));
-        text.extend(manifest.inputs.iter().map(|input| input.label.clone()));
+        for input in &manifest.inputs {
+            text.push(input.label.clone());
+            for choice in &input.choices {
+                text.push(choice.value.clone());
+                text.push(choice.display().to_owned());
+            }
+        }
 
         let described = text.join("\n").to_ascii_lowercase();
         for claim in ["billing", "balances", "usage limits", "account management"] {

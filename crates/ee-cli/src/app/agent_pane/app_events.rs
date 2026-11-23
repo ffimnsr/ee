@@ -19,7 +19,7 @@ use super::pump;
 use crate::app::agent_bridge::AgentPermissionPreview;
 use crate::config::AgentAlignmentMode;
 
-use super::constants::AGENT_PROMPT_HISTORY_MAX;
+use super::constants::{AGENT_DISPLAY_NAME, AGENT_PROMPT_HISTORY_MAX};
 use super::elicitation::ElicitationPrompt;
 use super::format::{
     client_request_label, content_block_text, plan_entry_marker, plan_entry_priority_label,
@@ -102,22 +102,18 @@ impl App {
                                 thread.state = ThreadUiState::Starting;
                             }
                         }
-                        AgentConnectionState::Ready { agent_info, .. } => {
+                        AgentConnectionState::Ready { .. } => {
                             if matches!(
                                 thread.state,
                                 ThreadUiState::Starting | ThreadUiState::Failed
                             ) {
                                 thread.state = ThreadUiState::Ready;
                             }
-                            if let Some(info) = agent_info.as_ref() {
-                                let label = info.title.as_deref().unwrap_or(&info.name);
-                                if !label.is_empty() {
-                                    thread.nick = label.to_string();
-                                }
-                            }
+                            // Keep the pane label stable across providers: the
+                            // configured server id is a routing key, not a name.
+                            thread.nick = AGENT_DISPLAY_NAME.to_owned();
                             thread.display_name = thread_display_name(
                                 thread.index,
-                                &thread.agent_id,
                                 thread.session_name.as_deref(),
                                 thread.session_title.as_deref(),
                             );
@@ -751,7 +747,7 @@ impl App {
         self.agents.mcp.proxy_mode = Some(thread.proxy_mode().to_string());
         let index = self.agents.next_thread_index;
         self.agents.next_thread_index += 1;
-        let nick = agent_id.to_string();
+        let nick = AGENT_DISPLAY_NAME.to_owned();
         let ready = self.agents.created_sessions.contains(&session_id);
         let session_title =
             snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
@@ -796,7 +792,6 @@ impl App {
             nick,
             display_name: thread_display_name(
                 index,
-                agent_id,
                 session_name.as_deref(),
                 session_title.as_deref(),
             ),
@@ -890,7 +885,6 @@ impl App {
         thread.session_updated_at = updated_at;
         thread.display_name = thread_display_name(
             thread.index,
-            &thread.agent_id,
             thread.session_name.as_deref(),
             thread.session_title.as_deref(),
         );

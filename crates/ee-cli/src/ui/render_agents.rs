@@ -111,7 +111,7 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
             "{} [{}] | agent:{} | conn:{} | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
             thread.nick,
             state_label,
-            thread.agent_id,
+            crate::app::agent_pane::AGENT_DISPLAY_NAME,
             connection,
             current_mode,
             active_index + 1,
