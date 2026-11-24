@@ -82,6 +82,13 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         // conversation, then responds (the SDK parses an empty object).
         .wait_for("session/load")
         .emit(wire::session_update("s1", wire::user_message_chunk("hello agent")))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": "checking the request" }
+            }),
+        ))
         .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "first answer")))
         .respond(json!({}))
         .wait_for("session/set_mode")
@@ -159,6 +166,68 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         })
     });
     assert_eq!(restored.as_deref(), Some("hello agent"));
+    assert_eq!(
+        app.agents.threads[0].collapsed_response_groups.iter().copied().collect::<Vec<_>>(),
+        vec![1],
+        "replayed response groups start collapsed; transcript={:?}",
+        app.agents.threads[0].transcript
+    );
+}
+
+#[test]
+fn reconnect_collapses_replay_chunks_that_arrive_after_the_load_reply() {
+    // `session/update` notifications for `session/load` can reach the pane after
+    // the load reply itself. Those late chunks must still start collapsed, or a
+    // reopened session flashes every historical reasoning row.
+    let state_dir = tempfile::tempdir().unwrap();
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true }
+        }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for("session/load")
+        .respond(json!({}))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": "late reasoning" }
+            }),
+        ))
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "late answer")))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/reconnect");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "late replay applied", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].transcript.iter().any(|item| {
+                matches!(
+                    item,
+                    TranscriptItem::Message {
+                        kind: MessageRenderKind::Assistant,
+                        text,
+                        ..
+                    } if text == "late answer"
+                )
+            })
+    });
+
+    assert_eq!(
+        app.agents.threads[0].collapsed_response_groups.iter().copied().collect::<Vec<_>>(),
+        vec![1],
+        "late replay groups start collapsed; transcript={:?}",
+        app.agents.threads[0].transcript
+    );
 }
 
 #[test]
@@ -276,6 +345,22 @@ fn workspace_restart_restores_local_transcript_when_agent_load_has_no_replay() {
         response_group: Some(1),
         at: SystemTime::now(),
     });
+    first_app.agents.threads[0].transcript.push(TranscriptItem::Message {
+        nick: String::from("think"),
+        text: String::from("persisted reasoning"),
+        kind: MessageRenderKind::Thought,
+        message_id: Some(String::from("thought-1")),
+        response_group: Some(1),
+        at: SystemTime::now(),
+    });
+    first_app.agents.threads[0].transcript.push(TranscriptItem::ToolCall {
+        id: String::from("tool-1"),
+        title: String::from("persisted tool"),
+        status: String::from("completed"),
+        detail: String::new(),
+        response_group: 1,
+        at: SystemTime::now(),
+    });
     first_app.shutdown_agents();
     drop(first_app);
 
@@ -322,6 +407,15 @@ fn workspace_restart_restores_local_transcript_when_agent_load_has_no_replay() {
 
     assert_eq!(restarted_fake.agent().requests_by_method("session/load").len(), 1);
     assert!(restarted_fake.agent().requests_by_method("session/new").is_empty());
+    assert_eq!(
+        restarted_app.agents.threads[0]
+            .collapsed_response_groups
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1],
+        "restored response groups start collapsed"
+    );
 }
 
 #[test]

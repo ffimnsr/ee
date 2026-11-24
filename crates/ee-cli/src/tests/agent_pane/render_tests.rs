@@ -226,6 +226,12 @@ fn scrollback_pins_to_bottom_until_user_scrolls_up() {
     press(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
     assert_eq!(app.agents.threads[0].scroll, 0);
 
+    press(&mut app, KeyCode::PageDown, KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].stick_to_bottom, "Ctrl-PageDown re-pins the view");
+
+    press(&mut app, KeyCode::PageUp, KeyModifiers::CONTROL);
+    assert_eq!(app.agents.threads[0].scroll, 0, "Ctrl-PageUp jumps to the top");
+
     press(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
     assert!(app.agents.threads[0].stick_to_bottom, "scrolling to the end re-pins");
 }

@@ -201,6 +201,10 @@ pub(crate) struct AgentThreadUi {
     pub(crate) selected_final_response: Option<ResponseGroupId>,
     /// Response groups whose reasoning and tools are hidden.
     pub(crate) collapsed_response_groups: BTreeSet<ResponseGroupId>,
+    /// While a restored or reconnected transcript is still arriving, every
+    /// newly created response group starts collapsed. Cleared when the next
+    /// user turn begins.
+    pub(crate) collapse_incoming_response_groups: bool,
     /// Response groups whose tool input/output detail is expanded.
     pub(crate) expanded_tool_details: BTreeSet<ResponseGroupId>,
     /// Latest agent plan snapshot, rendered in a modal instead of scrollback.
@@ -417,6 +421,9 @@ impl AgentThreadUi {
         self.active_response_group = Some(group);
         self.selected_response_group = Some(group);
         self.selected_final_response = None;
+        if self.collapse_incoming_response_groups {
+            self.collapsed_response_groups.insert(group);
+        }
         group
     }
 
@@ -466,6 +473,15 @@ impl AgentThreadUi {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    /// Collapses every response group currently in the transcript and keeps
+    /// groups created by late load-replay chunks collapsed as well. Restored
+    /// sessions start compact instead of replaying all reasoning and tool
+    /// rows that the user had already finished reading.
+    pub(super) fn collapse_restored_response_groups(&mut self) {
+        self.collapse_incoming_response_groups = true;
+        self.collapsed_response_groups = self.response_group_ids().into_iter().collect();
     }
 
     /// Whether any transcript item still belongs to `group`. Used to reject a

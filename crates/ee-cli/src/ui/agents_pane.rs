@@ -331,13 +331,10 @@ fn render_agent_transcript(
         lines.extend(transcript_lines(item, width, show_tool_detail));
         let span_end = lines.len();
         row_action_at.resize(span_end, None);
-        if final_response_group == thread.selected_final_response {
-            for line in &mut lines[span_start..span_end] {
-                line.style = line.style.bg(theme::BG_SELECTION);
-                for span in &mut line.spans {
-                    span.style = span.style.bg(theme::BG_SELECTION);
-                }
-            }
+        if let Some(group) = final_response_group
+            && thread.selected_final_response == Some(group)
+        {
+            highlight_response_rows(&mut lines[span_start..span_end], width);
         }
         if let crate::app::TranscriptItem::ToolCall { response_group, .. } = item {
             // Detail continuation rows belong to the same clickable tool entry.
@@ -351,6 +348,24 @@ fn render_agent_transcript(
         row_action_at.push(None);
     }
     AgentTranscriptRender { lines, row_action_at, group_header_at, final_response_at }
+}
+
+/// Paints a selected final response as one full-width row with readable text.
+#[cfg(feature = "agents")]
+fn highlight_response_rows(lines: &mut [Line<'static>], width: usize) {
+    for line in lines {
+        line.style = line.style.bg(theme::BG_SELECTION).fg(theme::FG_TEXT);
+        for span in &mut line.spans {
+            span.style = span.style.bg(theme::BG_SELECTION).fg(theme::FG_TEXT);
+        }
+        let padding = width.saturating_sub(line.width());
+        if padding > 0 {
+            line.spans.push(Span::styled(
+                " ".repeat(padding),
+                Style::default().fg(theme::FG_TEXT).bg(theme::BG_SELECTION),
+            ));
+        }
+    }
 }
 
 /// Spinner frames cycled while a turn runs (classic cli-spinners style).

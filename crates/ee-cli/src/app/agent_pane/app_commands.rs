@@ -788,7 +788,9 @@ impl App {
   Ctrl-↑/↓            select agent final response\n\
   agent_fork_selected_response  fork from selected response\n\
   /copy               copy selected final response, else latest\n\
-  PgUp/PgDn/Home/End  scroll transcript\n\
+  PgUp/PgDn            scroll transcript\n\
+  Ctrl-PgUp/Ctrl-PgDn  jump to transcript top/bottom\n\
+  Ctrl-Home/Ctrl-End   jump to transcript top/bottom\n\
   Tab                 slash/@ completion\n\
 Configure mode=agent bindings in [keymap].",
         );

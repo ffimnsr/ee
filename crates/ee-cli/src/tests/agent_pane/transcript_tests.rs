@@ -405,6 +405,50 @@ fn response_anchors_follow_rendered_group_order() {
 }
 
 #[test]
+fn transcript_rows_stay_unhighlighted_without_a_selected_final_response() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    let thread = &mut app.agents.threads[0];
+    thread.transcript.push(TranscriptItem::System {
+        text: String::from("Agents keys:\nCtrl-K toggle pane"),
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::Message {
+        nick: String::from("you"),
+        text: String::from("review this"),
+        kind: MessageRenderKind::User,
+        message_id: None,
+        response_group: None,
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::ToolCall {
+        id: String::from("call_1"),
+        title: String::from("tool"),
+        status: String::from("completed"),
+        detail: String::new(),
+        response_group: 1,
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::Message {
+        nick: String::from("agent"),
+        text: String::from("answer"),
+        kind: MessageRenderKind::Assistant,
+        message_id: None,
+        response_group: Some(1),
+        at: SystemTime::now(),
+    });
+    assert_eq!(thread.selected_final_response, None);
+
+    let lines = crate::ui::agents_pane::agent_transcript_lines(&app, &app.agents.threads[0], 80);
+    assert!(
+        lines.iter().all(|line| {
+            line.spans.iter().all(|span| span.style.bg != Some(crate::ui::theme::BG_SELECTION))
+        }),
+        "no row is highlighted until a final response is selected"
+    );
+}
+
+#[test]
 fn selected_final_response_highlights_only_that_answer() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
@@ -421,24 +465,44 @@ fn selected_final_response_highlights_only_that_answer() {
         });
     }
     thread.selected_final_response = Some(2);
+    thread.transcript.push(TranscriptItem::System {
+        text: String::from("Agents keys:\nCtrl-K toggle pane"),
+        at: SystemTime::now(),
+    });
 
     let lines = crate::ui::agents_pane::agent_transcript_lines(&app, &app.agents.threads[0], 80);
-    let highlighted = lines
-        .iter()
-        .filter(|line| {
-            line.spans.iter().any(|span| span.style.bg == Some(crate::ui::theme::BG_SELECTION))
-        })
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    let mut highlighted = Vec::new();
+    for line in &lines {
+        let painted =
+            line.spans.iter().any(|span| span.style.bg == Some(crate::ui::theme::BG_SELECTION));
+        if painted {
+            highlighted.push(line);
+        }
+    }
 
     assert!(
-        highlighted.iter().any(|line| line.contains("second answer")),
-        "selected final response is highlighted: {highlighted:?}"
+        highlighted.iter().any(|line| line.to_string().contains("second answer")),
+        "selected final response is highlighted"
     );
     assert!(
-        !highlighted.iter().any(|line| line.contains("first answer")),
-        "other final responses stay unhighlighted: {highlighted:?}"
+        !highlighted.iter().any(|line| line.to_string().contains("first answer")),
+        "other final responses stay unhighlighted"
     );
+    assert!(
+        !highlighted.iter().any(|line| line.to_string().contains("Agents keys:")),
+        "system notices never join the response selection"
+    );
+    for line in highlighted {
+        assert!(
+            line.spans.iter().all(|span| span.style.bg == Some(crate::ui::theme::BG_SELECTION)),
+            "every span on the selected row gets the selection background"
+        );
+        assert!(
+            line.spans.iter().all(|span| span.style.fg == Some(crate::ui::theme::FG_TEXT)),
+            "selected text switches to the high-contrast foreground"
+        );
+        assert_eq!(line.width(), 80, "selection paints the whole row");
+    }
 }
 
 #[test]

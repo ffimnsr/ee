@@ -577,6 +577,12 @@ impl App {
             KeyCode::Up => self.agents_navigate_prompt_history(-1),
             KeyCode::Down => self.agents_navigate_prompt_history(1),
             KeyCode::Esc => {}
+            KeyCode::PageUp if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_scroll_to(0);
+            }
+            KeyCode::PageDown if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_scroll_to_bottom();
+            }
             KeyCode::PageUp => self.agents_scroll(-(AGENTS_SCROLL_PAGE as isize)),
             KeyCode::PageDown => self.agents_scroll(AGENTS_SCROLL_PAGE as isize),
             KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {

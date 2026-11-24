@@ -175,6 +175,7 @@ impl App {
                     self.agents.threads[index].verification_revision = None;
                     self.agents.threads[index].active_response_group = None;
                     self.agents.threads[index].selected_final_response = None;
+                    self.agents.threads[index].collapse_incoming_response_groups = false;
                     self.agents.threads[index].turn_started_at = Some(Instant::now());
                     // Lifecycle markers are debugging aids, not chat content;
                     // they live in the private evidence audit log.
@@ -827,6 +828,7 @@ impl App {
             selected_response_group: None,
             selected_final_response: None,
             collapsed_response_groups: BTreeSet::new(),
+            collapse_incoming_response_groups: restored,
             expanded_tool_details: BTreeSet::new(),
             current_plan: Vec::new(),
             plan_modal_open: false,
@@ -845,7 +847,11 @@ impl App {
             self.agents.active_thread = Some(self.agents.threads.len() - 1);
         }
         self.agents.error = None;
-        self.agents.threads.last_mut().expect("thread pushed").push_system(format!(
+        let restored_thread = self.agents.threads.last_mut().expect("thread pushed");
+        if restored {
+            restored_thread.collapse_restored_response_groups();
+        }
+        restored_thread.push_system(format!(
             "session {} ({session_id})",
             if restored { "restored" } else { "started" }
         ));

@@ -106,6 +106,10 @@ impl App {
                         for update in index.1 {
                             self.apply_session_update(index.0, &update);
                         }
+                        // A load replay may recreate the transcript after the
+                        // thread was already registered, so collapse existing
+                        // groups and keep late replay chunks collapsed too.
+                        self.agents.threads[index.0].collapse_restored_response_groups();
                     }
                     if let Some(text) =
                         self.load_persisted_agent_workspace().and_then(|workspace| {
