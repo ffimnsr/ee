@@ -161,6 +161,27 @@ pub(crate) fn prompt_searchable_selection(
     prompt_selection(label, choices, default, required)
 }
 
+/// Opens the installed fuzzy finder over a complete in-memory list.
+///
+/// Returns `None` when no picker is available or the user aborts, so callers can
+/// fall back to their numbered prompt. Values are matched back by the caller, so
+/// an exact value typed into a picker with no match still reaches it.
+pub(crate) fn prompt_fuzzy_pick(
+    label: &str,
+    choices: &[(String, String)],
+) -> Result<Option<String>, String> {
+    if choices.is_empty() {
+        return Ok(None);
+    }
+    let Some(picker) = SearchPicker::detect() else {
+        return Ok(None);
+    };
+    match picker_select(picker, label, choices)? {
+        PickerOutcome::Value(value) => Ok(Some(value)),
+        PickerOutcome::Skipped | PickerOutcome::Unavailable => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchPicker {
     Fzf,
@@ -378,6 +399,11 @@ mod tests {
                 "aborting or failing never selects whatever text was typed"
             );
         }
+    }
+
+    #[test]
+    fn fuzzy_pick_without_choices_never_opens_a_picker() {
+        assert_eq!(prompt_fuzzy_pick("Agents", &[]).expect("empty list does not fail"), None);
     }
 
     #[test]

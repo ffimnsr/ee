@@ -1,5 +1,7 @@
 use std::sync::{Mutex, MutexGuard};
 
+use ee_agent_protocol::setup::SETUP_MANIFEST_SCHEMA_VERSION;
+
 use super::*;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -228,6 +230,77 @@ fn setup_manifest_advertises_required_values_and_defaults() {
     assert_eq!(manifest.inputs[9].config.env, "OPENROUTER_MAX_ITERATIONS");
     assert_eq!(manifest.inputs[10].key, "session_log_dir");
     assert_eq!(manifest.inputs[10].config.env, "EE_SESSION_LOG_DIR");
+}
+
+#[test]
+fn setup_manifest_offers_searchable_model_selections() {
+    let manifest = setup_manifest();
+
+    for key in ["model", "rubber_duck_model"] {
+        let input = manifest.inputs.iter().find(|input| input.key == key).expect(key);
+        assert!(input.remote_choices, "{key} may fetch the full catalog");
+        assert!(
+            input.choices.len() >= 8,
+            "{key} keeps enough curated ids to trigger the host picker"
+        );
+        assert!(
+            input.choices.iter().all(|choice| crate::catalog::find(&choice.value).is_some()),
+            "{key} only lists committed catalog ids"
+        );
+        assert!(input.choices.iter().all(|choice| choice.when.is_none()));
+    }
+}
+
+#[test]
+fn remote_choices_return_the_active_chat_catalog_for_model_inputs() {
+    let catalog = crate::catalog::chat_model_ids();
+    let manifest = setup_manifest();
+    let curated = manifest
+        .inputs
+        .iter()
+        .find(|input| input.key == "model")
+        .expect("model")
+        .choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>();
+
+    for key in ["model", "rubber_duck_model"] {
+        let choices = remote_choices(key).expect("model inputs accept remote choices");
+        assert_eq!(choices.len(), catalog.len(), "{key} returns every active chat id exactly once");
+        assert_eq!(
+            choices
+                .iter()
+                .take(curated.len())
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            curated,
+            "{key} keeps the curated ids first"
+        );
+        assert!(choices.iter().all(|choice| choice.label.is_none() && choice.when.is_none()));
+        assert!(
+            catalog.iter().all(|model_id| choices.iter().any(|choice| choice.value == *model_id))
+        );
+        let encoded = serde_json::to_string(&choices).expect("choices serialize");
+        assert!(
+            encoded.len() < 16 * 1024,
+            "{key} remote choices are {} bytes; the host cap is 16384",
+            encoded.len()
+        );
+    }
+    assert!(remote_choices("model_family").is_none());
+    assert!(remote_choices("surface").is_none());
+}
+
+#[test]
+fn setup_manifest_stays_under_the_host_byte_cap() {
+    let encoded = serde_json::to_string(&setup_manifest()).expect("manifest serializes");
+
+    assert!(
+        encoded.len() < 16 * 1024,
+        "setup manifest is {} bytes; the host cap is 16384",
+        encoded.len()
+    );
 }
 
 #[test]

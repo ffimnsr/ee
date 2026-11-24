@@ -22,6 +22,10 @@ use crate::setup_prompt::{
 };
 use crate::{config, secrets};
 
+mod selection;
+
+use selection::select_agent;
+
 const AGENT_BIN_DIRECTORY: [&str; 2] = [".local", "bin"];
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_MANIFEST_BYTES: usize = 16 * 1024;
@@ -366,36 +370,6 @@ fn is_executable_file(path: &Path) -> Result<bool, String> {
     #[cfg(not(unix))]
     {
         Ok(true)
-    }
-}
-
-fn select_agent(candidates: &[SetupCandidate]) -> Result<&SetupCandidate, String> {
-    if candidates.is_empty() {
-        return Err(String::from("no compatible agent servers found"));
-    }
-    println!("Available agent servers:");
-    for (index, candidate) in candidates.iter().enumerate() {
-        match candidate {
-            SetupCandidate::Local(candidate) => {
-                println!("  {}) {} (local)", index + 1, candidate.file_name);
-            }
-            SetupCandidate::Registry(agent) => {
-                println!("  {}) {} {} (ACP Registry)", index + 1, agent.name, agent.version);
-            }
-        }
-    }
-
-    loop {
-        let selected = prompt_line(&format!("Select agent [1-{}]: ", candidates.len()))?;
-        let index = selected
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| index.checked_sub(1))
-            .filter(|index| *index < candidates.len());
-        if let Some(index) = index {
-            return Ok(&candidates[index]);
-        }
-        eprintln!("Enter a number from 1 through {}.", candidates.len());
     }
 }
 

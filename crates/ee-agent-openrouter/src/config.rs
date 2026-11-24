@@ -15,13 +15,13 @@ use ee_agent_orchestrator::{
     MAX_RUBBER_DUCK_MAX_CALLS, MAX_RUBBER_DUCK_OUTPUT_BYTES, MAX_RUBBER_DUCK_TIMEOUT,
     RubberDuckBackend, RubberDuckConfig, RubberDuckMode,
 };
-use ee_agent_protocol::setup::{
-    SETUP_MANIFEST_SCHEMA_VERSION, SetupAgent, SetupChoice, SetupEnvVar, SetupInput,
-    SetupInputConfig, SetupManifest,
-};
 use ee_chat_completions::Timeouts;
 
 pub use crate::config_file::ConfigError;
+
+mod manifest;
+
+pub use manifest::{remote_choices, setup_manifest};
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -52,171 +52,6 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
 pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 /// OpenRouter `/compact` strategy: `local` (default), `native`, or `auto`.
 pub const COMPACTION_MODE_ENV: &str = "OPENROUTER_COMPACTION_MODE";
-
-/// Builds the setup manifest emitted by `ee-agent-openrouter --ee-config`.
-#[must_use]
-pub fn setup_manifest() -> SetupManifest {
-    SetupManifest {
-        schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
-        agent: SetupAgent {
-            id: String::from("openrouter"),
-            display_name: String::from("OpenRouter"),
-        },
-        env_vars: vec![SetupEnvVar {
-            name: String::from("OPENROUTER_API_KEY"),
-            required: true,
-            secret: true,
-            description: String::from("OpenRouter API key."),
-        }],
-        inputs: vec![
-            SetupInput {
-                key: String::from("model"),
-                label: String::from("Model"),
-                default: Some(String::from(DEFAULT_MODEL)),
-                required: true,
-                section: Some(String::from("Model selection")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: false,
-                config: SetupInputConfig { env: String::from("OPENROUTER_MODEL") },
-            },
-            SetupInput {
-                key: String::from("model_family"),
-                label: String::from("Model family"),
-                default: None,
-                required: false,
-                section: Some(String::from("Model selection")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: false,
-                config: SetupInputConfig { env: String::from("OPENROUTER_MODEL_FAMILY") },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_model"),
-                label: String::from("Rubber duck model"),
-                default: None,
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: false,
-                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MODEL") },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_model_family"),
-                label: String::from("Rubber duck model family"),
-                default: None,
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: false,
-                config: SetupInputConfig {
-                    env: String::from("OPENROUTER_RUBBER_DUCK_MODEL_FAMILY"),
-                },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_mode"),
-                label: String::from(
-                    "OpenRouter's own rubber-duck mode (off, manual, automatic; independent of ee's critic)",
-                ),
-                default: Some(String::from("manual")),
-                required: true,
-                section: Some(String::from("Agent behavior")),
-                choices: vec![
-                    SetupChoice {
-                        value: String::from("off"),
-                        label: Some(String::from("off: no agent-internal critic")),
-                        when: None,
-                    },
-                    SetupChoice {
-                        value: String::from("manual"),
-                        label: Some(String::from("manual: run only when you ask")),
-                        when: None,
-                    },
-                    SetupChoice {
-                        value: String::from("automatic"),
-                        label: Some(String::from("automatic: run on risky turns")),
-                        when: None,
-                    },
-                ],
-                remote_choices: false,
-                advanced: false,
-                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MODE") },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_max_calls"),
-                label: String::from("Rubber duck maximum calls per session"),
-                default: Some(DEFAULT_RUBBER_DUCK_MAX_CALLS.to_string()),
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MAX_CALLS") },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_context_bytes"),
-                label: String::from("Rubber duck context byte limit"),
-                default: Some(DEFAULT_RUBBER_DUCK_CONTEXT_BYTES.to_string()),
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig {
-                    env: String::from("OPENROUTER_RUBBER_DUCK_CONTEXT_BYTES"),
-                },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_output_bytes"),
-                label: String::from("Rubber duck output byte limit"),
-                default: Some(DEFAULT_RUBBER_DUCK_OUTPUT_BYTES.to_string()),
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig {
-                    env: String::from("OPENROUTER_RUBBER_DUCK_OUTPUT_BYTES"),
-                },
-            },
-            SetupInput {
-                key: String::from("rubber_duck_timeout_ms"),
-                label: String::from("Rubber duck timeout in milliseconds"),
-                default: Some(DEFAULT_RUBBER_DUCK_TIMEOUT.as_millis().to_string()),
-                required: false,
-                section: Some(String::from("Agent behavior")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_TIMEOUT_MS") },
-            },
-            SetupInput {
-                key: String::from("max_iterations"),
-                label: String::from("Maximum iterations (blank = unlimited)"),
-                default: None,
-                required: false,
-                section: Some(String::from("Advanced")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig { env: String::from("OPENROUTER_MAX_ITERATIONS") },
-            },
-            SetupInput {
-                key: String::from("session_log_dir"),
-                label: String::from("Durable session-log directory (optional)"),
-                default: None,
-                required: false,
-                section: Some(String::from("Advanced")),
-                choices: Vec::new(),
-                remote_choices: false,
-                advanced: true,
-                config: SetupInputConfig { env: String::from("EE_SESSION_LOG_DIR") },
-            },
-        ],
-    }
-}
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|_| String::from("must be a positive integer"))?;

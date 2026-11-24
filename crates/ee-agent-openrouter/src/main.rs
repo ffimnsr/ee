@@ -12,6 +12,12 @@ use std::path::{Path, PathBuf};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Setup-only flag, handled before clap so it never joins the normal ACP
+    // argument set: the host re-invokes this binary per input to fetch choices.
+    if let Some(key) = choices_request_key(std::env::args().skip(1)) {
+        print_choices_request(&key);
+        return;
+    }
     let args = Args::parse();
     if args.ee_config {
         match serde_json::to_string(&setup_manifest()) {
@@ -60,6 +66,36 @@ async fn main() {
 enum ProviderMode {
     Simple,
     Orchestrated,
+}
+
+/// Extracts the input key from a `--ee-config-choices` request.
+fn choices_request_key<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if let Some(key) = arg.strip_prefix("--ee-config-choices=") {
+            return Some(key.to_owned());
+        }
+        if arg == "--ee-config-choices" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// Prints the full choice list for one model input accepted by
+/// [`ee_agent_openrouter::config::remote_choices`].
+fn print_choices_request(key: &str) {
+    let Some(choices) = ee_agent_openrouter::config::remote_choices(key) else {
+        eprintln!("ee-agent-openrouter: `{key}` does not accept remote choices");
+        std::process::exit(1);
+    };
+    match serde_json::to_string(&choices) {
+        Ok(encoded) => println!("{encoded}"),
+        Err(error) => {
+            eprintln!("ee-agent-openrouter: failed to serialize choices: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Prints the generated OpenRouter catalog as JSON or a stable table.
@@ -256,6 +292,24 @@ mod tests {
             compaction_mode: ee_agent_orchestrator::CompactionMode::Local,
             file: Default::default(),
         }
+    }
+
+    #[test]
+    fn choices_request_flag_accepts_both_spellings_and_ignores_other_args() {
+        fn args(values: &[&str]) -> Vec<String> {
+            values.iter().map(|value| String::from(*value)).collect()
+        }
+
+        assert_eq!(
+            choices_request_key(args(&["--ee-config-choices=model"])),
+            Some(String::from("model"))
+        );
+        assert_eq!(
+            choices_request_key(args(&["--ee-config-choices", "rubber_duck_model"])),
+            Some(String::from("rubber_duck_model"))
+        );
+        assert_eq!(choices_request_key(args(&["--list-models", "--json"])), None);
+        assert_eq!(choices_request_key(args(&["--ee-config-choices"])), None);
     }
 
     #[test]
