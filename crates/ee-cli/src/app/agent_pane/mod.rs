@@ -39,6 +39,7 @@ mod app_host;
 pub(crate) use app_host::host_permission_rules;
 mod app_keys;
 mod app_mode;
+mod app_models;
 mod app_persist;
 mod app_prompt;
 mod app_replies;

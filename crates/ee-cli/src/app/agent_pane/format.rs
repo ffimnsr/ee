@@ -493,7 +493,7 @@ pub(super) const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/sessions", "switch session"),
     ("/export", "write redacted Markdown transcript"),
     ("/stop [terminal-id|all]", "cancel turn or stop owned direct-child terminal"),
-    ("/model <model-id>", "switch the session model between turns; /agent is an alias"),
+    ("/model [model-id]", "pick or switch the session model between turns; /agent is an alias"),
     ("/turn-diff [turn]", "report files and patches a turn changed (workspace snapshots)"),
     ("/steer <message>", "inject a message into the running turn"),
     ("/resume | /discard", "resolve paused turn"),

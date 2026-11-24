@@ -35,6 +35,8 @@ pub(crate) enum PickerKind {
     AgentThreads,
     #[cfg(feature = "agents")]
     AgentServers,
+    #[cfg(feature = "agents")]
+    AgentModels,
 }
 
 /// A single entry in a picker list.
@@ -313,6 +315,21 @@ impl PickerState {
             items,
             filtered,
             selected: 0,
+        }
+    }
+
+    #[cfg(feature = "agents")]
+    pub(crate) fn new_agent_models(items: Vec<PickerItem>, selected: usize) -> Self {
+        let filtered: Vec<usize> = (0..items.len()).collect();
+        let selected = selected.min(filtered.len().saturating_sub(1));
+        Self {
+            kind: PickerKind::AgentModels,
+            title: String::from("Switch Model"),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected,
         }
     }
 

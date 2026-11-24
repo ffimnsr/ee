@@ -295,6 +295,111 @@ fn agents_config_commands_list_and_mutate_advertised_options() {
 }
 
 #[test]
+fn model_slash_command_opens_picker_and_switches_selected_model() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "small",
+                    "options": [
+                        { "value": "small", "name": "Small" },
+                        { "value": "large", "name": "Large" }
+                    ]
+                }
+            ]
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for("session/set_config_option")
+        .respond(json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "large",
+                    "options": [
+                        { "value": "small", "name": "Small" },
+                        { "value": "large", "name": "Large" }
+                    ]
+                }
+            ]
+        }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/model");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let picker = app.picker.as_ref().expect("/model should open the model picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentModels);
+    assert_eq!(picker.title, "Switch Model");
+    assert_eq!(picker.visible_count(), 2);
+    assert_eq!(picker.selected, 0, "current model preselected");
+
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "model config sent", |_| {
+        fake.agent().requests_by_method("session/set_config_option").len() == 1
+    });
+    let model = &fake.agent().requests_by_method("session/set_config_option")[0];
+    assert_eq!(model["params"]["configId"], "model");
+    assert_eq!(model["params"]["value"], "large");
+    assert!(app.picker.is_none(), "picker closes after model confirm");
+    assert_eq!(app.mode, Mode::Agent);
+
+    type_text(&mut app, "/agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let picker = app.picker.as_ref().expect("/agent alias should open the model picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentModels);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.picker.is_none(), "Esc closes the model picker");
+}
+
+#[cfg(unix)]
+#[test]
+fn model_slash_command_falls_back_to_agent_setup_choices() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let choices_dir = tempfile::tempdir().unwrap();
+    let agent = choices_dir.path().join("fake-agent");
+    std::fs::write(
+        &agent,
+        b"#!/bin/sh\nprintf '%s' '[{\"value\":\"model-a\",\"label\":\"Model A\"},{\"value\":\"model-b\"}]'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let script = base_script().wait_for("session/set_model").respond(json!({}));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    app.config.agents.servers.get_mut("fake").expect("fake server").command =
+        agent.display().to_string();
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/model");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let picker = app.picker.as_ref().expect("/model should open remote choices");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentModels);
+    assert_eq!(picker.visible_count(), 2);
+
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "set_model sent", |_| {
+        fake.agent().requests_by_method("session/set_model").len() == 1
+    });
+    let request = &fake.agent().requests_by_method("session/set_model")[0];
+    assert_eq!(request["params"]["modelId"], "model-b");
+}
+
+#[test]
 fn provider_features_require_live_advertisement_or_advertised_config() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

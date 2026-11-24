@@ -232,6 +232,15 @@ impl App {
                 };
                 self.start_selected_agent_session(agent_id);
             }
+            #[cfg(feature = "agents")]
+            crate::picker::PickerKind::AgentModels => {
+                // Model items carry the stable id in `detail`; the label is the
+                // human-readable choice name.
+                let Some(model_id) = item.detail.clone().filter(|detail| !detail.is_empty()) else {
+                    return;
+                };
+                self.agents_model_command(&model_id);
+            }
             crate::picker::PickerKind::Symbols => {
                 let Some(path) = item.path else { return };
                 match self.backend.open_buffer(Some(path)) {

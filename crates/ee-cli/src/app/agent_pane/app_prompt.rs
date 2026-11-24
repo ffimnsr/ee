@@ -224,8 +224,7 @@ impl App {
                 true
             }
             "model" | "agent" => {
-                self.backend.status_message =
-                    Some(String::from("usage: /model <model-id> (alias: /agent <model-id>)"));
+                self.open_agent_model_picker();
                 true
             }
             "queue" if queue_command_is_management(args) => {

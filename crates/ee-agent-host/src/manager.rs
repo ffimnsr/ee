@@ -161,6 +161,15 @@ impl AgentManager {
         self.workspace_memory.status()
     }
 
+    /// Returns the resolved launch config for one configured agent.
+    ///
+    /// Used by runtime surfaces that need to re-invoke the agent binary with
+    /// the same resolved environment (for example model-choice probing).
+    #[must_use]
+    pub fn agent_config(&self, agent_id: &str) -> Option<AgentProcessConfig> {
+        self.config.agents.get(agent_id).cloned()
+    }
+
     /// Lists bounded active facts from configured primary workspace.
     pub fn workspace_memory_list(
         &self,

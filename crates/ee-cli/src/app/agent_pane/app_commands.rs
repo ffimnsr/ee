@@ -536,11 +536,11 @@ impl App {
     }
 
     /// Switches the session model between turns (`/model`; `/agent` aliases it).
-    pub(super) fn agents_model_command(&mut self, args: &str) {
+    pub(crate) fn agents_model_command(&mut self, args: &str) {
         let model_id = args.trim();
         if model_id.is_empty() || model_id.contains(char::is_whitespace) {
             self.backend.status_message =
-                Some(String::from("usage: /model <model-id> (alias: /agent <model-id>)"));
+                Some(String::from("usage: /model [model-id] (alias: /agent [model-id])"));
             return;
         }
         let Some(active) = self.agents.active_thread_index() else {
@@ -569,7 +569,7 @@ impl App {
             .host
             .config_options()
             .into_iter()
-            .find(|option| option.id.0.as_ref() == "model")
+            .find(super::app_models::is_model_config_option)
         {
             match parse_config_option_value(&option, model_id) {
                 Ok(value) => {
