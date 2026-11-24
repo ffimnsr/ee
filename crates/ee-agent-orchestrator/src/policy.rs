@@ -259,6 +259,15 @@ impl PolicyEngine {
                 ));
             }
         }
+        // Notes and workspace-knowledge writes never touch workspace files or
+        // processes, so read-only session modes keep them dispatchable. The
+        // pinned list is the authority; host-owned metadata alone is not enough.
+        if tool.host_approval
+            && tool.side_effect_class == SideEffectClass::Write
+            && ee_mcp::is_agent_knowledge_write_tool(&tool.name)
+        {
+            return PolicyDecision::allowed();
+        }
         // Trusted ee proxy mutations and terminal operations are approved by
         // the editor host. Do not block their dispatch before that prompt.
         if self.policy.allow_host_approved_side_effects
@@ -516,6 +525,45 @@ mod tests {
             let decision = engine.check(&tool(class).host_approval(), PolicyContext::default());
             assert!(!decision.allow, "{class:?} must not bypass a disabled approval gate");
         }
+    }
+
+    #[test]
+    fn agent_knowledge_writes_stay_dispatchable_in_read_only_modes() {
+        // Ask and plan modes disable host-approved side effects, but notes and
+        // workspace knowledge never touch workspace files or processes.
+        let engine = PolicyEngine::new(ToolPolicy {
+            allow_host_approved_side_effects: false,
+            ..ToolPolicy::default()
+        });
+        for name in ee_mcp::AGENT_KNOWLEDGE_WRITE_TOOL_NAMES {
+            let definition = ToolDefinition::new(*name, "knowledge write")
+                .side_effect_class(SideEffectClass::Write)
+                .host_approval();
+            assert!(
+                engine.check(&definition, PolicyContext::default()).allow,
+                "{name} must stay dispatchable in read-only modes"
+            );
+        }
+
+        let file_write = ToolDefinition::new("ee_write_text_file", "writes")
+            .side_effect_class(SideEffectClass::Write)
+            .host_approval();
+        assert!(!engine.check(&file_write, PolicyContext::default()).allow);
+
+        let spoofed_name = ToolDefinition::new("write_file", "writes")
+            .side_effect_class(SideEffectClass::Write)
+            .host_approval();
+        assert!(
+            !engine.check(&spoofed_name, PolicyContext::default()).allow,
+            "only the pinned knowledge tools are exempt"
+        );
+
+        let unapproved_memory =
+            ToolDefinition::new("ee_save_note", "notes").side_effect_class(SideEffectClass::Write);
+        assert!(
+            !engine.check(&unapproved_memory, PolicyContext::default()).allow,
+            "the exemption requires trusted host ownership"
+        );
     }
 
     #[test]

@@ -2592,7 +2592,7 @@
       ]
     },
     {
-      "approval": "required",
+      "approval": "none",
       "deprecated": false,
       "errorClasses": [
         "invalid_arguments",
@@ -2723,7 +2723,7 @@
       ]
     },
     {
-      "approval": "required",
+      "approval": "none",
       "deprecated": false,
       "errorClasses": [
         "invalid_arguments",
@@ -2773,7 +2773,7 @@
       ]
     },
     {
-      "approval": "required",
+      "approval": "none",
       "deprecated": false,
       "errorClasses": [
         "invalid_arguments",

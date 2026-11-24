@@ -424,6 +424,50 @@ async fn provider_adapter_dispatches_ee_write_tool_to_host_approval() {
 }
 
 #[tokio::test]
+async fn provider_adapter_plan_mode_dispatches_agent_note_write() {
+    let model = Arc::new(FakeModel::new(vec![
+        ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(
+            "tc-1",
+            "ee_save_note",
+            json!({ "key": "plan", "content": "inspect the parser next" }),
+        )]),
+        ModelResponse::new().text(plan_response("note saved")).completed(),
+    ]));
+    let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model);
+    let (handle, task) = spawn_server(provider);
+    let session_id = mcp_new_session(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+    let _ = handle.next_frame().await; // initial available-commands update
+
+    let mut runner = PromptMcpRunner::standard_ee_answers(json!([ee_tool("ee_save_note")]));
+    runner.answer_call(
+        "ee_save_note",
+        json!({
+            "resultType": "complete",
+            "content": [{ "type": "text", "text": "note saved" }],
+            "structuredContent": { "key": "plan", "content": "inspect the parser next" },
+        }),
+    );
+
+    handle.send(request(
+        2,
+        "session/set_mode",
+        json!({ "sessionId": session_id, "modeId": PLAN_MODE_ID }),
+    ));
+    assert_eq!(request_result(handle.next_frame().await), json!({}));
+    handle.send(request(3, "session/prompt", prompt_params(&session_id, "take a note")));
+    let (_thoughts, stop_reason) = runner.run(&handle).await;
+    assert_eq!(stop_reason, "end_turn");
+
+    let log = runner.log();
+    assert!(
+        log.iter().any(|line| line.contains("tools/call") && line.contains("ee_save_note")),
+        "plan mode must dispatch agent notes: {log:?}"
+    );
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test]
 async fn provider_adapter_mcp_failures_surface_diagnostics_without_secrets() {
     let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("ok").completed()]));
     let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model);

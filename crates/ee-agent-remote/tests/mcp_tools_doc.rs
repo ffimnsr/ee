@@ -1,10 +1,11 @@
 //! Drift test for `docs/MCP_TOOLS.md`.
 //!
-//! Fails when a tool is added, removed, or its approval policy changes without
-//! the matching documentation update. Both in-repo MCP servers are covered:
-//! the stable `ee_` editor proxy and the `ee-agent` remote-control server.
+//! Fails when a tool is added, removed, its approval policy changes, or the
+//! read-only mode exception list drifts without the matching documentation
+//! update. Both in-repo MCP servers are covered: the stable `ee_` editor proxy
+//! and the `ee-agent` remote-control server.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ee_agent_remote::RemoteMcpServer;
 
@@ -14,6 +15,8 @@ const PROXY_START: &str = "<!-- mcp-tools:proxy:start -->";
 const PROXY_END: &str = "<!-- mcp-tools:proxy:end -->";
 const REMOTE_START: &str = "<!-- mcp-tools:remote:start -->";
 const REMOTE_END: &str = "<!-- mcp-tools:remote:end -->";
+const MODES_START: &str = "<!-- mcp-tools:modes:start -->";
+const MODES_END: &str = "<!-- mcp-tools:modes:end -->";
 
 fn section(start: &str, end: &str) -> &'static str {
     let start_index = DOC.find(start).unwrap_or_else(|| panic!("missing marker {start}"));
@@ -97,6 +100,47 @@ fn remote_tool_matrix_matches_advertised_tools() {
         "documented remote tools differ from RemoteMcpServer::tool_names(); \
          add or remove the table row in docs/MCP_TOOLS.md"
     );
+}
+
+#[test]
+fn read_only_mode_exceptions_match_knowledge_write_contract() {
+    let modes = section(MODES_START, MODES_END);
+    let mut blocks: Vec<String> = Vec::new();
+    let mut block = String::new();
+    for line in modes.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("- ") && !block.is_empty() {
+            blocks.push(std::mem::take(&mut block));
+        }
+        if !block.is_empty() {
+            block.push(' ');
+        }
+        block.push_str(line);
+    }
+    if !block.is_empty() {
+        blocks.push(block);
+    }
+
+    let mut documented = BTreeSet::new();
+    for block in blocks.iter().filter(|block| block.contains("stay dispatchable")) {
+        for part in block.split('`').skip(1).step_by(2) {
+            if part.starts_with("ee_") {
+                documented.insert(part);
+            }
+        }
+    }
+
+    let expected: BTreeSet<&str> =
+        ee_mcp::AGENT_KNOWLEDGE_WRITE_TOOL_NAMES.iter().copied().collect();
+    assert_eq!(
+        documented, expected,
+        "docs/MCP_TOOLS.md read-only mode exceptions differ from \
+         ee_mcp::AGENT_KNOWLEDGE_WRITE_TOOL_NAMES"
+    );
+    assert!(modes.contains("ee_import_workspace_memory"));
+    assert!(modes.contains("ee_clear_workspace_memory"));
 }
 
 #[test]

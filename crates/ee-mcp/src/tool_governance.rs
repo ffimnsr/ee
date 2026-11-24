@@ -292,10 +292,15 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_apply_code_action"
         | "ee_format_file"
         | "ee_rename_symbol"
-        | "ee_write_text_file"
-        | "ee_save_note"
-        | "ee_update_note"
-        | "ee_delete_note" => write(),
+        | "ee_write_text_file" => write(),
+        "ee_save_note" | "ee_update_note" | "ee_delete_note" => {
+            // Notes are session-local scratch state. They never touch workspace
+            // files or processes, so they need no approval and stay available in
+            // read-only session modes.
+            let mut entry = write();
+            entry.approval = "none";
+            entry
+        }
         "ee_remember_workspace_fact"
         | "ee_replace_workspace_fact"
         | "ee_forget_workspace_fact"
@@ -349,6 +354,30 @@ pub fn critic_read_only_tool_names(transport: ToolTransport) -> Vec<&'static str
             })
         })
         .collect()
+}
+
+/// Write tools that update only agent notes or workspace knowledge, never
+/// workspace files or processes.
+///
+/// Read-only session modes (ask/plan) keep these tools dispatchable; durable
+/// workspace-memory mutations still pass the editor host's approval gate.
+/// Bulk import and clear are intentionally absent because they rewrite the
+/// whole store.
+pub const AGENT_KNOWLEDGE_WRITE_TOOL_NAMES: &[&str] = &[
+    "ee_save_note",
+    "ee_update_note",
+    "ee_delete_note",
+    "ee_remember_workspace_fact",
+    "ee_replace_workspace_fact",
+    "ee_verify_workspace_fact",
+    "ee_forget_workspace_fact",
+    "ee_retract_workspace_fact",
+];
+
+/// Whether `tool` writes only agent notes or workspace knowledge.
+#[must_use]
+pub fn is_agent_knowledge_write_tool(tool: &str) -> bool {
+    AGENT_KNOWLEDGE_WRITE_TOOL_NAMES.contains(&tool)
 }
 
 /// Stable tool names. Keep this list in existing compatibility order.
@@ -449,6 +478,45 @@ mod tests {
             assert_eq!(entry.approval, "required", "{tool}");
             assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
         }
+    }
+
+    #[test]
+    fn session_notes_do_not_require_approval() {
+        for tool in ["ee_save_note", "ee_update_note", "ee_delete_note"] {
+            let entry = governance(tool).expect("note governance");
+            assert_eq!(entry.side_effect, SideEffectClass::Write, "{tool}");
+            assert_eq!(entry.approval, "none", "{tool}");
+            assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
+        }
+    }
+
+    #[test]
+    fn agent_knowledge_write_tools_are_pinned() {
+        assert_eq!(
+            AGENT_KNOWLEDGE_WRITE_TOOL_NAMES,
+            [
+                "ee_save_note",
+                "ee_update_note",
+                "ee_delete_note",
+                "ee_remember_workspace_fact",
+                "ee_replace_workspace_fact",
+                "ee_verify_workspace_fact",
+                "ee_forget_workspace_fact",
+                "ee_retract_workspace_fact",
+            ]
+        );
+        for tool in AGENT_KNOWLEDGE_WRITE_TOOL_NAMES {
+            assert!(is_agent_knowledge_write_tool(tool), "{tool}");
+            assert!(STABLE_TOOL_NAMES.contains(tool), "{tool} is not a stable tool");
+            assert_eq!(
+                governance(tool).expect("knowledge tool governance").side_effect,
+                SideEffectClass::Write,
+                "{tool}"
+            );
+        }
+        assert!(!is_agent_knowledge_write_tool("ee_write_text_file"));
+        assert!(!is_agent_knowledge_write_tool("ee_import_workspace_memory"));
+        assert!(!is_agent_knowledge_write_tool("ee_clear_workspace_memory"));
     }
 
     #[test]

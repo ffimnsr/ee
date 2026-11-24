@@ -19,7 +19,8 @@ documented here.
 - **Approval** is the canonical proxy policy value:
   - `none`: no per-call approval for in-workspace operations. Path validation,
     workspace-root checks, capability checks, and external-directory read
-    approval still apply.
+    approval still apply. Session notes are connection-scoped scratch state and
+    are never approval-gated.
   - `required`: the editor must approve the mutation or execution before it
     happens. A pinned trust grant can cover a specific read or write tool, but
     outbound network tools and terminal execution keep dedicated approval paths.
@@ -76,6 +77,28 @@ driver surface for a headless host; agent-originated gated operations follow
 `--permission-mode ask|rules|deny`, and `ee_permission_respond` answers pending
 approvals. In `rules` mode pending approvals are not client-answerable; in
 `deny` mode every gated operation is refused immediately.
+
+### Session modes
+
+The built-in agent exposes `ask`, `write`, and `plan` modes. Ask and plan allow
+read-class dispatch and deny host-approved file and terminal mutations before
+the editor approval gate. Agent notes and single-fact workspace memory writes
+are the exception:
+
+<!-- mcp-tools:modes:start -->
+- `ee_save_note`, `ee_update_note`, and `ee_delete_note` stay dispatchable in
+  every mode and need no approval. Notes are scoped to the proxy connection and
+  persist only when `agents.workspace_memory.persist_notes` is enabled.
+- `ee_remember_workspace_fact`, `ee_replace_workspace_fact`,
+  `ee_verify_workspace_fact`, `ee_forget_workspace_fact`, and
+  `ee_retract_workspace_fact` stay dispatchable in every mode, but durable
+  memory mutations still prompt the editor host for approval.
+- `ee_import_workspace_memory` and `ee_clear_workspace_memory` rewrite the whole
+  store and stay blocked outside write mode.
+<!-- mcp-tools:modes:end -->
+
+This keeps planning and review sessions able to take notes and record verified
+facts without opening file or terminal mutations.
 
 ## Stable result objects
 
@@ -215,11 +238,11 @@ Redaction rules are also grouped:
 
 | Tool | Effect | Approval | Transports | Capabilities | Output cap | Structured | Result |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ee_save_note` | write | required | stdio,acp | — | result_items:500 | yes | `SessionNoteResult` |
+| `ee_save_note` | write | none | stdio,acp | — | result_items:500 | yes | `SessionNoteResult` |
 | `ee_read_notes` | read | none | stdio,acp | — | result_items:500 | yes | `SessionNotesResult` |
 | `ee_read_note` | read | none | stdio,acp | — | result_items:500 | yes | `SessionNoteResult` |
-| `ee_update_note` | write | required | stdio,acp | — | result_items:500 | yes | `SessionNoteResult` |
-| `ee_delete_note` | write | required | stdio,acp | — | result_items:500 | yes | `SessionNoteDeletion` |
+| `ee_update_note` | write | none | stdio,acp | — | result_items:500 | yes | `SessionNoteResult` |
+| `ee_delete_note` | write | none | stdio,acp | — | result_items:500 | yes | `SessionNoteDeletion` |
 | `ee_remember_workspace_fact` | write | required | stdio,acp | — | result_items:1 | yes | `WorkspaceFactMutationResult` |
 | `ee_replace_workspace_fact` | write | required | stdio,acp | — | result_items:1 | yes | `WorkspaceFactMutationResult` |
 | `ee_verify_workspace_fact` | write | required | acp | — | result_items:1 | yes | `WorkspaceFactMutationResult` |
