@@ -125,12 +125,12 @@ No prompt text or lesson content goes in telemetry; the fields are status and pa
 
 ### Phase H5 — Full library read parity
 
-- [ ] **I50 — Experience entry harness accessor and bounded loader.**
+- [x] **I50 — Experience entry harness accessor and bounded loader.**
   - **Problem:** the experience entry stores `harness/`, but nothing loads it; `HARNESS_DIR` has only the writer and one test reference.
   - **Fix:** add a bounded `library_context` module (new file under `crates/ee-agent-harnessing/src/`) that resolves `entry.path.parent().join(HARNESS_DIR)`, loads it with `HarnessTree::load_components`, validates bounds, and returns `Option<HarnessTree>`. Missing or malformed harness trees are skipped with a warning; symlinks, UTF-8 errors, oversized files, and path escapes fail closed for that entry.
   - **Acceptance:** round-trip test writes an entry with `save_entry` and reloads the full tree; malformed/missing harness entries are skipped without failing the context build; no path outside the entry directory can be read.
 
-- [ ] **I51 — Full library evidence in the improver context.**
+- [x] **I51 — Full library evidence in the improver context.**
   - **Problem:** `StageEvidence.library_cues` is only cue lines; `context/library/cues.md` is the only library evidence.
   - **Fix:** add `LibraryEvidence { cues, entries }` to `StageEvidence`. Load it once per task in `run_task` (same place as `library_cues`) and pass it to INV, DOM, composer, and reflector stages. Extend `context::build` to write:
     - `context/library/INDEX.md` (bounded cue catalog),
@@ -141,7 +141,7 @@ No prompt text or lesson content goes in telemetry; the fields are status and pa
 
 ### Phase H6 — Approval and persistence parity
 
-- [ ] **I52 — Invocation-consented reflection write and opt-out.**
+- [x] **I52 — Invocation-consented reflection write and opt-out.**
   - **Problem:** `/harness` cannot approve reflection because its child stdin is `null`; the current `--yes` gate makes every run need a second approval; approval provenance is unrecorded.
   - **Fix:** make the experience write part of the invocation:
     - CLI: default `--reflection=accept`; `--reflection=decline` runs the reflector but writes nothing; `--no-reflect` disables the reflector stage entirely. Remove `--yes` from `improve` (it belongs to `adopt` only).
@@ -150,14 +150,14 @@ No prompt text or lesson content goes in telemetry; the fields are status and pa
     - Invocation remains the consent boundary, matching D6 and Harness2's automatic library update.
   - **Acceptance:** `/harness` writes the entry without an extra prompt; `--no-reflect` skips the stage; `--reflection=decline` runs reflection but writes nothing; `--reflection=accept` is the default; every active `.agents` component stays byte-identical in all `improve` paths; tests cover all outcomes.
 
-- [ ] **I53 — Library root resolution shared by reader and writer.**
+- [x] **I53 — Library root resolution shared by reader and writer.**
   - **Problem:** `HarnessTask.library_root` and the CLI writer's `library_root` are separate values; a mismatch can cause a write that the next task cannot read. The current CLI also ignores the I43 run-identity scoping claim.
   - **Fix:** resolve one `LibraryLocation` per invocation: single task defaults to the workspace library, sweep defaults to `<run-root>/library/<mode>-k<k>`, and `--library-root` overrides. Pass the resolved path into both `HarnessTask` and the `ReflectionWriter`. Record it in the run summary. Add a test that asserts the writer path and the next task's reader path are identical.
   - **Acceptance:** single-task and sweep roots behave as specified; scratch roots never contaminate the workspace library; read/write consistency is asserted; a mismatched root is impossible by construction.
 
 ### Phase H7 — Active-harness adoption
 
-- [ ] **I54 — `ee do agent harness adopt`.**
+- [x] **I54 — `ee do agent harness adopt`.**
   - **Problem:** the chosen tree stops at `<run-root>/adopted`; users must copy it manually and can easily copy stale or invalid files.
   - **Fix:** add a dedicated command, kept out of `harness_cmd.rs` (currently 987 LOC) in a new `harness_adopt_cmd.rs`:
     - source: `--run-root <dir>` (reads `<run-root>/adopted/.agents` with `HarnessTree::load_components`) or `--experience <domain>/<seq>` (reads `entry.path.parent()/harness`);
@@ -169,26 +169,26 @@ No prompt text or lesson content goes in telemetry; the fields are status and pa
     - print `added/removed/modified` and the backup path.
   - **Acceptance:** dry-run writes nothing and shows removals; invalid trees are rejected; backup contains the previous managed files; stale `.agents/skills`/`.agents/scripts` entries are removed; `.agents/experience` and `.agents/memories` survive; top-level `skills/`, top-level `scripts/`, and `$XDG_CONFIG_HOME/ee/skills` stay byte-identical; symlink/path-escape attempts fail; non-TTY without `--yes` declines; a temp-workspace test proves the applied tree equals the adopted managed surface.
 
-- [ ] **I58 — Agent-mode `/adopt` surface (explicit ACP confirmation).**
+- [x] **I58 — Agent-mode `/adopt` surface (explicit ACP confirmation).**
   - **Problem:** CLI adoption is outside the agent session; an agent-mode user has no approval UI and `HarnessLedgerReport.run_root` is currently recorded as `None`.
   - **Fix:** include `run_root` in the child harness report/session log; add a `/adopt [--include-memories]` slash command that resolves the last run root, runs `ee do agent harness adopt --dry-run` first, shows the diff, asks through the existing `ClientBridge` elicitation pattern, and only on Accept invokes the apply with `--yes`. Cancel/decline writes nothing. Fixed argv only; never interpolate model text into shell arguments.
   - **Acceptance:** dry-run diff is shown before confirmation; Accept applies; Cancel/decline leaves active `.agents` byte-identical; missing run root gives a clear error; the command remains available without a model API key.
 
 ### Phase H8 — Task stream parity
 
-- [ ] **I55 — Task manifest and `ee do agent harness sweep`.**
+- [x] **I55 — Task manifest and `ee do agent harness sweep`.**
   - **Problem:** `run_stream` has no production caller, so there is no streaming next-task loop in agent mode.
   - **Fix:** add a `Sweep(Box<HarnessSweepArgs>)` subcommand with `--tasks <JSON>`, `--k`, `--mode`, `--workers`, `--run-root`, `--library-root`, `--no-reflect`, `--dry-run`. Parse and validate the manifest into `HarnessTask` values; call `run_stream`; print a bounded per-task summary and return nonzero if any task failed. Keep the implementation in a new `harness_sweep_cmd.rs`; reuse `run_stream` rather than duplicating scheduling.
   - **Acceptance:** a two-domain manifest runs domain streams concurrently and tasks within a domain sequentially; frozen order is reused; a bad manifest fails before any model call; a failed task is reported and does not abort completed domains; no network or provider keys in hermetic tests.
 
-- [ ] **I56 — Stream retention, own-entry exclusion, and library handoff.**
+- [x] **I56 — Stream retention, own-entry exclusion, and library handoff.**
   - **Problem:** `run_stream` does not set `library_before_seq` or exclude the current task's prior entry, so reruns can leak future/own lessons.
   - **Fix:** before each task in `run_stream`, resolve the registry cutoff and set `library_before_seq`; add an explicit excluded-task set to `HarnessTask`; filter library evidence and cues by both. Ensure a completed task's library write is visible to the next task in the same domain and not to a concurrent different domain. On a resumed task, reconcile the library from the saved reflection path or skip with the existing completed entry.
   - **Acceptance:** task B sees task A's full library entry; task A rerun does not see its own old entry; future entries are invisible; concurrent domains do not share cues; resume does not duplicate or lose entries.
 
 ### Phase H9 — Verification and documentation
 
-- [ ] **I57 — Parity regression suite and docs.**
+- [x] **I57 — Parity regression suite and docs.**
   - **Problem:** these seams cross crate, CLI, slash-command, filesystem, and approval boundaries; existing tests cover pieces, not the parity contract.
   - **Fix:** add hermetic `FakeAgentTransport` tests for: full library context, approval outcomes, adopt safety, stream order/retention, and end-to-end task A → task B → task C learning. Add `harness adopt`/`sweep` CLI tests. Update `docs/PLAN-HARNESS.md` status and the Part 11 checkboxes. Reassert `HARNESS_DIR` has a production reader and that active discovery still reads only root `.agents`. Resolve G8: either remove the `user_experience` module's user-mirror claim or add an explicit `--scope user` write path; default remains workspace-only and no trusted-plane mirror is implicit.
   - **Acceptance:** the full H5–H8 contract is exercised without network; the user-mirror claim matches code; `cargo fmt --all -- --check`; clippy on touched crates; targeted tests via `scripts/run-ee-cli-touched-tests.sh`; `scripts/run-affected-tests.sh` for dependents; file-size check keeps every modified code file under 1,000 LOC.
