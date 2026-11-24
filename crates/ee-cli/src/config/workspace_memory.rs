@@ -18,13 +18,16 @@ use std::fs;
 #[cfg(any(feature = "agents", test))]
 use std::io::{ErrorKind, Write as _};
 #[cfg(any(feature = "agents", test))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(any(feature = "agents", test))]
+use std::time::Duration;
 
 #[cfg(any(feature = "agents", test))]
 use ee_agent_host::{
     DEFAULT_WORKSPACE_MEMORY_CANDIDATE_RETENTION_DAYS, DEFAULT_WORKSPACE_MEMORY_EXPIRY_DAYS,
     DEFAULT_WORKSPACE_MEMORY_STALE_RETENTION_DAYS,
-    DEFAULT_WORKSPACE_MEMORY_SUPERSEDED_RETENTION_DAYS, WorkspaceMemoryHostConfig,
+    DEFAULT_WORKSPACE_MEMORY_SUPERSEDED_RETENTION_DAYS, MemoryRetention, WorkspaceMemoryHostConfig,
+    WorkspaceMemoryQuotas,
 };
 
 const MAX_WORKSPACE_MEMORY_VALUE_BYTES: usize = 1024 * 1024;
@@ -92,6 +95,38 @@ impl Default for WorkspaceMemorySettings {
                 stale_retention_days: 30,
                 superseded_retention_days: 90,
             }
+        }
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+impl WorkspaceMemorySettings {
+    /// Resolved host config for one agent host and its trusted roots.
+    ///
+    /// Agents mode enables durable workspace memory by default; an explicit
+    /// `[agents.workspace_memory] enabled = false` still disables it.
+    #[must_use]
+    pub(crate) fn to_host_config(&self, trusted_roots: Vec<PathBuf>) -> WorkspaceMemoryHostConfig {
+        WorkspaceMemoryHostConfig {
+            enabled: self.enabled,
+            trusted_roots,
+            database_path: None,
+            quotas: WorkspaceMemoryQuotas {
+                max_value_bytes: self.max_value_bytes,
+                max_active_facts: self.max_active_facts,
+                max_active_bytes: self.max_active_bytes,
+                max_total_facts: self.max_total_facts,
+                max_total_bytes: self.max_total_bytes,
+                max_recall_results: self.max_recall_results,
+            },
+            busy_timeout: Duration::from_millis(self.busy_timeout_ms),
+            retention: MemoryRetention {
+                default_expiry: (self.default_expiry_days != 0)
+                    .then(|| Duration::from_secs(self.default_expiry_days * 86_400)),
+                candidate_retention: Duration::from_secs(self.candidate_retention_days * 86_400),
+                stale_retention: Duration::from_secs(self.stale_retention_days * 86_400),
+                superseded_retention: Duration::from_secs(self.superseded_retention_days * 86_400),
+            },
         }
     }
 }

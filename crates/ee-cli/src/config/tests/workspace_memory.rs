@@ -42,6 +42,22 @@ fn workspace_memory_defaults_enabled_and_merges_field_by_field() {
     assert_eq!(memory.superseded_retention_days, 120);
 }
 #[test]
+fn workspace_memory_host_config_is_enabled_by_default_and_honors_disable() {
+    let roots = vec![std::path::PathBuf::from("/tmp/workspace-memory-root")];
+    let settings = WorkspaceMemorySettings::default();
+
+    let host = settings.to_host_config(roots.clone());
+
+    assert!(host.enabled, "agents mode enables workspace memory by default");
+    assert_eq!(host.trusted_roots, roots);
+    assert_eq!(host.quotas.max_value_bytes, settings.max_value_bytes);
+    assert_eq!(host.busy_timeout, std::time::Duration::from_millis(settings.busy_timeout_ms));
+    assert_eq!(host.retention.default_expiry, None);
+
+    let disabled = WorkspaceMemorySettings { enabled: false, ..settings };
+    assert!(!disabled.to_host_config(Vec::new()).enabled);
+}
+#[test]
 fn workspace_memory_validation_rejects_out_of_range_values() {
     let parsed: EeToml =
         toml::from_str("[agents.workspace_memory]\nenabled = true\nmax_recall_results = 0\n")

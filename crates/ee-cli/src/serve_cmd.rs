@@ -111,6 +111,7 @@ pub(crate) fn build_host_inputs(
         crate::config::xi_core_config_dir().as_deref(),
     );
     let workspace_policy = crate::workspace_trust::workspace_secret_policy(&roots[0]);
+    let workspace_memory = settings.agents.workspace_memory.to_host_config(roots.clone());
     let store = match crate::secrets::SecretStore::default() {
         Ok(store) => Some(store),
         Err(error) => {
@@ -138,6 +139,7 @@ pub(crate) fn build_host_inputs(
         permission_rules,
         permission_mode: mode,
         allowed_roots: roots,
+        workspace_memory,
         secret_values: launches.secret_values,
         default_agent: settings.agents.default_agent.clone(),
         audit_path: audit_log.or_else(default_audit_path),

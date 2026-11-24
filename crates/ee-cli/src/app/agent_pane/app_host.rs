@@ -1,7 +1,6 @@
 //! `impl App`: host worker ensure/start, reconnect, focus management.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use ee_agent_host::{AgentManager, AgentManagerConfig};
 use tokio::sync::mpsc as tokio_mpsc;
@@ -255,29 +254,7 @@ impl App {
         {
             trusted_roots.push(cwd);
         }
-        config.workspace_memory = ee_agent_host::WorkspaceMemoryHostConfig {
-            enabled: memory.enabled,
-            trusted_roots,
-            database_path: None,
-            quotas: ee_agent_host::WorkspaceMemoryQuotas {
-                max_value_bytes: memory.max_value_bytes,
-                max_active_facts: memory.max_active_facts,
-                max_active_bytes: memory.max_active_bytes,
-                max_total_facts: memory.max_total_facts,
-                max_total_bytes: memory.max_total_bytes,
-                max_recall_results: memory.max_recall_results,
-            },
-            busy_timeout: Duration::from_millis(memory.busy_timeout_ms),
-            retention: ee_agent_host::MemoryRetention {
-                default_expiry: (memory.default_expiry_days != 0)
-                    .then(|| Duration::from_secs(memory.default_expiry_days * 86_400)),
-                candidate_retention: Duration::from_secs(memory.candidate_retention_days * 86_400),
-                stale_retention: Duration::from_secs(memory.stale_retention_days * 86_400),
-                superseded_retention: Duration::from_secs(
-                    memory.superseded_retention_days * 86_400,
-                ),
-            },
-        };
+        config.workspace_memory = memory.to_host_config(trusted_roots);
         #[cfg(test)]
         for (id, factory) in &self.agents.test_fake_transports {
             config.fake_transports.insert(id.clone(), factory.clone());
