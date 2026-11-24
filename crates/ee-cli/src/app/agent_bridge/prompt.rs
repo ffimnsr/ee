@@ -415,7 +415,7 @@ impl ApprovalPrompt {
 
     pub(crate) fn allow_confirmation_preview(&self) -> Option<&AlwaysRulePreview> {
         let choice = self.confirming_allow?;
-        if choice == ApprovalChoice::AllowServer {
+        if matches!(choice, ApprovalChoice::AllowServer | ApprovalChoice::AllowServerExecution) {
             return self.mcp_server_candidate.as_ref().map(|candidate| &candidate.preview);
         }
         self.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {

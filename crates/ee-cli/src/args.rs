@@ -370,6 +370,9 @@ pub(crate) enum McpTrustCommands {
         /// Transport to grant; defaults to both stdio and ACP
         #[arg(long, value_enum, default_value = "all")]
         transport: McpTrustTransport,
+        /// Also grant terminal execution (`ee_terminal_create`) for this server
+        #[arg(long)]
+        execute: bool,
     },
     /// Revoke trust for one MCP server
     Revoke {
@@ -379,6 +382,9 @@ pub(crate) enum McpTrustCommands {
         /// Transport to revoke; defaults to both stdio and ACP
         #[arg(long, value_enum, default_value = "all")]
         transport: McpTrustTransport,
+        /// Revoke only the terminal-execution opt-in, keeping the other tools
+        #[arg(long)]
+        execute: bool,
     },
     /// Print recorded MCP server trust grants
     Status {

@@ -19,6 +19,7 @@ pub(crate) const ALWAYS_ALLOW_LABEL: &str = "Allow always";
 /// One-click trust for a pinned MCP server manifest, offered only on MCP write
 /// prompts while the workspace trust decision is `trusted`.
 pub(crate) const TRUST_MCP_SERVER_LABEL: &str = "Trust MCP server (pinned tools)";
+pub(crate) const TRUST_MCP_SERVER_EXEC_LABEL: &str = "Trust MCP server + terminal (run commands)";
 
 // ── Approval prompt ──────────────────────────────────────────────────────────
 
@@ -254,6 +255,9 @@ pub(crate) enum ApprovalChoice {
     /// Preview and persist a pinned host-local trust grant for the invoking MCP
     /// server transport.
     AllowServer,
+    /// Preview and persist the explicit terminal-execution opt-in for the
+    /// invoking MCP server transport.
+    AllowServerExecution,
     /// Preview and persist a narrow host-local deny rule before denying.
     DenyPersistent,
 }
@@ -268,6 +272,7 @@ impl ApprovalChoice {
             ApprovalChoice::AllowAlways => ALWAYS_ALLOW_LABEL,
             ApprovalChoice::AllowAlwaysPrefix(_) => "Allow always (token prefix)",
             ApprovalChoice::AllowServer => TRUST_MCP_SERVER_LABEL,
+            ApprovalChoice::AllowServerExecution => TRUST_MCP_SERVER_EXEC_LABEL,
             ApprovalChoice::DenyPersistent => "Deny for this workspace",
         }
     }
@@ -280,6 +285,7 @@ impl ApprovalChoice {
                 | ApprovalChoice::AllowAlways
                 | ApprovalChoice::AllowAlwaysPrefix(_)
                 | ApprovalChoice::AllowServer
+                | ApprovalChoice::AllowServerExecution
         )
     }
 }
@@ -344,6 +350,7 @@ pub(super) fn session_decision(choice: ApprovalChoice) -> Option<SessionChoice> 
         | ApprovalChoice::AllowAlways
         | ApprovalChoice::AllowAlwaysPrefix(_)
         | ApprovalChoice::AllowServer
+        | ApprovalChoice::AllowServerExecution
         | ApprovalChoice::DenyPersistent => None,
         ApprovalChoice::AllowSession => Some(SessionChoice::Allow),
         ApprovalChoice::DenySession => Some(SessionChoice::Deny),

@@ -299,11 +299,11 @@ pub fn run_cli() -> io::Result<()> {
                 },
                 DoCommands::Mcp { command } => match command {
                     McpCommands::Trust { command } => match command {
-                        McpTrustCommands::Grant { server, transport } => {
-                            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport)?
+                        McpTrustCommands::Grant { server, transport, execute } => {
+                            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport, execute)?
                         }
-                        McpTrustCommands::Revoke { server, transport } => {
-                            crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport)?
+                        McpTrustCommands::Revoke { server, transport, execute } => {
+                            crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport, execute)?
                         }
                         McpTrustCommands::Status { server } => {
                             crate::mcp_trust::cmd_mcp_trust_status(server.as_deref())?

@@ -796,14 +796,17 @@ impl App {
             }
             crate::app::agents_mcp::ProxyToolCall::Terminal(request) => {
                 let always_allowed = self.command_invocation_for_request(&request).is_ok();
-                self.request_bridge_approval(ApprovalPrompt::terminal(
+                let mcp = self.mcp_invocation_for_tool("ee_terminal_create", json!({}), route);
+                let mut prompt = ApprovalPrompt::terminal(
                     None,
                     None,
                     &session_id,
                     &request,
                     reply,
                     always_allowed,
-                ));
+                );
+                prompt.mcp = mcp;
+                self.request_bridge_approval(prompt);
             }
             crate::app::agents_mcp::ProxyToolCall::Diagnostics => {
                 // Transport-only mapping: diagnostics travel as terminal

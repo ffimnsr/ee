@@ -17,7 +17,10 @@ use crate::policy::{
     TrustStoreError,
 };
 
-use super::approval::{ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, TRUST_MCP_SERVER_LABEL};
+use super::approval::{
+    ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, TRUST_MCP_SERVER_EXEC_LABEL,
+    TRUST_MCP_SERVER_LABEL,
+};
 use super::prompt::ApprovalPrompt;
 use super::write::ActionLogEntry;
 
@@ -36,6 +39,7 @@ impl App {
                 ApprovalChoice::AllowAlways
                     | ApprovalChoice::AllowAlwaysPrefix(_)
                     | ApprovalChoice::AllowServer
+                    | ApprovalChoice::AllowServerExecution
             )
         });
         prompt.allow_candidates.clear();
@@ -79,6 +83,13 @@ impl App {
                             ));
                         }
                     }
+                }
+                if self.server_trust_prompt_eligible(prompt)
+                    && let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) =
+                        McpServerTrustCandidate::for_execution_invocation(invocation)
+                {
+                    prompt.mcp_server_candidate = Some(candidate);
                 }
             }
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. }
@@ -156,8 +167,13 @@ impl App {
             prompt.options.push((label, choice));
             prompt.allow_candidates.push((choice, candidate));
         }
-        if prompt.mcp_server_candidate.is_some() {
-            prompt.options.push((TRUST_MCP_SERVER_LABEL.to_string(), ApprovalChoice::AllowServer));
+        if let Some(candidate) = prompt.mcp_server_candidate.as_ref() {
+            let (label, choice) = if candidate.execution {
+                (TRUST_MCP_SERVER_EXEC_LABEL, ApprovalChoice::AllowServerExecution)
+            } else {
+                (TRUST_MCP_SERVER_LABEL, ApprovalChoice::AllowServer)
+            };
+            prompt.options.push((label.to_string(), choice));
         }
     }
 

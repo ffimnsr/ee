@@ -553,6 +553,7 @@ impl App {
                 ApprovalKind::Write { .. }
                     | ApprovalKind::WriteBatch { .. }
                     | ApprovalKind::Filesystem { .. }
+                    | ApprovalKind::TerminalCreate { .. }
             )
             && server_trust_allowed
             && let Some(invocation) = prompt.mcp.as_ref()
@@ -733,6 +734,7 @@ impl App {
                     | ApprovalChoice::AllowAlways
                     | ApprovalChoice::AllowAlwaysPrefix(_)
                     | ApprovalChoice::AllowServer
+                    | ApprovalChoice::AllowServerExecution
             )
         });
         prompt.allow_candidates.clear();

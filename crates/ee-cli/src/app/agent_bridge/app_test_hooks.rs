@@ -178,6 +178,7 @@ impl App {
             ApprovalChoice::AllowAlways
                 | ApprovalChoice::AllowAlwaysPrefix(_)
                 | ApprovalChoice::AllowServer
+                | ApprovalChoice::AllowServerExecution
         ) && let Some(prompt) = self.agents.approvals.front_mut()
             && prompt.confirming_allow != Some(choice)
         {

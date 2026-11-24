@@ -126,7 +126,7 @@ impl App {
             return;
         }
 
-        if choice == ApprovalChoice::AllowServer {
+        if matches!(choice, ApprovalChoice::AllowServer | ApprovalChoice::AllowServerExecution) {
             self.resolve_server_trust_choice(prompt);
             return;
         }
@@ -514,6 +514,9 @@ impl App {
                     && writes.iter().all(|write| write.content.len() as u64 <= MAX_WRITE_FILE_BYTES)
                     && writes.iter().map(|write| write.content.len() as u64).sum::<u64>()
                         <= MAX_WRITE_TOTAL_BYTES
+            }
+            ApprovalKind::TerminalCreate { request } => {
+                self.command_invocation_for_request(request).is_ok()
             }
             _ => true,
         }

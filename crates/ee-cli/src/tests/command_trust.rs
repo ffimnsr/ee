@@ -542,14 +542,15 @@ mod e2e {
             let prompt = app.agents.approvals.front().unwrap();
             assert_eq!(
                 prompt.options.len(),
-                7,
-                "exact always-allow, deduped prefix, and deny persistence offered"
+                8,
+                "exact always-allow, deduped prefix, terminal execution, and deny persistence offered"
             );
             assert_eq!(prompt.options[4].0, "Allow always");
             assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
             assert_eq!(prompt.options[5].0, "Allow always: prefix through argument 1");
             assert_eq!(prompt.options[5].1, ApprovalChoice::AllowAlwaysPrefix(1));
-            assert_eq!(prompt.options[6].1, ApprovalChoice::DenyPersistent);
+            assert_eq!(prompt.options[6].1, ApprovalChoice::AllowServerExecution);
+            assert_eq!(prompt.options[7].1, ApprovalChoice::DenyPersistent);
         }
         open_pane_and_select(&mut app, 4); // Allow always (exact)
 

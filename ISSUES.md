@@ -378,7 +378,7 @@ Rules:
 
 - Workspace trust is the outer gate; an undecided or untrusted workspace makes every MCP server grant inert.
 - Grants are pinned to the canonical workspace identity, server id, transport identity, and an application-owned manifest of `(tool, schema version, side-effect category)` entries.
-- Read tools with no separate approval requirement and every workspace write tool (edits, content-bearing writes, filesystem create/copy/move/delete, and workspace-memory mutations) are eligible. Execute and external-network tools are never eligible.
+- Read tools with no separate approval requirement and every workspace write tool (edits, content-bearing writes, filesystem create/copy/move/delete, and workspace-memory mutations) are eligible. External-network tools are never eligible. Terminal execution is a separate explicit opt-in that adds only `ee_terminal_create` as an execute tool.
 - A persistent deny, safeguard, mandatory-confirm rule, session deny, or untrusted workspace outranks a server grant.
 - New tools, schema changes, transport changes, and workspace revocation require a new approval; grants never follow server-advertised runtime changes.
 - The store is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), owner-only, atomic, and keyed by the workspace digest; repository configuration cannot create authority.
@@ -394,6 +394,7 @@ Work items:
 - [x] Manage server grants from `/permissions` list/inspect/revoke/reset and include them in the summary.
 - [x] Cover pinned matching, cross-transport and cross-workspace misses, persisted-tool drift, deny precedence, untrusted inertness, store permissions, malformed documents, and end-to-end approval/auto-allow behavior.
 - [x] Second pass: carry the validated MCP identity through content writes, filesystem mutations, and workspace-memory prompts; gate exact always-allow separately from server trust; keep write safety maxima; reject execute/network candidates; prove cross-tool persistence end to end.
+- [x] Add a separate terminal-execution opt-in (`--execute`, `Trust MCP server + terminal (run commands)`) that extends the server grant with `ee_terminal_create`; keep it out of the general grant, require validated argv, preserve command safeguards/denies/mandatory confirms, preserve execute pins on re-trust, and support execution-only revoke.
 - [x] Update README and CHANGELOG.
 
 Acceptance:
@@ -401,4 +402,4 @@ Acceptance:
 - [x] `cargo test --quiet -p ee-cli --features agents mcp_trust` passes.
 - [x] `cargo test --quiet -p ee-cli --features agents mcp_server_trust` passes.
 - [x] Existing trust, always-allow, command, and permission-matrix suites still pass.
-- [x] No grant authorizes execute, external-network, or unpinned tools; every pinned read or write tool covered by a grant dispatches without a per-tool prompt.
+- [x] No general grant authorizes execute, external-network, or unpinned tools; terminal execution requires its own validated-command opt-in; every pinned read or write tool covered by a grant dispatches without a per-tool prompt.

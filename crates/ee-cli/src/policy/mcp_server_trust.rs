@@ -40,7 +40,13 @@ impl McpServerToolGrant {
             | TrustCategory::WriteCreate
             | TrustCategory::WriteModify
             | TrustCategory::Delete => {}
-            TrustCategory::Execute | TrustCategory::Network | TrustCategory::Unknown => {
+            TrustCategory::Execute if self.tool == "ee_terminal_create" => {}
+            TrustCategory::Execute => {
+                return Err(
+                    "mcp server grants can cover execute only for ee_terminal_create".to_string()
+                );
+            }
+            TrustCategory::Network | TrustCategory::Unknown => {
                 return Err(format!(
                     "mcp server grants cannot cover {} tools",
                     self.category.as_str()
@@ -122,6 +128,25 @@ impl McpServerGrant {
     pub(crate) fn tool_count(&self) -> usize {
         self.tools.len()
     }
+
+    /// Whether this grant carries the explicit terminal-execution opt-in.
+    pub(crate) fn includes_execution(&self) -> bool {
+        self.tools.iter().any(|tool| tool.category == TrustCategory::Execute)
+    }
+
+    /// Preserves execute pins from a replaced grant. Re-trusting a server from
+    /// a non-execution prompt must never silently drop terminal trust; a full
+    /// revoke remains the explicit way to remove it.
+    pub(crate) fn preserve_execute_pins(&mut self, existing: &Self) {
+        for pin in &existing.tools {
+            if pin.category == TrustCategory::Execute
+                && !self.tools.iter().any(|tool| tool.tool == pin.tool)
+            {
+                self.tools.push(pin.clone());
+            }
+        }
+        self.tools.sort_by(|left, right| left.tool.cmp(&right.tool));
+    }
 }
 
 /// Effective MCP server trust for one workspace.
@@ -164,6 +189,8 @@ impl McpServerTrust {
 pub(crate) struct McpServerTrustCandidate {
     pub(crate) grant: McpServerGrant,
     pub(crate) preview: AlwaysRulePreview,
+    /// True when this candidate adds the explicit terminal-execution opt-in.
+    pub(crate) execution: bool,
 }
 
 impl McpServerTrustCandidate {
@@ -226,7 +253,85 @@ impl McpServerTrustCandidate {
                 "new tools until re-trusted".into(),
             ],
         };
-        Ok(Self { grant, preview })
+        Ok(Self { grant, preview, execution: false })
+    }
+
+    /// Builds the pinned grant that adds the explicit terminal-execution
+    /// opt-in for `ee_terminal_create` on one MCP transport.
+    pub(crate) fn for_execution_invocation(invocation: &McpInvocation) -> Result<Self, String> {
+        if invocation.server != "ee" {
+            return Err("server trust is available only for the pinned ee manifest".to_string());
+        }
+        let transport = match invocation.transport {
+            TransportKind::McpStdio => ee_mcp::ToolTransport::Stdio,
+            TransportKind::McpAcp => ee_mcp::ToolTransport::Acp,
+            TransportKind::Acp => {
+                return Err("server trust needs an MCP transport".to_string());
+            }
+        };
+        let execution = pinned_execution_tools(transport);
+        if execution.is_empty() {
+            return Err("terminal execution is not available for this transport".to_string());
+        }
+        if !execution.iter().any(|tool| {
+            tool.tool == invocation.tool
+                && tool.category == invocation.category
+                && tool.tool_schema_version == invocation.tool_schema_version
+        }) {
+            return Err("invoking tool is not covered by terminal execution trust".to_string());
+        }
+        let mut tools = pinned_server_tools(transport);
+        tools.extend(execution);
+        tools.sort_by(|left, right| left.tool.cmp(&right.tool));
+        tools.dedup_by(|left, right| left.tool == right.tool);
+        let grant = McpServerGrant::new(
+            generate_mcp_server_grant_id(),
+            invocation.workspace,
+            invocation.server.clone(),
+            invocation.transport_identity.clone(),
+            current_granted_at(),
+            tools,
+        )?;
+        let read_count =
+            grant.tools.iter().filter(|tool| tool.category == TrustCategory::Read).count();
+        let write_count = grant
+            .tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.category,
+                    TrustCategory::WriteCreate | TrustCategory::WriteModify | TrustCategory::Delete
+                )
+            })
+            .count();
+        let preview = AlwaysRulePreview {
+            workspace: grant.workspace.as_string(),
+            agent: "all agents".to_string(),
+            matcher_fields: vec![
+                ("kind".into(), "mcp server + terminal".into()),
+                ("server".into(), grant.server.clone()),
+                ("scope".into(), "ee_terminal_create".into()),
+                ("commands".into(), "validated argv only".into()),
+                ("read tools".into(), read_count.to_string()),
+                ("workspace write tools".into(), write_count.to_string()),
+                (
+                    "invalidates on".into(),
+                    "tool list, schema, transport, or workspace trust change".into(),
+                ),
+            ],
+            caps: vec![
+                ("command safeguards".into(), "application-owned".into()),
+                ("write caps".into(), "workspace write safety maxima".into()),
+            ],
+            transport_identity: Some(grant.transport_identity.clone()),
+            exclusions: vec![
+                "shell wrappers and external cwd".into(),
+                "other execute tools".into(),
+                "external network tools".into(),
+                "new tools until re-trusted".into(),
+            ],
+        };
+        Ok(Self { grant, preview, execution: true })
     }
 }
 
@@ -273,6 +378,28 @@ fn write_tool_category(tool: &str) -> TrustCategory {
         "ee_create_directory" | "ee_copy_path" => TrustCategory::WriteCreate,
         "ee_delete_path" => TrustCategory::Delete,
         _ => TrustCategory::WriteModify,
+    }
+}
+
+/// Pinned terminal-execution tools for the explicit execute opt-in.
+///
+/// Only `ee_terminal_create` qualifies. Shell wrappers and external cwd stay
+/// outside because the app still validates the command shape before either
+/// offering or applying execution trust.
+pub(crate) fn pinned_execution_tools(transport: ee_mcp::ToolTransport) -> Vec<McpServerToolGrant> {
+    let tool = "ee_terminal_create";
+    match ee_mcp::governance(tool) {
+        Some(governance)
+            if governance.side_effect == ee_mcp::SideEffectClass::Execute
+                && governance.transports.contains(&transport) =>
+        {
+            vec![McpServerToolGrant {
+                tool: tool.to_string(),
+                category: TrustCategory::Execute,
+                tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            }]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -401,6 +528,55 @@ mod tests {
     }
 
     #[test]
+    fn execution_opt_in_is_separate_and_pins_terminal_create() {
+        let invocation = McpInvocation {
+            workspace: workspace(),
+            agent: None,
+            transport: TransportKind::McpStdio,
+            transport_identity: "stdio:ee --mcp-proxy".to_string(),
+            server: "ee".to_string(),
+            tool: "ee_terminal_create".to_string(),
+            tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            category: TrustCategory::Execute,
+            arguments_json: "{}".to_string(),
+        };
+        assert!(McpServerTrustCandidate::for_invocation(&invocation).is_err());
+        let candidate = McpServerTrustCandidate::for_execution_invocation(&invocation).unwrap();
+        assert!(candidate.execution);
+        assert!(candidate.grant.includes_execution());
+        assert!(candidate.grant.tools.iter().any(|tool| {
+            tool.tool == "ee_terminal_create"
+                && tool.category == TrustCategory::Execute
+                && tool.tool_schema_version == ee_mcp::EE_TOOL_SCHEMA_VERSION
+        }));
+        assert!(candidate.grant.tools.iter().any(|tool| tool.tool == "ee_write_text_file"));
+
+        let trust = McpServerTrust::new(vec![candidate.grant]);
+        let terminal = operation(
+            workspace(),
+            "stdio:ee --mcp-proxy",
+            "ee_terminal_create",
+            TrustCategory::Execute,
+            ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        );
+        assert!(trust.allows(&terminal).is_some());
+    }
+
+    #[test]
+    fn general_retrust_preserves_terminal_execution_pins() {
+        let mut existing = grant("stdio:ee --mcp-proxy");
+        existing.tools.extend(pinned_execution_tools(ee_mcp::ToolTransport::Stdio));
+        assert!(existing.includes_execution());
+        let mut replacement = grant("stdio:ee --mcp-proxy");
+        assert!(!replacement.includes_execution());
+        replacement.preserve_execute_pins(&existing);
+        assert!(replacement.includes_execution());
+        assert!(replacement.tools.iter().any(|tool| {
+            tool.tool == "ee_terminal_create" && tool.category == TrustCategory::Execute
+        }));
+    }
+
+    #[test]
     fn grant_matches_only_the_pinned_identity() {
         let trust = McpServerTrust::new(vec![grant("stdio:ee --mcp-proxy")]);
         let matching = operation(
@@ -522,6 +698,18 @@ mod tests {
             tool_schema_version: 1,
         };
         assert!(delete.validate().is_ok(), "application-owned delete pins are allowed");
+        let terminal = McpServerToolGrant {
+            tool: "ee_terminal_create".to_string(),
+            category: TrustCategory::Execute,
+            tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        };
+        assert!(terminal.validate().is_ok(), "terminal execution opt-in is allowed");
+        let wrong_execute = McpServerToolGrant {
+            tool: "ee_format_file".to_string(),
+            category: TrustCategory::Execute,
+            tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        };
+        assert!(wrong_execute.validate().is_err(), "other execute pins are rejected");
         assert!(
             McpServerGrant::new(
                 "mcp_server_test".to_string(),

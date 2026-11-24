@@ -28,6 +28,7 @@ pub(crate) mod keybindings;
 pub(crate) mod keymap_config;
 pub(crate) mod lsp_edits;
 pub(crate) mod mandatory_confirm;
+pub(crate) mod mcp_exec_trust;
 pub(crate) mod mcp_trust;
 pub(crate) mod misc;
 pub(crate) mod modes;

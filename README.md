@@ -594,11 +594,15 @@ One explicit trust decision can cover the pinned tool surface of the built-in `e
 ```sh
 ee do mcp trust grant
 ee do mcp trust grant --transport stdio
+ee do mcp trust grant --execute
 ee do mcp trust status
 ee do mcp trust revoke
+ee do mcp trust revoke --execute
 ```
 
-The grant is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), bound to the canonical workspace identity, and inert unless the workspace trust decision is `trusted`. It covers every pinned read tool plus every workspace write tool in the stable `ee` manifest on the selected transport: edit tools, content-bearing file writes, filesystem create/copy/move/delete, and workspace-memory mutations. Content writes still obey the workspace write safety maxima, and built-in safeguards still deny protected paths, path escapes, secret-store writes, and catastrophic deletion. Terminal execution and external-network tools are never included; commands and outbound network access keep their dedicated approval paths. New tools or schema changes require a new grant; cross-transport and cross-workspace calls still prompt. Approval prompts for eligible MCP operations offer `Trust MCP server (pinned tools)` with the same preview/confirmation step as `Allow always`. After the grant persists, covered tools dispatch without a per-tool prompt (the status names the workspace or server grant that authorized it) until the grant is revoked or workspace trust is withdrawn.
+The grant is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), bound to the canonical workspace identity, and inert unless the workspace trust decision is `trusted`. It covers every pinned read tool plus every workspace write tool in the stable `ee` manifest on the selected transport: edit tools, content-bearing file writes, filesystem create/copy/move/delete, and workspace-memory mutations. Content writes still obey the workspace write safety maxima, and built-in safeguards still deny protected paths, path escapes, secret-store writes, and catastrophic deletion. External-network tools are never included; outbound network access keeps its dedicated approval path. New tools or schema changes require a new grant; cross-transport and cross-workspace calls still prompt. Approval prompts for eligible MCP operations offer `Trust MCP server (pinned tools)` with the same preview/confirmation step as `Allow always`. After the grant persists, covered tools dispatch without a per-tool prompt (the status names the workspace or server grant that authorized it) until the grant is revoked or workspace trust is withdrawn.
+
+Terminal execution is a separate opt-in, never part of the general grant: use `ee do mcp trust grant --execute` or the `Trust MCP server + terminal (run commands)` approval option. It extends the server grant with `ee_terminal_create` and covers validated argv commands. Shell wrappers, external cwd, built-in command safeguards, persistent command denies, mandatory confirms, and workspace gating still apply. Remove just that opt-in with `ee do mcp trust revoke --execute`; a full revoke drops the whole grant.
 
 This surface covers the built-in `ee` MCP server that ee hosts (stdio proxy and ACP-native routes). External `[mcp.servers]` entries are forwarded to agents and remain agent-owned; ee does not mediate their tool calls.
 

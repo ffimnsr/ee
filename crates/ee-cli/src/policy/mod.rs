@@ -84,7 +84,7 @@ pub(crate) use mcp::{McpInvocation, generate_mcp_rule_id};
 #[allow(unused_imports)]
 pub(crate) use mcp_server_trust::{
     McpServerGrant, McpServerToolGrant, McpServerTrust, McpServerTrustCandidate,
-    generate_mcp_server_grant_id, pinned_server_tools,
+    generate_mcp_server_grant_id, pinned_execution_tools, pinned_server_tools,
 };
 #[allow(unused_imports)]
 pub(crate) use paths::is_protected_relative_path;

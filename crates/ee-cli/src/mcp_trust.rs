@@ -10,8 +10,9 @@
 //! - unreadable, malformed, wrong-identity, symlinked, or non-owner-only files
 //!   yield no effective grants,
 //! - a grant is inert unless the workspace trust decision is `trusted`,
-//! - unknown fields, duplicate grants, duplicate tools, execute/destructive
-//!   categories, and empty tool lists are rejected at load.
+//! - unknown fields, duplicate grants, duplicate tools, non-manifest execute
+//!   pins, network/unknown categories, and empty tool lists are rejected at
+//!   load.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::args::McpTrustTransport;
 use crate::policy::{
     McpServerGrant, McpServerToolGrant, McpServerTrust, TrustCategory, TrustStoreError,
-    WorkspaceIdentity, generate_mcp_server_grant_id, pinned_server_tools,
+    WorkspaceIdentity, generate_mcp_server_grant_id, pinned_execution_tools, pinned_server_tools,
 };
 use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
 
@@ -119,6 +120,13 @@ impl McpTrustStore {
         }
         let mut trust = self.load()?;
         let mut grants = trust.grants().to_vec();
+        let mut grant = grant;
+        if let Some(existing) = grants.iter().find(|existing| {
+            existing.server == grant.server
+                && existing.transport_identity == grant.transport_identity
+        }) {
+            grant.preserve_execute_pins(existing);
+        }
         grants.retain(|existing| {
             !(existing.server == grant.server
                 && existing.transport_identity == grant.transport_identity)
@@ -161,6 +169,30 @@ impl McpTrustStore {
             trust.grants().iter().filter(|grant| grant.id != id).cloned().collect::<Vec<_>>();
         let removed = before.saturating_sub(grants.len());
         if removed > 0 {
+            self.save(&McpServerTrust::new(grants))?;
+        }
+        Ok(removed)
+    }
+
+    /// Removes terminal-execution pins for one server transport, preserving
+    /// the rest of the grant. Returns how many pins were removed.
+    pub(crate) fn revoke_execute(
+        &self,
+        server: &str,
+        transport_identity: &str,
+    ) -> Result<usize, TrustStoreError> {
+        let trust = self.load()?;
+        let mut grants = trust.grants().to_vec();
+        let mut removed = 0usize;
+        for grant in grants.iter_mut().filter(|grant| {
+            grant.server == server && grant.transport_identity == transport_identity
+        }) {
+            let before = grant.tools.len();
+            grant.tools.retain(|tool| tool.category != TrustCategory::Execute);
+            removed = removed.saturating_add(before.saturating_sub(grant.tools.len()));
+        }
+        if removed > 0 {
+            grants.retain(|grant| !grant.tools.is_empty());
             self.save(&McpServerTrust::new(grants))?;
         }
         Ok(removed)
@@ -278,7 +310,11 @@ fn parse_document(
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-pub(crate) fn cmd_mcp_trust_grant(server: &str, transport: McpTrustTransport) -> io::Result<()> {
+pub(crate) fn cmd_mcp_trust_grant(
+    server: &str,
+    transport: McpTrustTransport,
+    execute: bool,
+) -> io::Result<()> {
     let workspace = crate::workspace_trust::workspace_root_for_cli()?;
     require_trusted_workspace(&workspace)?;
     if server != "ee" {
@@ -294,35 +330,57 @@ pub(crate) fn cmd_mcp_trust_grant(server: &str, transport: McpTrustTransport) ->
             .find(server, identity)
             .map(|grant| grant.id.clone())
             .unwrap_or_else(generate_mcp_server_grant_id);
+        let mut tools = pinned_server_tools(tool_transport);
+        if execute {
+            tools.extend(pinned_execution_tools(tool_transport));
+            tools.sort_by(|left, right| left.tool.cmp(&right.tool));
+            tools.dedup_by(|left, right| left.tool == right.tool);
+        }
+        let execute_granted = execute
+            || existing
+                .find(server, identity)
+                .is_some_and(crate::policy::McpServerGrant::includes_execution);
         let grant = McpServerGrant::new(
             id,
             *store.workspace(),
             server.to_string(),
             identity.to_string(),
             crate::policy::mcp_server_trust::granted_at_now(),
-            pinned_server_tools(tool_transport),
+            tools,
         )
         .map_err(io::Error::other)?;
         store.add_grant(grant).map_err(io::Error::other)?;
         println!(
-            "mcp server trust granted: server={server} transport={identity} tools={}",
+            "mcp server trust granted: server={server} transport={identity} tools={} execute={execute_granted}",
             pinned_server_tools(tool_transport).len()
+                + usize::from(execute_granted) * pinned_execution_tools(tool_transport).len()
         );
     }
     println!("host-local store: {}", store.path().display());
     Ok(())
 }
 
-pub(crate) fn cmd_mcp_trust_revoke(server: &str, transport: McpTrustTransport) -> io::Result<()> {
+pub(crate) fn cmd_mcp_trust_revoke(
+    server: &str,
+    transport: McpTrustTransport,
+    execute: bool,
+) -> io::Result<()> {
     let workspace = crate::workspace_trust::workspace_root_for_cli()?;
     let store = McpTrustStore::default_for(&workspace).map_err(io::Error::other)?;
     let mut removed = 0usize;
     for tool_transport in transport.selected() {
-        removed += store
-            .revoke(server, Some(transport_identity(tool_transport)))
-            .map_err(io::Error::other)?;
+        if execute {
+            removed += store
+                .revoke_execute(server, transport_identity(tool_transport))
+                .map_err(io::Error::other)?;
+        } else {
+            removed += store
+                .revoke(server, Some(transport_identity(tool_transport)))
+                .map_err(io::Error::other)?;
+        }
     }
-    println!("mcp server trust revoked: server={server} grants={removed}");
+    let scope = if execute { "terminal execution" } else { "grants" };
+    println!("mcp server trust revoked: server={server} {scope}={removed}");
     Ok(())
 }
 
@@ -347,11 +405,12 @@ pub(crate) fn cmd_mcp_trust_status(server: Option<&str>) -> io::Result<()> {
             continue;
         }
         println!(
-            "  {} server={} transport={} tools={} granted_at={}",
+            "  {} server={} transport={} tools={} execute={} granted_at={}",
             grant.id,
             grant.server,
             grant.transport_identity,
             grant.tool_count(),
+            grant.includes_execution(),
             grant.granted_at
         );
         println!(
@@ -631,6 +690,39 @@ mod tests {
         store.add_grant(grant(*store.workspace(), "stdio:ee --mcp-proxy")).unwrap();
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(store.load(), Err(TrustStoreError::PermissionFailure(_))));
+    }
+
+    #[test]
+    fn execute_pins_survive_retrust_and_revoke_separately() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = workspace_root(temp.path(), "repo");
+        let base = temp.path().join("state");
+        let store = McpTrustStore::at(&base, &root).unwrap();
+        let workspace = *store.workspace();
+        let id = "mcp_server_exec".to_string();
+        let mut tools = pinned_server_tools(ee_mcp::ToolTransport::Stdio);
+        tools.extend(pinned_execution_tools(ee_mcp::ToolTransport::Stdio));
+        let execution = McpServerGrant::new(
+            id.clone(),
+            workspace,
+            "ee".to_string(),
+            "stdio:ee --mcp-proxy".to_string(),
+            crate::policy::mcp_server_trust::granted_at_now(),
+            tools,
+        )
+        .unwrap();
+        store.add_grant(execution).unwrap();
+        assert!(store.load().unwrap().grants()[0].includes_execution());
+
+        // Re-trusting from a general prompt refreshes tools but keeps execute.
+        store.add_grant(grant(workspace, "stdio:ee --mcp-proxy")).unwrap();
+        assert!(store.load().unwrap().grants()[0].includes_execution());
+
+        assert_eq!(store.revoke_execute("ee", "stdio:ee --mcp-proxy").unwrap(), 1);
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.grants().len(), 1);
+        assert!(!loaded.grants()[0].includes_execution());
+        assert!(!loaded.grants()[0].tools.is_empty());
     }
 
     #[test]

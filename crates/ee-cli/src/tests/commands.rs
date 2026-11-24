@@ -453,6 +453,7 @@ fn cli_utility_commands_live_under_do() {
                     command: crate::McpTrustCommands::Grant {
                         server,
                         transport: crate::McpTrustTransport::All,
+                        ..
                     }
                 }
             }
@@ -471,6 +472,32 @@ fn cli_utility_commands_live_under_do() {
                         transport: crate::McpTrustTransport::Acp,
                         ..
                     }
+                }
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant", "--execute"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Grant { execute: true, .. }
+                }
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke", "--execute"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Revoke { execute: true, .. }
                 }
             }
         })
