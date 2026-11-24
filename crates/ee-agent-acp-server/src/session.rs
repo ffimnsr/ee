@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::RwLock;
 
-use ee_agent_protocol::{McpServer, SessionId, SessionModeId, SessionModeState};
+use ee_agent_protocol::{
+    McpServer, SessionConfigOption, SessionId, SessionModeId, SessionModeState,
+};
 
 /// One live session, owned by the framework.
 ///
@@ -30,6 +32,8 @@ pub struct ServerSession {
     pub title: Option<String>,
     /// Advertised modes and current selected mode, when supported by provider.
     pub modes: Option<SessionModeState>,
+    /// Advertised session configuration options, when supported by provider.
+    pub config_options: Vec<SessionConfigOption>,
     /// Provider-owned metadata; the framework treats it as opaque.
     pub metadata: serde_json::Value,
 }
@@ -114,6 +118,31 @@ impl SessionStore {
         true
     }
 
+    /// Replaces a session's advertised configuration options.
+    pub fn set_config_options(
+        &self,
+        session_id: &SessionId,
+        config_options: Vec<SessionConfigOption>,
+    ) -> bool {
+        let mut sessions = self.sessions.write().expect("session store poisoned");
+        let Some(session) = sessions.get_mut(&session_id.to_string()) else {
+            return false;
+        };
+        session.config_options = config_options;
+        true
+    }
+
+    /// Returns the session's advertised configuration options.
+    #[must_use]
+    pub fn config_options(&self, session_id: &SessionId) -> Vec<SessionConfigOption> {
+        self.sessions
+            .read()
+            .expect("session store poisoned")
+            .get(&session_id.to_string())
+            .map(|session| session.config_options.clone())
+            .unwrap_or_default()
+    }
+
     /// Whether a session with the given id is registered.
     #[must_use]
     pub fn contains(&self, session_id: &SessionId) -> bool {
@@ -134,6 +163,7 @@ mod tests {
             mcp_servers: Vec::new(),
             title: None,
             modes: None,
+            config_options: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }

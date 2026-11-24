@@ -81,8 +81,8 @@ fn choices_request_key<I: IntoIterator<Item = String>>(args: I) -> Option<String
     None
 }
 
-/// Prints the full choice list for one input, scoped by the surface the host
-/// already collected (passed back as `OPENCODE_SURFACE`).
+/// Prints the full choice list for one input, scoped by the values the host
+/// already collected (passed back as `OPENCODE_SURFACE` / `OPENCODE_MODEL`).
 fn print_choices_request(key: &str) {
     let surface = std::env::var(config::SURFACE_ENV)
         .ok()
@@ -94,7 +94,8 @@ fn print_choices_request(key: &str) {
         );
         std::process::exit(1);
     };
-    let Some(choices) = config::remote_choices(surface, key) else {
+    let model = std::env::var(config::MODEL_ENV).ok();
+    let Some(choices) = config::remote_choices(surface, key, model.as_deref()) else {
         eprintln!("ee-agent-opencode: `{key}` does not accept remote choices");
         std::process::exit(1);
     };

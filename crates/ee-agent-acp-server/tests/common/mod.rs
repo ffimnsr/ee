@@ -10,15 +10,15 @@ pub use ee_agent_acp_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
     JsonRpcFrame, LoadSessionContext, LoginContext, MemoryTransport, MemoryTransportHandle,
     NewSessionContext, PromptContext, PromptResult, ProviderError, ProviderFuture, SessionInit,
-    SetModeContext, SetModelContext, UpdateSink,
+    SetConfigOptionContext, SetModeContext, SetModelContext, UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, ContentChunk, CreateTerminalRequest,
     Error as RpcError, Implementation, McpCapabilities, MessageId, MessageMcpRequest, PlanEntry,
     PlanEntryPriority, PlanEntryStatus, RawJsonRpcMessage, RawJsonRpcParams, ReadTextFileRequest,
-    RequestId, Response, SessionCapabilities, SessionCloseCapabilities, SessionId,
-    SessionListCapabilities, SessionModeState, SessionUpdate, StopReason, TextContent,
-    ToolCallContent, ToolKind,
+    RequestId, Response, SessionCapabilities, SessionCloseCapabilities, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionValue, SessionId, SessionListCapabilities,
+    SessionModeState, SessionUpdate, StopReason, TextContent, ToolCallContent, ToolKind,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -105,6 +105,9 @@ pub struct FakeProvider {
     commands: Arc<Mutex<Vec<AvailableCommand>>>,
     /// Modes advertised in every `SessionInit` (absent by default).
     modes: Arc<Mutex<Option<SessionModeState>>>,
+    /// Session config options advertised in every `SessionInit` (empty by
+    /// default) and updated by `session/set_config_option`.
+    config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
     /// When set, `session/set_mode` fails with this message.
     set_mode_error: Arc<Mutex<Option<String>>>,
     /// `(role, text)` conversation messages replayed by `session/load`
@@ -130,6 +133,7 @@ impl FakeProvider {
             ids: Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect())),
             commands: Arc::new(Mutex::new(Vec::new())),
             modes: Arc::new(Mutex::new(None)),
+            config_options: Arc::new(Mutex::new(Vec::new())),
             set_mode_error: Arc::new(Mutex::new(None)),
             replay: Arc::new(Mutex::new(Vec::new())),
             load_error: Arc::new(Mutex::new(None)),
@@ -151,6 +155,12 @@ impl FakeProvider {
     /// Advertises this caller-selected mode state in every session init.
     pub fn with_modes(self, modes: SessionModeState) -> Self {
         *self.modes.lock().expect("fake provider modes poisoned") = Some(modes);
+        self
+    }
+
+    /// Advertises these session config options in every session init.
+    pub fn with_config_options(self, options: Vec<SessionConfigOption>) -> Self {
+        *self.config_options.lock().expect("fake provider config options poisoned") = options;
         self
     }
 
@@ -260,12 +270,15 @@ impl AgentProvider for FakeProvider {
         let cwd = ctx.cwd.clone();
         let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
         let modes = self.modes.lock().expect("fake provider modes poisoned").clone();
+        let config_options =
+            self.config_options.lock().expect("fake provider config options poisoned").clone();
         Box::pin(async move {
             log.record(format!("new_session:{}", cwd.display()));
             Ok(SessionInit::new(SessionId::new(id))
                 .title("Test Session")
                 .commands(commands)
-                .modes(modes))
+                .modes(modes)
+                .config_options((!config_options.is_empty()).then_some(config_options)))
         })
     }
 
@@ -277,6 +290,8 @@ impl AgentProvider for FakeProvider {
         let session_id = ctx.session_id.clone();
         let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
         let modes = self.modes.lock().expect("fake provider modes poisoned").clone();
+        let config_options =
+            self.config_options.lock().expect("fake provider config options poisoned").clone();
         let replay = self.replay.lock().expect("fake provider replay poisoned").clone();
         let load_error = self.load_error.lock().expect("fake provider load error poisoned").clone();
         let sink = ctx.replay_sink;
@@ -306,7 +321,57 @@ impl AgentProvider for FakeProvider {
                     }
                 }
             }
-            Ok(SessionInit::new(session_id).commands(commands).modes(modes))
+            Ok(SessionInit::new(session_id)
+                .commands(commands)
+                .modes(modes)
+                .config_options((!config_options.is_empty()).then_some(config_options)))
+        })
+    }
+
+    fn set_config_option(
+        &self,
+        ctx: SetConfigOptionContext,
+    ) -> ProviderFuture<Result<Vec<SessionConfigOption>, ProviderError>> {
+        let log = self.log.clone();
+        let options = self.config_options.clone();
+        Box::pin(async move {
+            let new_value = match &ctx.value {
+                SessionConfigOptionValue::ValueId { value } => value.0.to_string(),
+                SessionConfigOptionValue::Boolean { value } => value.to_string(),
+                _ => String::from("?"),
+            };
+            log.record(format!(
+                "set_config_option:{}:{}:{new_value}",
+                ctx.session_id, ctx.config_id.0
+            ));
+            let mut options = options.lock().expect("fake provider config options poisoned");
+            let Some(option) = options.iter_mut().find(|option| option.id == ctx.config_id) else {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "unknown config option {}",
+                    ctx.config_id.0
+                )));
+            };
+            match (&mut option.kind, ctx.value) {
+                (
+                    SessionConfigKind::Select(select),
+                    SessionConfigOptionValue::ValueId { value },
+                ) => {
+                    select.current_value = value.clone();
+                }
+                (
+                    SessionConfigKind::Boolean(boolean),
+                    SessionConfigOptionValue::Boolean { value },
+                ) => {
+                    boolean.current_value = value;
+                }
+                _ => {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "config option {} received the wrong value shape",
+                        ctx.config_id.0
+                    )));
+                }
+            }
+            Ok(options.clone())
         })
     }
 

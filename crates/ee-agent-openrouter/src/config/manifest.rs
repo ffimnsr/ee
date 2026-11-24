@@ -4,7 +4,10 @@
 //! repository's 1,000-line threshold. Model inputs carry a short curated list in
 //! the manifest and advertise [`remote_choices`], so the host can offer the whole
 //! active chat catalog through its fuzzy picker without inflating the manifest.
+//! Reasoning effort is model-scoped: its values come from the selected model's
+//! catalog row, fetched after `OPENROUTER_MODEL` exists.
 
+use ee_agent_orchestrator::ReasoningProtocol;
 use ee_agent_orchestrator::{
     DEFAULT_RUBBER_DUCK_CONTEXT_BYTES, DEFAULT_RUBBER_DUCK_MAX_CALLS,
     DEFAULT_RUBBER_DUCK_OUTPUT_BYTES, DEFAULT_RUBBER_DUCK_TIMEOUT,
@@ -43,8 +46,8 @@ const CURATED_MODELS: [&str; CURATED_MODEL_LIMIT] = [
     "z-ai/glm-5.3",
 ];
 
-/// Keys that accept the full remotely fetched model catalog.
-const REMOTE_CHOICE_KEYS: [&str; 2] = ["model", "rubber_duck_model"];
+/// Keys that accept the full remotely fetched value set.
+const REMOTE_CHOICE_KEYS: [&str; 3] = ["model", "rubber_duck_model", "reasoning_effort"];
 
 /// Builds the setup manifest emitted by `ee-agent-openrouter --ee-config`.
 #[must_use]
@@ -149,6 +152,21 @@ pub fn setup_manifest() -> SetupManifest {
                 ];
                 mode
             },
+            {
+                // Catalog rows declare which efforts each model accepts; the
+                // host fetches that list for the selected `OPENROUTER_MODEL`.
+                // A model without declared levels keeps the blank default.
+                let mut effort = input(
+                    "reasoning_effort",
+                    "Reasoning effort (blank keeps the model default; choices follow the selected model)",
+                    None,
+                    false,
+                    BEHAVIOR_SECTION,
+                    "OPENROUTER_REASONING_EFFORT",
+                );
+                effort.remote_choices = true;
+                effort
+            },
             advanced_input(
                 "rubber_duck_max_calls",
                 "Rubber duck maximum calls per session",
@@ -242,14 +260,20 @@ fn curated_model_choices() -> Vec<SetupChoice> {
     curated_model_ids().into_iter().map(|model_id| choice(model_id, None)).collect()
 }
 
-/// Returns the complete active chat catalog for a remotely fetched input key,
-/// or `None` when the key does not accept remote choices. Curated ids stay first
-/// so the picker opens on a sensible model instead of the alphabetically first
+/// Returns the complete value set for a remotely fetched input key, or `None`
+/// when the key does not accept remote choices. Curated ids stay first so the
+/// picker opens on a sensible model instead of the alphabetically first
 /// third-party entry.
+///
+/// `model` is the already collected `OPENROUTER_MODEL` value; the
+/// `reasoning_effort` list is scoped to that model's catalog-declared levels.
 #[must_use]
-pub fn remote_choices(key: &str) -> Option<Vec<SetupChoice>> {
+pub fn remote_choices(key: &str, model: Option<&str>) -> Option<Vec<SetupChoice>> {
     if !REMOTE_CHOICE_KEYS.contains(&key) {
         return None;
+    }
+    if key == "reasoning_effort" {
+        return Some(reasoning_effort_choices(model));
     }
     let mut ids = curated_model_ids();
     for model_id in crate::catalog::chat_model_ids() {
@@ -258,6 +282,29 @@ pub fn remote_choices(key: &str) -> Option<Vec<SetupChoice>> {
         }
     }
     Some(ids.into_iter().map(|model_id| choice(model_id, None)).collect())
+}
+
+/// Catalog-declared effort variants for one selected model.
+///
+/// The same derivation feeds the runtime selector, so setup and `/effort`
+/// cannot disagree. A model that declares no reasoning support exposes no
+/// values and setup keeps the blank (provider-default) input.
+fn reasoning_effort_choices(model: Option<&str>) -> Vec<SetupChoice> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Vec::new();
+    };
+    let base_id = model.rsplit_once('#').map_or(model, |(base, _)| base.trim());
+    let Some(entry) = crate::catalog::find(base_id) else {
+        return Vec::new();
+    };
+    entry
+        .variants(ReasoningProtocol::OpenAiChat)
+        .into_iter()
+        .map(|variant| {
+            let label = (variant.id == "none").then_some("none: disable reasoning");
+            choice(variant.id, label)
+        })
+        .collect()
 }
 
 fn selectable(model_id: &str) -> bool {

@@ -151,6 +151,7 @@ impl OrchestratorRuntime {
                 read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                reasoning_effort: self.selected_reasoning_effort(),
                 memory: Some(self.memory.clone()),
                 checkpoint: Some(handle),
                 resume_state: Some(resumed),
@@ -305,6 +306,7 @@ impl OrchestratorRuntime {
                 read_only_tools: self.read_only_tools(),
                 available_models: self.models.advertised(),
                 model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                reasoning_effort: self.selected_reasoning_effort(),
                 session_context: Some(self.session_context_snapshot()),
                 middleware: self.middleware_spec(),
                 ..LoopOptions::default()

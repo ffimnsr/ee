@@ -73,7 +73,7 @@ pub use native::{
 pub use partial_json::{MAX_PARTIAL_JSON_BYTES, parse_partial};
 pub use profile::{
     BearerToken, CallOptions, EndpointProfile, MaxTokensField, RequestEncoding, RetryPolicy,
-    SessionHeaderStyle, Timeouts, TokenSource, ToolChoices, tool_choice_error,
+    SessionHeaderStyle, Timeouts, TokenSource, ToolChoices, merged_extensions, tool_choice_error,
 };
 pub use provider_options::{
     MAX_METADATA_ENTRIES, MAX_PROVIDER_OPTIONS_BYTES, ProviderOptions, REASONING_SUMMARY_VALUES,

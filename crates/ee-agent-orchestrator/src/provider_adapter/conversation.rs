@@ -344,6 +344,7 @@ pub(super) fn session_snapshot(session: &SessionRuntime) -> PersistedSession {
         mode: session.mode.clone(),
         model_id: session.runtime.selected_model(),
         agent: session.runtime.active_user_agent_name(),
+        reasoning_effort: session.runtime.selected_reasoning_effort(),
     }
 }
 

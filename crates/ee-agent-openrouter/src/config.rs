@@ -267,7 +267,9 @@ pub struct Args {
     /// Emit provider session-affinity headers (`OPENROUTER_SESSION_HEADERS`).
     #[arg(long, env = "OPENROUTER_SESSION_HEADERS", default_value_t = true, action = ArgAction::Set)]
     session_headers: bool,
-    /// Optional OpenRouter reasoning effort (`low`, `medium`, or `high`).
+    /// Optional OpenRouter reasoning effort (`none`, `minimal`, `low`, `medium`,
+    /// `high`, `xhigh`, or `max`; the selected model's catalog row decides which
+    /// values reach the request).
     #[arg(long, env = "OPENROUTER_REASONING_EFFORT")]
     reasoning_effort: Option<String>,
     /// System prompt sent with each session history.

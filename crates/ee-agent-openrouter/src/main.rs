@@ -82,10 +82,13 @@ fn choices_request_key<I: IntoIterator<Item = String>>(args: I) -> Option<String
     None
 }
 
-/// Prints the full choice list for one model input accepted by
+/// Prints the full choice list for one input accepted by
 /// [`ee_agent_openrouter::config::remote_choices`].
 fn print_choices_request(key: &str) {
-    let Some(choices) = ee_agent_openrouter::config::remote_choices(key) else {
+    // The host passes the values collected so far as process environment, so
+    // the model-scoped effort list can read the already selected model.
+    let model = std::env::var("OPENROUTER_MODEL").ok();
+    let Some(choices) = ee_agent_openrouter::config::remote_choices(key, model.as_deref()) else {
         eprintln!("ee-agent-openrouter: `{key}` does not accept remote choices");
         std::process::exit(1);
     };

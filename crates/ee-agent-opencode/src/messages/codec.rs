@@ -2,8 +2,7 @@
 
 use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::{
-    GenerationOptions, ModelMessage, ModelResponse, ToolCallControl, ToolDefinition,
-    estimate_prompt_tokens,
+    ModelMessage, ModelResponse, ToolCallControl, ToolDefinition, estimate_prompt_tokens,
 };
 use ee_chat_completions::{
     DeltaSink, EndpointRequest, EndpointTransport, StreamDelta, drive_sse_with_chunk_timeout,
@@ -55,7 +54,14 @@ impl MessagesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens, None, None).await
+        self.complete_controlled(
+            transcript,
+            tools,
+            &control,
+            prompt_tokens,
+            ee_chat_completions::CallOptions::default(),
+        )
+        .await
     }
 
     /// Performs one buffered round trip with tool-call control.
@@ -65,10 +71,9 @@ impl MessagesCodec {
         tools: &[ToolDefinition],
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&GenerationOptions>,
-        session: Option<&ee_agent_orchestrator::SessionContext>,
+        options: ee_chat_completions::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let transport = self.transport.with_session(session)?;
+        let transport = self.transport.with_session(options.session)?;
         let profile = transport.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
@@ -77,9 +82,11 @@ impl MessagesCodec {
         let max_output_tokens = profile
             .fitted_output_limit_with(
                 prompt,
-                generation.and_then(|generation| generation.max_output_tokens),
+                options.generation.and_then(|generation| generation.max_output_tokens),
             )
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let extensions =
+            ee_chat_completions::merged_extensions(profile.extensions.as_ref(), options.extensions);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             provider: Some(profile.label.as_str()),
@@ -88,11 +95,11 @@ impl MessagesCodec {
             tools,
             stream: false,
             max_output_tokens,
-            extensions: profile.extensions.as_ref(),
+            extensions: extensions.as_ref(),
             tool_control,
             cache: &profile.cache,
             prompt_tokens,
-            generation,
+            generation: options.generation,
         });
         let transport = &transport;
         let label = profile.label.as_str();
@@ -166,6 +173,8 @@ impl MessagesCodec {
                 options.generation.and_then(|generation| generation.max_output_tokens),
             )
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let extensions =
+            ee_chat_completions::merged_extensions(profile.extensions.as_ref(), options.extensions);
         let body = messages_body(&MessagesBody {
             model: &profile.model,
             provider: Some(profile.label.as_str()),
@@ -174,7 +183,7 @@ impl MessagesCodec {
             tools,
             stream: true,
             max_output_tokens,
-            extensions: profile.extensions.as_ref(),
+            extensions: extensions.as_ref(),
             tool_control,
             cache: &profile.cache,
             prompt_tokens,

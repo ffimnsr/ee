@@ -22,8 +22,8 @@ use ee_agent_acp_server::ProviderError;
 use ee_agent_orchestrator::ModelMessage;
 use ee_agent_orchestrator::{
     CompactionOutcome, ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse,
-    OrchestratorConfig, OrchestratorProviderConfig, RecoveryConfig, StreamSink, ToolCallControl,
-    ToolDefinition,
+    OrchestratorConfig, OrchestratorProviderConfig, ReasoningEffortControl, RecoveryConfig,
+    StreamSink, ToolCallControl, ToolDefinition,
 };
 use ee_agent_protocol::Implementation;
 use ee_chat_completions::{DeltaSink, EndpointTransport, StreamDelta, TokenSource, wait_cancelled};
@@ -151,8 +151,7 @@ impl DialectCodec for ResponsesCodec {
             tools,
             tool_control,
             prompt_tokens,
-            options.generation,
-            options.session,
+            options,
         ))
     }
 
@@ -222,8 +221,7 @@ impl DialectCodec for MessagesCodec {
             tools,
             tool_control,
             prompt_tokens,
-            options.generation,
-            options.session,
+            options,
         ))
     }
 
@@ -284,8 +282,7 @@ impl DialectCodec for ChatCompletionsCodec {
             tools,
             tool_control,
             prompt_tokens,
-            options.generation,
-            options.session,
+            options,
         ))
     }
 
@@ -377,6 +374,17 @@ impl OpenCodeModelAdapter {
     }
 }
 
+/// Lowers the runtime reasoning-effort selection onto one route's dialect.
+///
+/// The catalog row owns the valid variants, so an effort the route does not
+/// declare produces no overlay and the startup profile stays in effect.
+fn reasoning_extensions(route: OpenCodeRoute, request: &ModelRequest) -> Option<serde_json::Value> {
+    let effort = request.reasoning_effort.as_deref()?;
+    let variants = route.variants();
+    let variant = ee_agent_orchestrator::find_variant(&variants, effort)?;
+    crate::reasoning::variant_extensions(route.dialect, *variant)
+}
+
 impl ModelAdapter for OpenCodeModelAdapter {
     fn complete(
         &self,
@@ -385,6 +393,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
         let codec = self.codec.clone();
         let credential = self.check_credential();
+        let route = self.route;
         let model_id = self.route.model_id;
         let sampling = self.route.entry.sampling;
         let tool_choices = self.route.entry.capabilities.tool_choices;
@@ -405,6 +414,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 return Err(ModelError::Adapter(detail));
             }
             check_generation(model_id, sampling, &request)?;
+            let extensions = reasoning_extensions(route, &request);
             let completion = codec.complete_with_prompt(
                 &request.transcript,
                 &request.tools,
@@ -414,6 +424,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                     generation: request.generation.as_ref(),
                     session: request.session.as_ref(),
                     continuation: request.continuation.as_ref(),
+                    extensions: extensions.as_ref(),
                 },
             );
             tokio::select! {
@@ -431,6 +442,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
         let codec = self.codec.clone();
         let credential = self.check_credential();
+        let route = self.route;
         let model_id = self.route.model_id;
         let sampling = self.route.entry.sampling;
         let tool_choices = self.route.entry.capabilities.tool_choices;
@@ -451,6 +463,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                 return Err(ModelError::Adapter(detail));
             }
             check_generation(model_id, sampling, &request)?;
+            let extensions = reasoning_extensions(route, &request);
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => events.text(text).map_err(forward_error),
                 StreamDelta::Reasoning(text) => events.reasoning(text).map_err(forward_error),
@@ -478,6 +491,7 @@ impl ModelAdapter for OpenCodeModelAdapter {
                     generation: request.generation.as_ref(),
                     session: request.session.as_ref(),
                     continuation: request.continuation.as_ref(),
+                    extensions: extensions.as_ref(),
                 },
             );
             tokio::select! {
@@ -614,7 +628,17 @@ pub fn opencode_orchestrator_config(
         provider_config.orchestrator.session_log =
             ee_agent_orchestrator::SessionLogConfig::durable(root.join("session-log"));
     }
+    provider_config.reasoning_effort = reasoning_effort_control(config);
     provider_config
+}
+
+/// Catalog-derived effort choices for the configured route.
+fn reasoning_effort_control(config: &Config) -> Option<ReasoningEffortControl> {
+    let control = ReasoningEffortControl::new(
+        config.route.variants().iter().map(|variant| variant.id.to_string()).collect(),
+        config.reasoning_effort.map(|effort| effort.as_str().to_string()),
+    );
+    (!control.is_empty()).then_some(control)
 }
 
 /// Resolves the opt-in approval classifier.

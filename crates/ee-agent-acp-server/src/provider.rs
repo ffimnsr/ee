@@ -15,7 +15,8 @@ use std::pin::Pin;
 
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, Implementation, McpServer, Meta,
-    SessionConfigOption, SessionId, SessionModeId, SessionModeState,
+    SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionId, SessionModeId,
+    SessionModeState,
 };
 use tokio::sync::watch;
 
@@ -186,6 +187,37 @@ impl SetModelContext {
     }
 }
 
+/// Validated input for [`AgentProvider::set_config_option`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetConfigOptionContext {
+    /// Session whose configuration changes.
+    pub session_id: SessionId,
+    /// The advertised configuration option id.
+    pub config_id: SessionConfigId,
+    /// The new value, already shaped by the client's selection.
+    pub value: SessionConfigOptionValue,
+    /// Raw `_meta` from the request, if present.
+    pub metadata: Option<Meta>,
+}
+
+impl SetConfigOptionContext {
+    /// Creates a context with no metadata.
+    #[must_use]
+    pub fn new(
+        session_id: impl Into<SessionId>,
+        config_id: impl Into<SessionConfigId>,
+        value: impl Into<SessionConfigOptionValue>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            config_id: config_id.into(),
+            value: value.into(),
+            metadata: None,
+        }
+    }
+}
+
 /// Validated input for [`AgentProvider::login`] (v2 `auth/login`).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -344,6 +376,20 @@ pub trait AgentProvider: Send + Sync + 'static {
         Box::pin(async {
             Err(ProviderError::InvalidRequest(
                 "session/set_model is not supported by this provider".to_string(),
+            ))
+        })
+    }
+
+    /// Applies one advertised session configuration option and returns the
+    /// updated option list. Providers that advertise no options keep the
+    /// default rejection.
+    fn set_config_option(
+        &self,
+        _ctx: SetConfigOptionContext,
+    ) -> ProviderFuture<Result<Vec<SessionConfigOption>, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::InvalidRequest(
+                "session/set_config_option is not supported by this provider".to_string(),
             ))
         })
     }

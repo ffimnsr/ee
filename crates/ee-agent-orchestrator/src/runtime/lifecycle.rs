@@ -239,6 +239,7 @@ impl OrchestratorRuntime {
             until: Mutex::new(None),
             compaction_checkpoints: Mutex::new(HashMap::new()),
             selected_model: Mutex::new(None),
+            selected_reasoning_effort: Mutex::new(None),
             user_agents,
             active_user_agent: Mutex::new(None),
             user_commands,
@@ -258,6 +259,18 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn selected_model(&self) -> Option<String> {
         self.selected_model.lock().expect("selected model poisoned").clone()
+    }
+
+    /// Sets the runtime reasoning effort (`None` restores the provider default).
+    pub fn set_reasoning_effort(&self, reasoning_effort: Option<String>) {
+        *self.selected_reasoning_effort.lock().expect("selected effort poisoned") =
+            reasoning_effort;
+    }
+
+    /// The runtime reasoning effort, when one was selected.
+    #[must_use]
+    pub fn selected_reasoning_effort(&self) -> Option<String> {
+        self.selected_reasoning_effort.lock().expect("selected effort poisoned").clone()
     }
 
     /// Reloads user-defined agents from the workspace and personal config

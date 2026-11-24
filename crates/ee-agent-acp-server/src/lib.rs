@@ -188,7 +188,8 @@ pub use ids::{RequestIdGenerator, SessionIdGenerator};
 pub use inbox::{SteerInbox, SteerSendError, SteerSender};
 pub use provider::{
     AgentProvider, LoadSessionContext, LoginContext, NewSessionContext, PromptContext,
-    PromptResult, ProviderFuture, SessionInit, SetModeContext, SetModelContext,
+    PromptResult, ProviderFuture, SessionInit, SetConfigOptionContext, SetModeContext,
+    SetModelContext,
 };
 pub use server::AcpAgentServer;
 pub use session::{ServerSession, SessionStore, SessionStoreError};

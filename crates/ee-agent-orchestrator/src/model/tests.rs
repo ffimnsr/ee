@@ -47,6 +47,8 @@ fn sample_request() -> ModelRequest {
         response_format: None,
         allow_tool_list_updates: false,
         generation: None,
+        reasoning_effort: None,
+        provider_extensions: None,
         session: None,
         continuation: None,
     }

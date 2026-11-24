@@ -33,26 +33,29 @@ mod agent_command;
 mod auto_compact;
 mod bootstrap;
 mod command_template;
+mod reasoning_config;
 mod session_identity;
 mod session_transfer_command;
 
+pub use reasoning_config::ReasoningEffortControl;
+
 use ee_agent_acp_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
-    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, SetModelContext,
-    UpdateSink,
+    PromptResult, ProviderError, ProviderFuture, SessionInit, SetConfigOptionContext,
+    SetModeContext, SetModelContext, UpdateSink,
 };
 use ee_agent_protocol::{
     ADOPT_COMMAND_NAME, AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock,
     ContentChunk, DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, EXPORT_SESSION_COMMAND_NAME,
     FINAL_RESPONSE_MESSAGE_ID_PREFIX, HARNESS_COMMAND_NAME, IMPORT_SESSION_COMMAND_NAME,
     Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME, REFLECT_COMMAND_NAME,
-    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionId, SessionMode, SessionModeId,
-    SessionModeState, SessionUpdate, StopReason, TextContent, adopt_available_command,
-    branch_available_command, compact_available_command, diff_available_command,
-    discard_available_command, export_session_available_command, harness_available_command,
-    import_session_available_command, is_resume_command, parse_slash_command,
-    primary_agent_available_command, reflect_available_command, resume_available_command,
-    revert_available_command, rubber_duck_available_command,
+    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionConfigOption, SessionId, SessionMode,
+    SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
+    adopt_available_command, branch_available_command, compact_available_command,
+    diff_available_command, discard_available_command, export_session_available_command,
+    harness_available_command, import_session_available_command, is_resume_command,
+    parse_slash_command, primary_agent_available_command, reflect_available_command,
+    resume_available_command, revert_available_command, rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -122,6 +125,10 @@ pub struct OrchestratorProviderConfig {
     pub telemetry: TelemetryConfig,
     /// Opaque version labels attached to locally retained telemetry records.
     pub telemetry_attribution: TelemetryAttribution,
+    /// Provider-declared reasoning-effort choices advertised as an ACP
+    /// `effort` session config option. `None` advertises nothing, so agents
+    /// without a reasoning field never show a dead selector.
+    pub reasoning_effort: Option<ReasoningEffortControl>,
     /// Network client for configured remote instruction URLs.
     ///
     /// The orchestrator holds no HTTP client; a provider binary injects one.
@@ -145,6 +152,7 @@ impl Default for OrchestratorProviderConfig {
             validation_workspace: WorkspaceValidationConfig::default(),
             telemetry: TelemetryConfig::default(),
             telemetry_attribution: default_telemetry_attribution(),
+            reasoning_effort: None,
             remote_instruction_fetcher: None,
         }
     }
@@ -547,6 +555,9 @@ struct PersistedSession {
     /// Selected user-defined primary agent, when one was active.
     #[serde(default)]
     agent: Option<String>,
+    /// Runtime reasoning-effort override, when the client selected one.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 /// ACP provider adapter around [`OrchestratorRuntime`].

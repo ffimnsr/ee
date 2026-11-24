@@ -632,7 +632,14 @@ impl ResponsesCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens, None, None).await
+        self.complete_controlled(
+            transcript,
+            tools,
+            &control,
+            prompt_tokens,
+            crate::CallOptions::default(),
+        )
+        .await
     }
 
     /// Performs one buffered round trip with tool-call control and sampling
@@ -643,10 +650,9 @@ impl ResponsesCodec {
         tools: &[ToolDefinition],
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&GenerationOptions>,
-        session: Option<&SessionContext>,
+        options: crate::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let transport = self.transport.with_session(session)?;
+        let transport = self.transport.with_session(options.session)?;
         let profile = transport.profile();
         let transcript = guarded_transcript(profile, transcript);
         let prompt = prompt_tokens.unwrap_or_else(|| {
@@ -654,8 +660,9 @@ impl ResponsesCodec {
         });
         let max_output_tokens = profile.fitted_output_limit_with(
             prompt,
-            generation.and_then(|generation| generation.max_output_tokens),
+            options.generation.and_then(|generation| generation.max_output_tokens),
         );
+        let extensions = crate::merged_extensions(profile.extensions.as_ref(), options.extensions);
         let body = responses_body(&ResponsesBody {
             model: &profile.model,
             provider: Some(profile.label.as_str()),
@@ -664,11 +671,11 @@ impl ResponsesCodec {
             tools,
             stream: false,
             max_output_tokens,
-            extensions: profile.extensions.as_ref(),
-            generation,
+            extensions: extensions.as_ref(),
+            generation: options.generation,
             tool_control,
             cache: &profile.cache,
-            session,
+            session: options.session,
             previous_response_id: None,
             input_from: 0,
         });
@@ -743,6 +750,7 @@ impl ResponsesCodec {
             prompt,
             options.generation.and_then(|generation| generation.max_output_tokens),
         );
+        let extensions = crate::merged_extensions(profile.extensions.as_ref(), options.extensions);
         // Continuation is a capability: a route that does not store responses
         // never receives a previous response id.
         let (previous_response_id, input_from) = options
@@ -760,7 +768,7 @@ impl ResponsesCodec {
             tools,
             stream: true,
             max_output_tokens,
-            extensions: profile.extensions.as_ref(),
+            extensions: extensions.as_ref(),
             generation: options.generation,
             tool_control,
             cache: &profile.cache,

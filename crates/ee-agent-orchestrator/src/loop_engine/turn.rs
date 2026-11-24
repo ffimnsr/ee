@@ -225,6 +225,7 @@ impl LoopEngine {
                     .with_model_id(self.options.model_id.clone())
                     .with_prompt_tokens(measured_prompt_tokens)
                     .with_response_format(self.options.response_format.clone())
+                    .with_reasoning_effort(self.options.reasoning_effort.clone())
                     .with_session(Some(session.clone()))
                     .with_continuation(continuation.clone());
             // A continuation only carries valid indexes when projection did not
@@ -305,6 +306,7 @@ impl LoopEngine {
                         .with_model_id(self.options.model_id.clone())
                         .with_prompt_tokens(None)
                         .with_response_format(self.options.response_format.clone())
+                        .with_reasoning_effort(self.options.reasoning_effort.clone())
                         .with_session(Some(session.clone()))
                         .with_continuation(None);
                         crate::structured_output::prepare(&mut request)

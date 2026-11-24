@@ -5,6 +5,47 @@ use super::conversation::record_user_message;
 use super::*;
 use ee_agent_acp_server::server::OutboundEvent;
 
+#[tokio::test]
+async fn reasoning_effort_config_option_round_trips_through_the_provider() {
+    let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+    let config = OrchestratorProviderConfig {
+        reasoning_effort: Some(ReasoningEffortControl::new(
+            vec![String::from("low"), String::from("high")],
+            None,
+        )),
+        ..OrchestratorProviderConfig::default()
+    };
+    let provider = OrchestratorProvider::with_policy(config, model, PolicyEngine::default());
+
+    let init = provider.new_session(NewSessionContext::new("/work")).await.expect("session starts");
+    let advertised = init.config_options.expect("effort is advertised");
+    assert_eq!(advertised.len(), 1);
+    assert_eq!(advertised[0].id.0.as_ref(), "effort");
+
+    let updated = provider
+        .set_config_option(SetConfigOptionContext::new(
+            init.session_id.clone(),
+            "effort",
+            ee_agent_protocol::SessionConfigOptionValue::value_id("high"),
+        ))
+        .await
+        .expect("declared effort applies");
+    let ee_agent_protocol::SessionConfigKind::Select(select) = &updated[0].kind else {
+        panic!("effort stays a select option");
+    };
+    assert_eq!(select.current_value.0.as_ref(), "high");
+
+    let error = provider
+        .set_config_option(SetConfigOptionContext::new(
+            init.session_id.clone(),
+            "effort",
+            ee_agent_protocol::SessionConfigOptionValue::value_id("ultra"),
+        ))
+        .await
+        .expect_err("undeclared effort is rejected");
+    assert!(error.to_string().contains("unsupported reasoning effort"), "{error}");
+}
+
 #[test]
 fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
     let commands = initial_commands(false);

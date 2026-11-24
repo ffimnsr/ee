@@ -592,7 +592,7 @@ fn setup_manifest_offers_surface_scoped_model_selections() {
 #[test]
 fn remote_choices_return_only_the_selected_surface() {
     for surface in [OpenCodeSurface::Zen, OpenCodeSurface::Go] {
-        let model = remote_choices(surface, "model").expect("model accepts remote choices");
+        let model = remote_choices(surface, "model", None).expect("model accepts remote choices");
         let catalog = routes::chat_model_ids(surface);
 
         assert!(model.len() >= catalog.len(), "the full routable catalog is returned");
@@ -620,12 +620,12 @@ fn remote_choices_return_only_the_selected_surface() {
             surface.as_str()
         );
         assert_eq!(
-            remote_choices(surface, "critic_model").map(|choices| choices.len()),
+            remote_choices(surface, "critic_model", None).map(|choices| choices.len()),
             Some(model.len()),
             "the critic reuses the same catalog"
         );
-        assert!(remote_choices(surface, "approval_classifier_model").is_none());
-        assert!(remote_choices(surface, "surface").is_none());
+        assert!(remote_choices(surface, "approval_classifier_model", None).is_none());
+        assert!(remote_choices(surface, "surface", None).is_none());
     }
 }
 
@@ -660,6 +660,49 @@ fn setup_manifest_exposes_the_critic_mode_and_effort_knobs() {
     let effort =
         manifest.inputs.iter().find(|input| input.key == "reasoning_effort").expect("effort");
     assert!(effort.default.is_none(), "no effort is sent unless it is configured explicitly");
+    assert!(effort.choices.is_empty(), "effort choices follow the selected model");
+    assert!(effort.remote_choices, "the host fetches choices for the selected model");
+}
+
+#[test]
+fn reasoning_effort_choices_follow_the_selected_model() {
+    let surface = OpenCodeSurface::Zen;
+    let reasoning_model = routes::chat_model_ids(surface)
+        .into_iter()
+        .find(|model_id| {
+            routes::resolve_route(surface, model_id).is_ok_and(|route| route.variants().len() > 1)
+        })
+        .expect("a reasoning model is in the zen catalog");
+    let choices = remote_choices(surface, "reasoning_effort", Some(reasoning_model))
+        .expect("effort accepts remote choices");
+    let route = routes::resolve_route(surface, reasoning_model).expect("route resolves");
+    let variants = route.variants();
+    assert_eq!(
+        choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        variants.iter().map(|variant| variant.id).collect::<Vec<_>>(),
+        "the setup list equals the catalog variants"
+    );
+    assert!(!choices.is_empty(), "{reasoning_model} declares at least one selectable variant");
+
+    let variant_suffixed = format!("{reasoning_model}#{}", variants[0].id);
+    assert_eq!(
+        remote_choices(surface, "reasoning_effort", Some(&variant_suffixed))
+            .expect("a variant suffix still resolves")
+            .len(),
+        choices.len(),
+        "the suffix selects a variant but does not change the list"
+    );
+
+    assert!(
+        remote_choices(surface, "reasoning_effort", None).expect("missing model").is_empty(),
+        "without a model there is nothing to scope to"
+    );
+    assert!(
+        remote_choices(surface, "reasoning_effort", Some("not-a-model"))
+            .expect("unknown model")
+            .is_empty(),
+        "unknown models offer no effort list"
+    );
 }
 
 #[test]

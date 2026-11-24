@@ -279,6 +279,30 @@ async fn structured_output_uses_the_hidden_forced_tool() {
 }
 
 #[tokio::test]
+async fn runtime_reasoning_effort_is_stamped_on_model_requests() {
+    let model = FakeModel::new(vec![ModelResponse::new().text("final answer").completed()]);
+    let (sink, client, _rx) = plumbing();
+    let events = EventRecorder::new();
+    let engine = engine_with_options(
+        OrchestratorConfig::default(),
+        Arc::new(model.clone()),
+        echo_tool(),
+        events,
+        LoopOptions { reasoning_effort: Some(String::from("high")), ..LoopOptions::default() },
+    );
+
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    engine
+        .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+        .await
+        .expect("turn succeeds");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].reasoning_effort.as_deref(), Some("high"));
+}
+
+#[tokio::test]
 async fn one_model_response_turn_emits_assistant_update_and_stops() {
     let model = FakeModel::new(vec![
         ModelResponse::new().reasoning("thinking").text("final answer").completed(),

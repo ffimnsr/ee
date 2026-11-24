@@ -34,6 +34,8 @@ pub struct ChatRequest {
     pub prompt_tokens: Option<u64>,
     /// Session affinity headers for this round trip; `None` emits none.
     pub session: Option<ee_agent_orchestrator::SessionContext>,
+    /// Provider-specific body extensions merged over the profile extensions.
+    pub extensions: Option<Value>,
 }
 
 /// One Chat Completions endpoint: profile, bearer-token source, HTTP client.
@@ -101,6 +103,10 @@ impl ChatCompletionsClient {
             .generation
             .clone()
             .map_or(profile.generation.clone(), |request| request.merged_over(&profile.generation));
+        let extensions = crate::profile::merged_extensions(
+            profile.extensions.as_ref(),
+            request.extensions.as_ref(),
+        );
         let mut body = request_body(
             &profile.model,
             &request.messages,
@@ -112,7 +118,7 @@ impl ChatCompletionsClient {
                 max_tokens_field: profile.max_tokens_field,
                 tool_control: Some(&request.tool_control),
                 generation: (!generation.is_empty()).then_some(&generation),
-                extensions: profile.extensions.as_ref(),
+                extensions: extensions.as_ref(),
             },
         );
         if let Some(Value::Object(ttl)) = crate::cache_policy::openai_request_ttl(&profile.cache)
@@ -161,6 +167,7 @@ impl ChatCompletionsClient {
             generation: None,
             prompt_tokens,
             session: None,
+            extensions: None,
         })
         .await
     }
@@ -219,6 +226,7 @@ impl ChatCompletionsClient {
             generation: None,
             prompt_tokens,
             session: None,
+            extensions: None,
         })
         .await
     }
@@ -273,6 +281,7 @@ impl ChatCompletionsClient {
                 generation: None,
                 prompt_tokens,
                 session: None,
+                extensions: None,
             },
             sink,
         )
@@ -333,6 +342,7 @@ impl ChatCompletionsClient {
                 generation: None,
                 prompt_tokens,
                 session: None,
+                extensions: None,
             },
             sink,
         )

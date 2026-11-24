@@ -247,6 +247,33 @@ pub struct CallOptions<'a> {
     pub session: Option<&'a ee_agent_orchestrator::SessionContext>,
     /// Provider-side continuation anchor for stateful Responses routes.
     pub continuation: Option<&'a ee_agent_orchestrator::Continuation>,
+    /// Provider-specific body extensions merged over the profile extensions.
+    /// `None` sends the profile extensions unchanged.
+    pub extensions: Option<&'a serde_json::Value>,
+}
+
+/// Merges a provider-specific overlay over the profile body extensions.
+///
+/// Later keys win, so a runtime-selected reasoning effort replaces the
+/// startup value while unrelated provider fields survive.
+#[must_use]
+pub fn merged_extensions(
+    profile: Option<&serde_json::Value>,
+    overlay: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (profile, overlay) {
+        (None, None) => None,
+        (Some(extensions), None) => Some(extensions.clone()),
+        (None, Some(overlay)) => Some(overlay.clone()),
+        (Some(extensions), Some(overlay)) => {
+            let mut merged = extensions.clone();
+            if !merged.is_object() {
+                merged = serde_json::Value::Object(serde_json::Map::new());
+            }
+            crate::deep_merge(&mut merged, overlay);
+            Some(merged)
+        }
+    }
 }
 
 /// `tool_choice` values a route honours (`auto`, `none`, `required`, `tool`).
@@ -735,6 +762,23 @@ mod tests {
     #[test]
     fn retry_policy_none_disables_retries() {
         assert_eq!(RetryPolicy::none().max_attempts, 0);
+    }
+
+    #[test]
+    fn profile_extension_overlay_merges_instead_of_replacing() {
+        let profile = serde_json::json!({
+            "reasoning": { "effort": "low", "summary": "concise" },
+            "service_tier": "priority"
+        });
+        let overlay = serde_json::json!({ "reasoning": { "effort": "high" } });
+
+        let merged = merged_extensions(Some(&profile), Some(&overlay)).expect("merged");
+        assert_eq!(merged["reasoning"]["effort"], "high");
+        assert_eq!(merged["reasoning"]["summary"], "concise");
+        assert_eq!(merged["service_tier"], "priority");
+        assert_eq!(merged_extensions(Some(&profile), None), Some(profile));
+        assert_eq!(merged_extensions(None, Some(&overlay)), Some(overlay));
+        assert_eq!(merged_extensions(None, None), None);
     }
 
     #[test]

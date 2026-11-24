@@ -191,6 +191,55 @@ fn sample_request() -> ModelRequest {
 }
 
 #[test]
+fn runtime_effort_overlays_the_profile_reasoning_object() {
+    let adapter = OpenRouterModelAdapter::new(test_config()).expect("adapter builds");
+    let mut request = sample_request();
+    request.reasoning_effort = Some(String::from("high"));
+    let request = adapter.with_reasoning_overlay(request);
+    assert_eq!(
+        request.provider_extensions,
+        Some(json!({ "reasoning": { "effort": "high", "enabled": null, "max_tokens": null } }))
+    );
+    let profile = json!({ "reasoning": { "max_tokens": 4096, "summary": "concise" } });
+    let merged = ee_chat_completions::merged_extensions(
+        Some(&profile),
+        request.provider_extensions.as_ref(),
+    )
+    .expect("the overlay merges over the startup profile");
+    assert_eq!(
+        merged["reasoning"],
+        json!({ "effort": "high", "summary": "concise" }),
+        "a selected effort replaces a startup budget and keeps unrelated keys"
+    );
+
+    let mut request = sample_request();
+    request.reasoning_effort = Some(String::from("none"));
+    let request = adapter.with_reasoning_overlay(request);
+    assert_eq!(
+        request.provider_extensions,
+        Some(json!({ "reasoning": { "enabled": false, "effort": null, "max_tokens": null } }))
+    );
+
+    let mut request = sample_request();
+    request.reasoning_effort = Some(String::from("ultra"));
+    let request = adapter.with_reasoning_overlay(request);
+    assert!(
+        request.provider_extensions.is_none(),
+        "an undeclared effort keeps the startup profile only"
+    );
+}
+
+#[test]
+fn orchestrator_config_advertises_catalog_effort_choices() {
+    let mut config = test_config();
+    config.model = String::from("anthropic/claude-haiku-5.5");
+    let provider = openrouter_orchestrator_config(&config, PathBuf::from("/tmp/ee-effort-test"));
+    let control = provider.reasoning_effort.expect("catalog efforts are advertised");
+    assert!(control.accepts("high"), "the catalog declares high");
+    assert!(!control.accepts("ultra"), "undeclared levels are not offered");
+}
+
+#[test]
 fn request_body_carries_profile_system_prompt_tools_and_reasoning() {
     let mut config = test_config();
     config.reasoning_effort = Some(String::from("medium"));

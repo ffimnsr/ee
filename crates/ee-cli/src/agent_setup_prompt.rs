@@ -11,14 +11,16 @@ use ee_agent_protocol::setup::{SetupChoice, SetupInput, SetupManifest};
 
 use crate::secrets;
 use crate::setup_prompt::{
-    confirm, prompt_searchable_selection, prompt_selection, prompt_value, read_hidden_value,
+    confirm, prompt_fuzzy_pick, prompt_searchable_selection, prompt_selection, prompt_value,
+    read_hidden_value,
 };
 
 /// Collects every environment value the manifest declares.
 ///
-/// `fetch_remote` is called only for inputs that set [`SetupInput::remote_choices`]
-/// and only when the host can offer a searchable picker; it receives the values
-/// collected so far as environment for the agent process.
+/// `fetch_remote` is called for inputs that set [`SetupInput::remote_choices`]:
+/// directly when the manifest carries no static choices (the list depends on an
+/// earlier selection) and through the searchable picker otherwise. It receives
+/// the values collected so far as environment for the agent process.
 pub(crate) fn collect_setup_values(
     manifest: &SetupManifest,
     fetch_remote: impl Fn(&str, &BTreeMap<String, String>) -> Result<Vec<SetupChoice>, String>,
@@ -155,6 +157,38 @@ fn prompt_manifest_input(
             },
         );
     }
+    // A model-scoped input (for example reasoning effort) has no static list:
+    // the choices depend on a value collected earlier, so fetch them directly
+    // and fall back to free-form when the selected model advertises none.
+    if input.remote_choices {
+        let collected = env_values.clone();
+        match fetch_remote(&input.key, &collected) {
+            Ok(all) if !all.is_empty() => {
+                let all = all
+                    .into_iter()
+                    .map(|choice| (choice.value.clone(), choice.display().to_owned()))
+                    .collect::<Vec<_>>();
+                if let Some(value) = prompt_fuzzy_pick(&input.label, &all)? {
+                    return Ok(Some(value));
+                }
+                return prompt_selection(
+                    &input.label,
+                    &all,
+                    input.default.as_deref(),
+                    input.required,
+                );
+            }
+            Ok(_) if !input.required => {
+                println!(
+                    "{}: no catalog-declared values for the current selection; keeping the provider default.",
+                    input.label
+                );
+                return Ok(None);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("warning: cannot fetch the full {} list: {error}", input.label),
+        }
+    }
     if choices.is_empty() {
         return prompt_value(&input.label, input.default.as_deref(), input.required);
     }
@@ -256,5 +290,28 @@ mod tests {
             applicable_choices(&input, &BTreeMap::new()),
             vec![(String::from("gpt-5.5"), String::from("gpt-5.5 (go)"))]
         );
+    }
+
+    #[test]
+    fn optional_remote_input_without_catalog_values_keeps_the_default() {
+        let input = SetupInput {
+            key: String::from("reasoning_effort"),
+            label: String::from("Reasoning effort"),
+            default: None,
+            required: false,
+            section: Some(String::from("Agent behavior")),
+            choices: Vec::new(),
+            remote_choices: true,
+            advanced: false,
+            config: SetupInputConfig { env: String::from("OPENCODE_REASONING_EFFORT") },
+        };
+
+        let selected =
+            prompt_manifest_input(&input, &BTreeMap::new(), &BTreeMap::new(), &|_, _| {
+                Ok(Vec::new())
+            })
+            .expect("no prompt runs when the catalog has no values");
+
+        assert_eq!(selected, None, "an empty catalog keeps the provider default");
     }
 }

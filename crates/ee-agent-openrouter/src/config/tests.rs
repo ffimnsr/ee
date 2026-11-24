@@ -216,7 +216,7 @@ fn setup_manifest_advertises_required_values_and_defaults() {
     assert_eq!(manifest.inputs[0].key, "model");
     assert_eq!(manifest.inputs[0].default.as_deref(), Some(DEFAULT_MODEL));
     assert_eq!(manifest.inputs[0].config.env, "OPENROUTER_MODEL");
-    assert_eq!(manifest.inputs.len(), 13);
+    assert_eq!(manifest.inputs.len(), 14);
     assert_eq!(manifest.inputs[1].key, "model_family");
     assert_eq!(manifest.inputs[1].config.env, "OPENROUTER_MODEL_FAMILY");
     assert_eq!(manifest.inputs[2].key, "rubber_duck_model");
@@ -248,11 +248,15 @@ fn setup_manifest_advertises_required_values_and_defaults() {
         "the built-in critic is named separately from EE's rubber-duck critic: {}",
         manifest.inputs[6].label
     );
-    assert_eq!(manifest.inputs[11].key, "max_iterations");
-    assert_eq!(manifest.inputs[11].default, None);
-    assert_eq!(manifest.inputs[11].config.env, "OPENROUTER_MAX_ITERATIONS");
-    assert_eq!(manifest.inputs[12].key, "session_log_dir");
-    assert_eq!(manifest.inputs[12].config.env, "EE_SESSION_LOG_DIR");
+    assert_eq!(manifest.inputs[7].key, "reasoning_effort");
+    assert_eq!(manifest.inputs[7].config.env, "OPENROUTER_REASONING_EFFORT");
+    assert!(manifest.inputs[7].remote_choices, "effort choices follow the selected model");
+    assert!(manifest.inputs[7].choices.is_empty(), "no static effort list is offered");
+    assert_eq!(manifest.inputs[12].key, "max_iterations");
+    assert_eq!(manifest.inputs[12].default, None);
+    assert_eq!(manifest.inputs[12].config.env, "OPENROUTER_MAX_ITERATIONS");
+    assert_eq!(manifest.inputs[13].key, "session_log_dir");
+    assert_eq!(manifest.inputs[13].config.env, "EE_SESSION_LOG_DIR");
 }
 
 #[test]
@@ -289,7 +293,7 @@ fn remote_choices_return_the_active_chat_catalog_for_model_inputs() {
         .collect::<Vec<_>>();
 
     for key in ["model", "rubber_duck_model"] {
-        let choices = remote_choices(key).expect("model inputs accept remote choices");
+        let choices = remote_choices(key, None).expect("model inputs accept remote choices");
         assert_eq!(choices.len(), catalog.len(), "{key} returns every active chat id exactly once");
         assert_eq!(
             choices
@@ -311,8 +315,79 @@ fn remote_choices_return_the_active_chat_catalog_for_model_inputs() {
             encoded.len()
         );
     }
-    assert!(remote_choices("model_family").is_none());
-    assert!(remote_choices("surface").is_none());
+    assert!(remote_choices("model_family", None).is_none());
+    assert!(remote_choices("surface", None).is_none());
+}
+
+#[test]
+fn reasoning_effort_choices_follow_the_selected_model() {
+    let with_levels = crate::catalog::chat_model_ids()
+        .into_iter()
+        .find(|model_id| {
+            crate::catalog::find(model_id).is_some_and(|entry| !entry.reasoning.efforts.is_empty())
+        })
+        .expect("the catalog declares at least one model with effort levels");
+    let entry = crate::catalog::find(with_levels).expect("catalog row");
+    let expected = entry
+        .variants(ee_agent_orchestrator::ReasoningProtocol::OpenAiChat)
+        .into_iter()
+        .map(|variant| variant.id)
+        .collect::<Vec<_>>();
+    let choices = remote_choices("reasoning_effort", Some(with_levels))
+        .expect("effort accepts remote choices");
+    assert_eq!(
+        choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        expected,
+        "the setup list equals the runtime variants"
+    );
+
+    let variant_suffixed = format!("{with_levels}#{}", expected[0]);
+    assert_eq!(
+        remote_choices("reasoning_effort", Some(&variant_suffixed))
+            .expect("a variant suffix still resolves")
+            .len(),
+        choices.len(),
+        "the suffix selects a level but does not change the list"
+    );
+
+    let toggle_only = crate::catalog::chat_model_ids()
+        .into_iter()
+        .find(|model_id| {
+            crate::catalog::find(model_id).is_some_and(|entry| {
+                entry.reasoning.supported
+                    && entry.reasoning.toggle
+                    && entry.reasoning.efforts.is_empty()
+            })
+        })
+        .expect("the catalog declares at least one toggle-only model");
+    let choices = remote_choices("reasoning_effort", Some(toggle_only))
+        .expect("toggle-only models accept remote choices");
+    assert_eq!(
+        choices.first().map(|choice| choice.value.as_str()),
+        Some("none"),
+        "a toggle-only model starts with the documented off value"
+    );
+    assert!(choices.len() > 1, "the protocol defaults remain selectable when the row omits levels");
+
+    let unsupported = crate::catalog::chat_model_ids().into_iter().find(|model_id| {
+        crate::catalog::find(model_id).is_some_and(|entry| !entry.reasoning.supported)
+    });
+    if let Some(unsupported) = unsupported {
+        assert!(
+            remote_choices("reasoning_effort", Some(unsupported))
+                .expect("non-reasoning models are still queryable")
+                .is_empty(),
+            "a model without reasoning support offers nothing"
+        );
+    }
+    assert!(
+        remote_choices("reasoning_effort", None).expect("missing model").is_empty(),
+        "without a model there is nothing to scope to"
+    );
+    assert!(
+        remote_choices("reasoning_effort", Some("not/a-model")).expect("unknown model").is_empty(),
+        "unknown models offer no effort list"
+    );
 }
 
 #[test]

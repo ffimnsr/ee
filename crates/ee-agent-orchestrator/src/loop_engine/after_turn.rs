@@ -53,6 +53,7 @@ impl LoopEngine {
         let request = ModelRequest::new(prepared.messages, tools, budget_snapshot, task.clone())
             .with_available_models(self.options.available_models.clone())
             .with_model_id(self.options.model_id.clone())
+            .with_reasoning_effort(self.options.reasoning_effort.clone())
             .with_session(Some(session.clone()))
             .with_tool_control(crate::model_options::ToolCallControl {
                 choice: crate::model_options::ToolChoice::None,

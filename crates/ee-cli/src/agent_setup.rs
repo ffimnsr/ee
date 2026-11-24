@@ -384,7 +384,8 @@ fn read_manifest(path: &Path) -> Result<SetupManifest, String> {
 
 /// Reads the complete choice list for one remotely fetched input, passing the
 /// values collected so far so the agent scopes the catalog (for example by
-/// surface). Called only while an interactive searchable picker is offered.
+/// surface or the selected model). Called for curated model lists and for
+/// inputs whose choices depend entirely on an earlier selection.
 pub(crate) fn read_choices(
     path: &Path,
     key: &str,

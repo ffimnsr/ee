@@ -129,7 +129,7 @@ pub fn variant_extensions(dialect: OpenCodeDialect, variant: ReasoningVariant) -
             OpenCodeDialect::OpenAiResponses => Some(json!({ "reasoning": { "effort": "none" } })),
             OpenCodeDialect::OpenAiChatCompletions => Some(json!({ "reasoning_effort": "none" })),
             OpenCodeDialect::AnthropicMessages => {
-                Some(json!({ "thinking": { "type": "disabled" } }))
+                Some(json!({ "thinking": { "type": "disabled", "budget_tokens": null } }))
             }
         };
     }

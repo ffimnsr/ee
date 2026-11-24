@@ -278,6 +278,10 @@ pub struct OrchestratorRuntime {
     /// Explicit model registry id for this session (mid-session switch).
     /// `None` uses the registry's `DEFAULT_MODEL_ID` adapter.
     selected_model: Mutex<Option<String>>,
+    /// Runtime-selected reasoning effort. `None` keeps the provider profile's
+    /// startup configuration; adapters that document an effort field lower it
+    /// per request.
+    selected_reasoning_effort: Mutex<Option<String>>,
     /// User-defined agent definitions shared with the subagent manager.
     /// Reloaded from the workspace and personal config roots per prompt.
     user_agents: Arc<RwLock<UserAgentRegistry>>,

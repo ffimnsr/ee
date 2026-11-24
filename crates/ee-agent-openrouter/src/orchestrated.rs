@@ -24,12 +24,14 @@ use std::sync::Arc;
 use ee_agent_orchestrator::{
     DEFAULT_MODEL_ID, ModelAdapter, ModelCapability, ModelError, ModelFamily, ModelFuture,
     ModelIdentity, ModelRegistration, ModelRequest, ModelResponse, ModelTier, OrchestratorConfig,
-    OrchestratorProvider, OrchestratorProviderConfig, RUBBER_DUCK_ROLE, StreamSink,
+    OrchestratorProvider, OrchestratorProviderConfig, RUBBER_DUCK_ROLE, ReasoningEffortControl,
+    ReasoningProtocol, StreamSink,
 };
 use ee_agent_protocol::Implementation;
 #[cfg(any(test, feature = "test-utils"))]
 use ee_chat_completions::CompletionClient;
 use ee_chat_completions::{ChatCompletionsAdapter, ResponsesAdapter};
+use serde_json::json;
 use tokio::sync::watch;
 
 use crate::config::{Config, OpenRouterApiKind};
@@ -93,7 +95,22 @@ pub fn openrouter_orchestrator_config(
         provider_config.orchestrator.session_log =
             ee_agent_orchestrator::SessionLogConfig::durable(root.join("session-log"));
     }
+    provider_config.reasoning_effort = reasoning_effort_control(config);
     provider_config
+}
+
+/// Catalog-derived effort choices for the configured route and dialect.
+fn reasoning_effort_control(config: &Config) -> Option<ReasoningEffortControl> {
+    let entry = config.catalog_entry()?;
+    let protocol = match config.api_kind {
+        OpenRouterApiKind::Chat => ReasoningProtocol::OpenAiChat,
+        OpenRouterApiKind::Responses => ReasoningProtocol::OpenAiResponses,
+    };
+    let control = ReasoningEffortControl::new(
+        entry.variants(protocol).iter().map(|variant| variant.id.to_string()).collect(),
+        config.reasoning_effort.clone(),
+    );
+    (!control.is_empty()).then_some(control)
 }
 
 /// Resolves the opt-in worktree isolation policy for a session state root.
@@ -377,12 +394,55 @@ impl OpenRouterModelAdapter {
     }
 }
 
+impl OpenRouterModelAdapter {
+    /// Applies a runtime reasoning-effort selection over the startup profile.
+    ///
+    /// OpenRouter documents one `reasoning` object for both dialects, and a
+    /// catalog-declared level wins over whatever the profile configured. An
+    /// unknown or blank value keeps the profile unchanged.
+    fn with_reasoning_overlay(&self, mut request: ModelRequest) -> ModelRequest {
+        let Some(effort) = request
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| crate::options::REASONING_EFFORTS.contains(effort))
+        else {
+            return request;
+        };
+        let reasoning = if effort == "none" {
+            json!({ "enabled": false, "effort": null, "max_tokens": null })
+        } else {
+            json!({ "effort": effort, "enabled": null, "max_tokens": null })
+        };
+        let mut extensions = request.provider_extensions.take().unwrap_or_else(|| json!({}));
+        if !extensions.is_object() {
+            extensions = json!({});
+        }
+        // The runtime selection replaces the startup shape, not just one key:
+        // a budget from `model#max` must not ride along with a new effort.
+        if let Some(reasoning) =
+            extensions.get_mut("reasoning").and_then(|value| value.as_object_mut())
+        {
+            reasoning.remove("max_tokens");
+            if effort == "none" {
+                reasoning.remove("effort");
+            } else {
+                reasoning.remove("enabled");
+            }
+        }
+        crate::route_plan::merge_reasoning(&mut extensions, reasoning);
+        request.provider_extensions = Some(extensions);
+        request
+    }
+}
+
 impl ModelAdapter for OpenRouterModelAdapter {
     fn complete(
         &self,
         request: ModelRequest,
         cancel: watch::Receiver<bool>,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let request = self.with_reasoning_overlay(request);
         match self {
             Self::Chat(adapter) => adapter.complete(request, cancel),
             Self::Responses(adapter) => adapter.complete(request, cancel),
@@ -395,6 +455,7 @@ impl ModelAdapter for OpenRouterModelAdapter {
         cancel: watch::Receiver<bool>,
         events: StreamSink,
     ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let request = self.with_reasoning_overlay(request);
         match self {
             Self::Chat(adapter) => adapter.complete_streaming(request, cancel, events),
             Self::Responses(adapter) => adapter.complete_streaming(request, cancel, events),

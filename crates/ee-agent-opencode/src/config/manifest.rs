@@ -9,6 +9,8 @@
 //! so the host can show only the ids valid for the surface the user just picked,
 //! and they stay curated: the complete catalog is fetched on demand through
 //! `--ee-config-choices` (see [`remote_choices`]) so the manifest stays small.
+//! Reasoning effort has no static list at all: its values are the selected
+//! model's declared variants, fetched the same way after `OPENCODE_MODEL` exists.
 
 use ee_agent_protocol::setup::{SetupChoice, SetupChoiceWhen};
 
@@ -65,7 +67,7 @@ const GO_CURATED_MODELS: [&str; 12] = [
 ];
 
 /// Keys that accept a full remotely fetched catalog.
-const REMOTE_CHOICE_KEYS: [&str; 2] = ["model", "critic_model"];
+const REMOTE_CHOICE_KEYS: [&str; 3] = ["model", "critic_model", "reasoning_effort"];
 
 /// Builds the setup manifest emitted by `ee-agent-opencode --ee-config`.
 ///
@@ -129,16 +131,18 @@ pub fn setup_manifest() -> SetupManifest {
         choice("automatic", "automatic: run on risky turns"),
     ];
 
+    // Effort levels are per model: the host fetches the selected model's
+    // catalog variants through `remote_choices` once `OPENCODE_MODEL` is set.
+    // A static list would offer values the chosen model cannot express.
     let mut reasoning_effort = input(
         "reasoning_effort",
-        "Reasoning effort (blank sends the dialect default)",
+        "Reasoning effort (blank sends the model default; choices follow the selected model)",
         None,
         false,
         BEHAVIOR_SECTION,
         REASONING_EFFORT_ENV,
     );
-    reasoning_effort.choices =
-        vec![choice("low", "low"), choice("medium", "medium"), choice("high", "high")];
+    reasoning_effort.remote_choices = true;
 
     SetupManifest {
         schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
@@ -297,14 +301,46 @@ fn model_choices() -> Vec<SetupChoice> {
     choices
 }
 
-/// Returns the complete routable catalog for a remotely fetched input key, or
-/// `None` when the key does not accept remote choices.
+/// Returns the complete value set for a remotely fetched input key, or `None`
+/// when the key does not accept remote choices.
+///
+/// `model` is the already collected `OPENCODE_MODEL` value; the
+/// `reasoning_effort` list is scoped to that model's catalog-declared variants.
+/// An empty list means the model declares no reasoning control, so the host
+/// keeps the blank (provider-default) value.
 #[must_use]
-pub fn remote_choices(surface: OpenCodeSurface, key: &str) -> Option<Vec<SetupChoice>> {
+pub fn remote_choices(
+    surface: OpenCodeSurface,
+    key: &str,
+    model: Option<&str>,
+) -> Option<Vec<SetupChoice>> {
     if !REMOTE_CHOICE_KEYS.contains(&key) {
         return None;
     }
+    if key == "reasoning_effort" {
+        return Some(reasoning_effort_choices(surface, model));
+    }
     Some(full_model_choices(surface))
+}
+
+/// Catalog-declared reasoning variants for one selected model.
+fn reasoning_effort_choices(surface: OpenCodeSurface, model: Option<&str>) -> Vec<SetupChoice> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Vec::new();
+    };
+    let base_id = model.rsplit_once('#').map_or(model, |(base, _)| base.trim());
+    let Ok(route) = routes::resolve_route(surface, base_id) else {
+        return Vec::new();
+    };
+    route
+        .variants()
+        .iter()
+        .map(|variant| match variant.id {
+            "none" => choice(variant.id, "none: disable reasoning"),
+            "thinking" => choice(variant.id, "thinking: enable the model's thinking budget"),
+            id => choice(id, id),
+        })
+        .collect()
 }
 
 /// Curated ids for one surface: routable seed ids first (cheapest first), then

@@ -466,7 +466,7 @@ pub use prompt_injection::{
 };
 pub use provider_adapter::{
     DEFAULT_IMPLEMENTATION_NAME, DEFAULT_IMPLEMENTATION_TITLE, OrchestratorProvider,
-    OrchestratorProviderConfig, SESSION_ID_PREFIX,
+    OrchestratorProviderConfig, ReasoningEffortControl, SESSION_ID_PREFIX,
 };
 pub use rate_limit::{RateLimitClock, RateLimitConfig, RateLimitPermit, RateLimiter, TokioClock};
 pub use recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};

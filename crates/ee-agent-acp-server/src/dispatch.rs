@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ee_agent_protocol::registry::{
     INITIALIZE_METHOD_NAME, SESSION_CANCEL_NOTIFICATION, SESSION_CLOSE_METHOD_NAME,
     SESSION_LIST_METHOD_NAME, SESSION_LOAD_METHOD_NAME, SESSION_NEW_METHOD_NAME,
-    SESSION_PROMPT_METHOD_NAME, SESSION_RESUME_METHOD_NAME, SESSION_SET_MODE_METHOD_NAME,
+    SESSION_PROMPT_METHOD_NAME, SESSION_RESUME_METHOD_NAME, SESSION_SET_CONFIG_OPTION_METHOD_NAME,
+    SESSION_SET_MODE_METHOD_NAME,
 };
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandsUpdate, CancelNotification, CloseSessionRequest,
@@ -51,6 +52,8 @@ use crate::validate::{validate_absolute_paths, validate_protocol_version, valida
 /// the SDK's v2 agent method registry).
 const V2_AUTH_LOGIN_METHOD_NAME: &str = "auth/login";
 const V2_AUTH_LOGOUT_METHOD_NAME: &str = "auth/logout";
+
+mod config_option;
 
 /// Outcome of dispatching one request.
 pub(crate) enum DispatchOutcome {
@@ -142,6 +145,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             SESSION_SET_MODEL_METHOD_NAME => {
                 DispatchOutcome::Immediate(self.session_set_model(params).await)
             }
+            SESSION_SET_CONFIG_OPTION_METHOD_NAME => config_option::dispatch(self, params).await,
             SESSION_PROMPT_METHOD_NAME => match self.session_prompt(params).await {
                 Ok(outcome) => outcome,
                 Err(error) => DispatchOutcome::Immediate(Err(error)),
@@ -268,6 +272,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             mcp_servers: request.mcp_servers.clone(),
             title: init.title.clone(),
             modes: init.modes.clone(),
+            config_options: init.config_options.clone().unwrap_or_default(),
             metadata: Value::Null,
         })?;
         // Advertise the provider's initial commands after the session is
@@ -336,6 +341,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             mcp_servers: request.mcp_servers.clone(),
             title: None,
             modes: None,
+            config_options: Vec::new(),
             metadata: Value::Null,
         })?;
         let ctx = LoadSessionContext {
@@ -389,6 +395,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 if let Some(mut resolved) = sessions.remove(&session_id) {
                     resolved.title = init.title.clone();
                     resolved.modes = init.modes.clone();
+                    resolved.config_options = init.config_options.clone().unwrap_or_default();
                     resolved.metadata = Value::Null;
                     let _ = sessions.insert_new(resolved);
                 }
@@ -458,6 +465,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 mcp_servers: request.mcp_servers.clone(),
                 title: init.title.clone(),
                 modes: init.modes.clone(),
+                config_options: init.config_options.clone().unwrap_or_default(),
                 metadata: Value::Null,
             })?;
         }
@@ -517,6 +525,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 mcp_servers: Vec::new(),
                 title: None,
                 modes: None,
+                config_options: Vec::new(),
                 metadata: Value::Null,
             })?;
         }
@@ -560,6 +569,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 if let Some(mut resolved) = sessions.remove(&session_id) {
                     resolved.title = init.title.clone();
                     resolved.modes = init.modes.clone();
+                    resolved.config_options = init.config_options.clone().unwrap_or_default();
                     resolved.metadata = Value::Null;
                     let _ = sessions.insert_new(resolved);
                 }
@@ -1152,6 +1162,7 @@ mod tests {
                 mcp_servers: Vec::new(),
                 title: None,
                 modes: None,
+                config_options: Vec::new(),
                 metadata: Value::Null,
             })
             .expect("seeds store");

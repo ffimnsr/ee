@@ -485,4 +485,6 @@ pub(crate) struct StrategyExecutor {
     read_only_tools: bool,
     /// Provider-facing session affinity stamped on every request this turn.
     session_context: crate::session_context::SessionContext,
+    /// Runtime reasoning-effort selection stamped on every request this turn.
+    reasoning_effort: Option<String>,
 }

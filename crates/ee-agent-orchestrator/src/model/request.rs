@@ -52,6 +52,21 @@ pub struct ModelRequest {
     /// unset knob emits no body field at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<crate::generation::GenerationOptions>,
+    /// Runtime-selected reasoning effort for this call.
+    ///
+    /// `None` keeps whatever the provider profile configured at startup, so a
+    /// session that never selected an effort sends byte-identical requests.
+    /// Adapters that document a reasoning field lower this value; adapters that
+    /// do not ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Provider-specific request-body extensions for this call.
+    ///
+    /// The owning adapter builds this overlay (for example an OpenRouter
+    /// `reasoning` object) and codecs merge it over the profile extensions.
+    /// `None` emits nothing, so providers stay in charge of their own shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_extensions: Option<serde_json::Value>,
     /// Session affinity for provider cache routing and per-session limits.
     /// `None` emits no session headers and falls back to the profile cache key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +98,8 @@ impl ModelRequest {
             response_format: None,
             allow_tool_list_updates: false,
             generation: None,
+            reasoning_effort: None,
+            provider_extensions: None,
             session: None,
             continuation: None,
         }
@@ -104,6 +121,23 @@ impl ModelRequest {
     #[must_use]
     pub fn with_tool_control(mut self, tool_control: ToolCallControl) -> Self {
         self.tool_control = tool_control;
+        self
+    }
+
+    /// Sets the runtime reasoning-effort selection for this request.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// Sets the provider-specific request-body extension overlay.
+    #[must_use]
+    pub fn with_provider_extensions(
+        mut self,
+        provider_extensions: Option<serde_json::Value>,
+    ) -> Self {
+        self.provider_extensions = provider_extensions;
         self
     }
 

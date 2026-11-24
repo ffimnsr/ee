@@ -276,8 +276,12 @@ impl ModelAdapter for ResponsesAdapter {
                 &request.tools,
                 &request.tool_control,
                 request.prompt_tokens,
-                (!generation.is_empty()).then_some(&generation),
-                request.session.as_ref(),
+                crate::CallOptions {
+                    generation: (!generation.is_empty()).then_some(&generation),
+                    session: request.session.as_ref(),
+                    continuation: None,
+                    extensions: request.provider_extensions.as_ref(),
+                },
             );
             tokio::select! {
                 response = completion => response.map_err(response_error),
@@ -306,6 +310,7 @@ impl ModelAdapter for ResponsesAdapter {
             ensure_structured_output(profile, &request)?;
             ensure_tool_choice(profile, &request)?;
             let generation = merged_generation(profile, &request)?;
+            let provider_extensions = request.provider_extensions.clone();
             let mut sink = |delta: StreamDelta| forward_delta(delta, &events);
             let completion = async move {
                 let mut request = request;
@@ -320,6 +325,7 @@ impl ModelAdapter for ResponsesAdapter {
                             generation: (!generation.is_empty()).then_some(&generation),
                             session: request.session.as_ref(),
                             continuation: request.continuation.as_ref(),
+                            extensions: provider_extensions.as_ref(),
                         },
                     )
                     .await;
@@ -339,6 +345,7 @@ impl ModelAdapter for ResponsesAdapter {
                                     generation: (!generation.is_empty()).then_some(&generation),
                                     session: request.session.as_ref(),
                                     continuation: None,
+                                    extensions: provider_extensions.as_ref(),
                                 },
                             )
                             .await
@@ -458,6 +465,7 @@ fn wire_request(
         generation: (!generation.is_empty()).then_some(generation),
         prompt_tokens: request.prompt_tokens,
         session: request.session.clone(),
+        extensions: request.provider_extensions.clone(),
     })
 }
 

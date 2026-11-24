@@ -6,9 +6,7 @@
 //! dialect has no private duplicate codec.
 
 use ee_agent_acp_server::ProviderError;
-use ee_agent_orchestrator::{
-    GenerationOptions, ModelMessage, ModelResponse, ToolCallControl, ToolDefinition,
-};
+use ee_agent_orchestrator::{ModelMessage, ModelResponse, ToolCallControl, ToolDefinition};
 use ee_chat_completions::{
     ChatCompletionsClient, ChatRequest, ChatRequestParts, DeltaSink, EndpointProfile,
     EndpointTransport, chat_request_parts, response_from_turn,
@@ -58,7 +56,14 @@ impl ChatCompletionsCodec {
         prompt_tokens: Option<u64>,
     ) -> Result<ModelResponse, ProviderError> {
         let control = ToolCallControl::auto();
-        self.complete_controlled(transcript, tools, &control, prompt_tokens, None, None).await
+        self.complete_controlled(
+            transcript,
+            tools,
+            &control,
+            prompt_tokens,
+            ee_chat_completions::CallOptions::default(),
+        )
+        .await
     }
 
     /// Performs one buffered round trip with tool-call control.
@@ -68,8 +73,7 @@ impl ChatCompletionsCodec {
         tools: &[ToolDefinition],
         tool_control: &ToolCallControl,
         prompt_tokens: Option<u64>,
-        generation: Option<&GenerationOptions>,
-        session: Option<&ee_agent_orchestrator::SessionContext>,
+        options: ee_chat_completions::CallOptions<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let profile = self.profile();
         let transcript = crate::dialect::guarded_transcript(profile, transcript);
@@ -91,9 +95,10 @@ impl ChatCompletionsCodec {
                 messages,
                 tools,
                 tool_control: tool_control.clone(),
-                generation: generation.cloned(),
+                generation: options.generation.cloned(),
                 prompt_tokens,
-                session: session.cloned(),
+                session: options.session.cloned(),
+                extensions: options.extensions.cloned(),
             })
             .await?;
         Ok(crate::dialect::finalize(response_from_turn(turn), profile))
@@ -170,6 +175,7 @@ impl ChatCompletionsCodec {
                     generation: options.generation.cloned(),
                     prompt_tokens,
                     session: options.session.cloned(),
+                    extensions: options.extensions.cloned(),
                 },
                 sink,
             )

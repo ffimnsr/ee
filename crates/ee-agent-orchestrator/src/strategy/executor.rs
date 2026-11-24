@@ -23,6 +23,7 @@ impl StrategyExecutor {
             events,
             read_only_tools: false,
             session_context: crate::session_context::SessionContext::default(),
+            reasoning_effort: None,
         }
     }
 
@@ -49,6 +50,13 @@ impl StrategyExecutor {
         context: crate::session_context::SessionContext,
     ) -> Self {
         self.session_context = context;
+        self
+    }
+
+    /// Stamps the runtime reasoning-effort selection on every request.
+    #[must_use]
+    pub(crate) fn with_reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
+        self.reasoning_effort = reasoning_effort;
         self
     }
 
@@ -163,6 +171,7 @@ impl StrategyExecutor {
             graph: Some(self.tasks.clone()),
             plan: Some(self.plan.clone()),
             session_context: Some(self.session_context.clone()),
+            reasoning_effort: self.reasoning_effort.clone(),
             ..LoopOptions::default()
         };
         let engine = LoopEngine::new(

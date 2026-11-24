@@ -118,6 +118,9 @@ pub(crate) struct LoopOptions {
     /// Registry id of the adapter this loop runs on (diagnostic and used as
     /// the delegation fallback).
     pub model_id: Option<String>,
+    /// Runtime reasoning-effort selection stamped on every model request.
+    /// `None` keeps the adapter profile's startup configuration.
+    pub reasoning_effort: Option<String>,
     /// Exact model-visible tool names. `None` exposes normal registry surface;
     /// a critic supplies a filtered set mirrored by execution policy.
     pub visible_tool_names: Option<HashSet<String>>,
@@ -196,6 +199,7 @@ impl Default for LoopOptions {
             session_title: None,
             available_models: Vec::new(),
             model_id: None,
+            reasoning_effort: None,
             visible_tool_names: None,
             read_only_tools: false,
             memory: None,

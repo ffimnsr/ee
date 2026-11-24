@@ -72,6 +72,64 @@ async fn wait_for_requests(codec: &ScriptedCodec, count: usize) {
 }
 
 #[test]
+fn runtime_effort_is_lowered_onto_the_route_dialect() {
+    let mut request = sample_request();
+    for (model_id, expected_dialect) in [
+        ("gpt-5.5", OpenCodeDialect::OpenAiResponses),
+        ("claude-opus-4-5", OpenCodeDialect::AnthropicMessages),
+        ("kimi-k3", OpenCodeDialect::OpenAiChatCompletions),
+    ] {
+        let route = crate::routes::resolve_route(OpenCodeSurface::Zen, model_id)
+            .expect("fixture names a documented route");
+        assert_eq!(route.dialect, expected_dialect, "{model_id}");
+        let variants = route.variants();
+        assert!(!variants.is_empty(), "{model_id} declares reasoning variants");
+        for variant in variants {
+            request.reasoning_effort = Some(variant.id.to_string());
+            assert_eq!(
+                reasoning_extensions(route, &request),
+                crate::reasoning::variant_extensions(route.dialect, variant),
+                "{model_id}#{} lowers onto {}",
+                variant.id,
+                route.dialect.as_str()
+            );
+        }
+        request.reasoning_effort = Some(String::from("ultra"));
+        assert!(
+            reasoning_extensions(route, &request).is_none(),
+            "{model_id} ignores an undeclared effort instead of guessing a field"
+        );
+    }
+    request.reasoning_effort = None;
+    let route = crate::routes::resolve_route(OpenCodeSurface::Zen, "gpt-5.5").expect("route");
+    assert!(
+        reasoning_extensions(route, &request).is_none(),
+        "an unset runtime effort keeps the startup profile only"
+    );
+}
+
+#[test]
+fn orchestrator_config_advertises_the_catalog_effort_choices() {
+    let config = test_config(OpenCodeSurface::Zen, "gpt-5.5");
+    let provider = opencode_orchestrator_config(&config, PathBuf::from("/tmp/ee-effort-test"));
+    let control = provider.reasoning_effort.expect("the reasoning model advertises effort");
+    for variant in config.route.variants() {
+        assert!(control.accepts(variant.id), "offer {}", variant.id);
+    }
+
+    let legacy = crate::routes::catalog().find(|route| route.variants().is_empty());
+    if let Some(legacy) = legacy {
+        let config = test_config(legacy.surface, legacy.model_id);
+        let provider = opencode_orchestrator_config(&config, PathBuf::from("/tmp/ee-effort-test"));
+        assert!(
+            provider.reasoning_effort.is_none(),
+            "{} declares no effort, so no selector is advertised",
+            legacy.model_id
+        );
+    }
+}
+
+#[test]
 fn every_dialect_route_dispatches_to_its_own_codec() {
     for dialect in [
         OpenCodeDialect::OpenAiResponses,

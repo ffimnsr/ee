@@ -127,7 +127,8 @@ impl OrchestratorRuntime {
         )
         .with_plan(self.todo_plan.clone())
         .with_read_only_tools(self.read_only_tools())
-        .with_session_context(self.session_context_snapshot());
+        .with_session_context(self.session_context_snapshot())
+        .with_reasoning_effort(self.selected_reasoning_effort());
         let (prompt_result, reflection) = executor
             .execute(decision.strategy, ctx, memory, context_plan.as_ref(), run, &mut validation)
             .await?;

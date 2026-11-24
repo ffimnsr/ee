@@ -42,6 +42,8 @@ impl AgentProvider for OrchestratorProvider {
         let next_session = self.next_session.clone();
         let recovery_enabled = config.recovery.enabled;
         let plugins = self.plugins.clone();
+        let config_options =
+            super::reasoning_config::config_options(self.config.reasoning_effort.as_ref());
         Box::pin(async move {
             // Monotonic id per process, raised past ids that survive in the
             // durable stores so a reconnected session is never shadowed by a
@@ -92,7 +94,8 @@ impl AgentProvider for OrchestratorProvider {
                 .insert(session_id.to_string(), entry);
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
-                .modes(session_modes(mode)))
+                .modes(session_modes(mode))
+                .config_options(config_options))
         })
     }
 
@@ -110,6 +113,7 @@ impl AgentProvider for OrchestratorProvider {
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
         let plugins = self.plugins.clone();
+        let reasoning_control = self.config.reasoning_effort.clone();
         Box::pin(async move {
             let workspace_roots = normalize_workspace_roots(&ctx.cwd, &ctx.additional_directories);
             let (mut provider_label, mut model_label) = default_model_labels(&models);
@@ -123,9 +127,14 @@ impl AgentProvider for OrchestratorProvider {
                     ctx.replay_sink.as_ref(),
                     &entry.conversation.lock().expect("conversation poisoned"),
                 )?;
+                let live_options = super::reasoning_config::config_options_for(
+                    reasoning_control.as_ref(),
+                    entry.runtime.selected_reasoning_effort(),
+                );
                 return Ok(SessionInit::new(session_id)
                     .commands(initial_commands(recovery_enabled))
-                    .modes(session_modes(entry.mode.clone())));
+                    .modes(session_modes(entry.mode.clone()))
+                    .config_options(live_options));
             }
             let state = persisted
                 .lock()
@@ -140,6 +149,7 @@ impl AgentProvider for OrchestratorProvider {
             let durable_load = state.is_some();
             let model_override = state.as_ref().and_then(|state| state.model_id.clone());
             let agent_override = state.as_ref().and_then(|state| state.agent.clone());
+            let effort_override = state.as_ref().and_then(|state| state.reasoning_effort.clone());
             let (runtime, conversation, mode) = match state {
                 Some(state) => {
                     let mode = state.mode;
@@ -209,6 +219,14 @@ impl AgentProvider for OrchestratorProvider {
                     );
                 }
             }
+            if let Some(effort) = effort_override {
+                // Effort choices follow the configured model, so an override
+                // that is no longer declared silently falls back to the profile
+                // default instead of failing the load.
+                if reasoning_control.as_ref().is_some_and(|control| control.accepts(&effort)) {
+                    runtime.set_reasoning_effort(Some(effort));
+                }
+            }
             if let Some(agent) = agent_override {
                 let config_root = crate::prompt::skills::user_config_root_from_env();
                 runtime.reload_user_agents(&ctx.cwd, &workspace_roots, config_root.as_deref());
@@ -255,9 +273,19 @@ impl AgentProvider for OrchestratorProvider {
                 .lock()
                 .expect("adapter sessions poisoned")
                 .insert(session_id.to_string(), entry);
+            let selected_effort = sessions
+                .lock()
+                .expect("adapter sessions poisoned")
+                .get(&session_id.to_string())
+                .and_then(|session| session.runtime.selected_reasoning_effort());
+            let config_options = super::reasoning_config::config_options_for(
+                reasoning_control.as_ref(),
+                selected_effort,
+            );
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
-                .modes(session_modes(mode)))
+                .modes(session_modes(mode))
+                .config_options(config_options))
         })
     }
 
@@ -274,6 +302,7 @@ impl AgentProvider for OrchestratorProvider {
         let recovery_enabled = config.recovery.enabled;
         let recovery_durable = config.recovery.is_durable();
         let plugins = self.plugins.clone();
+        let reasoning_control = self.config.reasoning_effort.clone();
         Box::pin(async move {
             if !recovery_durable {
                 return Err(ProviderError::BackendFailure(
@@ -342,9 +371,19 @@ impl AgentProvider for OrchestratorProvider {
                 );
                 mode
             };
+            let selected_effort = sessions
+                .lock()
+                .expect("adapter sessions poisoned")
+                .get(&session_id.to_string())
+                .and_then(|session| session.runtime.selected_reasoning_effort());
+            let config_options = super::reasoning_config::config_options_for(
+                reasoning_control.as_ref(),
+                selected_effort,
+            );
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
-                .modes(session_modes(mode)))
+                .modes(session_modes(mode))
+                .config_options(config_options))
         })
     }
 
@@ -1371,6 +1410,13 @@ impl AgentProvider for OrchestratorProvider {
                 &sessions,
             )
         })
+    }
+
+    fn set_config_option(
+        &self,
+        ctx: SetConfigOptionContext,
+    ) -> ProviderFuture<Result<Vec<SessionConfigOption>, ProviderError>> {
+        super::reasoning_config::set_config_option(self, ctx)
     }
 
     fn cancel_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
