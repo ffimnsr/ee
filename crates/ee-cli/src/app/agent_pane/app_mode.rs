@@ -286,8 +286,12 @@ impl App {
         }
 
         let command_name = current_name.as_deref().unwrap_or_default();
-        let command_names =
-            agent_slash_command_names(&thread.available_commands, external_rubber_duck);
+        let config_options = thread.host.config_options();
+        let command_names = agent_slash_command_names(
+            &thread.available_commands,
+            &config_options,
+            external_rubber_duck,
+        );
         let current_index = command_names.iter().position(|name| *name == command_name);
         let matching_indices: Vec<usize> = if current_index.is_some() {
             (0..command_names.len()).collect()

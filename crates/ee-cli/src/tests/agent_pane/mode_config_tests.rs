@@ -295,6 +295,37 @@ fn agents_config_commands_list_and_mutate_advertised_options() {
 }
 
 #[test]
+fn advertised_config_alias_appears_in_tab_completion() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "effort",
+                    "name": "Effort",
+                    "type": "select",
+                    "currentValue": "low",
+                    "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "high", "name": "High" }
+                    ]
+                }
+            ]
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/eff");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "/effort");
+}
+
+#[test]
 fn model_slash_command_opens_picker_and_switches_selected_model() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

@@ -493,7 +493,10 @@ pub(super) const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/sessions", "switch session"),
     ("/export", "write redacted Markdown transcript"),
     ("/stop [terminal-id|all]", "cancel turn or stop owned direct-child terminal"),
-    ("/model [model-id]", "pick or switch the session model between turns; /agent is an alias"),
+    (
+        "/model, /agent [model-id]",
+        "pick or switch the session model between turns; /agent is an alias",
+    ),
     ("/turn-diff [turn]", "report files and patches a turn changed (workspace snapshots)"),
     ("/steer <message>", "inject a message into the running turn"),
     ("/resume | /discard", "resolve paused turn"),
@@ -680,13 +683,24 @@ pub(super) fn sanitize_session_name(raw: &str) -> Option<String> {
 }
 
 /// Lists local and agent-advertised slash commands without duplicate names.
-pub(crate) fn agent_slash_command_names(
-    commands: &[AvailableCommand],
+pub(crate) fn agent_slash_command_names<'a>(
+    commands: &'a [AvailableCommand],
+    config_options: &'a [SessionConfigOption],
     external_rubber_duck: bool,
-) -> Vec<&str> {
+) -> Vec<&'a str> {
     let mut names = LOCAL_AGENT_SLASH_COMMANDS.to_vec();
     if external_rubber_duck {
         names.push("rubber-duck");
+    }
+    // Provider config aliases are not ACP commands. Add only the aliases the
+    // active session can actually apply, so completion never offers a dead
+    // `/effort` or `/personality`.
+    for alias in PROVIDER_CONFIG_ALIASES {
+        if config_options.iter().any(|option| option.id.0.as_ref() == *alias)
+            && !names.contains(alias)
+        {
+            names.push(alias);
+        }
     }
     for command in commands {
         let name = command.name.as_str();
@@ -835,6 +849,7 @@ mod tests {
         assert_eq!(
             agent_slash_command_names(
                 &[compact_command(), AvailableCommand::new("quit", "")],
+                &[],
                 false,
             ),
             vec![
@@ -891,6 +906,39 @@ mod tests {
                 "compact",
             ]
         );
+    }
+
+    #[test]
+    fn every_help_command_is_tab_completable() {
+        let names = agent_slash_command_names(&[], &[], false);
+        for (usage, _) in LOCAL_AGENT_SLASH_HELP {
+            for command in usage.split([' ', ',', '|']).filter(|token| token.starts_with('/')) {
+                let name = command.trim_start_matches('/');
+                assert!(
+                    names.contains(&name),
+                    "help lists /{name} but tab completion does not: {usage:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advertised_config_aliases_are_tab_completable() {
+        let option = |id: &str| {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "name": id,
+                "type": "select",
+                "currentValue": "off",
+                "options": [{ "value": "off", "name": "Off" }]
+            }))
+            .expect("config option")
+        };
+        let options = [option("effort"), option("personality")];
+        let names = agent_slash_command_names(&[], &options, false);
+        assert!(names.contains(&"effort"));
+        assert!(names.contains(&"personality"));
+        assert!(!names.contains(&"fast"), "unadvertised alias must stay hidden");
     }
 
     #[test]
