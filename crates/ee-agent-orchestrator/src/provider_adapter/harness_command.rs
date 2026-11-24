@@ -5,9 +5,13 @@
 //! bounded child process, fixed arguments, no shell, and a wall-clock timeout.
 //! The child reuses the same configured agent host and the same driver the
 //! manual CLI path uses, so there is one implementation of the loop.
+//!
+//! The provider runs as its own binary (`ee-agent-opencode`), so
+//! `current_exe` is not the CLI. Resolution order is `EE_CLI_BIN`, the `ee`
+//! sibling of the running provider, then `ee` on `PATH`.
 
-use std::ffi::OsString;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +34,8 @@ const MAX_CHILD_OUTPUT_BYTES: usize = 32 * 1024;
 const MAX_K: usize = 16;
 /// Maximum cross-domain workers accepted from the command line.
 const MAX_WORKERS: usize = 16;
+/// Environment override for the `ee` CLI used by `/harness`.
+const CLI_BIN_ENV: &str = "EE_CLI_BIN";
 
 /// Parsed `/harness` instructions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,15 +73,15 @@ pub(super) async fn handle_harness_command(
     ctx: HarnessCommand<'_>,
 ) -> Result<PromptResult, ProviderError> {
     let args = parse_harness_args(ctx.instructions).map_err(ProviderError::InvalidRequest)?;
-    let task = super::reflect_command::last_task(&ctx.history).ok_or_else(|| {
-        ProviderError::InvalidRequest(String::from(
-            "`/harness` needs a completed task in this session; run the task first",
-        ))
-    })?;
+    let task = super::reflect_command::last_task(&ctx.history)
+        .or_else(|| last_logged_task(ctx.runtime, &ctx.session_id.to_string()))
+        .ok_or_else(|| {
+            ProviderError::InvalidRequest(String::from(
+                "`/harness` needs a completed task in this session; run the task first",
+            ))
+        })?;
     let domain = super::reflect_command::resolve_domain(None, ctx.workspace)?;
-    let executable = std::env::current_exe().map_err(|error| {
-        ProviderError::BackendFailure(format!("cannot resolve the ee executable: {error}"))
-    })?;
+    let executable = resolve_ee_executable().map_err(ProviderError::BackendFailure)?;
     let argv = child_args(&executable, &args, ctx.workspace, &task, &domain);
     let mut command = tokio::process::Command::new(&argv[0]);
     command
@@ -217,6 +223,94 @@ pub(super) fn parse_harness_args(instructions: Option<&str>) -> Result<HarnessAr
     Ok(args)
 }
 
+fn last_logged_task(runtime: &OrchestratorRuntime, session_id: &str) -> Option<String> {
+    let records = runtime.replay_session_messages(session_id).ok()?;
+    last_task_from_logged(&records)
+}
+
+fn last_task_from_logged(records: &[(String, ModelMessage)]) -> Option<String> {
+    let messages: Vec<ModelMessage> = records.iter().map(|(_, message)| message.clone()).collect();
+    super::reflect_command::last_task(&messages)
+}
+
+/// Resolves the `ee` CLI that hosts the recursive improvement loop.
+fn resolve_ee_executable() -> Result<PathBuf, String> {
+    let override_path =
+        std::env::var_os(CLI_BIN_ENV).filter(|value| !value.is_empty()).map(PathBuf::from);
+    let current_exe = std::env::current_exe().ok();
+    let path_var = std::env::var_os("PATH");
+    resolve_ee_executable_from(
+        override_path.as_deref(),
+        current_exe.as_deref(),
+        path_var.as_deref(),
+    )
+}
+
+fn resolve_ee_executable_from(
+    override_path: Option<&Path>,
+    current_exe: Option<&Path>,
+    path_var: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = override_path {
+        if is_executable_file(path) {
+            return Ok(path.to_path_buf());
+        }
+        return Err(format!(
+            "{CLI_BIN_ENV} does not point to an executable file: {}",
+            path.display()
+        ));
+    }
+    if let Some(executable) = current_exe {
+        if executable.file_name() == Some(OsStr::new(ee_binary_file_name()))
+            && is_executable_file(executable)
+        {
+            return Ok(executable.to_path_buf());
+        }
+        if let Some(parent) = executable.parent() {
+            let sibling = parent.join(ee_binary_file_name());
+            if is_executable_file(&sibling) {
+                return Ok(sibling);
+            }
+        }
+    }
+    if let Some(path_var) = path_var {
+        for directory in std::env::split_paths(path_var) {
+            // An empty PATH component means the current directory; never
+            // auto-run a workspace-controlled `ee` from there.
+            if directory.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = directory.join(ee_binary_file_name());
+            if is_executable_file(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(format!("cannot locate the `ee` CLI executable; set {CLI_BIN_ENV} or add `ee` to PATH"))
+}
+
+fn ee_binary_file_name() -> &'static str {
+    if cfg!(windows) { "ee.exe" } else { "ee" }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn child_args(
     executable: &Path,
     args: &HarnessArgs,
@@ -285,6 +379,7 @@ fn truncate_child(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ModelRole;
 
     #[test]
     fn harness_arguments_parse_and_reject_unknown_tokens() {
@@ -311,6 +406,91 @@ mod tests {
         assert_eq!(report.dead_rollouts, 2);
         assert!(!report.base_failed);
         assert!(parse_child_report("no report").is_none());
+    }
+
+    #[test]
+    fn logged_session_messages_supply_a_task_when_the_transcript_is_empty() {
+        let records = vec![
+            (String::from("1"), ModelMessage::text(ModelRole::User, "first task")),
+            (String::from("2"), ModelMessage::text(ModelRole::Assistant, "done")),
+            (String::from("3"), ModelMessage::text(ModelRole::User, "/harness")),
+            (String::from("4"), ModelMessage::text(ModelRole::User, "last task")),
+        ];
+        assert_eq!(last_task_from_logged(&records).as_deref(), Some("last task"));
+        assert!(last_task_from_logged(&[]).is_none());
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\n").expect("write fake executable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark fake executable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_executable_prefers_the_provider_sibling_over_path() {
+        let provider_root = tempfile::tempdir().expect("provider dir");
+        let provider = provider_root.path().join("ee-agent-opencode");
+        let sibling = provider_root.path().join("ee");
+        write_executable(&provider);
+        write_executable(&sibling);
+        let path_root = tempfile::tempdir().expect("path dir");
+        write_executable(&path_root.path().join("ee"));
+        let path_var = std::env::join_paths([path_root.path()]).expect("path value");
+
+        let resolved = resolve_ee_executable_from(None, Some(&provider), Some(&path_var))
+            .expect("sibling resolves");
+        assert_eq!(resolved, sibling);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_executable_uses_the_environment_override_first() {
+        let override_root = tempfile::tempdir().expect("override dir");
+        let override_path = override_root.path().join("custom-ee");
+        write_executable(&override_path);
+        let provider_root = tempfile::tempdir().expect("provider dir");
+        let provider = provider_root.path().join("ee-agent-opencode");
+        write_executable(&provider);
+        write_executable(&provider_root.path().join("ee"));
+
+        let resolved = resolve_ee_executable_from(Some(&override_path), Some(&provider), None)
+            .expect("override resolves");
+        assert_eq!(resolved, override_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_executable_falls_back_to_path_when_no_sibling_exists() {
+        let provider_root = tempfile::tempdir().expect("provider dir");
+        let provider = provider_root.path().join("ee-agent-opencode");
+        write_executable(&provider);
+        let path_root = tempfile::tempdir().expect("path dir");
+        let path_ee = path_root.path().join("ee");
+        write_executable(&path_ee);
+        let path_var = std::env::join_paths([path_root.path()]).expect("path value");
+
+        let resolved = resolve_ee_executable_from(None, Some(&provider), Some(&path_var))
+            .expect("path resolves");
+        assert_eq!(resolved, path_ee);
+    }
+
+    #[test]
+    fn harness_executable_reports_a_missing_override() {
+        let missing = Path::new("/nonexistent/ee-cli-for-harness-test");
+        let error = resolve_ee_executable_from(Some(missing), None, None)
+            .expect_err("missing override rejected");
+        assert!(error.contains(CLI_BIN_ENV), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn harness_executable_reports_when_nothing_can_be_resolved() {
+        let empty_path = std::env::join_paths(std::iter::empty::<&Path>()).expect("empty path");
+        let error = resolve_ee_executable_from(None, None, Some(&empty_path))
+            .expect_err("no executable rejected");
+        assert!(error.contains("cannot locate the `ee` CLI"), "unexpected error: {error}");
     }
 
     #[test]
