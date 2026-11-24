@@ -82,6 +82,12 @@ impl ApprovalPrompt {
         )
     }
 
+    /// Attaches the validated MCP invocation behind this prompt.
+    pub(super) fn with_mcp(mut self, mcp: Option<McpInvocation>) -> Self {
+        self.mcp = mcp;
+        self
+    }
+
     pub(super) fn workspace_memory(
         operation: ee_agent_host::WorkspaceMemoryMutationOperation,
         key: String,

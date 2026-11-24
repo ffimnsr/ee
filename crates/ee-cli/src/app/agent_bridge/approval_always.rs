@@ -85,6 +85,7 @@ impl App {
                 if prompt.mcp.is_some() =>
             {
                 if let Some(invocation) = prompt.mcp.as_ref()
+                    && ee_mcp::classify::exact_trust_eligible(&invocation.tool)
                     && let Ok(candidate) = AlwaysRuleCandidate::mcp_exact(invocation)
                 {
                     candidates.push((
@@ -92,24 +93,8 @@ impl App {
                         ALWAYS_ALLOW_LABEL.to_string(),
                         candidate,
                     ));
-                }
-                if let Some(invocation) = prompt.mcp.as_ref()
-                    && let Ok(candidate) = McpServerTrustCandidate::for_invocation(invocation)
-                {
-                    prompt.mcp_server_candidate = Some(candidate);
-                }
-            }
-            ApprovalKind::Write { path, content, expectation, .. } => {
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_single_write_rule_shape(path, content, expectation)
-                    && let Ok(candidate) = AlwaysRuleCandidate::write_prefix(
-                        operation.workspace,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                    )
+                } else if let Some(candidate) =
+                    self.native_write_candidate_for_prompt(prompt, operation.workspace)
                 {
                     candidates.push((
                         ApprovalChoice::AllowAlways,
@@ -117,18 +102,25 @@ impl App {
                         candidate,
                     ));
                 }
+                if self.server_trust_prompt_eligible(prompt)
+                    && let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) = McpServerTrustCandidate::for_invocation(invocation)
+                {
+                    prompt.mcp_server_candidate = Some(candidate);
+                }
             }
-            ApprovalKind::WriteBatch { writes, .. } => {
-                if let Some((write_operation, prefix, files, total, file)) =
-                    self.native_batch_write_rule_shape(writes)
-                    && let Ok(candidate) = AlwaysRuleCandidate::write_prefix(
-                        operation.workspace,
-                        write_operation,
-                        prefix,
-                        files,
-                        total,
-                        file,
-                    )
+            ApprovalKind::Filesystem { .. } | ApprovalKind::WorkspaceMemoryApproval { .. }
+                if prompt.mcp.is_some() =>
+            {
+                if let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) = McpServerTrustCandidate::for_invocation(invocation)
+                {
+                    prompt.mcp_server_candidate = Some(candidate);
+                }
+            }
+            ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
+                if let Some(candidate) =
+                    self.native_write_candidate_for_prompt(prompt, operation.workspace)
                 {
                     candidates.push((
                         ApprovalChoice::AllowAlways,
@@ -166,6 +158,30 @@ impl App {
         }
         if prompt.mcp_server_candidate.is_some() {
             prompt.options.push((TRUST_MCP_SERVER_LABEL.to_string(), ApprovalChoice::AllowServer));
+        }
+    }
+
+    /// Native write-prefix candidate for one write prompt, if its shape is
+    /// bounded and persistable.
+    fn native_write_candidate_for_prompt(
+        &self,
+        prompt: &ApprovalPrompt,
+        workspace: crate::policy::WorkspaceIdentity,
+    ) -> Option<AlwaysRuleCandidate> {
+        match &prompt.kind {
+            ApprovalKind::Write { path, content, expectation, .. } => {
+                let (operation, prefix, files, total, file) =
+                    self.native_single_write_rule_shape(path, content, expectation)?;
+                AlwaysRuleCandidate::write_prefix(workspace, operation, prefix, files, total, file)
+                    .ok()
+            }
+            ApprovalKind::WriteBatch { writes, .. } => {
+                let (operation, prefix, files, total, file) =
+                    self.native_batch_write_rule_shape(writes)?;
+                AlwaysRuleCandidate::write_prefix(workspace, operation, prefix, files, total, file)
+                    .ok()
+            }
+            _ => None,
         }
     }
 
@@ -245,7 +261,7 @@ impl App {
     }
 
     /// Resolves the explicit server-trust choice: persist the pinned grant,
-    /// then dispatch the original write without consuming a per-rule use.
+    /// then dispatch the original operation without consuming a per-rule use.
     pub(super) fn resolve_server_trust_choice(&mut self, mut prompt: ApprovalPrompt) {
         let Some(candidate) = prompt.mcp_server_candidate.as_ref() else {
             self.release_prompt_write_lease(&mut prompt);
@@ -267,7 +283,7 @@ impl App {
             }
             return;
         }
-        self.dispatch_write_prompt(prompt, None);
+        self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
     }
 
     /// Resolves one always-allow choice: persist (or reuse) the previewed

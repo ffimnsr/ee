@@ -126,6 +126,11 @@ impl App {
             return;
         }
 
+        if choice == ApprovalChoice::AllowServer {
+            self.resolve_server_trust_choice(prompt);
+            return;
+        }
+
         if matches!(prompt.kind, ApprovalKind::WorkspaceMemoryApproval { .. }) {
             let approved = choice == ApprovalChoice::AllowOnce;
             let ApprovalKind::WorkspaceMemoryApproval { key, target, .. } = prompt.kind else {
@@ -223,11 +228,6 @@ impl App {
 
         if choice == ApprovalChoice::DenyPersistent {
             self.resolve_persistent_deny_choice(prompt);
-            return;
-        }
-
-        if choice == ApprovalChoice::AllowServer {
-            self.resolve_server_trust_choice(prompt);
             return;
         }
 
@@ -498,17 +498,42 @@ impl App {
         candidate.starts_with(&primary).then_some(candidate)
     }
 
+    /// Whether an MCP-originated prompt may consume a pinned server grant.
+    /// Content-bearing writes keep the same application safety maxima as the
+    /// workspace-trusted built-in write allow; oversized requests fall back to
+    /// per-operation approval.
+    pub(super) fn server_trust_prompt_eligible(&self, prompt: &ApprovalPrompt) -> bool {
+        if prompt.mcp.is_none() {
+            return false;
+        }
+        match &prompt.kind {
+            ApprovalKind::Write { content, .. } => content.len() as u64 <= MAX_WRITE_FILE_BYTES,
+            ApprovalKind::WriteBatch { writes, .. } => {
+                !writes.is_empty()
+                    && writes.len() as u64 <= MAX_WRITE_FILES
+                    && writes.iter().all(|write| write.content.len() as u64 <= MAX_WRITE_FILE_BYTES)
+                    && writes.iter().map(|write| write.content.len() as u64).sum::<u64>()
+                        <= MAX_WRITE_TOTAL_BYTES
+            }
+            _ => true,
+        }
+    }
+
     /// Whether a pending approval may skip the prompt because the host-local
-    /// workspace decision is `trusted`.  Only native writes whose every target
-    /// canonicalizes inside the primary workspace qualify; MCP proxy writes,
-    /// external paths, symlink escapes, protected paths, and the secret store
-    /// always stay on the explicit approval path.  Requests beyond the write
-    /// safety maxima (files, per-file bytes, total bytes) also stay explicit:
-    /// trust is implicit consent for routine writes, not for unbounded ones.
-    /// Read-only agent modes (`agents.read_only_modes`, default `ask`/`plan`)
-    /// also stay explicit.
+    /// workspace decision is `trusted`.  Only native writes and non-exact MCP
+    /// content writes whose every target canonicalizes inside the primary
+    /// workspace qualify; exact-trust MCP invocations, external paths, symlink
+    /// escapes, protected paths, and the secret store always stay on the
+    /// explicit approval path.  Requests beyond the write safety maxima
+    /// (files, per-file bytes, total bytes) also stay explicit: trust is
+    /// implicit consent for routine writes, not for unbounded ones.  Read-only
+    /// agent modes (`agents.read_only_modes`, default `ask`/`plan`) also stay
+    /// explicit.
     pub(super) fn trusted_write_eligible(&self, prompt: &ApprovalPrompt) -> bool {
-        if prompt.mcp.is_some()
+        if prompt
+            .mcp
+            .as_ref()
+            .is_some_and(|invocation| ee_mcp::classify::exact_trust_eligible(&invocation.tool))
             || !self.workspace_trusted()
             || !self.trusted_write_mode_allows(&prompt.session_id)
         {

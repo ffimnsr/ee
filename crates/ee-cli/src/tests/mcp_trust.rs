@@ -171,7 +171,7 @@ fn mcp_server_grant_allows_pinned_tools_and_persistent_deny_wins() {
     );
     assert_eq!(decide_with(&other_transport, &[], Some(&trust)).outcome, TrustOutcome::Confirm);
 
-    // A tool outside the pinned list prompts even when the server grants.
+    // Content-bearing writes are part of the workspace-write ceiling.
     let unpacked = mcp_op_with_schema(
         ws,
         None,
@@ -180,7 +180,21 @@ fn mcp_server_grant_allows_pinned_tools_and_persistent_deny_wins() {
         ee_mcp::EE_TOOL_SCHEMA_VERSION,
         r#"{"path":"/work/root/src/main.rs","content":"x"}"#,
     );
-    assert_eq!(decide_with(&unpacked, &[], Some(&trust)).outcome, TrustOutcome::Confirm);
+    assert_eq!(
+        decide_with(&unpacked, &[], Some(&trust)).reason,
+        crate::policy::DecisionReason::McpServerAllow
+    );
+
+    // Execute tools stay outside the server grant.
+    let terminal = mcp_op_with_schema(
+        ws,
+        None,
+        "stdio:ee --mcp-proxy",
+        "ee_terminal_create",
+        ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        r#"{"command":"git","args":["status"]}"#,
+    );
+    assert_eq!(decide_with(&terminal, &[], Some(&trust)).outcome, TrustOutcome::Confirm);
 
     // Persistent deny outranks the server grant.
     let deny = TrustRule::McpDeny(crate::policy::McpDenyRule {
@@ -716,11 +730,10 @@ mod e2e {
     }
 
     #[test]
-    fn content_bearing_writes_never_offer_always_and_terminal_trust_is_command_only() {
+    fn server_grant_auto_allows_mixed_workspace_mutations_but_not_terminal() {
         let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
         open_pane_and_wait_ready(&mut app);
-        // Trust the workspace so always-allow eligibility is decided by the
-        // operation shape instead of the trust gate.
+        // Trust the workspace so the server-trust gate is the only variable.
         let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
         let _cwd_restore = CurrentDirGuard::capture();
         std::env::set_current_dir(temp.path()).unwrap();
@@ -732,77 +745,110 @@ mod e2e {
             .set_decision(WorkspaceTrustDecision::Trusted)
             .unwrap();
 
-        let mut stream = connect_proxy(&app);
         let target = temp.path().join("write.txt");
-        fs::write(&target, "v0").unwrap();
-        // Content-bearing native writes offer no exact always-allow rule. The
-        // trusted workspace auto-applies routine writes, so use a request above
-        // the write safety maxima to keep the prompt path under test.
-        let huge = "x".repeat((crate::policy::MAX_WRITE_FILE_BYTES + 1) as usize);
-        proxy_send(
-            &mut stream,
-            1,
-            json!({
-                "method": "write_text_file",
-                "path": target.display().to_string(),
-                "content": huge,
-            }),
-        );
-        wait_until(&mut app, "write approval queued", |app| !app.agents.approvals.is_empty());
+        fs::write(&target, "alpha\nbeta\n").unwrap();
+        let target_text = target.display().to_string();
+        seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
+
+        let mut stream = connect_proxy(&app);
+        proxy_send(&mut stream, 1, action_frame(&target_text, "act_1"));
+        wait_until(&mut app, "server trust approval queued", |app| {
+            !app.agents.approvals.is_empty()
+        });
+        let server_index = app
+            .agents
+            .approvals
+            .front()
+            .unwrap()
+            .options
+            .iter()
+            .position(|(_, choice)| *choice == ApprovalChoice::AllowServer)
+            .expect("exact MCP write offers server trust");
+        open_pane_and_select(&mut app, server_index);
+        wait_until(&mut app, "server grant write applied", |_app| {
+            fs::read_to_string(&target).map(|text| text.contains("alpha-edited")).unwrap_or(false)
+        });
+        let reply = proxy_recv(&mut stream);
+        assert!(reply["result"]["value"].is_object(), "structured success: {reply}");
+
+        let trust = McpTrustStore::at(&state_dir, temp.path()).unwrap().load().unwrap();
+        assert_eq!(trust.grants().len(), 1);
+        let grant = &trust.grants()[0];
+        for tool in
+            ["ee_write_text_file", "ee_replace_text", "ee_create_directory", "ee_delete_path"]
         {
-            let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(
-                prompt.options.len(),
-                5,
-                "content-bearing write offers the base choices and workspace deny"
-            );
             assert!(
-                prompt.options.iter().all(|(_, choice)| !matches!(
-                    choice,
-                    ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
-                )),
-                "content-bearing write never offers an always-allow rule"
+                grant.tools.iter().any(|pin| pin.tool == tool),
+                "{tool} must be pinned by the server grant"
             );
         }
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
-        let _ = proxy_recv(&mut stream);
 
-        // Terminal creation uses command trust only: the always-allow options
-        // are command-scoped, and the persisted rule is a command rule —
-        // generic MCP trust never applies to terminal-create. `git stash`
-        // keeps the prompt path (the built-in safe_read allowlist would
-        // silently allow read-only git inspection).
+        // Content writes and edits stay prompt-free on a different path.
+        let second = temp.path().join("write-2.txt");
+        fs::write(&second, "old").unwrap();
         proxy_send(
             &mut stream,
             2,
+            json!({
+                "method": "write_text_file",
+                "path": second.display().to_string(),
+                "content": "second",
+            }),
+        );
+        wait_until(&mut app, "second write applied without prompt", |_app| {
+            fs::read_to_string(&second).map(|text| text == "second").unwrap_or(false)
+        });
+        assert!(app.agents.approvals.is_empty(), "content writes never ask again");
+        let _ = proxy_recv(&mut stream);
+
+        proxy_send(
+            &mut stream,
+            3,
+            json!({
+                "method": "replace_text",
+                "path": second.display().to_string(),
+                "old_text": "second",
+                "new_text": "replaced",
+            }),
+        );
+        wait_until(&mut app, "cross-tool edit applied without prompt", |_app| {
+            fs::read_to_string(&second).map(|text| text == "replaced").unwrap_or(false)
+        });
+        assert!(app.agents.approvals.is_empty(), "server grant covers pinned tools");
+        let _ = proxy_recv(&mut stream);
+
+        // Filesystem mutations are not covered by the trusted-write built-in,
+        // so successful prompt-free deletion proves the server grant applies.
+        let doomed = temp.path().join("delete-me.txt");
+        fs::write(&doomed, "bye").unwrap();
+        proxy_send(
+            &mut stream,
+            4,
+            json!({ "method": "delete_path", "path": doomed.display().to_string() }),
+        );
+        wait_until(&mut app, "file deleted without prompt", |_app| !doomed.exists());
+        assert!(app.agents.approvals.is_empty(), "filesystem writes are covered");
+        let _ = proxy_recv(&mut stream);
+
+        // Terminal creation keeps its command approval path and never inherits
+        // the server grant.
+        proxy_send(
+            &mut stream,
+            5,
             json!({ "method": "terminal_create", "command": "git", "args": ["stash"] }),
         );
         wait_until(&mut app, "terminal approval queued", |app| !app.agents.approvals.is_empty());
-        {
-            let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(
-                prompt.options.len(),
-                7,
-                "base choices, exact and prefix always-allow, and workspace deny offered"
-            );
-            assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
-            assert_eq!(prompt.options[5].1, ApprovalChoice::AllowAlwaysPrefix(1));
-        }
-        open_pane_and_select(&mut app, 4); // Allow always (command exact)
-        wait_until(&mut app, "terminal granted", |_app| {
-            TrustStore::at(&state_dir, temp.path())
-                .map(|store| store.load().map(|doc| !doc.rules.is_empty()).unwrap_or(false))
-                .unwrap_or(false)
-        });
-        let store = TrustStore::at(&state_dir, temp.path()).unwrap();
-        let document = store.load().unwrap();
-        assert_eq!(document.rules.len(), 1);
-        let TrustRule::Command(rule) = &document.rules[0] else {
-            panic!("terminal-create persists a command rule, never an MCP rule");
-        };
-        assert_eq!(rule.scope.agent, None);
-        assert_eq!(rule.scope.expires_at, None);
-        assert_eq!(rule.scope.max_uses, None);
+        assert!(
+            app.agents
+                .approvals
+                .front()
+                .unwrap()
+                .options
+                .iter()
+                .all(|(_, choice)| *choice != ApprovalChoice::AllowServer),
+            "terminal execution never inherits server trust"
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
         let _ = proxy_recv(&mut stream);
     }
 

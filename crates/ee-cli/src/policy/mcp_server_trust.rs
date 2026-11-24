@@ -36,11 +36,11 @@ impl McpServerToolGrant {
             return Err("mcp server tool schema version must be at least 1".to_string());
         }
         match self.category {
-            TrustCategory::Read | TrustCategory::WriteCreate | TrustCategory::WriteModify => {}
-            TrustCategory::Delete
-            | TrustCategory::Execute
-            | TrustCategory::Network
-            | TrustCategory::Unknown => {
+            TrustCategory::Read
+            | TrustCategory::WriteCreate
+            | TrustCategory::WriteModify
+            | TrustCategory::Delete => {}
+            TrustCategory::Execute | TrustCategory::Network | TrustCategory::Unknown => {
                 return Err(format!(
                     "mcp server grants cannot cover {} tools",
                     self.category.as_str()
@@ -183,6 +183,13 @@ impl McpServerTrustCandidate {
         if tools.is_empty() {
             return Err("server trust has no pinned tools for this transport".to_string());
         }
+        if !tools.iter().any(|tool| {
+            tool.tool == invocation.tool
+                && tool.category == invocation.category
+                && tool.tool_schema_version == invocation.tool_schema_version
+        }) {
+            return Err("invoking tool is not covered by a server grant".to_string());
+        }
         let grant = McpServerGrant::new(
             generate_mcp_server_grant_id(),
             invocation.workspace,
@@ -202,19 +209,20 @@ impl McpServerTrustCandidate {
                 ("server".into(), grant.server.clone()),
                 ("pinned tools".into(), grant.tool_count().to_string()),
                 ("read tools".into(), read_count.to_string()),
-                ("safe write tools".into(), write_count.to_string()),
+                ("workspace write tools".into(), write_count.to_string()),
                 (
                     "invalidates on".into(),
                     "tool list, schema, transport, or workspace trust change".into(),
                 ),
             ],
-            caps: vec![("result caps".into(), "application tool limits".into())],
+            caps: vec![
+                ("result caps".into(), "application tool limits".into()),
+                ("write caps".into(), "workspace write safety maxima".into()),
+            ],
             transport_identity: Some(grant.transport_identity.clone()),
             exclusions: vec![
-                "execute tools".into(),
-                "delete/move tools".into(),
-                "content-bearing writes".into(),
-                "network tools".into(),
+                "terminal execution".into(),
+                "external network tools".into(),
                 "new tools until re-trusted".into(),
             ],
         };
@@ -227,30 +235,26 @@ impl McpServerTrustCandidate {
 /// Eligibility is application-owned:
 /// - read tools that require no separate approval and have no external-network
 ///   capability,
-/// - the non-content-bearing safe write tools already eligible for exact MCP
-///   trust.
+/// - every write tool in the stable manifest, including content-bearing
+///   writes, filesystem mutations, and workspace-memory mutations.
 ///
-/// Content-bearing writes, destructive filesystem operations, workspace-memory
-/// mutations, network reads, and execute tools never appear here.
+/// Execute tools and external-network tools never appear here: command
+/// execution and outbound network access keep their dedicated approval paths.
 pub(crate) fn pinned_server_tools(transport: ee_mcp::ToolTransport) -> Vec<McpServerToolGrant> {
     let mut tools = ee_mcp::tool_names_for_transport(transport)
         .into_iter()
         .filter_map(|tool| {
             let governance = ee_mcp::governance(tool)?;
-            let category = match governance.side_effect {
-                ee_mcp::SideEffectClass::Read if governance.approval == "none" => {
-                    TrustCategory::Read
+            let (category, tool_schema_version) = match governance.side_effect {
+                ee_mcp::SideEffectClass::Read
+                    if governance.approval == "none"
+                        && !governance.required_capabilities.contains(&"ExternalNetwork") =>
+                {
+                    (TrustCategory::Read, crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION)
                 }
-                ee_mcp::SideEffectClass::Write if ee_mcp::exact_trust_eligible(tool) => {
-                    TrustCategory::WriteModify
+                ee_mcp::SideEffectClass::Write => {
+                    (write_tool_category(tool), ee_mcp::EE_TOOL_SCHEMA_VERSION)
                 }
-                _ => return None,
-            };
-            let tool_schema_version = match governance.side_effect {
-                ee_mcp::SideEffectClass::Read => {
-                    crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION
-                }
-                ee_mcp::SideEffectClass::Write => ee_mcp::EE_TOOL_SCHEMA_VERSION,
                 _ => return None,
             };
             Some(McpServerToolGrant { tool: tool.to_string(), category, tool_schema_version })
@@ -259,6 +263,17 @@ pub(crate) fn pinned_server_tools(transport: ee_mcp::ToolTransport) -> Vec<McpSe
     tools.sort_by(|left, right| left.tool.cmp(&right.tool));
     tools.dedup_by(|left, right| left.tool == right.tool);
     tools
+}
+
+/// Operation category produced by the approval path for one write tool.
+/// Most write tools normalize to `WriteModify`; filesystem mutations keep
+/// their distinct create/delete categories.
+fn write_tool_category(tool: &str) -> TrustCategory {
+    match tool {
+        "ee_create_directory" | "ee_copy_path" => TrustCategory::WriteCreate,
+        "ee_delete_path" => TrustCategory::Delete,
+        _ => TrustCategory::WriteModify,
+    }
 }
 
 /// Stable rule id for a newly created server grant (`mcp_server_…`).
@@ -349,20 +364,24 @@ mod tests {
     }
 
     #[test]
-    fn pinned_tools_cover_safe_reads_and_exact_writes_only() {
+    fn pinned_tools_cover_workspace_reads_and_writes_only() {
         let tools = pinned_server_tools(ee_mcp::ToolTransport::Stdio);
         assert!(tools.iter().any(|tool| tool.tool == "ee_read_text_file"));
         assert!(tools.iter().any(|tool| tool.tool == "ee_apply_code_action"));
         assert!(tools.iter().any(|tool| tool.tool == "ee_format_file"));
         assert!(tools.iter().any(|tool| tool.tool == "ee_rename_symbol"));
+        assert!(tools.iter().any(|tool| tool.tool == "ee_write_text_file"));
+        assert!(tools.iter().any(|tool| tool.tool == "ee_replace_text"));
+        assert!(tools.iter().any(|tool| {
+            tool.tool == "ee_delete_path" && tool.category == TrustCategory::Delete
+        }));
+        assert!(tools.iter().any(|tool| tool.tool == "ee_clear_workspace_memory"));
         for excluded in [
-            "ee_write_text_file",
-            "ee_replace_text",
-            "ee_delete_path",
-            "ee_move_path",
             "ee_terminal_create",
+            "ee_terminal_kill",
             "ee_fetch_url",
-            "ee_clear_workspace_memory",
+            "ee_web_search",
+            "ee_export_workspace_memory",
         ] {
             assert!(
                 !tools.iter().any(|tool| tool.tool == excluded),
@@ -370,7 +389,13 @@ mod tests {
             );
         }
         for tool in &tools {
-            assert!(matches!(tool.category, TrustCategory::Read | TrustCategory::WriteModify));
+            assert!(matches!(
+                tool.category,
+                TrustCategory::Read
+                    | TrustCategory::WriteCreate
+                    | TrustCategory::WriteModify
+                    | TrustCategory::Delete
+            ));
             assert_ne!(tool.tool_schema_version, 0);
         }
     }
@@ -417,11 +442,38 @@ mod tests {
         let unpinned = operation(
             workspace(),
             "stdio:ee --mcp-proxy",
+            "ee_terminal_create",
+            TrustCategory::Execute,
+            ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        );
+        assert!(trust.allows(&unpinned).is_none());
+
+        let content_write = operation(
+            workspace(),
+            "stdio:ee --mcp-proxy",
             "ee_write_text_file",
             TrustCategory::WriteModify,
             ee_mcp::EE_TOOL_SCHEMA_VERSION,
         );
-        assert!(trust.allows(&unpinned).is_none());
+        assert!(trust.allows(&content_write).is_some());
+
+        let delete = operation(
+            workspace(),
+            "stdio:ee --mcp-proxy",
+            "ee_delete_path",
+            TrustCategory::Delete,
+            ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        );
+        assert!(trust.allows(&delete).is_some());
+
+        let memory_write = operation(
+            workspace(),
+            "stdio:ee --mcp-proxy",
+            "ee_remember_workspace_fact",
+            TrustCategory::WriteModify,
+            ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        );
+        assert!(trust.allows(&memory_write).is_some());
 
         let wrong_category = operation(
             workspace(),
@@ -456,12 +508,7 @@ mod tests {
 
     #[test]
     fn malformed_and_dangerous_tool_categories_are_rejected() {
-        for category in [
-            TrustCategory::Delete,
-            TrustCategory::Execute,
-            TrustCategory::Network,
-            TrustCategory::Unknown,
-        ] {
+        for category in [TrustCategory::Execute, TrustCategory::Network, TrustCategory::Unknown] {
             let tool = McpServerToolGrant {
                 tool: "ee_delete_path".to_string(),
                 category,
@@ -469,6 +516,12 @@ mod tests {
             };
             assert!(tool.validate().is_err(), "{category:?} must be rejected");
         }
+        let delete = McpServerToolGrant {
+            tool: "ee_delete_path".to_string(),
+            category: TrustCategory::Delete,
+            tool_schema_version: 1,
+        };
+        assert!(delete.validate().is_ok(), "application-owned delete pins are allowed");
         assert!(
             McpServerGrant::new(
                 "mcp_server_test".to_string(),

@@ -81,6 +81,7 @@ impl App {
         let (reply, receiver) = oneshot::channel();
         self.queue_proxy_filesystem(
             crate::app::agent_filesystem::FilesystemOperation::CreateDirectory { path },
+            None,
             reply,
         );
         receiver
@@ -94,6 +95,7 @@ impl App {
         let (reply, receiver) = oneshot::channel();
         self.queue_proxy_filesystem(
             crate::app::agent_filesystem::FilesystemOperation::DeletePath { path },
+            None,
             reply,
         );
         receiver

@@ -82,9 +82,15 @@ impl App {
                 unreachable!("bypass approvals do not consult trust policy")
             }
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
-                // Phase 3: eligible proxy tool calls carry a validated MCP
-                // invocation; everything else normalizes as a native write.
-                if let Some(invocation) = &prompt.mcp {
+                // Exact-trust MCP invocations use the MCP identity so server
+                // and exact rules match. Content-bearing MCP writes stay on
+                // the native write identity so existing write/session/deny
+                // rules keep matching; the server-grant fallback evaluates
+                // their MCP identity separately.
+                if prompt.mcp.as_ref().is_some_and(|invocation| {
+                    ee_mcp::classify::exact_trust_eligible(&invocation.tool)
+                }) {
+                    let invocation = prompt.mcp.as_ref().expect("checked above");
                     (invocation.category, invocation.to_identity())
                 } else {
                     match &prompt.kind {
@@ -510,7 +516,14 @@ impl App {
         session_id: &str,
         fingerprint: &str,
     ) -> TrustDecision {
-        self.evaluate_operation_with_safeguard(operation, session_id, fingerprint, None, false)
+        self.evaluate_operation_with_safeguard(
+            operation,
+            session_id,
+            fingerprint,
+            None,
+            false,
+            true,
+        )
     }
 
     pub(super) fn evaluate_operation_with_safeguard(
@@ -520,11 +533,13 @@ impl App {
         fingerprint: &str,
         built_in_deny: Option<SafeguardMatch>,
         trusted_write_enabled: bool,
+        mcp_server_trust_allowed: bool,
     ) -> TrustDecision {
         let now = self.trust_clock.now();
         let effective = self.effective_trust_document(operation.workspace);
         let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
-        let mcp_server_trust = self.effective_mcp_server_trust();
+        let mcp_server_trust =
+            mcp_server_trust_allowed.then(|| self.effective_mcp_server_trust()).flatten();
         let tool_key = operation.tool_key();
         let tool_default = effective
             .tool_defaults

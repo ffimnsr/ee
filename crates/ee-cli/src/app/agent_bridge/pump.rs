@@ -96,12 +96,34 @@ impl App {
                     self.present_elicitation(session_id, request, reply);
                 }
                 BridgeUiMessage::WorkspaceMemoryApproval { operation, key, reply } => {
-                    self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
-                        operation,
-                        key,
-                        WorkspaceMemoryApprovalTarget::ApprovalOnly,
-                        reply,
-                    ));
+                    let tool = match operation {
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Remember => {
+                            "ee_remember_workspace_fact"
+                        }
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Replace => {
+                            "ee_replace_workspace_fact"
+                        }
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Verify => {
+                            "ee_verify_workspace_fact"
+                        }
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Forget => {
+                            "ee_forget_workspace_fact"
+                        }
+                    };
+                    let mcp = self.mcp_invocation_for_tool(
+                        tool,
+                        json!({ "key": key }),
+                        crate::app::agents_mcp::ProxyRoute::AcpNative,
+                    );
+                    self.request_workspace_memory_approval(
+                        ApprovalPrompt::workspace_memory(
+                            operation,
+                            key,
+                            WorkspaceMemoryApprovalTarget::ApprovalOnly,
+                            reply,
+                        )
+                        .with_mcp(mcp),
+                    );
                 }
                 BridgeUiMessage::WorkspaceMemorySlashResult { text } => {
                     if let Some(index) = self.agents.active_thread_index() {
@@ -318,20 +340,36 @@ impl App {
         }
         match call {
             crate::app::agents_mcp::ProxyToolCall::RememberWorkspaceFact { key, value } => {
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
-                    ee_agent_host::WorkspaceMemoryMutationOperation::Remember,
-                    key,
-                    WorkspaceMemoryApprovalTarget::Remember { value },
-                    reply,
-                ));
+                let mcp = self.mcp_invocation_for_tool(
+                    "ee_remember_workspace_fact",
+                    json!({ "key": key }),
+                    route,
+                );
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory(
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Remember,
+                        key,
+                        WorkspaceMemoryApprovalTarget::Remember { value },
+                        reply,
+                    )
+                    .with_mcp(mcp),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::ReplaceWorkspaceFact { key, value } => {
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
-                    ee_agent_host::WorkspaceMemoryMutationOperation::Replace,
-                    key,
-                    WorkspaceMemoryApprovalTarget::Replace { value },
-                    reply,
-                ));
+                let mcp = self.mcp_invocation_for_tool(
+                    "ee_replace_workspace_fact",
+                    json!({ "key": key }),
+                    route,
+                );
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory(
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Replace,
+                        key,
+                        WorkspaceMemoryApprovalTarget::Replace { value },
+                        reply,
+                    )
+                    .with_mcp(mcp),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::RecallWorkspaceFacts { query } => {
                 let result = self
@@ -359,12 +397,20 @@ impl App {
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
             crate::app::agents_mcp::ProxyToolCall::ForgetWorkspaceFact { key } => {
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
-                    ee_agent_host::WorkspaceMemoryMutationOperation::Forget,
-                    key,
-                    WorkspaceMemoryApprovalTarget::Forget,
-                    reply,
-                ));
+                let mcp = self.mcp_invocation_for_tool(
+                    "ee_forget_workspace_fact",
+                    json!({ "key": key }),
+                    route,
+                );
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory(
+                        ee_agent_host::WorkspaceMemoryMutationOperation::Forget,
+                        key,
+                        WorkspaceMemoryApprovalTarget::Forget,
+                        reply,
+                    )
+                    .with_mcp(mcp),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::ListWorkspaceFacts { limit } => {
                 let result = self
@@ -380,11 +426,16 @@ impl App {
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
             crate::app::agents_mcp::ProxyToolCall::RetractWorkspaceFact { key } => {
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
-                    WorkspaceMemoryApprovalOperation::Retract,
-                    WorkspaceMemoryApprovalTarget::RetractKey { key },
-                    reply,
-                ));
+                let mcp =
+                    self.mcp_invocation_for_tool("ee_retract_workspace_fact", json!({}), route);
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory_proxy(
+                        WorkspaceMemoryApprovalOperation::Retract,
+                        WorkspaceMemoryApprovalTarget::RetractKey { key },
+                        reply,
+                    )
+                    .with_mcp(mcp),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::ExportWorkspaceMemory { include_values } => {
                 self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
@@ -405,18 +456,32 @@ impl App {
                         return;
                     }
                 };
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
-                    WorkspaceMemoryApprovalOperation::Import,
-                    WorkspaceMemoryApprovalTarget::Import { export: Box::new(export) },
-                    reply,
-                ));
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory_proxy(
+                        WorkspaceMemoryApprovalOperation::Import,
+                        WorkspaceMemoryApprovalTarget::Import { export: Box::new(export) },
+                        reply,
+                    )
+                    .with_mcp(self.mcp_invocation_for_tool(
+                        "ee_import_workspace_memory",
+                        json!({}),
+                        route,
+                    )),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::ClearWorkspaceMemory => {
-                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
-                    WorkspaceMemoryApprovalOperation::Clear,
-                    WorkspaceMemoryApprovalTarget::Clear,
-                    reply,
-                ));
+                self.request_workspace_memory_approval(
+                    ApprovalPrompt::workspace_memory_proxy(
+                        WorkspaceMemoryApprovalOperation::Clear,
+                        WorkspaceMemoryApprovalTarget::Clear,
+                        reply,
+                    )
+                    .with_mcp(self.mcp_invocation_for_tool(
+                        "ee_clear_workspace_memory",
+                        json!({}),
+                        route,
+                    )),
+                );
             }
             crate::app::agents_mcp::ProxyToolCall::WorkspaceRoots => {
                 let _ =
@@ -500,50 +565,47 @@ impl App {
                 );
             }
             crate::app::agents_mcp::ProxyToolCall::ReplaceText { path, old_text, new_text } => {
-                self.queue_proxy_replace_text(&path, &old_text, &new_text, reply);
+                self.queue_proxy_replace_text(&path, &old_text, &new_text, route, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::ApplyPatch { path, edits } => {
-                self.queue_proxy_apply_patch(&path, &edits, reply);
+                self.queue_proxy_apply_patch(&path, &edits, route, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::CreateTextFile { path, content } => {
-                self.queue_proxy_create_text_file(&path, &content, reply);
+                self.queue_proxy_create_text_file(&path, &content, route, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::OverwriteTextFile { path, content } => {
-                self.queue_proxy_overwrite_text_file(&path, &content, reply);
+                self.queue_proxy_overwrite_text_file(&path, &content, route, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::CreateDirectory { path } => {
-                self.queue_proxy_filesystem(
+                let operation =
                     crate::app::agent_filesystem::FilesystemOperation::CreateDirectory {
                         path: PathBuf::from(path),
-                    },
-                    reply,
-                );
+                    };
+                let mcp = self.mcp_filesystem_invocation(&operation, route);
+                self.queue_proxy_filesystem(operation, mcp, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::DeletePath { path } => {
-                self.queue_proxy_filesystem(
-                    crate::app::agent_filesystem::FilesystemOperation::DeletePath {
-                        path: PathBuf::from(path),
-                    },
-                    reply,
-                );
+                let operation = crate::app::agent_filesystem::FilesystemOperation::DeletePath {
+                    path: PathBuf::from(path),
+                };
+                let mcp = self.mcp_filesystem_invocation(&operation, route);
+                self.queue_proxy_filesystem(operation, mcp, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::CopyPath { source_path, destination_path } => {
-                self.queue_proxy_filesystem(
-                    crate::app::agent_filesystem::FilesystemOperation::CopyPath {
-                        source: PathBuf::from(source_path),
-                        destination: PathBuf::from(destination_path),
-                    },
-                    reply,
-                );
+                let operation = crate::app::agent_filesystem::FilesystemOperation::CopyPath {
+                    source: PathBuf::from(source_path),
+                    destination: PathBuf::from(destination_path),
+                };
+                let mcp = self.mcp_filesystem_invocation(&operation, route);
+                self.queue_proxy_filesystem(operation, mcp, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::MovePath { source_path, destination_path } => {
-                self.queue_proxy_filesystem(
-                    crate::app::agent_filesystem::FilesystemOperation::MovePath {
-                        source: PathBuf::from(source_path),
-                        destination: PathBuf::from(destination_path),
-                    },
-                    reply,
-                );
+                let operation = crate::app::agent_filesystem::FilesystemOperation::MovePath {
+                    source: PathBuf::from(source_path),
+                    destination: PathBuf::from(destination_path),
+                };
+                let mcp = self.mcp_filesystem_invocation(&operation, route);
+                self.queue_proxy_filesystem(operation, mcp, reply);
             }
             crate::app::agents_mcp::ProxyToolCall::ReadBuffer { path } => {
                 let _ = reply.send(
@@ -717,7 +779,8 @@ impl App {
                     let _ = reply.send(Err(error));
                     return;
                 }
-                self.request_bridge_approval(ApprovalPrompt::write(
+                let mcp = self.mcp_write_invocation("ee_write_text_file", &request.path, route);
+                let mut prompt = ApprovalPrompt::write(
                     None,
                     &session_id,
                     &request,
@@ -727,7 +790,9 @@ impl App {
                         &WriteExpectation::Blind,
                     ),
                     reply,
-                ));
+                );
+                prompt.mcp = mcp;
+                self.request_bridge_approval(prompt);
             }
             crate::app::agents_mcp::ProxyToolCall::Terminal(request) => {
                 let always_allowed = self.command_invocation_for_request(&request).is_ok();

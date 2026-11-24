@@ -454,7 +454,31 @@ impl App {
         });
     }
 
-    pub(super) fn request_workspace_memory_approval(&mut self, prompt: ApprovalPrompt) {
+    pub(super) fn request_workspace_memory_approval(&mut self, mut prompt: ApprovalPrompt) {
+        // MCP-originated memory mutations are workspace writes once a pinned
+        // server grant covers them. Evaluate the shared policy first so an
+        // explicit deny or mandatory-confirm rule still wins; native slash
+        // commands keep their always-prompt behavior because they carry no
+        // MCP invocation.
+        let operation = prompt.mcp.as_ref().map(|invocation| invocation.to_operation());
+        if let Some(operation) = operation {
+            let fingerprint = approval_fingerprint(&prompt.kind);
+            self.attach_always_allows(&mut prompt, &operation);
+            let decision = self.evaluate_operation(&operation, &prompt.session_id, &fingerprint);
+            self.push_trust_audit(&operation, &decision, &prompt.session_id);
+            self.mark_mandatory_confirmation(&mut prompt, &operation, &decision);
+            match decision.outcome {
+                TrustOutcome::Deny => {
+                    self.resolve_policy_deny(prompt, &decision);
+                    return;
+                }
+                TrustOutcome::Allow if decision.reason == DecisionReason::McpServerAllow => {
+                    self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.agents.approvals.push_back(prompt);
         self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
             String::from("workspace memory approval required (open :agents)")
@@ -475,12 +499,14 @@ impl App {
         self.attach_always_allows(&mut prompt, &operation);
         self.attach_persistent_deny(&mut prompt, &operation);
         let trusted_write = self.trusted_write_eligible(&prompt);
+        let server_trust_allowed = self.server_trust_prompt_eligible(&prompt);
         let mut decision = self.evaluate_operation_with_safeguard(
             &operation,
             &session_id,
             &fingerprint,
             safeguard,
             trusted_write,
+            server_trust_allowed,
         );
         // Phase 4 curated-profile fallback: a terminal request that matches
         // a fixed registry entry is evaluated as its profile when the exact
@@ -508,6 +534,37 @@ impl App {
             };
             decision = self.evaluate_operation(&profile_operation, &session_id, &fingerprint);
             audited_operation = profile_operation;
+        }
+        // Pinned MCP server trust for workspace writes and filesystem
+        // mutations: the primary evaluation keeps the native identity so
+        // existing write/session/deny rules still match. When that evaluation
+        // falls through to a prompt, the MCP identity behind the same request
+        // may still be covered by a server grant.
+        if matches!(decision.outcome, TrustOutcome::Confirm)
+            && matches!(
+                decision.reason,
+                DecisionReason::NoMatchingRule
+                    | DecisionReason::ToolDefaultConfirm
+                    | DecisionReason::CategoryDefaultConfirm
+                    | DecisionReason::GlobalDefaultConfirm
+            )
+            && matches!(
+                prompt.kind,
+                ApprovalKind::Write { .. }
+                    | ApprovalKind::WriteBatch { .. }
+                    | ApprovalKind::Filesystem { .. }
+            )
+            && server_trust_allowed
+            && let Some(invocation) = prompt.mcp.as_ref()
+        {
+            let server_operation = invocation.to_operation();
+            if let Some(trust) = self.effective_mcp_server_trust()
+                && let Some(grant) = trust.allows(&server_operation)
+            {
+                let grant_id = grant.id.clone();
+                decision = TrustDecision::allow(DecisionReason::McpServerAllow, Some(grant_id));
+                audited_operation = server_operation;
+            }
         }
         self.mark_mandatory_confirmation(&mut prompt, &audited_operation, &decision);
         // Phase 6 audit: every automatic decision (allow or prompt fallback)

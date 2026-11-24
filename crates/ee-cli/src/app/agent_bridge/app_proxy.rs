@@ -19,23 +19,20 @@ use super::read::read_text_window;
 use super::write::buffer_revision_id;
 
 impl App {
-    /// Validated generic MCP invocation for an eligible proxy tool call
-    /// (Phase 3): server identity `ee`, pinned manifest schema version,
-    /// side-effect classification, canonical exact JSON arguments, and the
-    /// delivering transport.  Returns `None` for tools that never qualify
-    /// (content-bearing writes, terminal-create, read/unknown tools).
+    /// Validated generic MCP invocation for any stable manifest tool.
+    /// Exact always-allow rules remain separately gated by
+    /// `exact_trust_eligible`; this identity also feeds server trust and
+    /// persistent deny matching.
     pub(super) fn mcp_invocation_for_tool(
         &self,
         tool: &str,
         arguments: serde_json::Value,
         route: crate::app::agents_mcp::ProxyRoute,
     ) -> Option<McpInvocation> {
-        if !ee_mcp::classify::exact_trust_eligible(tool) {
-            return None;
-        }
+        let governance = ee_mcp::governance(tool)?;
         let arguments_json =
             crate::policy::rules::canonicalize_arguments_json(&arguments.to_string()).ok()?;
-        let category = match ee_mcp::classify::side_effect_class(tool) {
+        let category = match governance.side_effect {
             ee_mcp::SideEffectClass::Read => TrustCategory::Read,
             ee_mcp::SideEffectClass::Write => TrustCategory::WriteModify,
             ee_mcp::SideEffectClass::Execute => TrustCategory::Execute,
@@ -54,11 +51,55 @@ impl App {
         })
     }
 
+    /// MCP invocation for a content-bearing write. Arguments stay
+    /// path-only because server grants and deny rules never persist file
+    /// contents.
+    pub(super) fn mcp_write_invocation(
+        &self,
+        tool: &str,
+        path: &Path,
+        route: crate::app::agents_mcp::ProxyRoute,
+    ) -> Option<McpInvocation> {
+        self.mcp_invocation_for_tool(tool, json!({ "path": path }), route)
+    }
+
+    /// MCP invocation for an MCP-originated filesystem mutation.
+    pub(super) fn mcp_filesystem_invocation(
+        &self,
+        operation: &crate::app::agent_filesystem::FilesystemOperation,
+        route: crate::app::agents_mcp::ProxyRoute,
+    ) -> Option<McpInvocation> {
+        use crate::app::agent_filesystem::FilesystemOperation;
+        let (category, arguments) = match operation {
+            FilesystemOperation::CreateDirectory { path } => {
+                (TrustCategory::WriteCreate, json!({ "path": path }))
+            }
+            FilesystemOperation::DeletePath { path } => {
+                (TrustCategory::Delete, json!({ "path": path }))
+            }
+            FilesystemOperation::CopyPath { source, destination } => (
+                TrustCategory::WriteCreate,
+                json!({ "source_path": source, "destination_path": destination }),
+            ),
+            FilesystemOperation::MovePath { source, destination } => (
+                TrustCategory::WriteModify,
+                json!({ "source_path": source, "destination_path": destination }),
+            ),
+        };
+        self.mcp_invocation_for_tool(operation.tool_name(), arguments, route).map(
+            |mut invocation| {
+                invocation.category = category;
+                invocation
+            },
+        )
+    }
+
     pub(super) fn queue_proxy_replace_text(
         &mut self,
         path: &str,
         old_text: &str,
         new_text: &str,
+        route: crate::app::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path = PathBuf::from(path);
@@ -66,6 +107,7 @@ impl App {
             Ok((content, expectation)) => {
                 let always_allowed =
                     self.native_write_always_allowed(&path, &content, &expectation);
+                let mcp = self.mcp_write_invocation("ee_replace_text", &path, route);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_replace_text"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), content.len()),
@@ -80,7 +122,7 @@ impl App {
                 };
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
-                    None,
+                    mcp,
                     always_allowed,
                     reply,
                 ))
@@ -95,6 +137,7 @@ impl App {
         &mut self,
         path: &str,
         edits: &[ee_agent_host::ProxyTextEdit],
+        route: crate::app::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path = PathBuf::from(path);
@@ -110,6 +153,7 @@ impl App {
                 );
                 let always_allowed =
                     self.native_write_always_allowed(&path, &content, &expectation);
+                let mcp = self.mcp_write_invocation("ee_apply_patch", &path, route);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_apply_patch"),
                     detail,
@@ -124,7 +168,7 @@ impl App {
                 };
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
-                    None,
+                    mcp,
                     always_allowed,
                     reply,
                 ))
@@ -138,6 +182,7 @@ impl App {
     pub(super) fn queue_proxy_filesystem(
         &mut self,
         operation: crate::app::agent_filesystem::FilesystemOperation,
+        mcp: Option<McpInvocation>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         // Application safeguards inspect typed paths before ordinary validation;
@@ -155,7 +200,9 @@ impl App {
             ))));
             return;
         }
-        self.request_bridge_approval(ApprovalPrompt::filesystem(operation, reply));
+        let mut prompt = ApprovalPrompt::filesystem(operation, reply);
+        prompt.mcp = mcp;
+        self.request_bridge_approval(prompt);
     }
 
     pub(super) fn apply_proxy_filesystem(
@@ -203,6 +250,7 @@ impl App {
         &mut self,
         path: &str,
         content: &str,
+        route: crate::app::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path = PathBuf::from(path);
@@ -224,6 +272,7 @@ impl App {
                     &created,
                     &WriteExpectation::MustNotExist,
                 );
+                let mcp = self.mcp_write_invocation("ee_create_text_file", &path, route);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_create_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), created.len()),
@@ -238,7 +287,7 @@ impl App {
                 };
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
-                    None,
+                    mcp,
                     always_allowed,
                     reply,
                 ))
@@ -253,6 +302,7 @@ impl App {
         &mut self,
         path: &str,
         content: &str,
+        route: crate::app::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path = PathBuf::from(path);
@@ -266,6 +316,7 @@ impl App {
                 let expectation = WriteExpectation::ExpectRevision(revision);
                 let always_allowed =
                     self.native_write_always_allowed(&path, &updated, &expectation);
+                let mcp = self.mcp_write_invocation("ee_overwrite_text_file", &path, route);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_overwrite_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), updated.len()),
@@ -280,7 +331,7 @@ impl App {
                 };
                 self.request_bridge_approval(ApprovalPrompt::proxy_write(
                     spec,
-                    None,
+                    mcp,
                     always_allowed,
                     reply,
                 ))

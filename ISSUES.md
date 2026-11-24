@@ -378,7 +378,7 @@ Rules:
 
 - Workspace trust is the outer gate; an undecided or untrusted workspace makes every MCP server grant inert.
 - Grants are pinned to the canonical workspace identity, server id, transport identity, and an application-owned manifest of `(tool, schema version, side-effect category)` entries.
-- Read tools with no separate approval requirement and the non-content-bearing safe write tools are eligible. Execute, delete/move, content-bearing writes, workspace-memory mutations, and external-network tools are never eligible.
+- Read tools with no separate approval requirement and every workspace write tool (edits, content-bearing writes, filesystem create/copy/move/delete, and workspace-memory mutations) are eligible. Execute and external-network tools are never eligible.
 - A persistent deny, safeguard, mandatory-confirm rule, session deny, or untrusted workspace outranks a server grant.
 - New tools, schema changes, transport changes, and workspace revocation require a new approval; grants never follow server-advertised runtime changes.
 - The store is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), owner-only, atomic, and keyed by the workspace digest; repository configuration cannot create authority.
@@ -393,6 +393,7 @@ Work items:
 - [x] Add the `Trust MCP server (pinned tools)` approval option with preview/confirmation and persistence-failure denial.
 - [x] Manage server grants from `/permissions` list/inspect/revoke/reset and include them in the summary.
 - [x] Cover pinned matching, cross-transport and cross-workspace misses, persisted-tool drift, deny precedence, untrusted inertness, store permissions, malformed documents, and end-to-end approval/auto-allow behavior.
+- [x] Second pass: carry the validated MCP identity through content writes, filesystem mutations, and workspace-memory prompts; gate exact always-allow separately from server trust; keep write safety maxima; reject execute/network candidates; prove cross-tool persistence end to end.
 - [x] Update README and CHANGELOG.
 
 Acceptance:
@@ -400,4 +401,4 @@ Acceptance:
 - [x] `cargo test --quiet -p ee-cli --features agents mcp_trust` passes.
 - [x] `cargo test --quiet -p ee-cli --features agents mcp_server_trust` passes.
 - [x] Existing trust, always-allow, command, and permission-matrix suites still pass.
-- [x] No grant authorizes execute, destructive, content-bearing write, memory-mutation, network, or unpinned tools.
+- [x] No grant authorizes execute, external-network, or unpinned tools; every pinned read or write tool covered by a grant dispatches without a per-tool prompt.
