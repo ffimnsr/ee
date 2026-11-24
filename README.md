@@ -587,6 +587,21 @@ Repeat `--profile` to select several. Profile names are application-owned; confi
 
 Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
 
+### MCP server trust
+
+One explicit trust decision can cover the pinned tool surface of the built-in `ee` MCP server instead of approving each MCP write prompt:
+
+```sh
+ee do mcp trust grant
+ee do mcp trust grant --transport stdio
+ee do mcp trust status
+ee do mcp trust revoke
+```
+
+The grant is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), bound to the canonical workspace identity, and inert unless the workspace trust decision is `trusted`. It covers every pinned read tool plus the non-content-bearing safe write tools (`ee_apply_code_action`, `ee_format_file`, `ee_rename_symbol`) on the selected transport. Execute tools, destructive delete/move operations, content-bearing writes, workspace-memory mutations, and external-network tools are never included. New tools or schema changes require a new grant; cross-transport and cross-workspace calls still prompt. Approval prompts for eligible MCP writes offer `Trust MCP server (pinned tools)` with the same preview/confirmation step as `Allow always`.
+
+This surface covers the built-in `ee` MCP server that ee hosts (stdio proxy and ACP-native routes). External `[mcp.servers]` entries are forwarded to agents and remain agent-owned; ee does not mediate their tool calls.
+
 ### OpenRouter root and rubber-duck models
 
 `OPENROUTER_MODEL` remains root/default model. Orchestrated mode can register independent critic adapter using explicit, non-secret identity metadata:

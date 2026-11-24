@@ -19,8 +19,9 @@ use crate::policy::session::SessionPolicy;
 #[cfg(feature = "agents")]
 use crate::policy::store::TrustStore;
 use crate::policy::{
-    McpInvocation, OperationIdentity, TrustCategory, TrustOperation, TrustOutcome, TrustRuleScope,
-    UsageSnapshot, WorkspaceIdentity,
+    McpInvocation, McpServerGrant, McpServerTrust, OperationIdentity, TrustCategory,
+    TrustOperation, TrustOutcome, TrustRuleScope, UsageSnapshot, WorkspaceIdentity,
+    pinned_server_tools,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -43,6 +44,17 @@ fn mcp_op(
     tool: &str,
     arguments_json: &str,
 ) -> TrustOperation {
+    mcp_op_with_schema(workspace, agent, transport_identity, tool, 1, arguments_json)
+}
+
+fn mcp_op_with_schema(
+    workspace: WorkspaceIdentity,
+    agent: Option<&str>,
+    transport_identity: &str,
+    tool: &str,
+    tool_schema_version: u64,
+    arguments_json: &str,
+) -> TrustOperation {
     TrustOperation {
         workspace,
         agent: agent.map(String::from),
@@ -52,7 +64,7 @@ fn mcp_op(
             server: "ee".to_string(),
             transport_identity: transport_identity.to_string(),
             tool: tool.to_string(),
-            tool_schema_version: 1,
+            tool_schema_version,
             arguments_json: arguments_json.to_string(),
         },
     }
@@ -83,6 +95,14 @@ fn mcp_rule(
 }
 
 fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecision {
+    decide_with(op, rules, None)
+}
+
+fn decide_with(
+    op: &TrustOperation,
+    rules: &[TrustRule],
+    mcp_server_trust: Option<&McpServerTrust>,
+) -> crate::policy::TrustDecision {
     crate::policy::evaluate(&crate::policy::PolicyInput {
         session_id: "s1",
         fingerprint: "fp",
@@ -94,6 +114,7 @@ fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecis
         workspace_enabled: true,
         safe_read_enabled: false,
         trusted_write_enabled: false,
+        mcp_server_trust,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -101,7 +122,82 @@ fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecis
     })
 }
 
+fn server_trust(workspace: WorkspaceIdentity, transport_identity: &str) -> McpServerTrust {
+    McpServerTrust::new(vec![
+        McpServerGrant::new(
+            "mcp_server_test".to_string(),
+            workspace,
+            "ee".to_string(),
+            transport_identity.to_string(),
+            "2026-08-07T00:00:00Z".to_string(),
+            pinned_server_tools(ee_mcp::ToolTransport::Stdio),
+        )
+        .expect("server grant"),
+    ])
+}
+
 // ── Exact-invocation matcher ─────────────────────────────────────────────────
+
+#[test]
+fn mcp_server_grant_allows_pinned_tools_and_persistent_deny_wins() {
+    let ws = identity(b"/work/root");
+    let args = r#"{"action_id":"act_1","path":"/work/root/src/main.rs"}"#;
+    let operation = mcp_op_with_schema(
+        ws,
+        None,
+        "stdio:ee --mcp-proxy",
+        "ee_apply_code_action",
+        ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        args,
+    );
+    let trust = server_trust(ws, "stdio:ee --mcp-proxy");
+
+    let allowed = decide_with(&operation, &[], Some(&trust));
+    assert_eq!(allowed.outcome, TrustOutcome::Allow);
+    assert_eq!(allowed.reason, crate::policy::DecisionReason::McpServerAllow);
+    assert_eq!(allowed.rule_id.as_deref(), Some("mcp_server_test"));
+
+    // Untrusted callers inject no server trust, so the operation prompts.
+    assert_eq!(decide(&operation, &[]).outcome, TrustOutcome::Confirm);
+
+    // A different transport never inherits the grant.
+    let other_transport = mcp_op_with_schema(
+        ws,
+        None,
+        "acp:ee",
+        "ee_apply_code_action",
+        ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        args,
+    );
+    assert_eq!(decide_with(&other_transport, &[], Some(&trust)).outcome, TrustOutcome::Confirm);
+
+    // A tool outside the pinned list prompts even when the server grants.
+    let unpacked = mcp_op_with_schema(
+        ws,
+        None,
+        "stdio:ee --mcp-proxy",
+        "ee_write_text_file",
+        ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        r#"{"path":"/work/root/src/main.rs","content":"x"}"#,
+    );
+    assert_eq!(decide_with(&unpacked, &[], Some(&trust)).outcome, TrustOutcome::Confirm);
+
+    // Persistent deny outranks the server grant.
+    let deny = TrustRule::McpDeny(crate::policy::McpDenyRule {
+        id: "deny_apply".to_string(),
+        effect: crate::policy::TrustEffect::Deny,
+        scope: TrustRuleScope { workspace: ws, agent: None, expires_at: None, max_uses: None },
+        server: "ee".to_string(),
+        transport_identity: "stdio:ee --mcp-proxy".to_string(),
+        tool: "ee_apply_code_action".to_string(),
+        tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        category: None,
+    });
+    assert_eq!(
+        decide_with(&operation, std::slice::from_ref(&deny), Some(&trust)).outcome,
+        TrustOutcome::Deny
+    );
+}
 
 #[test]
 fn mcp_rule_matches_every_identity_field_exactly() {
@@ -271,6 +367,8 @@ mod e2e {
     use crate::app::App;
     use crate::app::ApprovalChoice;
     use crate::app::agents_mcp::CachedProxyCodeAction;
+    use crate::mcp_trust::McpTrustStore;
+    use crate::policy::TrustRule;
     use crate::tests::agent_mcp::{
         acp_connect_script, base_agent_script, connect_proxy, fake_response, mcp_app, mcp_app_in,
         open_pane_and_wait_ready, press, proxy_recv, proxy_send, wait_until,
@@ -404,10 +502,11 @@ mod e2e {
             assert!(prompt.detail.contains("args:"), "detail: {}", prompt.detail);
             assert_eq!(
                 prompt.options.len(),
-                6,
-                "base choices, exact always-allow, and workspace deny offered"
+                7,
+                "base choices, exact always-allow, server trust, and workspace deny offered"
             );
             assert_eq!(prompt.options[4].1, ApprovalChoice::AllowAlways);
+            assert_eq!(prompt.options[5].1, ApprovalChoice::AllowServer);
         }
         open_pane_and_select(&mut app, 4); // Allow always (preview then confirm)
 
@@ -454,6 +553,87 @@ mod e2e {
             !app.agents.approvals.is_empty()
         });
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+        let reply = proxy_recv(&mut stream);
+        assert!(reply["result"]["error"].is_object(), "denied: {reply}");
+    }
+
+    #[test]
+    fn server_trust_persists_pinned_tools_and_covers_varied_arguments() {
+        let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+        open_pane_and_wait_ready(&mut app);
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        let target = temp.path().join("server-trust.txt");
+        fs::write(&target, "alpha\nbeta\n").unwrap();
+        let target_text = target.display().to_string();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        app.agents.test_trust_store_base = Some(state_dir.clone());
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Trusted)
+            .unwrap();
+        seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
+
+        let mut stream = connect_proxy(&app);
+        proxy_send(&mut stream, 1, action_frame(&target_text, "act_1"));
+        wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
+        {
+            let prompt = app.agents.approvals.front().unwrap();
+            assert_eq!(prompt.options[5].1, ApprovalChoice::AllowServer);
+        }
+        // Select server trust (preview then confirm).
+        open_pane_and_select(&mut app, 5);
+        wait_until(&mut app, "server trust write applied", |_app| {
+            fs::read_to_string(&target).map(|text| text.contains("alpha-edited")).unwrap_or(false)
+        });
+        let reply = proxy_recv(&mut stream);
+        assert!(reply["result"]["value"].is_object(), "structured success: {reply}");
+
+        let trust = McpTrustStore::at(&state_dir, temp.path()).unwrap().load().unwrap();
+        assert_eq!(trust.grants().len(), 1);
+        let grant = &trust.grants()[0];
+        assert_eq!(grant.server, "ee");
+        assert_eq!(grant.transport_identity, "stdio:ee --mcp-proxy");
+        assert!(grant.tools.iter().any(|tool| {
+            tool.tool == "ee_apply_code_action"
+                && tool.tool_schema_version == ee_mcp::EE_TOOL_SCHEMA_VERSION
+        }));
+        assert!(grant.tools.len() > 3, "pinned reads must be included too");
+
+        // A different action id and argument set still matches the server grant.
+        seed_code_action(&mut app, "act_2", &target_text, "beta-edited", 2);
+        proxy_send(&mut stream, 2, action_frame(&target_text, "act_2"));
+        wait_until(&mut app, "second server-trusted write applied", |_app| {
+            fs::read_to_string(&target).map(|text| text.contains("beta-edited")).unwrap_or(false)
+        });
+        assert!(app.agents.approvals.is_empty(), "server grant covers varied arguments");
+        let _ = proxy_recv(&mut stream);
+
+        // Workspace untrust makes the stored grant inert again. Use a fresh
+        // file so the prepared write is guaranteed to change content.
+        WorkspaceTrustStore::at(&state_dir, temp.path())
+            .unwrap()
+            .set_decision(WorkspaceTrustDecision::Untrusted)
+            .unwrap();
+        let target3 = temp.path().join("server-trust-3.txt");
+        fs::write(&target3, "one\ntwo\n").unwrap();
+        let target3_text = target3.display().to_string();
+        seed_code_action(&mut app, "act_3", &target3_text, "one-edited", 1);
+        proxy_send(&mut stream, 3, action_frame(&target3_text, "act_3"));
+        wait_until(&mut app, "untrusted workspace prompts", |app| !app.agents.approvals.is_empty());
+        assert!(
+            app.agents
+                .approvals
+                .front()
+                .unwrap()
+                .options
+                .iter()
+                .all(|(_, choice)| *choice != ApprovalChoice::AllowServer),
+            "untrusted workspace must not offer server trust"
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         let reply = proxy_recv(&mut stream);
         assert!(reply["result"]["error"].is_object(), "denied: {reply}");
     }

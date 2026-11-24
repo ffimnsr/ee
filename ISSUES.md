@@ -369,3 +369,35 @@ Audit found landed H0–H4 code still leaves four parity gaps: `/harness` cannot
   - [x] **Problem:** the parity contract crosses approval, filesystem, library, and stream boundaries with no single suite.
   - [x] **Fix:** hermetic `FakeAgentTransport` tests for approval outcomes, full library context, adopt safety, stream order/retention, and task A → B → C learning; CLI tests; update plan/checklist; assert `HARNESS_DIR` has a production reader; correct the `user_experience` user-mirror claim or add an explicit user-scope write path (default stays workspace-only).
   - [x] **Acceptance:** all H5–H8 contracts covered without network; user-mirror documentation matches code; fmt/clippy/targeted tests; every touched code file under 1,000 LOC.
+
+## MCP Server Trust (2026-11-24)
+
+Goal: one explicit host-local trust decision covers the pinned tool surface of an MCP server without weakening the existing per-operation safeguards.
+
+Rules:
+
+- Workspace trust is the outer gate; an undecided or untrusted workspace makes every MCP server grant inert.
+- Grants are pinned to the canonical workspace identity, server id, transport identity, and an application-owned manifest of `(tool, schema version, side-effect category)` entries.
+- Read tools with no separate approval requirement and the non-content-bearing safe write tools are eligible. Execute, delete/move, content-bearing writes, workspace-memory mutations, and external-network tools are never eligible.
+- A persistent deny, safeguard, mandatory-confirm rule, session deny, or untrusted workspace outranks a server grant.
+- New tools, schema changes, transport changes, and workspace revocation require a new approval; grants never follow server-advertised runtime changes.
+- The store is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), owner-only, atomic, and keyed by the workspace digest; repository configuration cannot create authority.
+- Scope is the built-in `ee` MCP server (stdio proxy and ACP-native routes). External `[mcp.servers]` entries are forwarded to agents and remain outside the editor trust store.
+
+Work items:
+
+- [x] Add `McpServerTrust`, pinned `McpServerGrant`/tool grants, candidate preview, and manifest-derived tool eligibility.
+- [x] Add the evaluator `mcp_server_allow` layer between workspace gating and session/persistent allows; deny and mandatory-confirm layers still win.
+- [x] Add the owner-only workspace-keyed MCP trust store with strict parsing, duplicate rejection, identity checks, atomic writes, and revocation.
+- [x] Add `ee do mcp trust grant|revoke|status` with workspace-trust enforcement.
+- [x] Add the `Trust MCP server (pinned tools)` approval option with preview/confirmation and persistence-failure denial.
+- [x] Manage server grants from `/permissions` list/inspect/revoke/reset and include them in the summary.
+- [x] Cover pinned matching, cross-transport and cross-workspace misses, persisted-tool drift, deny precedence, untrusted inertness, store permissions, malformed documents, and end-to-end approval/auto-allow behavior.
+- [x] Update README and CHANGELOG.
+
+Acceptance:
+
+- [x] `cargo test --quiet -p ee-cli --features agents mcp_trust` passes.
+- [x] `cargo test --quiet -p ee-cli --features agents mcp_server_trust` passes.
+- [x] Existing trust, always-allow, command, and permission-matrix suites still pass.
+- [x] No grant authorizes execute, destructive, content-bearing write, memory-mutation, network, or unpinned tools.

@@ -40,7 +40,7 @@ impl App {
             "test" if !rest.is_empty() => self.permissions_test(rest, false),
             "preview" if !rest.is_empty() => self.permissions_test(rest, true),
             _ => self.permissions_notice(
-                "usage: /permissions [list|inspect <id>|disable <id>|enable <id>|revoke <id>|revoke-read <dir|all>|reload|reset confirm|test <kind> field=value...|preview <kind> field=value...]",
+                "usage: /permissions [list|inspect <id>|disable <id>|enable <id>|revoke <id>|revoke-read <dir|all>|reload|reset confirm|test <kind> field=value...|preview <kind> field=value...] (mcp_server_* ids support inspect/revoke)",
             ),
         }
     }
@@ -63,14 +63,19 @@ impl App {
             .iter()
             .filter(|rule| managed.state(rule.id()).is_none_or(|state| state.enabled))
             .count();
+        let mcp_grants = self
+            .mcp_trust_store()
+            .and_then(|store| store.load().ok())
+            .map_or(0, |trust| trust.grants().len());
         self.permissions_notice(&format!(
-            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} session-scope:memory-only external-reads:{} store:{}\n{}",
+            "permissions workspace:{} persistent-rules:{}/{} tool-defaults:{} category-defaults:{} global-default:{:?} mcp-servers:{} session-scope:memory-only external-reads:{} store:{}\n{}",
             managed.document.workspace.as_string(),
             enabled,
             managed.document.rules.len(),
             managed.document.tool_defaults.len(),
             managed.document.category_defaults.len(),
             managed.document.global_default,
+            mcp_grants,
             self.agents.external_read_roots.len(),
             store.path().display(),
             self.agents
@@ -120,6 +125,22 @@ impl App {
             ));
         }
         lines.push(format!("default global effect:{:?}", managed.document.global_default));
+        lines.push("[mcp server trust]".into());
+        match self.mcp_trust_store().and_then(|store| store.load().ok()) {
+            Some(trust) if !trust.is_empty() => {
+                lines.extend(trust.grants().iter().map(|grant| {
+                    format!(
+                        "id:{} server:{} transport:{} tools:{} granted:{}",
+                        grant.id,
+                        grant.server,
+                        grant.transport_identity,
+                        grant.tool_count(),
+                        grant.granted_at
+                    )
+                }));
+            }
+            _ => lines.push(String::from("(none)")),
+        }
         lines.push("[external reads] session-only, read-class tools only".into());
         let roots = self.external_read_roots_display();
         if roots.is_empty() {
@@ -131,6 +152,24 @@ impl App {
     }
 
     fn permissions_inspect(&mut self, rule_id: &str) {
+        if rule_id.starts_with("mcp_server_") {
+            let found = self
+                .mcp_trust_store()
+                .and_then(|store| store.load().ok())
+                .and_then(|trust| trust.grants().iter().find(|grant| grant.id == rule_id).cloned());
+            match found {
+                Some(grant) => self.permissions_notice(&format!(
+                    "id:{} server:{} transport:{} tools:{} granted:{}",
+                    grant.id,
+                    grant.server,
+                    grant.transport_identity,
+                    grant.tool_count(),
+                    grant.granted_at
+                )),
+                None => self.permissions_notice("unknown or stale MCP server grant id"),
+            }
+            return;
+        }
         let Some(store) = self.workspace_trust_store() else {
             self.permissions_notice("trust store unavailable; effective policy fails closed");
             return;
@@ -151,6 +190,22 @@ impl App {
     }
 
     fn permissions_mutate(&mut self, rule_id: &str, mutation: RuleMutation, action: &str) {
+        if rule_id.starts_with("mcp_server_") {
+            if mutation != RuleMutation::Revoke {
+                self.permissions_notice("MCP server grants support revoke only");
+                return;
+            }
+            match self.mcp_trust_store().map(|store| store.revoke_id(rule_id)) {
+                Some(Ok(1)) => {
+                    self.reload_mcp_server_trust();
+                    self.permissions_notice(&format!("mcp server grant {rule_id} revoked"));
+                }
+                Some(Ok(_)) => self.permissions_notice("unknown or stale MCP server grant id"),
+                Some(Err(error)) => self.permissions_notice(&format!("grant unchanged: {error}")),
+                None => self.permissions_notice("mcp trust store unavailable; grant unchanged"),
+            }
+            return;
+        }
         let Some(store) = self.workspace_trust_store() else {
             self.permissions_notice("trust store unavailable; policy unchanged");
             return;
@@ -197,13 +252,22 @@ impl App {
         match store.reset_at(self.trust_clock.now()) {
             Ok(_) => {
                 self.agents.trust_policy.replace(Some(store.effective_at(self.trust_clock.now())));
+                if let Some(mcp_store) = self.mcp_trust_store()
+                    && let Err(error) = mcp_store.clear()
+                {
+                    self.permissions_notice(&format!(
+                        "workspace rules reset; mcp server grants unchanged: {error}"
+                    ));
+                    return;
+                }
+                self.reload_mcp_server_trust();
                 self.agents.action_log.push(ActionLogEntry::TrustRuleMutation {
                     rule_id: None,
                     action: "reset".into(),
                     source: "explicit-user-confirmation".into(),
                 });
                 self.permissions_notice(
-                    "workspace persistent rules/defaults reset; session choices remain memory-only",
+                    "workspace persistent rules/defaults and MCP server grants reset; session choices remain memory-only",
                 );
             }
             Err(error) => {
@@ -252,6 +316,7 @@ impl App {
             // workspace-trusted built-in safe list is not replayable here.
             safe_read_enabled: false,
             trusted_write_enabled: false,
+            mcp_server_trust: None,
             built_in_deny: None,
             tool_default: effective
                 .tool_defaults

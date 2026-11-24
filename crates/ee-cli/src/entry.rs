@@ -66,8 +66,8 @@ pub(crate) fn coalesce_input_events(events: Vec<Event>) -> Vec<Event> {
 }
 use crate::args::{
     AgentCommands, AgentTrustCommands, Cli, Commands, ConfigCommands, ConfigSetupCommands,
-    DoCommands, FileCommands, LanguageCommands, PluginCommands, RuntimeCommands, SchemaCommands,
-    WorkspaceTrustCommands,
+    DoCommands, FileCommands, LanguageCommands, McpCommands, McpTrustCommands, PluginCommands,
+    RuntimeCommands, SchemaCommands, WorkspaceTrustCommands,
 };
 use crate::config_cmd::{
     cmd_config_get, cmd_config_init, cmd_config_set, cmd_config_setup_agent, cmd_config_setup_mcp,
@@ -296,6 +296,19 @@ pub fn run_cli() -> io::Result<()> {
                     WorkspaceTrustCommands::Grant => workspace_trust::cmd_trust_grant()?,
                     WorkspaceTrustCommands::Revoke => workspace_trust::cmd_trust_revoke()?,
                     WorkspaceTrustCommands::Status => workspace_trust::cmd_trust_status()?,
+                },
+                DoCommands::Mcp { command } => match command {
+                    McpCommands::Trust { command } => match command {
+                        McpTrustCommands::Grant { server, transport } => {
+                            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport)?
+                        }
+                        McpTrustCommands::Revoke { server, transport } => {
+                            crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport)?
+                        }
+                        McpTrustCommands::Status { server } => {
+                            crate::mcp_trust::cmd_mcp_trust_status(server.as_deref())?
+                        }
+                    },
                 },
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),

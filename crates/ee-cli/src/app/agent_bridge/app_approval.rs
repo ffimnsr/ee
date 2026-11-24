@@ -559,7 +559,24 @@ impl App {
                 }
                 return;
             }
-            TrustDecision { outcome: TrustOutcome::Allow, reason, .. } => {
+            TrustDecision { outcome: TrustOutcome::Allow, reason, rule_id } => {
+                if *reason == DecisionReason::McpServerAllow {
+                    // Pinned server grant: dispatch without a prompt and without
+                    // inventing a per-session decision; the audit trail already
+                    // carries the grant id.
+                    let summary = match rule_id {
+                        Some(id) => format!("trusted by MCP server grant {id}"),
+                        None => String::from("trusted by MCP server grant"),
+                    };
+                    if let Some(thread_index) = thread_index
+                        && let Some(thread) = self.agents.threads.get_mut(thread_index)
+                    {
+                        thread.push_system(summary.clone());
+                    }
+                    self.backend.status_message = Some(summary);
+                    self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
+                    return;
+                }
                 if *reason == DecisionReason::BuiltInAllow {
                     // Workspace-trusted allowlist: dispatch silently, never
                     // record a session decision, and keep the audit trail
@@ -658,9 +675,11 @@ impl App {
                 ApprovalChoice::AllowSession
                     | ApprovalChoice::AllowAlways
                     | ApprovalChoice::AllowAlwaysPrefix(_)
+                    | ApprovalChoice::AllowServer
             )
         });
         prompt.allow_candidates.clear();
+        prompt.mcp_server_candidate = None;
         prompt.selected = prompt.selected.min(prompt.options.len().saturating_sub(1));
     }
 }

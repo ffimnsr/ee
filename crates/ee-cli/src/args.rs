@@ -71,6 +71,11 @@ pub(crate) enum DoCommands {
         #[command(subcommand)]
         command: WorkspaceTrustCommands,
     },
+    /// Manage host-local MCP server trust grants
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
     /// List installed plugins from configured plugin directories
     Plugins {
         #[command(subcommand)]
@@ -352,6 +357,51 @@ pub(crate) enum AgentTrustCommands {
         /// Built-in host-local profile to revoke; repeat to revoke multiple profiles
         #[arg(long = "profile", value_enum, required = true)]
         profiles: Vec<AgentTrustProfile>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum McpTrustCommands {
+    /// Grant trust for one MCP server's pinned tools
+    Grant {
+        /// MCP server id; only the built-in ee manifest is supported
+        #[arg(long, default_value = "ee", value_name = "SERVER")]
+        server: String,
+        /// Transport to grant; defaults to both stdio and ACP
+        #[arg(long, value_enum, default_value = "all")]
+        transport: McpTrustTransport,
+    },
+    /// Revoke trust for one MCP server
+    Revoke {
+        /// MCP server id
+        #[arg(long, default_value = "ee", value_name = "SERVER")]
+        server: String,
+        /// Transport to revoke; defaults to both stdio and ACP
+        #[arg(long, value_enum, default_value = "all")]
+        transport: McpTrustTransport,
+    },
+    /// Print recorded MCP server trust grants
+    Status {
+        /// Restrict output to one server id
+        #[arg(long, value_name = "SERVER")]
+        server: Option<String>,
+    },
+}
+
+/// Transport selector for MCP server trust commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum McpTrustTransport {
+    Stdio,
+    Acp,
+    All,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum McpCommands {
+    /// Grant, revoke, or inspect MCP server trust
+    Trust {
+        #[command(subcommand)]
+        command: McpTrustCommands,
     },
 }
 

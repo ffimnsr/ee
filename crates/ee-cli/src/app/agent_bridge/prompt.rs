@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::app::agents_mcp::ProxyRoute;
 use crate::app::write_leases::{WriteLeaseId, WriteLeaseOwner};
 
-use crate::policy::{AlwaysRuleCandidate, AlwaysRulePreview, McpInvocation};
+use crate::policy::{
+    AlwaysRuleCandidate, AlwaysRulePreview, McpInvocation, McpServerTrustCandidate,
+};
 
 use super::approval::{
     ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, DeferredExternalRead, DenyScopePreview,
@@ -42,6 +44,9 @@ pub(crate) struct ApprovalPrompt {
     /// the request is an eligible proxy tool call.  Presence gates the
     /// persistent `Allow always` option.
     pub(super) mcp: Option<McpInvocation>,
+    /// Pinned server-trust candidate for this MCP transport, when one can be
+    /// generated. Persisted only after the explicit preview confirmation.
+    pub(super) mcp_server_candidate: Option<McpServerTrustCandidate>,
     pub(super) allow_candidates: Vec<(ApprovalChoice, AlwaysRuleCandidate)>,
     pub(super) confirming_allow: Option<ApprovalChoice>,
     pub(super) deny_candidate: Option<PersistentDenyCandidate>,
@@ -122,6 +127,7 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::WorkspaceMemoryApproval { operation, key, target },
             mcp: None,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -158,6 +164,7 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::Filesystem { operation },
             mcp: None,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -217,6 +224,7 @@ impl ApprovalPrompt {
                 proxy_edit_count: prepared.proxy_edit_count,
             },
             mcp,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -247,6 +255,7 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::WriteBatch { writes, total_edit_count },
             mcp,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -304,6 +313,7 @@ impl ApprovalPrompt {
                 cancellation,
             },
             mcp: None,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -341,6 +351,7 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::ExternalRead { directory, read },
             mcp: None,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -386,6 +397,7 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::TerminalCreate { request: request.clone() },
             mcp: None,
+            mcp_server_candidate: None,
             allow_candidates: Vec::new(),
             confirming_allow: None,
             deny_candidate: None,
@@ -397,6 +409,9 @@ impl ApprovalPrompt {
 
     pub(crate) fn allow_confirmation_preview(&self) -> Option<&AlwaysRulePreview> {
         let choice = self.confirming_allow?;
+        if choice == ApprovalChoice::AllowServer {
+            return self.mcp_server_candidate.as_ref().map(|candidate| &candidate.preview);
+        }
         self.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
             (*candidate_choice == choice).then_some(&candidate.preview)
         })

@@ -85,6 +85,7 @@ impl App {
         self.agents.agent_permissions.clear();
         self.agents.alignment_stats = crate::app::agent_bridge::AgentAlignmentStats::default();
         self.agents.usage_ledger = crate::policy::UsageLedger::default();
+        self.agents.mcp_server_trust.replace(None);
     }
 
     /// `:agents_threads` — open modal thread picker.

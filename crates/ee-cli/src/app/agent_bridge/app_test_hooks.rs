@@ -171,12 +171,16 @@ impl App {
 
     /// Confirms the front approval with the selected option.
     pub(crate) fn confirm_bridge_approval(&mut self, choice: ApprovalChoice) {
-        if matches!(choice, ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_))
-            && let Some(prompt) = self.agents.approvals.front_mut()
+        if matches!(
+            choice,
+            ApprovalChoice::AllowAlways
+                | ApprovalChoice::AllowAlwaysPrefix(_)
+                | ApprovalChoice::AllowServer
+        ) && let Some(prompt) = self.agents.approvals.front_mut()
             && prompt.confirming_allow != Some(choice)
         {
             prompt.confirming_allow = Some(choice);
-            self.backend.status_message = Some(String::from("confirm workspace always-allow rule"));
+            self.backend.status_message = Some(String::from("confirm host-local trust rule"));
             return;
         }
         if choice == ApprovalChoice::DenyPersistent

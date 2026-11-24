@@ -226,6 +226,11 @@ impl App {
             return;
         }
 
+        if choice == ApprovalChoice::AllowServer {
+            self.resolve_server_trust_choice(prompt);
+            return;
+        }
+
         let fingerprint = approval_fingerprint(&prompt.kind);
         if let Some(decision) = session_decision(choice) {
             self.agents.approval_policy.record(&prompt.session_id, &fingerprint, decision);
@@ -396,7 +401,11 @@ impl App {
 
     /// Dispatches an approved write or write batch and consumes the matched
     /// persistent rule use only after the write succeeds.
-    fn dispatch_write_prompt(&mut self, mut prompt: ApprovalPrompt, rule_id: Option<String>) {
+    pub(super) fn dispatch_write_prompt(
+        &mut self,
+        mut prompt: ApprovalPrompt,
+        rule_id: Option<String>,
+    ) {
         if let Err(error) = self.validate_prompt_write_lease(&prompt) {
             self.release_prompt_write_lease(&mut prompt);
             let _ = prompt.reply.send(Err(error));

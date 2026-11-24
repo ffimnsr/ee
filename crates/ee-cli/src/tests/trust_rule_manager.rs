@@ -81,6 +81,7 @@ fn input<'a>(
         workspace_enabled: true,
         safe_read_enabled: false,
         trusted_write_enabled: false,
+        mcp_server_trust: None,
         built_in_deny: None,
         tool_default: None,
         category_default: Some(FallbackEffect::Confirm),
@@ -206,7 +207,7 @@ fn trust_rule_manager_tester_matches_evaluator_without_mutating_inputs() {
     assert_eq!(tester.decision.reason, DecisionReason::PersistentDeny);
     assert_eq!(session.lookup(SESSION, FINGERPRINT), before_lookup);
     assert_eq!(usage.used("trace_allow"), before_used);
-    assert_eq!(tester.trace.len(), 11);
+    assert_eq!(tester.trace.len(), 12);
     assert_eq!(
         tester
             .trace
@@ -220,6 +221,7 @@ fn trust_rule_manager_tester_matches_evaluator_without_mutating_inputs() {
             ("mandatory_confirm", TraceStatus::NotReached, None),
             ("built_in_allow", TraceStatus::NotReached, None),
             ("workspace_gate", TraceStatus::NotReached, None),
+            ("mcp_server_allow", TraceStatus::NotReached, None),
             ("session_allow", TraceStatus::NotReached, None),
             ("bounded_persistent_allow", TraceStatus::NotReached, None),
             ("tool_default", TraceStatus::NotReached, None),

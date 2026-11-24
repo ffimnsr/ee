@@ -31,6 +31,13 @@
 //!   Denials, safeguards, and mandatory-confirm rules still win, MCP proxy
 //!   writes never qualify, and additional workspace roots are out of scope
 //!   because the trust decision is keyed by the primary root.
+//! - Pinned MCP server grants: a host-local, workspace-trust-gated grant may
+//!   allow an application-owned manifest of read tools and non-content-bearing
+//!   safe write tools for one exact server transport. Matching requires the
+//!   canonical workspace, server, transport identity, tool name, schema
+//!   version, and side-effect category; execute, destructive, content-bearing
+//!   write, memory-mutation, and network tools never match. Persistent denies,
+//!   safeguards, mandatory-confirm rules, and session denies still win.
 //! - `evaluate`: the pure shared evaluator.  It performs no filesystem,
 //!   process, transport, UI, clock, or counter mutation; time and usage are
 //!   injected.
@@ -41,6 +48,7 @@ pub(crate) mod command;
 pub(crate) mod evaluator;
 pub(crate) mod manager;
 pub(crate) mod mcp;
+pub(crate) mod mcp_server_trust;
 pub(crate) mod paths;
 pub(crate) mod profiles;
 pub(crate) mod rules;
@@ -73,6 +81,11 @@ pub(crate) use evaluator::{
 };
 #[allow(unused_imports)]
 pub(crate) use mcp::{McpInvocation, generate_mcp_rule_id};
+#[allow(unused_imports)]
+pub(crate) use mcp_server_trust::{
+    McpServerGrant, McpServerToolGrant, McpServerTrust, McpServerTrustCandidate,
+    generate_mcp_server_grant_id, pinned_server_tools,
+};
 #[allow(unused_imports)]
 pub(crate) use paths::is_protected_relative_path;
 #[allow(unused_imports)]
@@ -473,6 +486,8 @@ pub(crate) enum DecisionReason {
     /// The built-in workspace-trusted read-only allowlist matched the
     /// operation (no prompt, no persistent rule, no use budget).
     BuiltInAllow,
+    /// A pinned host-local MCP server grant matched the operation.
+    McpServerAllow,
     /// A recorded session allow matched the operation.
     SessionAllow,
     /// The user's decision on the agent's own permission request covered the
@@ -511,6 +526,7 @@ impl DecisionReason {
             DecisionReason::SessionDeny => "session_deny",
             DecisionReason::MandatoryConfirm => "mandatory_confirm",
             DecisionReason::BuiltInAllow => "built_in_allow",
+            DecisionReason::McpServerAllow => "mcp_server_allow",
             DecisionReason::SessionAllow => "session_allow",
             DecisionReason::AgentPermissionAllow => "agent_permission_allow",
             DecisionReason::AgentPermissionDeny => "agent_permission_deny",

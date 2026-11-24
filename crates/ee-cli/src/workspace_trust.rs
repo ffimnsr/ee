@@ -224,7 +224,7 @@ fn confirm(prompt: &str) -> Result<bool, String> {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-fn workspace_root_for_cli() -> io::Result<PathBuf> {
+pub(crate) fn workspace_root_for_cli() -> io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     Ok(crate::config::find_git_root(&cwd).unwrap_or(cwd))
 }

@@ -13,10 +13,11 @@ use ee_agent_host::AgentError;
 use super::super::*;
 
 use crate::policy::{
-    AlwaysRuleCandidate, OperationIdentity, TrustEffect, TrustOperation, TrustStoreError,
+    AlwaysRuleCandidate, McpServerTrustCandidate, OperationIdentity, TrustEffect, TrustOperation,
+    TrustStoreError,
 };
 
-use super::approval::{ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind};
+use super::approval::{ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalKind, TRUST_MCP_SERVER_LABEL};
 use super::prompt::ApprovalPrompt;
 use super::write::ActionLogEntry;
 
@@ -30,9 +31,15 @@ impl App {
         operation: &TrustOperation,
     ) {
         prompt.options.retain(|(_, choice)| {
-            !matches!(choice, ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_))
+            !matches!(
+                choice,
+                ApprovalChoice::AllowAlways
+                    | ApprovalChoice::AllowAlwaysPrefix(_)
+                    | ApprovalChoice::AllowServer
+            )
         });
         prompt.allow_candidates.clear();
+        prompt.mcp_server_candidate = None;
         if !self.workspace_trusted() {
             return;
         }
@@ -85,6 +92,11 @@ impl App {
                         ALWAYS_ALLOW_LABEL.to_string(),
                         candidate,
                     ));
+                }
+                if let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) = McpServerTrustCandidate::for_invocation(invocation)
+                {
+                    prompt.mcp_server_candidate = Some(candidate);
                 }
             }
             ApprovalKind::Write { path, content, expectation, .. } => {
@@ -152,6 +164,9 @@ impl App {
             prompt.options.push((label, choice));
             prompt.allow_candidates.push((choice, candidate));
         }
+        if prompt.mcp_server_candidate.is_some() {
+            prompt.options.push((TRUST_MCP_SERVER_LABEL.to_string(), ApprovalChoice::AllowServer));
+        }
     }
 
     /// Reuses an identical enabled always-allow rule or appends a new one.
@@ -206,6 +221,53 @@ impl App {
             source: "approval-always-allow".into(),
         });
         Ok(rule_id)
+    }
+
+    fn persist_mcp_server_candidate(
+        &mut self,
+        candidate: &McpServerTrustCandidate,
+    ) -> Result<String, TrustStoreError> {
+        if !self.workspace_trusted() {
+            return Err(TrustStoreError::ValidationFailure(
+                "workspace trust decision is not trusted".into(),
+            ));
+        }
+        let store = self.mcp_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        let grant_id = candidate.grant.id.clone();
+        store.add_grant(candidate.grant.clone())?;
+        self.reload_mcp_server_trust();
+        self.agents.action_log.push(ActionLogEntry::TrustRuleMutation {
+            rule_id: Some(grant_id.clone()),
+            action: "create".into(),
+            source: "approval-mcp-server".into(),
+        });
+        Ok(grant_id)
+    }
+
+    /// Resolves the explicit server-trust choice: persist the pinned grant,
+    /// then dispatch the original write without consuming a per-rule use.
+    pub(super) fn resolve_server_trust_choice(&mut self, mut prompt: ApprovalPrompt) {
+        let Some(candidate) = prompt.mcp_server_candidate.as_ref() else {
+            self.release_prompt_write_lease(&mut prompt);
+            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                reason: "MCP server trust has no previewed candidate".into(),
+            }));
+            return;
+        };
+        if let Err(error) = self.persist_mcp_server_candidate(candidate) {
+            self.record_denied_write(&prompt.session_id, &prompt.kind);
+            self.release_prompt_write_lease(&mut prompt);
+            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                reason: format!("MCP server trust unavailable: {error}"),
+            }));
+            if let Some(thread) = prompt.thread_index
+                && let Some(thread) = self.agents.threads.get_mut(thread)
+            {
+                thread.push_system("approval denied");
+            }
+            return;
+        }
+        self.dispatch_write_prompt(prompt, None);
     }
 
     /// Resolves one always-allow choice: persist (or reuse) the previewed

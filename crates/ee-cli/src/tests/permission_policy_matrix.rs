@@ -386,6 +386,7 @@ fn policy_input<'a>(
         workspace_enabled: true,
         safe_read_enabled: false,
         trusted_write_enabled: false,
+        mcp_server_trust: None,
         built_in_deny: None,
         tool_default: None,
         category_default: None,
@@ -472,7 +473,7 @@ fn permission_policy_matrix_effect_category_transport_is_deterministic() {
                     fixture.label
                 );
                 assert_eq!(result.decision.rule_id.as_deref(), Some(id.as_str()));
-                assert_eq!(result.trace.len(), 11);
+                assert_eq!(result.trace.len(), 12);
                 assert_eq!(usage, before_usage, "evaluator consumed usage");
                 assert_eq!(store_bytes, b"immutable-host-local-store", "evaluator changed store");
                 assert_redacted(&result.decision);

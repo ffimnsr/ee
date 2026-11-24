@@ -365,6 +365,38 @@ impl App {
         TrustStore::default_for(&self.working_dir).ok()
     }
 
+    /// Host-local MCP server trust store for the primary workspace. Tests use
+    /// the same isolated base as the rule trust store.
+    pub(crate) fn mcp_trust_store(&self) -> Option<crate::mcp_trust::McpTrustStore> {
+        #[cfg(test)]
+        if let Some(base) = self.agents.test_trust_store_base.as_deref() {
+            return crate::mcp_trust::McpTrustStore::at(base, &self.working_dir).ok();
+        }
+        crate::mcp_trust::McpTrustStore::default_for(&self.working_dir).ok()
+    }
+
+    /// Effective pinned MCP server grants. A missing or malformed store, or an
+    /// undecided/untrusted workspace, yields `None`; the evaluator then falls
+    /// back to the normal per-tool approval path.
+    pub(super) fn effective_mcp_server_trust(&self) -> Option<crate::policy::McpServerTrust> {
+        if !self.workspace_trusted() {
+            return None;
+        }
+        if self.agents.mcp_server_trust.borrow().is_none() {
+            let trust = self
+                .mcp_trust_store()
+                .and_then(|store| store.load().ok())
+                .unwrap_or_else(crate::policy::McpServerTrust::empty);
+            self.agents.mcp_server_trust.replace(Some(trust));
+        }
+        self.agents.mcp_server_trust.borrow().clone()
+    }
+
+    /// Drops the in-memory server-grant snapshot after a grant/revoke or reset.
+    pub(crate) fn reload_mcp_server_trust(&self) {
+        self.agents.mcp_server_trust.replace(None);
+    }
+
     /// Host-local policy for workspace-layer `secret://` references in the
     /// primary workspace. Fail closed: only an explicit `trusted` decision
     /// resolves. Tests inject `test_trust_store_base` so app tests stay
@@ -438,6 +470,7 @@ impl App {
         let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
         let document = self.gated_trust_document(store.load_at(self.trust_clock.now())?);
         self.agents.trust_policy.replace(Some(document));
+        self.reload_mcp_server_trust();
         Ok(())
     }
 
@@ -491,6 +524,7 @@ impl App {
         let now = self.trust_clock.now();
         let effective = self.effective_trust_document(operation.workspace);
         let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
+        let mcp_server_trust = self.effective_mcp_server_trust();
         let tool_key = operation.tool_key();
         let tool_default = effective
             .tool_defaults
@@ -513,6 +547,7 @@ impl App {
             workspace_enabled: effective.workspace_enabled,
             safe_read_enabled: self.workspace_trusted(),
             trusted_write_enabled,
+            mcp_server_trust: mcp_server_trust.as_ref(),
             built_in_deny,
             tool_default,
             category_default,

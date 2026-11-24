@@ -16,6 +16,9 @@ use crate::policy::TrustRule;
 /// host-local workspace trust store, are workspace-wide (no agent binding),
 /// and are offered only while the workspace trust decision is `trusted`.
 pub(crate) const ALWAYS_ALLOW_LABEL: &str = "Allow always";
+/// One-click trust for a pinned MCP server manifest, offered only on MCP write
+/// prompts while the workspace trust decision is `trusted`.
+pub(crate) const TRUST_MCP_SERVER_LABEL: &str = "Trust MCP server (pinned tools)";
 
 // ── Approval prompt ──────────────────────────────────────────────────────────
 
@@ -248,6 +251,9 @@ pub(crate) enum ApprovalChoice {
     /// Preview and persist a command argv prefix ending at the selected token
     /// boundary as a workspace-wide always-allow rule.
     AllowAlwaysPrefix(usize),
+    /// Preview and persist a pinned host-local trust grant for the invoking MCP
+    /// server transport.
+    AllowServer,
     /// Preview and persist a narrow host-local deny rule before denying.
     DenyPersistent,
 }
@@ -261,6 +267,7 @@ impl ApprovalChoice {
             ApprovalChoice::DenySession => "Deny session",
             ApprovalChoice::AllowAlways => ALWAYS_ALLOW_LABEL,
             ApprovalChoice::AllowAlwaysPrefix(_) => "Allow always (token prefix)",
+            ApprovalChoice::AllowServer => TRUST_MCP_SERVER_LABEL,
             ApprovalChoice::DenyPersistent => "Deny for this workspace",
         }
     }
@@ -272,6 +279,7 @@ impl ApprovalChoice {
                 | ApprovalChoice::AllowSession
                 | ApprovalChoice::AllowAlways
                 | ApprovalChoice::AllowAlwaysPrefix(_)
+                | ApprovalChoice::AllowServer
         )
     }
 }
@@ -335,6 +343,7 @@ pub(super) fn session_decision(choice: ApprovalChoice) -> Option<SessionChoice> 
         | ApprovalChoice::DenyOnce
         | ApprovalChoice::AllowAlways
         | ApprovalChoice::AllowAlwaysPrefix(_)
+        | ApprovalChoice::AllowServer
         | ApprovalChoice::DenyPersistent => None,
         ApprovalChoice::AllowSession => Some(SessionChoice::Allow),
         ApprovalChoice::DenySession => Some(SessionChoice::Deny),

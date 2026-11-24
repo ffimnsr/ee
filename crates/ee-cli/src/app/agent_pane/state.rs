@@ -301,6 +301,10 @@ pub(crate) struct AgentPaneState {
     /// Effective host-local policy snapshot. Disk changes activate only through
     /// initial load or explicit reload/persistence paths.
     pub(crate) trust_policy: std::cell::RefCell<Option<crate::policy::TrustStoreDocument>>,
+    /// Effective pinned MCP server grants for the primary workspace. Only
+    /// populated while the workspace trust decision is `trusted`; disk changes
+    /// activate through initial load, reload, or explicit grant persistence.
+    pub(crate) mcp_server_trust: std::cell::RefCell<Option<crate::policy::McpServerTrust>>,
     /// Phase 6 MCP state: health registry, browsing, and the proxy listener.
     pub(crate) mcp: crate::app::agents_mcp::McpPaneState,
     /// Lazily built host-bound secrets store shared by agent launch and MCP
@@ -385,6 +389,7 @@ impl Default for AgentPaneState {
             approval_modes: BTreeMap::new(),
             usage_ledger: crate::policy::UsageLedger::default(),
             trust_policy: std::cell::RefCell::new(None),
+            mcp_server_trust: std::cell::RefCell::new(None),
             mcp: crate::app::agents_mcp::McpPaneState::default(),
             secret_store: None,
             resolved_secret_values: Vec::new(),

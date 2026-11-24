@@ -444,6 +444,63 @@ fn cli_utility_commands_live_under_do() {
     ));
     assert!(crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "revoke"]).is_err());
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Grant {
+                        server,
+                        transport: crate::McpTrustTransport::All,
+                    }
+                }
+            }
+        }) if server == "ee"
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant", "--transport", "acp"])
+            .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Grant {
+                        transport: crate::McpTrustTransport::Acp,
+                        ..
+                    }
+                }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Revoke { .. }
+                }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "status", "--server", "ee"])
+        .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Mcp {
+                command: crate::McpCommands::Trust {
+                    command: crate::McpTrustCommands::Status { server: Some(server) }
+                }
+            }
+        }) if server == "ee"
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
 
     assert!(matches!(

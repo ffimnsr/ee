@@ -13,8 +13,8 @@ use std::time::SystemTime;
 use super::rules::TrustRule;
 use super::session::SessionPolicy;
 use super::{
-    DecisionReason, FallbackEffect, OperationIdentity, SafeguardMatch, TrustCategory,
-    TrustDecision, TrustEffect, TrustOperation, UsageSnapshot, is_safe_read_profile,
+    DecisionReason, FallbackEffect, McpServerTrust, OperationIdentity, SafeguardMatch,
+    TrustCategory, TrustDecision, TrustEffect, TrustOperation, UsageSnapshot, is_safe_read_profile,
 };
 
 /// Immutable inputs for one policy evaluation.
@@ -48,6 +48,11 @@ pub(crate) struct PolicyInput<'a> {
     /// the secret store, so a write outside the workspace directory can
     /// never reach the built-in allow below.
     pub(crate) trusted_write_enabled: bool,
+    /// Effective pinned MCP server grants for this workspace. The caller
+    /// supplies this only while the host-local workspace decision is
+    /// `trusted`; a stale or malformed grant set is represented as `None` and
+    /// therefore cannot authorize anything.
+    pub(crate) mcp_server_trust: Option<&'a McpServerTrust>,
     /// Application-owned, non-overridable safeguard match, if any.
     pub(crate) built_in_deny: Option<SafeguardMatch>,
     /// Effective exact-tool fallback, if configured.
@@ -78,13 +83,14 @@ pub(crate) struct EvaluationResult {
     pub(crate) trace: Vec<PrecedenceTraceStep>,
 }
 
-const TRACE_LAYERS: [&str; 11] = [
+const TRACE_LAYERS: [&str; 12] = [
     "built_in_deny",
     "persistent_deny",
     "session_deny",
     "mandatory_confirm",
     "built_in_allow",
     "workspace_gate",
+    "mcp_server_allow",
     "session_allow",
     "bounded_persistent_allow",
     "tool_default",
@@ -152,6 +158,7 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
         no_match!("mandatory_confirm");
         no_match!("built_in_allow");
         no_match!("workspace_gate");
+        no_match!("mcp_server_allow");
         no_match!("session_allow");
         no_match!("bounded_persistent_allow");
         if let Some(effect) = input.tool_default {
@@ -207,6 +214,21 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
         );
     }
     no_match!("workspace_gate");
+    // Pinned MCP server trust: a host-local grant generated from the
+    // application-owned manifest. It sits after every deny, safeguard,
+    // mandatory-confirm, and workspace gate layer, so it can never override
+    // an explicit denial or an untrusted workspace.
+    if let Some(trust) = input.mcp_server_trust
+        && let Some(grant) = trust.allows(input.operation)
+    {
+        let id = Some(grant.id.clone());
+        finish!(
+            "mcp_server_allow",
+            id.clone(),
+            TrustDecision::allow(DecisionReason::McpServerAllow, id)
+        );
+    }
+    no_match!("mcp_server_allow");
     if input.session.is_allowed(input.session_id, input.fingerprint) {
         finish!("session_allow", None, TrustDecision::allow(DecisionReason::SessionAllow, None));
     }
