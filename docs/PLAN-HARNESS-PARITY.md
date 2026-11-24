@@ -1,6 +1,6 @@
 # PLAN-HARNESS-PARITY — Close the ee ↔ Harness2 gaps
 
-Status: **proposed (2026-11-24)** · Scope: `ee-agent-harnessing`, existing orchestrator seams, and `ee-cli` agent-mode surfaces. Design parity for the agent-mode loop; benchmark adapters and LLM judges remain out of scope.
+Status: **implemented (2026-11-24)** · Scope: `ee-agent-harnessing`, existing orchestrator seams, and `ee-cli` agent-mode surfaces. Design parity for the agent-mode loop; benchmark adapters and LLM judges remain out of scope.
 
 Sources:
 
@@ -243,3 +243,20 @@ Gates after each phase: `cargo fmt --all -- --check`; clippy on touched crates; 
 - `ee do agent harness sweep` runs a manifest with frozen domain order and correct library retention.
 - `HARNESS_DIR` has a production reader; active component discovery still reads only root `.agents`.
 - I57's regression suite passes, and all touched code files remain under 1,000 LOC.
+
+## 8. Implementation result (2026-11-24)
+
+H5–H9 landed with these concrete shapes:
+
+- **H5** — `library_context` is the production `HARNESS_DIR` reader; `run_task` loads one bounded `LibraryEvidence` and every INV/DOM/composer/reflector context gets `library/INDEX.md` plus full `EXPERIENCE.md` and `harness/` trees. `cues.md` was replaced by the stage-local index.
+- **H6** — `--reflection=accept` is the CLI default and invocation is consent; `--reflection=decline` runs the reflector without a writer; `--no-reflect` skips the stage. `/harness` passes `--reflection accept` and an optional `no-reflect`. The run summary records `library_root`, `reflection_write`, `reflection_source`, and `reflected_path`.
+- **H7** — `harness adopt` validates, diffs, backs up, and applies the managed `.agents` roots with complete-tree semantics. `/adopt` resolves the last run root from the session log, shows the dry-run diff, and applies only after an Accept elicitation.
+- **H8** — `harness sweep --tasks` validates the manifest before host startup, defaults the library to `<run-root>/library/<mode>-k<k>`, and reports base-failed or no-deliverable tasks as failures. `run_stream` freezes the per-domain cutoff and excludes each task's own prior entries.
+- **H9** — `tests/parity.rs` covers approval outcomes, full-library context, forward-only A → B → C learning, and the `HARNESS_DIR` production reader without network access.
+
+Deviations from the design text: the library root is the experience directory
+itself (`<workspace>/.agents/experience`) rather than a workspace-shaped root;
+the stage-local index replaces `library/cues.md`; adoption stages and renames
+one managed root at a time instead of swapping the whole `.agents` directory;
+and `/adopt` reads the run root from the harness ledger report recorded by the
+child process.

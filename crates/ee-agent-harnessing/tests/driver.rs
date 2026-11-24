@@ -1,18 +1,21 @@
 //! Hermetic driver, selection, resume, and stream tests.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ee_agent_harnessing::{
     Channel, ChannelFuture, HarnessConfig, HarnessError, HarnessTask, ImproverReply,
-    ImproverRequest, ImproverRole, RunRecord, RunRequest, run_stream, run_task,
+    ImproverRequest, ImproverRole, ReflectionSource, ReflectionWrite, ReflectionWriter, RunRecord,
+    RunRequest, run_stream, run_task, save_entry_at,
 };
 use ee_agent_orchestrator::harness_reflection::ReflectionToolRecord;
 use ee_agent_orchestrator::harness_validation::HarnessTree;
 use ee_agent_orchestrator::rollout_view::{
     RolloutDiffFile, RolloutToolRecord, RolloutTurn, RolloutView,
 };
+use tokio::sync::Barrier;
 
 type RunFn = Arc<dyn Fn(&RunRequest) -> Result<RunRecord, HarnessError> + Send + Sync>;
 type ImproveFn = Arc<dyn Fn(&ImproverRequest) -> Result<ImproverReply, HarnessError> + Send + Sync>;
@@ -133,6 +136,22 @@ fn task(workspace: &Path) -> HarnessTask {
 
 fn config(k: usize) -> HarnessConfig {
     HarnessConfig { k, ..HarnessConfig::default() }
+}
+
+struct RecordingWriter {
+    library: PathBuf,
+    calls: Arc<Mutex<usize>>,
+}
+
+impl ReflectionWriter for RecordingWriter {
+    fn write(
+        &self,
+        entry: &ee_agent_harnessing::ExperienceEntry,
+        harness: &HarnessTree,
+    ) -> Result<PathBuf, HarnessError> {
+        *self.calls.lock().expect("calls") += 1;
+        save_entry_at(&self.library, entry, Some(harness)).map_err(HarnessError::State)
+    }
 }
 
 fn prepare_workspace(root: &Path) -> PathBuf {
@@ -588,4 +607,295 @@ async fn stream_keeps_a_frozen_order_and_rejects_stale_inputs() {
     let error =
         run_stream(&channel, &stale, &settings, &stream_root, None).await.expect_err("stale order");
     assert!(error.to_string().contains("stale frozen stream order"), "{error}");
+}
+
+#[tokio::test]
+async fn invocation_consent_writes_the_library_entry_and_leaves_active_agents_unchanged() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let before = snapshot(&workspace.join(".agents"));
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0usize));
+    let writer = RecordingWriter { library: library.clone(), calls: calls.clone() };
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let task = task(&workspace).with_library_root(&library);
+    let mut settings = config(1);
+    settings.resume = false;
+    let run = run_task(&channel, &task, &settings, &root.path().join("run"), Some(&writer))
+        .await
+        .expect("run");
+    assert_eq!(run.reflection_write, ReflectionWrite::Written);
+    assert_eq!(run.reflection_source, ReflectionSource::Invocation);
+    assert_eq!(run.library_root, library);
+    assert_eq!(*calls.lock().expect("calls"), 1);
+    let entry = run.reflected_path.as_ref().expect("entry path");
+    assert!(entry.join("EXPERIENCE.md").is_file());
+    assert!(entry.join("harness/guardrails.md").is_file());
+    assert_eq!(snapshot(&workspace.join(".agents")), before, "active .agents untouched");
+    let summary =
+        std::fs::read_to_string(root.path().join("run/run-summary.json")).expect("summary");
+    assert!(summary.contains("\"reflection_write\": \"written\""), "{summary}");
+    assert!(summary.contains("\"reflection_source\": \"invocation\""), "{summary}");
+    assert!(summary.contains("library"), "{summary}");
+}
+
+#[tokio::test]
+async fn no_reflect_skips_the_stage_and_writes_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0usize));
+    let writer = RecordingWriter { library: library.clone(), calls: calls.clone() };
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let task = task(&workspace);
+    let mut settings = config(1);
+    settings.reflect = false;
+    settings.resume = false;
+    let run = run_task(&channel, &task, &settings, &root.path().join("run"), Some(&writer))
+        .await
+        .expect("run");
+    assert_eq!(run.reflection_write, ReflectionWrite::Disabled);
+    assert_eq!(run.reflection_source, ReflectionSource::None);
+    assert_eq!(run.ledger.reflection_sessions, 0);
+    assert_eq!(*calls.lock().expect("calls"), 0);
+    assert!(!library.exists());
+}
+
+#[tokio::test]
+async fn declined_reflection_runs_but_writes_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let task = task(&workspace).with_library_root(&library);
+    let mut settings = config(1);
+    settings.resume = false;
+    settings.reflection_source = ReflectionSource::Flag;
+    let run =
+        run_task(&channel, &task, &settings, &root.path().join("run"), None).await.expect("run");
+    assert_eq!(run.reflection_write, ReflectionWrite::Declined);
+    assert_eq!(run.reflection_source, ReflectionSource::Flag);
+    assert_eq!(run.ledger.reflection_sessions, 1);
+    assert!(run.reflection.is_some());
+    assert!(run.reflected_path.is_none());
+    assert!(!library.exists());
+}
+
+#[tokio::test]
+async fn second_task_reads_the_first_tasks_full_library_tree() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0usize));
+    let writer = RecordingWriter { library: library.clone(), calls };
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let first = task(&workspace).with_library_root(&library);
+    let mut settings = config(1);
+    settings.resume = false;
+    run_task(&channel, &first, &settings, &root.path().join("run-1"), Some(&writer))
+        .await
+        .expect("first");
+
+    let second =
+        HarnessTask::new("t2", "do the work again", "rust", &workspace).with_library_root(&library);
+    let second_run = run_task(&channel, &second, &settings, &root.path().join("run-2"), None)
+        .await
+        .expect("second");
+    assert_eq!(second_run.library_root, library);
+    let copied =
+        root.path().join("run-2/context/step-0-inv/library/rust/1-t1/harness/guardrails.md");
+    assert!(copied.is_file(), "prior harness tree copied into the next context");
+    assert_eq!(
+        std::fs::read_to_string(copied).expect("copied rule").trim_end(),
+        "improved inv rule"
+    );
+    assert!(root.path().join("run-2/context/step-0-inv/library/rust/1-t1/EXPERIENCE.md").is_file());
+    assert!(root.path().join("run-2/context/step-0-inv/library/INDEX.md").is_file());
+}
+
+#[tokio::test]
+async fn resume_reuses_the_written_entry_without_duplicating_it() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0usize));
+    let writer = RecordingWriter { library: library.clone(), calls };
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let task = task(&workspace).with_library_root(&library);
+    let run_root = root.path().join("run");
+    let first =
+        run_task(&channel, &task, &config(1), &run_root, Some(&writer)).await.expect("first");
+    let reflected = first.reflected_path.clone().expect("entry written");
+    let second =
+        run_task(&channel, &task, &config(1), &run_root, Some(&writer)).await.expect("second");
+    assert!(second.resumed);
+    assert_eq!(second.reflected_path.as_deref(), Some(reflected.as_path()));
+    assert_eq!(second.reflection_write, ReflectionWrite::Written);
+    let entries = std::fs::read_dir(library.join("rust/entries")).expect("entries");
+    assert_eq!(entries.count(), 1, "resume must not duplicate the library entry");
+}
+
+#[tokio::test]
+async fn stream_reports_failed_task_without_aborting_completed_domains() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let channel = channel(
+        Arc::new(|request| {
+            if request.task.domain == "alpha" {
+                Err(HarnessError::Channel(String::from("alpha provider down")))
+            } else {
+                Ok(record(&request.label, "delivered"))
+            }
+        }),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let tasks = vec![
+        HarnessTask::new("a1", "alpha task", "alpha", &workspace),
+        HarnessTask::new("b1", "beta task", "beta", &workspace),
+    ];
+    let mut settings = config(1);
+    settings.reflect = false;
+    settings.resume = false;
+    let runs = run_stream(&channel, &tasks, &settings, &root.path().join("stream"), None)
+        .await
+        .expect("stream");
+    assert_eq!(runs.len(), 2);
+    let alpha = runs.iter().find(|run| run.domain == "alpha").expect("alpha");
+    let beta = runs.iter().find(|run| run.domain == "beta").expect("beta");
+    let alpha_run = alpha.result.as_ref().expect("alpha returns a recorded failure");
+    assert!(alpha_run.ledger.base_failed, "alpha has no delivered base run");
+    let beta_run = beta.result.as_ref().expect("beta completed");
+    assert!(beta_run.selection.chosen.is_some(), "beta delivered despite alpha failing");
+}
+
+#[tokio::test]
+async fn stream_runs_domains_concurrently_and_keeps_one_domain_sequential() {
+    #[derive(Clone)]
+    struct BarrierChannel {
+        barrier: Arc<Barrier>,
+        seen: Arc<Mutex<BTreeSet<String>>>,
+        active: Arc<Mutex<BTreeSet<String>>>,
+        overlap: Arc<AtomicBool>,
+    }
+
+    impl Channel for BarrierChannel {
+        fn run_task(&self, request: RunRequest) -> ChannelFuture<RunRecord> {
+            let this = self.clone();
+            let label = request.label.clone();
+            let domain = request.task.domain.clone();
+            Box::pin(async move {
+                let first = this.seen.lock().expect("seen").insert(domain.clone());
+                if !this.active.lock().expect("active").insert(domain.clone()) {
+                    this.overlap.store(true, Ordering::Relaxed);
+                }
+                if first {
+                    this.barrier.wait().await;
+                }
+                tokio::task::yield_now().await;
+                this.active.lock().expect("active").remove(&domain);
+                Ok(record(&label, "delivered"))
+            })
+        }
+
+        fn improve(&self, request: ImproverRequest) -> ChannelFuture<ImproverReply> {
+            Box::pin(async move {
+                Ok(ImproverReply {
+                    tree: HarnessTree::load_components(&request.base_harness.join(".agents"))
+                        .unwrap_or_default(),
+                    notes: String::from("kept -> base harness -> probe delivered"),
+                })
+            })
+        }
+    }
+
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let channel = BarrierChannel {
+        barrier: Arc::new(Barrier::new(2)),
+        seen: Arc::new(Mutex::new(BTreeSet::new())),
+        active: Arc::new(Mutex::new(BTreeSet::new())),
+        overlap: Arc::new(AtomicBool::new(false)),
+    };
+    let tasks = vec![
+        HarnessTask::new("a1", "alpha one", "alpha", &workspace),
+        HarnessTask::new("a2", "alpha two", "alpha", &workspace),
+        HarnessTask::new("b1", "beta one", "beta", &workspace),
+    ];
+    let mut settings = config(1);
+    settings.reflect = false;
+    settings.resume = false;
+    settings.max_workers = 2;
+    let runs = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_stream(&channel, &tasks, &settings, &root.path().join("stream"), None),
+    )
+    .await
+    .expect("domains must reach the barrier concurrently")
+    .expect("stream");
+    assert_eq!(runs.len(), 3);
+    assert!(runs.iter().all(|run| run.result.is_ok()));
+    assert!(!channel.overlap.load(Ordering::Relaxed), "one domain ran two tasks at once");
+}
+
+#[tokio::test]
+async fn stream_retention_exposes_prior_same_domain_and_hides_own_entries() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0usize));
+    let writer = RecordingWriter { library: library.clone(), calls };
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let tasks = vec![
+        HarnessTask::new("a", "first task", "rust", &workspace).with_library_root(&library),
+        HarnessTask::new("b", "second task", "rust", &workspace).with_library_root(&library),
+    ];
+    let mut settings = config(1);
+    settings.max_workers = 2;
+    settings.resume = false;
+    let stream_root = root.path().join("stream");
+    let runs =
+        run_stream(&channel, &tasks, &settings, &stream_root, Some(&writer)).await.expect("stream");
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|run| run.result.is_ok()));
+    let first_id = runs[0].task_id.clone();
+    let second_id = runs[1].task_id.clone();
+    assert!(
+        !stream_root.join("tasks/rust").join(&first_id).join("context/step-0-inv/library").exists(),
+        "the first task has no prior entries"
+    );
+    let b_copy = stream_root
+        .join("tasks/rust")
+        .join(&second_id)
+        .join(format!("context/step-0-inv/library/rust/1-{first_id}/harness/guardrails.md"));
+    assert!(b_copy.is_file(), "the second task sees the first task's full harness tree");
+
+    let rerun_root = root.path().join("rerun");
+    let rerun =
+        run_stream(&channel, &tasks[..1], &settings, &rerun_root, None).await.expect("rerun");
+    assert!(rerun[0].result.is_ok());
+    let rerun_library = rerun_root.join("tasks/rust/a/context/step-0-inv/library");
+    if let Ok(entries) = std::fs::read_dir(rerun_library.join("rust")) {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(!name.ends_with("-a"), "own prior entry {name} is hidden");
+        }
+    }
 }

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
+use ee_agent_orchestrator::user_experience::ExperienceRegistry;
+
 use crate::channel::Channel;
 use crate::error::{HarnessError, HarnessResult};
 use crate::select::seeded_shuffle;
@@ -88,8 +90,16 @@ pub async fn run_stream(
         let config = config.clone();
         async move {
             let mut results = Vec::new();
-            for (position, task) in tasks.into_iter().enumerate() {
+            for (position, mut task) in tasks.into_iter().enumerate() {
                 let task_id = task.id.clone();
+                // Freeze retention at task start: only entries that already
+                // existed are visible, and the task's own prior entries never
+                // leak into its context on a rerun.
+                let registry = ExperienceRegistry::discover_at(&task.library_root());
+                let cutoff = registry.next_seq(&task.domain);
+                task.library_before_seq =
+                    Some(task.library_before_seq.map_or(cutoff, |existing| existing.min(cutoff)));
+                task.excluded_task_ids.insert(task.id.clone());
                 let task_root = run_root.join("tasks").join(&domain).join(safe_name(&task_id));
                 let result = run_task(channel, &task, &config, &task_root, writer).await;
                 if let Err(error) = &result {

@@ -17,6 +17,7 @@ pub mod driver;
 pub mod error;
 pub mod leave_one_out;
 pub mod ledger;
+pub mod library_context;
 pub mod regression;
 pub mod runstate;
 pub mod select;
@@ -28,17 +29,23 @@ pub use channel::{
 };
 pub use compose::{ComposeNote, parse_notes};
 pub use driver::{
-    DryRunPlan, HarnessConfig, HarnessMode, HarnessRun, ReflectionWriter, StreamTaskRun,
-    run_stream, run_task, stream_order_path,
+    DryRunPlan, HarnessConfig, HarnessMode, HarnessRun, ReflectionSource, ReflectionWrite,
+    ReflectionWriter, StreamTaskRun, run_stream, run_task, stream_order_path,
 };
 pub use ee_agent_orchestrator::harness_reflection::ReflectionToolRecord;
 pub use ee_agent_orchestrator::harness_validation::{HarnessTree, materialize, validate};
 pub use ee_agent_orchestrator::rollout_view::{
     RolloutDiffFile, RolloutToolRecord, RolloutTurn, RolloutView,
 };
-pub use ee_agent_orchestrator::user_experience::{ExperienceEntry, save_entry};
+pub use ee_agent_orchestrator::user_experience::{
+    ExperienceEntry, ExperienceRegistry, WORKSPACE_EXPERIENCE_DIR, save_entry, save_entry_at,
+};
 pub use error::{HarnessError, HarnessResult};
 pub use ledger::{Ledger, LedgerReport};
+pub use library_context::{
+    LibraryEntry, LibraryEvidence, LibraryLocation, MAX_LIBRARY_ENTRIES, MAX_LIBRARY_FILE_BYTES,
+    MAX_LIBRARY_TOTAL_BYTES, load as load_library_evidence,
+};
 pub use select::{AnonPool, Candidate, Selection};
 pub use task::HarnessTask;
 

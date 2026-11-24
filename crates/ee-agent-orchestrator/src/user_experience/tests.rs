@@ -167,6 +167,28 @@ fn streaming_retention_hides_the_current_and_later_sequences() {
 }
 
 #[test]
+fn discovery_reads_only_the_root_agents_experience_directory() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    write_entry(
+        workspace.path(),
+        "rust",
+        "1-root",
+        &entry_file(1, "rust", "root task", "helped", Some(("root cue", "l", "e"))),
+    );
+    let nested = workspace.path().join("nested");
+    std::fs::create_dir_all(&nested).expect("nested");
+    write_entry(
+        &nested,
+        "rust",
+        "2-nested",
+        &entry_file(2, "rust", "nested task", "helped", Some(("nested cue", "l", "e"))),
+    );
+    let registry = ExperienceRegistry::discover(workspace.path(), &[], None);
+    assert_eq!(registry.len(), 1, "only root .agents/experience is discovered");
+    assert_eq!(registry.iter().next().expect("root entry").seq, 1);
+}
+
+#[test]
 fn domain_filter_scopes_the_catalog() {
     let workspace = tempfile::tempdir().expect("workspace");
     write_entry(

@@ -299,6 +299,7 @@ pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol:
         rubber_duck_available_command(),
         reflect_available_command(),
         harness_available_command(),
+        adopt_available_command(),
         branch_available_command(),
         revert_available_command(),
         diff_available_command(),

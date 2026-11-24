@@ -60,7 +60,13 @@ mod folds;
 mod git;
 #[cfg(feature = "agents")]
 #[allow(dead_code)]
+mod harness_adopt_cmd;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
 mod harness_cmd;
+#[cfg(feature = "agents")]
+#[allow(dead_code)]
+mod harness_sweep_cmd;
 #[allow(dead_code)]
 mod highlight;
 #[allow(dead_code)]

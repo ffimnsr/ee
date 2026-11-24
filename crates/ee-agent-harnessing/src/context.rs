@@ -16,6 +16,7 @@ use ee_agent_remote::redact::Redactor;
 
 use crate::channel::Deliverable;
 use crate::error::{HarnessError, HarnessResult};
+use crate::library_context::{LibraryEvidence, safe_relative_path};
 use crate::task::{HarnessTask, render_deliverable};
 
 /// Maximum bytes written to one context markdown file.
@@ -56,8 +57,8 @@ pub struct StageEvidence {
     pub rollouts: Vec<(String, RolloutView)>,
     /// Deliverables by label.
     pub deliverables: Vec<(String, Deliverable)>,
-    /// Bounded library cue lines.
-    pub library_cues: Vec<String>,
+    /// Bounded prior experience entries with their archived harness trees.
+    pub library: LibraryEvidence,
     /// Composition or stage decisions, keyed by their source label.
     pub decisions: Vec<(String, String)>,
     /// Anonymized selector candidates, written untrimmed with size headers.
@@ -142,14 +143,36 @@ pub fn build(root: &Path, evidence: &StageEvidence) -> HarnessResult<PathBuf> {
         present.push("deliverables/");
     }
 
-    if !evidence.library_cues.is_empty() {
+    if !evidence.library.is_empty() {
         let library_dir = directory.join("library");
         std::fs::create_dir_all(&library_dir)?;
-        write_checked(
-            &library_dir.join("cues.md"),
-            &format!("# Library cues\n\n{}", evidence.library_cues.join("\n")),
-            &redactor,
-        )?;
+        let mut index = String::from("# Library evidence\n\n");
+        if evidence.library.cues.is_empty() {
+            index.push_str("_No prior entry could be copied._\n");
+        } else {
+            index.push_str(&evidence.library.cues.join("\n"));
+            index.push('\n');
+        }
+        if !evidence.library.skipped.is_empty() {
+            index.push_str("\n## Skipped entries\n\n");
+            for note in &evidence.library.skipped {
+                index.push_str(&format!("- {note}\n"));
+            }
+        }
+        write_checked(&library_dir.join("INDEX.md"), &index, &redactor)?;
+        for entry in &evidence.library.entries {
+            let entry_dir =
+                library_dir.join(safe_name(&entry.domain)).join(safe_name(&entry.directory));
+            write_checked(&entry_dir.join("EXPERIENCE.md"), &entry.experience, &redactor)?;
+            for (relative, content) in &entry.harness.files {
+                if !safe_relative_path(relative) {
+                    return Err(HarnessError::State(format!(
+                        "library harness path escapes the entry: {relative}"
+                    )));
+                }
+                write_checked(&entry_dir.join("harness").join(relative), content, &redactor)?;
+            }
+        }
         present.push("library/");
     }
 
@@ -305,6 +328,8 @@ fn safe_name(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::channel::DeliverableAsset;
+    use crate::library_context::LibraryEntry;
+    use std::collections::BTreeMap;
 
     fn task() -> HarnessTask {
         HarnessTask::new("t1", "improve it", "rust", std::env::temp_dir())
@@ -347,7 +372,20 @@ mod tests {
                     }],
                 },
             )],
-            library_cues: vec!["- [rust #1] cue".into()],
+            library: LibraryEvidence {
+                cues: vec!["- [rust #1] cue".into()],
+                entries: vec![LibraryEntry {
+                    domain: "rust".into(),
+                    seq: 1,
+                    directory: "1-prior".into(),
+                    experience: "# Experience\n\nlesson\n".into(),
+                    harness: HarnessTree::new(BTreeMap::from([(
+                        "guardrails.md".into(),
+                        "prior rule\n".into(),
+                    )])),
+                }],
+                skipped: Vec::new(),
+            },
             decisions: vec![(String::from("step-0"), String::from("- kept base"))],
             selector: Vec::new(),
             observations: None,
@@ -364,6 +402,9 @@ mod tests {
             "decisions/step-0.md",
             "rollouts/ref-0.md",
             "deliverables/ref-0.md",
+            "library/INDEX.md",
+            "library/rust/1-prior/EXPERIENCE.md",
+            "library/rust/1-prior/harness/guardrails.md",
         ] {
             assert!(directory.join(file).is_file(), "missing {file}");
         }
@@ -371,6 +412,7 @@ mod tests {
         assert!(mission.contains("rollouts/"));
         assert!(mission.contains("deliverables/"));
         assert!(mission.contains("decisions/"));
+        assert!(mission.contains("library/"));
         assert!(!mission.contains("observations.md"));
     }
 
@@ -378,7 +420,20 @@ mod tests {
     fn refuses_grader_material() {
         let root = tempfile::tempdir().expect("root");
         let mut evidence = base_evidence();
-        evidence.library_cues.push("expected score: 0.9".into());
+        evidence.library.cues.push("expected score: 0.9".into());
+        let error = build(root.path(), &evidence).expect_err("leak guard");
+        assert!(error.to_string().contains("grader"), "{error}");
+    }
+
+    #[test]
+    fn refuses_grader_material_in_library_harness() {
+        let root = tempfile::tempdir().expect("root");
+        let mut evidence = base_evidence();
+        evidence.library.cues.clear();
+        evidence.library.entries[0]
+            .harness
+            .files
+            .insert("scripts/check.sh".into(), "expected score: 0.9".into());
         let error = build(root.path(), &evidence).expect_err("leak guard");
         assert!(error.to_string().contains("grader"), "{error}");
     }
@@ -405,7 +460,7 @@ mod tests {
         evidence.rollouts.clear();
         evidence.deliverables.clear();
         evidence.harnesses.clear();
-        evidence.library_cues.clear();
+        evidence.library = LibraryEvidence::default();
         evidence.decisions.clear();
         let error = build(root.path(), &evidence).expect_err("nothing to adapt");
         assert!(error.to_string().contains("adapting on nothing"), "{error}");

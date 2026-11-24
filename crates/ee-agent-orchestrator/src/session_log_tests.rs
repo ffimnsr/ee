@@ -282,3 +282,22 @@ fn artifact_sweep_cannot_escape_the_log_root() {
     assert_eq!(sink.prune_bodies("s-1", &[]).expect("sweep"), 0);
     assert!(stray.is_file(), "only content-hash names are candidates");
 }
+
+#[test]
+fn last_harness_run_root_comes_from_the_newest_ledger_report() {
+    let log = SessionLog::in_memory("s-1");
+    assert_eq!(log.last_harness_run_root().expect("empty log"), None);
+    log.record_harness_ledger(HarnessLedgerReport {
+        task_id: String::from("t1"),
+        run_root: Some(String::from("/state/run-1")),
+        ..HarnessLedgerReport::default()
+    })
+    .expect("first");
+    log.record_harness_ledger(HarnessLedgerReport {
+        task_id: String::from("t2"),
+        run_root: Some(String::from("/state/run-2")),
+        ..HarnessLedgerReport::default()
+    })
+    .expect("second");
+    assert_eq!(log.last_harness_run_root().expect("latest"), Some(String::from("/state/run-2")));
+}

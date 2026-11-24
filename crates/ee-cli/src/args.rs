@@ -200,12 +200,71 @@ pub(crate) enum AgentCommands {
 pub(crate) enum HarnessCommands {
     /// Run one task through Propose -> Probe -> Compose -> Select
     Improve(Box<HarnessImproveArgs>),
+    /// Apply a validated adopted harness tree to the workspace `.agents` surface
+    Adopt(Box<HarnessAdoptArgs>),
+    /// Run a JSON task manifest through per-domain ordered streams
+    Sweep(Box<HarnessSweepArgs>),
     /// Run the deterministic demo loop with no model credentials
     Demo {
         /// Directory that receives the demo workspace and run root
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
+}
+
+/// `ee do agent harness adopt` options.
+#[derive(Debug, Args)]
+pub(crate) struct HarnessAdoptArgs {
+    /// Run root whose `adopted/.agents` tree is applied
+    #[arg(long = "run-root", value_name = "DIR", conflicts_with = "experience")]
+    pub(crate) run_root: Option<PathBuf>,
+    /// Experience entry `<domain>/<seq>` whose archived harness is applied
+    #[arg(long = "experience", value_name = "DOMAIN/SEQ")]
+    pub(crate) experience: Option<String>,
+    /// Experience-library root used by --experience (defaults to the workspace library)
+    #[arg(long = "library-root", value_name = "DIR")]
+    pub(crate) library_root: Option<PathBuf>,
+    /// Workspace whose `.agents` managed surface receives the tree
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub(crate) workspace: PathBuf,
+    /// Print the diff and write nothing
+    #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
+    pub(crate) dry_run: bool,
+    /// Apply without an interactive confirmation
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) yes: bool,
+    /// Replace `.agents/memories` as part of the managed surface
+    #[arg(long = "include-memories", action = clap::ArgAction::SetTrue)]
+    pub(crate) include_memories: bool,
+}
+
+/// `ee do agent harness sweep` options.
+#[derive(Debug, Args)]
+pub(crate) struct HarnessSweepArgs {
+    /// JSON task manifest: {"tasks":[{"id","prompt","domain","workspace"}]}
+    #[arg(long, value_name = "FILE")]
+    pub(crate) tasks: PathBuf,
+    /// Recursion depth per task
+    #[arg(long, default_value_t = 1)]
+    pub(crate) k: usize,
+    /// Candidate execution mode
+    #[arg(long, value_enum, default_value_t = HarnessModeArg::Parallel)]
+    pub(crate) mode: HarnessModeArg,
+    /// Domain concurrency
+    #[arg(long, default_value_t = 2)]
+    pub(crate) workers: usize,
+    /// Run directory (defaults to the ee state directory)
+    #[arg(long = "run-root", value_name = "DIR")]
+    pub(crate) run_root: Option<PathBuf>,
+    /// Scratch experience-library root (defaults to <run-root>/library/<mode>-k<k>)
+    #[arg(long = "library-root", value_name = "DIR")]
+    pub(crate) library_root: Option<PathBuf>,
+    /// Skip the reflector stage for every task
+    #[arg(long = "no-reflect", action = clap::ArgAction::SetTrue)]
+    pub(crate) no_reflect: bool,
+    /// Print the plan without any model call
+    #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
+    pub(crate) dry_run: bool,
 }
 
 /// `ee do agent harness improve` options.
@@ -253,9 +312,22 @@ pub(crate) struct HarnessImproveArgs {
     /// Improver wall-clock timeout in seconds
     #[arg(long = "improver-timeout", default_value_t = 300)]
     pub(crate) improver_timeout: u64,
-    /// Approve writing the reflection entry into the workspace library
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    pub(crate) yes: bool,
+    /// Reflection persistence: accept writes the experience entry, decline runs
+    /// the reflector without writing
+    #[arg(long = "reflection", value_enum, default_value_t = ReflectionChoiceArg::Accept)]
+    pub(crate) reflection: ReflectionChoiceArg,
+    /// Skip the reflector stage entirely
+    #[arg(long = "no-reflect", action = clap::ArgAction::SetTrue)]
+    pub(crate) no_reflect: bool,
+}
+
+/// Reflection persistence choice on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ReflectionChoiceArg {
+    /// Write the experience entry as part of this invocation
+    Accept,
+    /// Run reflection but write nothing
+    Decline,
 }
 
 /// Candidate execution mode on the command line.

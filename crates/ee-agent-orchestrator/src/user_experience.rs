@@ -1,10 +1,12 @@
 //! Per-domain harness experience library.
 //!
 //! Entries live under `<workspace>/.agents/experience/<domain>/entries/
-//! <seq>-<slug>/` and mirror to `$XDG_CONFIG_HOME/ee/experience/`. Each entry
-//! stores the full adopted harness tree and an `EXPERIENCE.md` file with the
-//! edit verdict rows and at most one durable lesson. `INDEX.md` is rebuilt from
-//! the entries whenever one is written.
+//! <seq>-<slug>/`. Discovery also reads `$XDG_CONFIG_HOME/ee/experience/` when
+//! a caller supplies that root, but writes are workspace-scoped: there is no
+//! implicit user-config mirror. Each entry stores the full adopted harness tree
+//! and an `EXPERIENCE.md` file with the edit verdict rows and at most one
+//! durable lesson. `INDEX.md` is rebuilt from the entries whenever one is
+//! written.
 //!
 //! Streaming retention is explicit: callers can ask for entries with
 //! `seq < before_seq`, so a task never reads its own lesson while it runs.
@@ -217,6 +219,13 @@ impl ExperienceEntry {
         self.lesson.is_none()
     }
 
+    /// Archived adopted harness tree stored beside this entry, when the entry
+    /// carries a canonical path.
+    #[must_use]
+    pub fn harness_dir(&self) -> Option<PathBuf> {
+        self.path.parent().map(|parent| parent.join(HARNESS_DIR))
+    }
+
     /// One-line catalog summary.
     fn catalog_line(&self) -> String {
         let summary = match &self.cue {
@@ -264,6 +273,19 @@ impl ExperienceRegistry {
         if let Some(root) = config_root {
             registry.load_root(&root.join(USER_EXPERIENCE_DIR), ExperienceScope::User);
         }
+        registry.warnings.sort();
+        registry.warnings.dedup();
+        registry
+    }
+
+    /// Discovers entries from one explicit experience-library root.
+    ///
+    /// The root is the library directory itself (`<workspace>/.agents/experience`
+    /// or a run-scoped library), not a workspace-shaped root.
+    #[must_use]
+    pub fn discover_at(root: &Path) -> Self {
+        let mut registry = Self::default();
+        registry.load_root(root, ExperienceScope::Workspace);
         registry.warnings.sort();
         registry.warnings.dedup();
         registry
@@ -734,6 +756,23 @@ pub fn save_entry(
     entry: &ExperienceEntry,
     harness: Option<&HarnessTree>,
 ) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(workspace_root)
+        .map_err(|error| format!("cannot resolve workspace root: {error}"))?;
+    save_entry_at(&root.join(WORKSPACE_EXPERIENCE_DIR), entry, harness)
+}
+
+/// Writes one entry under an explicit experience-library root and rebuilds the
+/// domain index.
+///
+/// The root is the library directory itself. The full adopted harness tree is
+/// copied verbatim, never summarized. The caller owns approval: this helper
+/// only enforces library-root containment.
+#[must_use = "a failed write returns a named error"]
+pub fn save_entry_at(
+    library_root: &Path,
+    entry: &ExperienceEntry,
+    harness: Option<&HarnessTree>,
+) -> Result<PathBuf, String> {
     if entry.seq == 0 || entry.seq > MAX_EXPERIENCE_SEQ {
         return Err(format!("seq {} is out of range", entry.seq));
     }
@@ -743,9 +782,11 @@ pub fn save_entry(
     if entry.edits.is_empty() {
         return Err(String::from("an experience entry requires at least one edit row"));
     }
-    let root = fs::canonicalize(workspace_root)
-        .map_err(|error| format!("cannot resolve workspace root: {error}"))?;
-    let domain_root = root.join(WORKSPACE_EXPERIENCE_DIR).join(&entry.domain);
+    fs::create_dir_all(library_root)
+        .map_err(|error| format!("cannot create {}: {error}", library_root.display()))?;
+    let root = fs::canonicalize(library_root)
+        .map_err(|error| format!("cannot resolve library root: {error}"))?;
+    let domain_root = root.join(&entry.domain);
     let entry_dir =
         domain_root.join("entries").join(format!("{}-{}", entry.seq, slugify(&entry.task)));
     fs::create_dir_all(&entry_dir)
@@ -753,7 +794,7 @@ pub fn save_entry(
     let canonical_entry_dir = fs::canonicalize(&entry_dir)
         .map_err(|error| format!("cannot resolve {}: {error}", entry_dir.display()))?;
     if !canonical_entry_dir.starts_with(&root) {
-        return Err(String::from("experience entry escapes the workspace root"));
+        return Err(String::from("experience entry escapes the library root"));
     }
     write_atomic(&canonical_entry_dir.join(ENTRY_FILE), &render_entry_file(entry))?;
     if let Some(harness) = harness {

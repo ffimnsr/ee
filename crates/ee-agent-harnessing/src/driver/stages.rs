@@ -24,14 +24,15 @@ use crate::channel::{
 use crate::context::{self, SelectorCandidate, StageEvidence};
 use crate::error::{HarnessError, HarnessResult};
 use crate::ledger::{Ledger, LedgerKind};
+use crate::library_context::LibraryEvidence;
 use crate::runstate::{self, ImproverCache};
 use crate::select::{Candidate, Selection, assign_ids, neutral_fallback, parse_choice};
 use crate::task::HarnessTask;
 
-use super::{HarnessConfig, MISSION_REFLECTOR, MISSION_SELECTOR, ReflectionWriter};
+use super::{
+    HarnessConfig, MISSION_REFLECTOR, MISSION_SELECTOR, ReflectionWrite, ReflectionWriter,
+};
 
-/// Maximum bytes written for one library cue catalog.
-const MAX_LIBRARY_CUE_BYTES: usize = 4 * 1024;
 /// Maximum bytes retained in one validator report.
 const MAX_VALIDATOR_REPORT_BYTES: usize = 8 * 1024;
 
@@ -41,32 +42,6 @@ pub(crate) fn materialize_harness(tree: &HarnessTree, directory: &Path) -> Harne
     std::fs::create_dir_all(&agents)?;
     materialize(tree, &agents).map_err(HarnessError::Validation)?;
     Ok(directory.to_path_buf())
-}
-
-/// Bounded cue catalog for one task's domain.
-pub(crate) fn library_cues(task: &HarnessTask) -> Vec<String> {
-    let registry = ExperienceRegistry::discover(task.library_root(), &[], None);
-    let mut cues = Vec::new();
-    let mut used = 0usize;
-    for entry in registry
-        .filtered(Some(task.domain_of()), task.library_before_seq)
-        .into_iter()
-        .filter(|entry| !task.excludes_experience(entry.seq))
-        .take(32)
-    {
-        let summary = entry.cue.clone().unwrap_or_else(|| {
-            let components: Vec<&str> =
-                entry.edits.iter().map(|edit| edit.component.as_str()).collect();
-            format!("edits: {}", components.join(", "))
-        });
-        let line = format!("- [{} #{}] {}", entry.domain, entry.seq, truncate_chars(&summary, 200));
-        if used + line.len() + 1 > MAX_LIBRARY_CUE_BYTES {
-            break;
-        }
-        used += line.len() + 1;
-        cues.push(line);
-    }
-    cues
 }
 
 /// One propose/compose request.
@@ -107,6 +82,14 @@ pub(crate) struct ReflectInputs<'a> {
     pub(crate) raw_selection_record: Option<String>,
     pub(crate) base_dir: &'a Path,
     pub(crate) writer: Option<&'a dyn ReflectionWriter>,
+    pub(crate) library: &'a LibraryEvidence,
+}
+
+/// Result of one reflection stage.
+pub(crate) struct ReflectionOutcome {
+    pub(crate) output: Option<ReflectionOutput>,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) write: ReflectionWrite,
 }
 
 /// Shared per-task stage driver.
@@ -325,7 +308,7 @@ impl StageRuntime<'_> {
             harnesses: Vec::new(),
             rollouts: Vec::new(),
             deliverables: Vec::new(),
-            library_cues: Vec::new(),
+            library: LibraryEvidence::default(),
             decisions: Vec::new(),
             selector,
             observations,
@@ -393,7 +376,7 @@ impl StageRuntime<'_> {
         &self,
         inputs: ReflectInputs<'_>,
         ledger: &mut Ledger,
-    ) -> HarnessResult<(Option<ReflectionOutput>, Option<PathBuf>)> {
+    ) -> HarnessResult<ReflectionOutcome> {
         let chosen_record = inputs
             .references
             .iter()
@@ -454,7 +437,7 @@ impl StageRuntime<'_> {
             ],
             rollouts: Vec::new(),
             deliverables: Vec::new(),
-            library_cues: library_cues(self.task),
+            library: inputs.library.clone(),
             decisions: inputs.decisions.to_vec(),
             selector: Vec::new(),
             observations: Some(projection),
@@ -483,39 +466,60 @@ impl StageRuntime<'_> {
                 {
                     tracing::warn!(%record_error, "reflector failure could not be recorded");
                 }
-                return Ok((None, None));
+                return Ok(ReflectionOutcome {
+                    output: None,
+                    path: None,
+                    write: ReflectionWrite::Failed,
+                });
             }
         };
         let output = match harness_reflection::parse_reflection(&reply.notes) {
             Ok(output) => output,
             Err(error) => {
                 tracing::warn!(%error, "reflector reply unusable; no lesson written");
-                return Ok((None, None));
+                return Ok(ReflectionOutcome {
+                    output: None,
+                    path: None,
+                    write: ReflectionWrite::Failed,
+                });
             }
         };
-        let registry = ExperienceRegistry::discover(self.task.library_root(), &[], None);
+        let registry = ExperienceRegistry::discover_at(&self.task.library_root());
         let seq = registry.next_seq(self.task.domain_of());
         let entry = match build_entry(
             &output,
             seq,
             self.task.domain_of(),
-            &task_summary(&self.task.prompt),
+            &self.task.id,
             ExperienceConfidence::Medium,
         ) {
             Ok(entry) => entry,
             Err(error) => {
                 tracing::warn!(%error, "reflection entry could not be built; no lesson written");
-                return Ok((Some(output), None));
+                return Ok(ReflectionOutcome {
+                    output: Some(output),
+                    path: None,
+                    write: ReflectionWrite::Failed,
+                });
             }
         };
-        let path = inputs.writer.and_then(|writer| match writer.write(&entry, inputs.chosen) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                tracing::warn!(%error, "reflection write declined or failed; no lesson written");
-                None
-            }
-        });
-        Ok((Some(output), path))
+        let write = match inputs.writer {
+            None => ReflectionWrite::Declined,
+            Some(writer) => match writer.write(&entry, inputs.chosen) {
+                Ok(path) => {
+                    return Ok(ReflectionOutcome {
+                        output: Some(output),
+                        path: Some(path),
+                        write: ReflectionWrite::Written,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "reflection write failed; no lesson written");
+                    ReflectionWrite::Failed
+                }
+            },
+        };
+        Ok(ReflectionOutcome { output: Some(output), path: None, write })
     }
 
     async fn invoke(
@@ -682,15 +686,6 @@ fn validator_summary(verdict: &Verdict) -> String {
         .first()
         .map(|error| format!("{}: {}", error.file, error.message))
         .unwrap_or_else(|| String::from("validator reported errors"))
-}
-
-fn task_summary(prompt: &str) -> String {
-    let mut text = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() > 120 {
-        text = text.chars().take(120).collect::<String>();
-        text.push('…');
-    }
-    text
 }
 
 fn truncate_chars(text: &str, max_bytes: usize) -> String {

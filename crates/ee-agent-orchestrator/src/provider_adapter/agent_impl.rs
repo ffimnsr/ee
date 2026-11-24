@@ -670,6 +670,30 @@ impl AgentProvider for OrchestratorProvider {
                 )
                 .await;
             }
+            // `/adopt` applies the last harness run's chosen tree to the active
+            // `.agents` surface after showing a dry-run diff and confirming.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == ADOPT_COMMAND_NAME
+            {
+                record_user_message(&conversation, prompt_text.clone());
+                return super::adopt_command::handle_adopt_command(
+                    super::adopt_command::AdoptCommand {
+                        runtime: &runtime,
+                        sink: &sink,
+                        client: client.clone(),
+                        cancel: cancel.clone(),
+                        session_id: &session_id,
+                        instructions: command.instructions.as_deref(),
+                        workspace: &workspace,
+                        session_log: runtime.session_log_for(&session_id.to_string()),
+                        telemetry: &telemetry,
+                        telemetry_turn: &telemetry_turn,
+                        telemetry_started_at,
+                        telemetry_event_start,
+                    },
+                )
+                .await;
+            }
             // `/diff` reports the files and patches one turn changed, using
             // the start/end workspace snapshots captured around it.
             if let Some(command) = parse_slash_command(&prompt_text)

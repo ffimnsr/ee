@@ -7,7 +7,7 @@
 //! back after the turn.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, IsTerminal, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,8 +15,9 @@ use std::time::Duration;
 use ee_agent_harnessing::{
     Channel, ChannelFuture, Deliverable, DeliverableAsset, ExperienceEntry, HarnessConfig,
     HarnessError, HarnessMode, HarnessRun, HarnessTask, HarnessTree, ImproverModel, ImproverReply,
-    ImproverRequest, ReflectionToolRecord, ReflectionWriter, RolloutDiffFile, RolloutToolRecord,
-    RolloutTurn, RolloutView, RunRecord, RunRequest, materialize, run_task, save_entry,
+    ImproverRequest, LibraryLocation, ReflectionSource, ReflectionToolRecord, ReflectionWriter,
+    RolloutDiffFile, RolloutToolRecord, RolloutTurn, RolloutView, RunRecord, RunRequest,
+    materialize, run_task, save_entry_at,
 };
 use ee_agent_host::AgentEvent;
 use ee_agent_protocol::{ContentBlock, SessionUpdate, ToolCallStatus};
@@ -24,7 +25,7 @@ use ee_agent_remote::protocol::{Method, PermissionDecision, SessionNewResult};
 use ee_agent_remote::{RemoteHost, RemotePermissionMode};
 use tokio::sync::Notify;
 
-use crate::args::{HarnessCommands, HarnessModeArg};
+use crate::args::{HarnessCommands, HarnessModeArg, ReflectionChoiceArg};
 
 const MAX_WORKSPACE_FILES: usize = 512;
 const MAX_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024;
@@ -58,9 +59,12 @@ pub(crate) fn run(command: HarnessCommands) -> io::Result<()> {
                 improver_effort: options.improver_effort,
                 improver_steps: options.improver_steps,
                 improver_timeout: options.improver_timeout,
-                approve_reflection: options.yes,
+                reflect: !options.no_reflect,
+                reflection_write: options.reflection == ReflectionChoiceArg::Accept,
             }))
         }
+        HarnessCommands::Adopt(options) => crate::harness_adopt_cmd::run(*options),
+        HarnessCommands::Sweep(options) => crate::harness_sweep_cmd::run(*options),
         HarnessCommands::Demo { root } => {
             let root = root.unwrap_or_else(default_demo_root);
             std::fs::create_dir_all(&root)?;
@@ -70,7 +74,7 @@ pub(crate) fn run(command: HarnessCommands) -> io::Result<()> {
                 .build()?;
             let run =
                 runtime.block_on(ee_agent_harnessing::demo::run_demo(&root)).map_err(to_io)?;
-            print_run(&run);
+            print_run(&run, &root.join("run"));
             println!("ee: harness demo root {}", root.display());
             Ok(())
         }
@@ -100,7 +104,8 @@ struct ImproveOptions {
     improver_effort: Option<String>,
     improver_steps: usize,
     improver_timeout: u64,
-    approve_reflection: bool,
+    reflect: bool,
+    reflection_write: bool,
 }
 
 async fn improve(options: ImproveOptions) -> io::Result<()> {
@@ -115,16 +120,25 @@ async fn improve(options: ImproveOptions) -> io::Result<()> {
     }
     let domain = options.domain.clone().unwrap_or_else(|| derive_domain(&workspace));
     let task_id = task_id(&domain, &options.prompt);
-    let mut task = HarnessTask::new(task_id.clone(), &options.prompt, &domain, &workspace);
-    if let Some(library_root) = &options.library_root {
-        std::fs::create_dir_all(library_root)?;
-        task = task.with_library_root(library_root);
-    }
+    let library = LibraryLocation::resolve(
+        LibraryLocation::workspace(&workspace),
+        options.library_root.as_deref(),
+    );
+    std::fs::create_dir_all(library.root())?;
+    let task = HarnessTask::new(task_id.clone(), &options.prompt, &domain, &workspace)
+        .with_library_root(library.root());
     let config = HarnessConfig {
         k: options.k,
         mode: options.mode,
         dry_run: options.dry_run,
-        reflect: true,
+        reflect: options.reflect,
+        reflection_source: if !options.reflect {
+            ReflectionSource::None
+        } else if options.reflection_write {
+            ReflectionSource::Invocation
+        } else {
+            ReflectionSource::Flag
+        },
         improver: ImproverModel {
             model_id: options.improver_model.clone(),
             effort: options.improver_effort.clone(),
@@ -142,29 +156,37 @@ async fn improve(options: ImproveOptions) -> io::Result<()> {
     }
     let run_root = options.run_root.clone().unwrap_or_else(|| default_run_root(&task_id));
     std::fs::create_dir_all(&run_root)?;
-    let (host, handler, agent_id) = start_host(&workspace, &run_root)?;
+    let (host, handler, channel) = start_host_channel(
+        &workspace,
+        &run_root,
+        Duration::from_secs(options.improver_timeout.max(60)),
+    )?;
+    let writer = CliWriter { library_root: library.root().to_path_buf() };
+    let writer: Option<&dyn ReflectionWriter> =
+        if options.reflection_write { Some(&writer) } else { None };
+    let result = run_task(&channel, &task, &config, &run_root, writer).await;
+    host.shutdown().await;
+    drop(handler);
+    let run = result.map_err(to_io)?;
+    print_run(&run, &run_root);
+    println!("ee: run root {}", run_root.display());
+    Ok(())
+}
+
+/// Starts the isolated host and returns a channel bound to its event stream.
+pub(crate) fn start_host_channel(
+    workspace: &Path,
+    run_root: &Path,
+    timeout: Duration,
+) -> io::Result<(RemoteHost, Arc<ee_agent_remote::HeadlessHandler>, HostChannel)> {
+    let (host, handler, agent_id) = start_host(workspace, run_root)?;
     let events = host.take_events().ok_or_else(|| {
         io::Error::other("agent host did not expose its event stream; cannot watch rollouts")
     })?;
     let collector = Arc::new(EventCollector::default());
     spawn_collector(events, host.clone(), collector.clone());
-    let channel = HostChannel {
-        host: host.clone(),
-        collector,
-        agent_id,
-        timeout: Duration::from_secs(options.improver_timeout.max(60)),
-    };
-    let writer = CliWriter {
-        workspace: options.library_root.clone().unwrap_or_else(|| workspace.clone()),
-        approve: options.approve_reflection,
-    };
-    let result = run_task(&channel, &task, &config, &run_root, Some(&writer)).await;
-    host.shutdown().await;
-    drop(handler);
-    let run = result.map_err(to_io)?;
-    print_run(&run);
-    println!("ee: run root {}", run_root.display());
-    Ok(())
+    let channel = HostChannel { host: host.clone(), collector, agent_id, timeout };
+    Ok((host, handler, channel))
 }
 
 fn start_host(
@@ -198,7 +220,7 @@ fn start_host(
     Ok((host, handler, agent_id))
 }
 
-fn print_run(run: &HarnessRun) {
+fn print_run(run: &HarnessRun, run_root: &Path) {
     let chosen = run.selection.chosen.as_deref().unwrap_or("none");
     println!(
         "ee: harness task {} k={} mode={} chosen={chosen}{}{}",
@@ -220,8 +242,20 @@ fn print_run(run: &HarnessRun) {
     for dead in &run.ledger.dead_rollouts {
         println!("ee: harness dead rollout {}: {}", dead.label, dead.reason);
     }
+    println!(
+        "ee: harness library {} reflection={} source={}",
+        run.library_root.display(),
+        run.reflection_write.as_str(),
+        run.reflection_source.as_str()
+    );
+    let adopted_path = run.adopted_path.as_ref().map(|path| path.display().to_string());
+    let reflected_path = run.reflected_path.as_ref().map(|path| path.display().to_string());
     match serde_json::to_string(&serde_json::json!({
         "task_id": run.task_id,
+        "run_root": run_root.display().to_string(),
+        "library_root": run.library_root.display().to_string(),
+        "reflection_write": run.reflection_write.as_str(),
+        "reflection_source": run.reflection_source.as_str(),
         "rollouts": run.ledger.rollouts,
         "sessions": run.ledger.sessions,
         "selection_sessions": run.ledger.selection_sessions,
@@ -229,6 +263,8 @@ fn print_run(run: &HarnessRun) {
         "reflection_sessions": run.ledger.reflection_sessions,
         "dead_rollouts": run.ledger.dead_rollouts.len(),
         "base_failed": run.ledger.base_failed,
+        "adopted_path": adopted_path,
+        "reflected_path": reflected_path,
     })) {
         Ok(report) => println!("ee: harness-report {report}"),
         Err(error) => tracing::warn!(%error, "harness report could not be serialized"),
@@ -310,7 +346,7 @@ fn to_io(error: HarnessError) -> io::Error {
 // ── Host channel ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct HostChannel {
+pub(crate) struct HostChannel {
     host: RemoteHost,
     collector: Arc<EventCollector>,
     agent_id: String,
@@ -831,11 +867,10 @@ fn read_asset_text(path: &Path, limit: usize) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-// ── Reflection approval ──────────────────────────────────────────────────────
+// ── Reflection persistence ────────────────────────────────────────────────
 
-struct CliWriter {
-    workspace: PathBuf,
-    approve: bool,
+pub(crate) struct CliWriter {
+    pub(crate) library_root: PathBuf,
 }
 
 impl ReflectionWriter for CliWriter {
@@ -844,32 +879,8 @@ impl ReflectionWriter for CliWriter {
         entry: &ExperienceEntry,
         harness: &HarnessTree,
     ) -> Result<PathBuf, HarnessError> {
-        let approved = self.approve || ask_approval(entry);
-        if !approved {
-            return Err(HarnessError::State(String::from("reflection write declined")));
-        }
-        save_entry(&self.workspace, entry, Some(harness)).map_err(HarnessError::State)
+        save_entry_at(&self.library_root, entry, Some(harness)).map_err(HarnessError::State)
     }
-}
-
-fn ask_approval(entry: &ExperienceEntry) -> bool {
-    if !io::stdin().is_terminal() {
-        eprintln!("ee: harness reflection declined (no terminal for approval; pass --yes)");
-        return false;
-    }
-    let lesson = entry.lesson.as_deref().unwrap_or("NO_ENTRY (edits only)");
-    eprint!(
-        "ee: write experience {}/{} with {} edit row(s) and lesson: {lesson}? [y/N] ",
-        entry.domain,
-        entry.seq,
-        entry.edits.len()
-    );
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    if io::stdin().read_line(&mut answer).is_err() {
-        return false;
-    }
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn copy_tree(source: &Path, target: &Path) -> Result<(), HarnessError> {
@@ -926,62 +937,4 @@ fn truncate(text: &str, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn delivery_combines_final_text_and_added_files() {
-        let root = tempfile::tempdir().expect("root");
-        std::fs::write(root.path().join("out.txt"), "done\n").expect("asset");
-        let added = vec![PathBuf::from("out.txt")];
-        let deliverable = delivery("wrote it", &added, root.path()).expect("delivered");
-        assert_eq!(deliverable.text, "wrote it");
-        assert_eq!(deliverable.assets.len(), 1);
-        assert_eq!(deliverable.assets[0].name, "out.txt");
-        assert_eq!(deliverable.assets[0].bytes, 5);
-        assert_eq!(deliverable.assets[0].content.as_deref(), Some("done\n"));
-        assert!(delivery("", &[], root.path()).is_none());
-        assert!(delivery("", &added, root.path()).is_some());
-    }
-
-    #[test]
-    fn task_id_and_domain_are_stable() {
-        let workspace = Path::new("/work/My Project");
-        assert_eq!(derive_domain(workspace), "my-project");
-        let first = task_id("my-project", "do the task");
-        assert_eq!(first, task_id("my-project", "do the task"));
-        assert_ne!(first, task_id("my-project", "a different task"));
-        assert!(first.starts_with("cli-my-project-"));
-    }
-
-    #[test]
-    fn rollout_workspace_mounts_the_candidate_and_copies_sources() {
-        let root = tempfile::tempdir().expect("root");
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("src")).expect("workspace");
-        std::fs::write(workspace.join("src/lib.rs"), "pub fn one() {}\n").expect("source");
-        let harness = root.path().join("harness");
-        std::fs::create_dir_all(harness.join(".agents")).expect("harness");
-        std::fs::write(harness.join(".agents/guardrails.md"), "candidate rule\n").expect("rule");
-        let request = RunRequest {
-            label: String::from("ref-0"),
-            task: HarnessTask::new("t", "do work", "rust", &workspace),
-            harness_root: harness,
-            scratch_root: root.path().join("scratch"),
-        };
-        let prepared = prepare_rollout_workspace(&request).expect("prepared");
-        assert_eq!(
-            std::fs::read_to_string(prepared.join("src/lib.rs")).expect("source"),
-            "pub fn one() {}\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(prepared.join(".agents/guardrails.md")).expect("rule"),
-            "candidate rule\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.join(".agents/guardrails.md")).unwrap_or_default(),
-            "",
-            "the task workspace harness is never mutated"
-        );
-    }
-}
+mod tests;

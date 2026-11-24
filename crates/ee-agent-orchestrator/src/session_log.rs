@@ -803,6 +803,18 @@ impl SessionLog {
         })
     }
 
+    /// Run root recorded by the most recent harness ledger report.
+    ///
+    /// `/adopt` uses this to resolve the last `/harness` run without taking a
+    /// path from model text.
+    pub fn last_harness_run_root(&self) -> Result<Option<String>, OrchestratorError> {
+        let records = self.records()?;
+        Ok(records.iter().rev().find_map(|record| match record {
+            SessionLogRecord::HarnessLedger(record) => record.report.run_root.clone(),
+            _ => None,
+        }))
+    }
+
     /// Every record in append order.
     pub fn records(&self) -> Result<Vec<SessionLogRecord>, OrchestratorError> {
         {

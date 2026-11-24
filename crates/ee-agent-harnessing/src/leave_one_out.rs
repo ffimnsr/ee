@@ -120,7 +120,7 @@ fn summary(run: &HarnessRun) -> OutcomeSummary {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -168,8 +168,9 @@ mod tests {
             let seen = self.seen.clone();
             Box::pin(async move {
                 if request.role == ImproverRole::Inv {
-                    let cues = std::fs::read_to_string(request.context_dir.join("library/cues.md"))
-                        .unwrap_or_default();
+                    let cues =
+                        std::fs::read_to_string(request.context_dir.join("library/INDEX.md"))
+                            .unwrap_or_default();
                     seen.lock().expect("seen").insert(cues);
                 }
                 let tree = HarnessTree::load_components(&request.base_harness.join(".agents"))
@@ -211,8 +212,12 @@ mod tests {
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(workspace.join(".agents")).expect("agents");
         std::fs::write(workspace.join(".agents/guardrails.md"), "base rule\n").expect("base");
-        save_entry(&workspace, &entry(1, "own-entry cue"), None).expect("own entry");
-        save_entry(&workspace, &entry(2, "later-entry cue"), None).expect("later entry");
+        let harness = HarnessTree::new(BTreeMap::from([(
+            "guardrails.md".to_string(),
+            "prior rule\n".to_string(),
+        )]));
+        save_entry(&workspace, &entry(1, "own-entry cue"), Some(&harness)).expect("own entry");
+        save_entry(&workspace, &entry(2, "later-entry cue"), Some(&harness)).expect("later entry");
         let channel = CueChannel::new();
         let task = HarnessTask::new("t1", "do the task", "rust", &workspace);
         let fixtures = vec![LeaveOneOutFixture { domain: String::from("rust"), task, own_seq: 1 }];

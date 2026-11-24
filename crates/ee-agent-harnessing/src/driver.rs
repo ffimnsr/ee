@@ -3,16 +3,18 @@
 //! The driver owns ordering, budget accounting, and run summaries. Stage work
 //! lives in `stages`; stream scheduling lives in `stream`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ee_agent_orchestrator::harness_reflection::ReflectionOutput;
 use ee_agent_orchestrator::harness_validation::HarnessTree;
 use ee_agent_orchestrator::user_experience::ExperienceEntry;
+use serde::{Deserialize, Serialize};
 
 use crate::channel::{Channel, ImproverModel, RunRecord};
 use crate::context::StageEvidence;
 use crate::error::HarnessError;
 use crate::ledger::{Ledger, LedgerReport, MAX_K};
+use crate::library_context::{self, LibraryEvidence};
 use crate::runstate::{self, ImproverCache, RunSummary};
 use crate::select::{
     Candidate, Selection, drop_non_delivering, neutral_fallback, trivial_selection,
@@ -22,9 +24,7 @@ use crate::task::HarnessTask;
 mod stages;
 mod stream;
 
-use stages::{
-    ImproveRequest, ReflectInputs, SelectionInputs, StageRuntime, library_cues, materialize_harness,
-};
+use stages::{ImproveRequest, ReflectInputs, SelectionInputs, StageRuntime, materialize_harness};
 pub use stream::{StreamTaskRun, run_stream, stream_order_path};
 
 /// Layered editor contract: process and execution evidence.
@@ -95,6 +95,78 @@ impl HarnessMode {
     }
 }
 
+/// Reflection persistence outcome recorded in the run summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionWrite {
+    /// The experience entry was written.
+    Written,
+    /// Reflection ran but no write was requested.
+    Declined,
+    /// Reflection or the write failed.
+    Failed,
+    /// The reflector stage did not run.
+    Disabled,
+}
+
+impl ReflectionWrite {
+    /// Stable lowercase label used in run summaries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Declined => "declined",
+            Self::Failed => "failed",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Parses a recorded label; unknown values fall back to `Disabled`.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "written" => Self::Written,
+            "declined" => Self::Declined,
+            "failed" => Self::Failed,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+/// Where reflection-write consent came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionSource {
+    /// The invocation itself consented (default CLI or `/harness`).
+    Invocation,
+    /// An explicit `--reflection=decline` flag withheld consent.
+    Flag,
+    /// Reflection was disabled.
+    None,
+}
+
+impl ReflectionSource {
+    /// Stable lowercase label used in run summaries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Invocation => "invocation",
+            Self::Flag => "flag",
+            Self::None => "none",
+        }
+    }
+
+    /// Parses a recorded label; unknown values fall back to `None`.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "invocation" => Self::Invocation,
+            "flag" => Self::Flag,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Driver configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConfig {
@@ -106,6 +178,8 @@ pub struct HarnessConfig {
     pub dry_run: bool,
     /// Run the reflector stage.
     pub reflect: bool,
+    /// Consent provenance recorded when reflection writes.
+    pub reflection_source: ReflectionSource,
     /// Improver policy.
     pub improver: ImproverModel,
     /// Domain concurrency for stream mode.
@@ -121,6 +195,7 @@ impl Default for HarnessConfig {
             mode: HarnessMode::Parallel,
             dry_run: false,
             reflect: true,
+            reflection_source: ReflectionSource::Invocation,
             improver: ImproverModel {
                 model_id: None,
                 effort: None,
@@ -181,6 +256,12 @@ pub struct HarnessRun {
     pub adopted_path: Option<std::path::PathBuf>,
     /// Path of the written reflection entry, when approved.
     pub reflected_path: Option<std::path::PathBuf>,
+    /// Experience-library root used for both reads and writes.
+    pub library_root: PathBuf,
+    /// Recorded reflection persistence outcome.
+    pub reflection_write: ReflectionWrite,
+    /// Recorded consent provenance.
+    pub reflection_source: ReflectionSource,
 }
 
 /// Plan rendered by dry-run mode.
@@ -271,6 +352,9 @@ pub async fn run_task(
             reflection: None,
             adopted_path: None,
             reflected_path: None,
+            library_root: task.library_root(),
+            reflection_write: ReflectionWrite::Disabled,
+            reflection_source: ReflectionSource::None,
         });
     }
     std::fs::create_dir_all(run_root)?;
@@ -309,7 +393,18 @@ pub async fn run_task(
                         ledger: Ledger::new().report(),
                         reflection: None,
                         adopted_path: Some(run_root.join("adopted")),
-                        reflected_path: None,
+                        reflected_path: summary
+                            .reflected_path
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .filter(|path| path.exists()),
+                        library_root: summary
+                            .library_root
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| task.library_root()),
+                        reflection_write: ReflectionWrite::parse(&summary.reflection_write),
+                        reflection_source: ReflectionSource::parse(&summary.reflection_source),
                     });
                 }
                 runstate::ResumeDecision::Rerun(reason) => {
@@ -341,6 +436,10 @@ pub async fn run_task(
             task_fingerprint: runstate::fingerprint_task(task),
             completed: true,
             terminal_state: String::from("base-failed"),
+            library_root: Some(task.library_root().display().to_string()),
+            reflection_write: String::from(ReflectionWrite::Disabled.as_str()),
+            reflection_source: String::from(ReflectionSource::None.as_str()),
+            reflected_path: None,
         };
         runstate::save_summary(run_root, &summary)?;
         return Ok(HarnessRun {
@@ -360,10 +459,13 @@ pub async fn run_task(
             reflection: None,
             adopted_path: None,
             reflected_path: None,
+            library_root: task.library_root(),
+            reflection_write: ReflectionWrite::Disabled,
+            reflection_source: ReflectionSource::None,
         });
     }
 
-    let cues = library_cues(task);
+    let library = library_context::load(task);
     let mut current_base = base_tree.clone();
     let mut finals: Vec<(Candidate, HarnessTree, RunRecord)> = Vec::new();
     let mut probe_records: Vec<(String, HarnessTree, RunRecord)> = Vec::new();
@@ -386,7 +488,7 @@ pub async fn run_task(
                 task,
                 &step_base,
                 &references,
-                &cues,
+                &library,
                 decisions.clone(),
             );
             let reply = runtime
@@ -435,7 +537,7 @@ pub async fn run_task(
             harnesses: probe_harnesses,
             rollouts: probe_rollouts,
             deliverables: probe_deliverables,
-            library_cues: cues.clone(),
+            library: library.clone(),
             decisions: decisions.clone(),
             selector: Vec::new(),
             observations: None,
@@ -547,8 +649,12 @@ pub async fn run_task(
 
     let mut reflection = None;
     let mut reflected_path = None;
+    let mut reflection_write =
+        if config.reflect { ReflectionWrite::Declined } else { ReflectionWrite::Disabled };
+    let reflection_source =
+        if config.reflect { config.reflection_source } else { ReflectionSource::None };
     if config.reflect {
-        let (output, path) = runtime
+        let outcome = runtime
             .reflect(
                 ReflectInputs {
                     base: &base_tree,
@@ -562,12 +668,14 @@ pub async fn run_task(
                     raw_selection_record,
                     base_dir: &base_dir,
                     writer,
+                    library: &library,
                 },
                 &mut ledger,
             )
             .await?;
-        reflection = output;
-        reflected_path = path;
+        reflection = outcome.output;
+        reflected_path = outcome.path;
+        reflection_write = outcome.write;
     }
 
     let summary = RunSummary {
@@ -584,6 +692,10 @@ pub async fn run_task(
         } else {
             String::from("no-deliverable")
         },
+        library_root: Some(task.library_root().display().to_string()),
+        reflection_write: String::from(reflection_write.as_str()),
+        reflection_source: String::from(reflection_source.as_str()),
+        reflected_path: reflected_path.as_ref().map(|path| path.display().to_string()),
     };
     runstate::save_summary(run_root, &summary)?;
 
@@ -599,6 +711,9 @@ pub async fn run_task(
         reflection,
         adopted_path: Some(adopted_path),
         reflected_path,
+        library_root: task.library_root(),
+        reflection_write,
+        reflection_source,
     })
 }
 
@@ -608,7 +723,7 @@ fn stage_evidence(
     task: &HarnessTask,
     base: &HarnessTree,
     references: &[RunRecord],
-    cues: &[String],
+    library: &LibraryEvidence,
     decisions: Vec<(String, String)>,
 ) -> StageEvidence {
     StageEvidence {
@@ -626,7 +741,7 @@ fn stage_evidence(
                 record.delivered.clone().map(|deliverable| (record.label.clone(), deliverable))
             })
             .collect(),
-        library_cues: cues.to_vec(),
+        library: library.clone(),
         decisions,
         selector: Vec::new(),
         observations: None,

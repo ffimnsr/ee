@@ -44,11 +44,12 @@ pub(super) struct HarnessArgs {
     pub(super) mode: String,
     pub(super) workers: usize,
     pub(super) dry_run: bool,
+    pub(super) no_reflect: bool,
 }
 
 impl Default for HarnessArgs {
     fn default() -> Self {
-        Self { k: 1, mode: String::from("parallel"), workers: 2, dry_run: false }
+        Self { k: 1, mode: String::from("parallel"), workers: 2, dry_run: false, no_reflect: false }
     }
 }
 
@@ -131,7 +132,7 @@ pub(super) async fn handle_harness_command(
         && let Some(report) = parse_child_report(&stdout)
         && let Err(error) = log.record_harness_ledger(HarnessLedgerReport {
             task_id: report.task_id,
-            run_root: None,
+            run_root: report.run_root,
             rollouts: report.rollouts,
             sessions: report.sessions,
             selection_sessions: report.selection_sessions,
@@ -197,6 +198,8 @@ pub(super) fn parse_harness_args(instructions: Option<&str>) -> Result<HarnessAr
     for token in instructions.unwrap_or_default().split_whitespace() {
         if token == "dry-run" {
             args.dry_run = true;
+        } else if token == "no-reflect" {
+            args.no_reflect = true;
         } else if let Some(value) = token.strip_prefix("k=") {
             args.k = value
                 .parse::<usize>()
@@ -216,7 +219,7 @@ pub(super) fn parse_harness_args(instructions: Option<&str>) -> Result<HarnessAr
                 .ok_or_else(|| format!("`workers` must be 1-{MAX_WORKERS}; got {value:?}"))?;
         } else {
             return Err(format!(
-                "unknown `/harness` argument {token:?}; usage: k=N mode=parallel|sequential workers=N dry-run"
+                "unknown `/harness` argument {token:?}; usage: k=N mode=parallel|sequential workers=N dry-run no-reflect"
             ));
         }
     }
@@ -234,7 +237,7 @@ fn last_task_from_logged(records: &[(String, ModelMessage)]) -> Option<String> {
 }
 
 /// Resolves the `ee` CLI that hosts the recursive improvement loop.
-fn resolve_ee_executable() -> Result<PathBuf, String> {
+pub(super) fn resolve_ee_executable() -> Result<PathBuf, String> {
     let override_path =
         std::env::var_os(CLI_BIN_ENV).filter(|value| !value.is_empty()).map(PathBuf::from);
     let current_exe = std::env::current_exe().ok();
@@ -343,12 +346,19 @@ fn child_args(
     if args.dry_run {
         argv.push(OsString::from("--dry-run"));
     }
+    argv.push(OsString::from("--reflection"));
+    argv.push(OsString::from("accept"));
+    if args.no_reflect {
+        argv.push(OsString::from("--no-reflect"));
+    }
     argv
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct ChildReport {
     task_id: String,
+    #[serde(default)]
+    run_root: Option<String>,
     rollouts: u64,
     sessions: u64,
     selection_sessions: u64,
@@ -383,11 +393,13 @@ mod tests {
 
     #[test]
     fn harness_arguments_parse_and_reject_unknown_tokens() {
-        let args = parse_harness_args(Some("k=2 mode=sequential workers=4 dry-run")).expect("args");
+        let args = parse_harness_args(Some("k=2 mode=sequential workers=4 dry-run no-reflect"))
+            .expect("args");
         assert_eq!(args.k, 2);
         assert_eq!(args.mode, "sequential");
         assert_eq!(args.workers, 4);
         assert!(args.dry_run);
+        assert!(args.no_reflect);
         assert_eq!(parse_harness_args(None).expect("defaults"), HarnessArgs::default());
         assert!(parse_harness_args(Some("k=0")).is_err());
         assert!(parse_harness_args(Some("k=99")).is_err());
@@ -398,9 +410,10 @@ mod tests {
 
     #[test]
     fn child_report_lines_parse_into_ledger_totals() {
-        let stdout = "noise\nee: harness-report {\"task_id\":\"t\",\"rollouts\":8,\"sessions\":6,\"selection_sessions\":1,\"retry_sessions\":0,\"reflection_sessions\":1,\"dead_rollouts\":2,\"base_failed\":false}\nmore";
+        let stdout = "noise\nee: harness-report {\"task_id\":\"t\",\"run_root\":\"/tmp/run\",\"rollouts\":8,\"sessions\":6,\"selection_sessions\":1,\"retry_sessions\":0,\"reflection_sessions\":1,\"dead_rollouts\":2,\"base_failed\":false}\nmore";
         let report = parse_child_report(stdout).expect("report");
         assert_eq!(report.task_id, "t");
+        assert_eq!(report.run_root.as_deref(), Some("/tmp/run"));
         assert_eq!(report.rollouts, 8);
         assert_eq!(report.sessions, 6);
         assert_eq!(report.dead_rollouts, 2);
@@ -496,7 +509,13 @@ mod tests {
     #[test]
     fn child_arguments_are_fixed_and_shell_free() {
         let executable = Path::new("/usr/bin/ee");
-        let args = HarnessArgs { k: 3, mode: String::from("parallel"), workers: 2, dry_run: true };
+        let args = HarnessArgs {
+            k: 3,
+            mode: String::from("parallel"),
+            workers: 2,
+            dry_run: true,
+            no_reflect: false,
+        };
         let argv = child_args(executable, &args, Path::new("/work"), "do the task", "rust");
         let rendered: Vec<String> =
             argv.iter().map(|value| value.to_string_lossy().to_string()).collect();
@@ -521,7 +540,27 @@ mod tests {
                 "--workers",
                 "2",
                 "--dry-run",
+                "--reflection",
+                "accept",
             ]
         );
+    }
+
+    #[test]
+    fn child_arguments_can_disable_reflection() {
+        let executable = Path::new("/usr/bin/ee");
+        let args = HarnessArgs {
+            k: 1,
+            mode: String::from("parallel"),
+            workers: 2,
+            dry_run: false,
+            no_reflect: true,
+        };
+        let argv = child_args(executable, &args, Path::new("/work"), "task", "rust");
+        let rendered: Vec<String> =
+            argv.iter().map(|value| value.to_string_lossy().to_string()).collect();
+        assert!(rendered.windows(2).any(|pair| pair == ["--reflection", "accept"]));
+        assert!(rendered.iter().any(|value| value == "--no-reflect"));
+        assert!(!rendered.iter().any(|value| value == "--yes"));
     }
 }

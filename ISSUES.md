@@ -320,52 +320,52 @@ Audit found landed H0–H4 code still leaves four parity gaps: `/harness` cannot
 
 ### Phase H5 — Full library read parity
 
-- [ ] **I50 — Experience entry harness accessor and bounded loader.**
-  - [ ] **Problem:** `save_entry` writes `.agents/experience/<domain>/entries/<seq>-<slug>/harness/`, but `HARNESS_DIR` has no production reader.
-  - [ ] **Fix:** add a bounded `library_context` loader that resolves `entry.path.parent()/harness`, validates the tree, caps files/bytes/depth, rejects symlinks and escapes, and skips malformed entries with a warning.
-  - [ ] **Acceptance:** round-trip write/load test; malformed/missing tree skipped without failing the context; no path outside the entry can be read.
-- [ ] **I51 — Full library evidence in the improver context.**
-  - [ ] **Problem:** `StageEvidence` carries only `library_cues`; `context/library/cues.md` is the only prior-task evidence.
-  - [ ] **Fix:** add bounded `LibraryEvidence` entries and copy `EXPERIENCE.md` plus the full `harness/` tree into `<run-root>/context/<stage>/library/<domain>/<seq>-<slug>/`; generate stage-local `library/INDEX.md`; caps 16 entries / 1 MiB total / 64 KiB per file; redaction and grader guards on every file. Do not rewrite `<workspace>/.agents/experience/<domain>/INDEX.md` here.
-  - [ ] **Acceptance:** second task sees first task's full tree; stage-local INDEX exists; persistent workspace index untouched by context build; truncation deterministic; malformed skip; grader material refused.
+- [x] **I50 — Experience entry harness accessor and bounded loader.**
+  - [x] **Problem:** `save_entry` writes `.agents/experience/<domain>/entries/<seq>-<slug>/harness/`, but `HARNESS_DIR` has no production reader.
+  - [x] **Fix:** add a bounded `library_context` loader that resolves `entry.path.parent()/harness`, validates the tree, caps files/bytes/depth, rejects symlinks and escapes, and skips malformed entries with a warning.
+  - [x] **Acceptance:** round-trip write/load test; malformed/missing tree skipped without failing the context; no path outside the entry can be read.
+- [x] **I51 — Full library evidence in the improver context.**
+  - [x] **Problem:** `StageEvidence` carries only `library_cues`; `context/library/cues.md` is the only prior-task evidence.
+  - [x] **Fix:** add bounded `LibraryEvidence` entries and copy `EXPERIENCE.md` plus the full `harness/` tree into `<run-root>/context/<stage>/library/<domain>/<seq>-<slug>/`; generate stage-local `library/INDEX.md`; caps 16 entries / 1 MiB total / 64 KiB per file; redaction and grader guards on every file. Do not rewrite `<workspace>/.agents/experience/<domain>/INDEX.md` here.
+  - [x] **Acceptance:** second task sees first task's full tree; stage-local INDEX exists; persistent workspace index untouched by context build; truncation deterministic; malformed skip; grader material refused.
 
 ### Phase H6 — Approval and persistence parity
 
-- [ ] **I52 — Invocation-consented reflection write and opt-out.**
-  - [ ] **Problem:** `/harness` child stdin is `null`; reflection is always declined, and the current `--yes` gate makes every run need a second approval.
-  - [ ] **Fix:** default `--reflection=accept`; `--reflection=decline` runs reflection without writing; `--no-reflect` skips the stage. Remove `--yes` from `improve`; no `/harness yes` token. Record `reflection_write`/`reflection_source` in the run summary. Invocation is the consent boundary.
-  - [ ] **Acceptance:** `/harness` writes without an extra prompt; `--no-reflect` skips; `--reflection=decline` writes nothing; active `.agents` unchanged in all `improve` paths.
-- [ ] **I53 — Shared library-root resolution.**
-  - [ ] **Problem:** `HarnessTask.library_root` and the CLI writer root are separate; sweep/run identity scoping is not wired.
-  - [ ] **Fix:** resolve one `LibraryLocation` per invocation: single task defaults to workspace, sweep defaults to `<run-root>/library/<mode>-k<k>`, `--library-root` overrides; pass the same value to reader and writer and record it.
-  - [ ] **Acceptance:** read root == write root; scratch roots do not contaminate the workspace library.
+- [x] **I52 — Invocation-consented reflection write and opt-out.**
+  - [x] **Problem:** `/harness` child stdin is `null`; reflection is always declined, and the current `--yes` gate makes every run need a second approval.
+  - [x] **Fix:** default `--reflection=accept`; `--reflection=decline` runs reflection without writing; `--no-reflect` skips the stage. Remove `--yes` from `improve`; no `/harness yes` token. Record `reflection_write`/`reflection_source` in the run summary. Invocation is the consent boundary.
+  - [x] **Acceptance:** `/harness` writes without an extra prompt; `--no-reflect` skips; `--reflection=decline` writes nothing; active `.agents` unchanged in all `improve` paths.
+- [x] **I53 — Shared library-root resolution.**
+  - [x] **Problem:** `HarnessTask.library_root` and the CLI writer root are separate; sweep/run identity scoping is not wired.
+  - [x] **Fix:** resolve one `LibraryLocation` per invocation: single task defaults to workspace, sweep defaults to `<run-root>/library/<mode>-k<k>`, `--library-root` overrides; pass the same value to reader and writer and record it.
+  - [x] **Acceptance:** read root == write root; scratch roots do not contaminate the workspace library.
 
 ### Phase H7 — Active harness adoption
 
-- [ ] **I54 — `ee do agent harness adopt`.**
-  - [ ] **Problem:** chosen tree stops at `<run-root>/adopted/.agents`; no validated apply path exists.
-  - [ ] **Fix:** new `harness_adopt_cmd.rs` with `--run-root`/`--experience` source, `--workspace`, `--dry-run`, `--yes`, `--include-memories`; validate, diff, back up, atomically apply only the `.agents` managed surface (`guardrails.md`, `tool_guidance.md`, `middleware.toml`, `scripts/`, `skills/`, `agents/`), remove managed files absent from the adopted tree, preserve `.agents/experience` and `.agents/memories` by default. Top-level `skills/`, top-level `scripts/`, and user-config skills are out of scope.
-  - [ ] **Acceptance:** dry-run no writes and shows removals; invalid tree rejected; backup; stale `.agents/skills`/`.agents/scripts` removal; unrelated files preserved; top-level skills/scripts and `$XDG_CONFIG_HOME/ee/skills` unchanged; symlink rejected; non-TTY without `--yes` declines.
+- [x] **I54 — `ee do agent harness adopt`.**
+  - [x] **Problem:** chosen tree stops at `<run-root>/adopted/.agents`; no validated apply path exists.
+  - [x] **Fix:** new `harness_adopt_cmd.rs` with `--run-root`/`--experience` source, `--workspace`, `--dry-run`, `--yes`, `--include-memories`; validate, diff, back up, atomically apply only the `.agents` managed surface (`guardrails.md`, `tool_guidance.md`, `middleware.toml`, `scripts/`, `skills/`, `agents/`), remove managed files absent from the adopted tree, preserve `.agents/experience` and `.agents/memories` by default. Top-level `skills/`, top-level `scripts/`, and user-config skills are out of scope.
+  - [x] **Acceptance:** dry-run no writes and shows removals; invalid tree rejected; backup; stale `.agents/skills`/`.agents/scripts` removal; unrelated files preserved; top-level skills/scripts and `$XDG_CONFIG_HOME/ee/skills` unchanged; symlink rejected; non-TTY without `--yes` declines.
 
-- [ ] **I58 — Agent-mode `/adopt` surface.**
-  - [ ] **Problem:** CLI adoption is outside the agent session; `HarnessLedgerReport.run_root` is recorded as `None`, so no in-session apply UX exists.
-  - [ ] **Fix:** report `run_root` through the child harness report/session log; add `/adopt [--include-memories]` that resolves the last run root, runs `harness adopt --dry-run`, shows the diff, confirms via `ClientBridge` elicitation, then applies with `--yes` only on Accept. Fixed argv; no model text in shell args.
-  - [ ] **Acceptance:** diff shown; Accept applies; Cancel/decline writes nothing; missing run root errors clearly; no model API key required.
+- [x] **I58 — Agent-mode `/adopt` surface.**
+  - [x] **Problem:** CLI adoption is outside the agent session; `HarnessLedgerReport.run_root` is recorded as `None`, so no in-session apply UX exists.
+  - [x] **Fix:** report `run_root` through the child harness report/session log; add `/adopt [--include-memories]` that resolves the last run root, runs `harness adopt --dry-run`, shows the diff, confirms via `ClientBridge` elicitation, then applies with `--yes` only on Accept. Fixed argv; no model text in shell args.
+  - [x] **Acceptance:** diff shown; Accept applies; Cancel/decline writes nothing; missing run root errors clearly; no model API key required.
 
 ### Phase H8 — Task stream parity
 
-- [ ] **I55 — Task manifest and `ee do agent harness sweep`.**
-  - [ ] **Problem:** `run_stream` has no production caller.
-  - [ ] **Fix:** add `Sweep(Box<HarnessSweepArgs>)` with `--tasks <JSON>`, `--k`, `--mode`, `--workers`, `--run-root`, `--library-root`, `--no-reflect`, `--dry-run`; manifest is invocation-level library scoped; parse into `HarnessTask` and call `run_stream`; new `harness_sweep_cmd.rs`; nonzero exit on task failure.
-  - [ ] **Acceptance:** two domains concurrent, tasks within domain sequential; frozen order reused; bad manifest fails before model calls; failed task reported without aborting completed domains.
-- [ ] **I56 — Stream retention and own-entry exclusion.**
-  - [ ] **Problem:** `run_stream` does not set `library_before_seq` or exclude the current task's prior entry.
-  - [ ] **Fix:** compute the cutoff before each task, add an explicit excluded-task set to `HarnessTask`, filter cues and full library entries by both, and reconcile the library on resume.
-  - [ ] **Acceptance:** task B sees task A; task A rerun does not see its own old entry; future entries invisible; concurrent domains isolated.
+- [x] **I55 — Task manifest and `ee do agent harness sweep`.**
+  - [x] **Problem:** `run_stream` has no production caller.
+  - [x] **Fix:** add `Sweep(Box<HarnessSweepArgs>)` with `--tasks <JSON>`, `--k`, `--mode`, `--workers`, `--run-root`, `--library-root`, `--no-reflect`, `--dry-run`; manifest is invocation-level library scoped; parse into `HarnessTask` and call `run_stream`; new `harness_sweep_cmd.rs`; nonzero exit on task failure.
+  - [x] **Acceptance:** two domains concurrent, tasks within domain sequential; frozen order reused; bad manifest fails before model calls; failed task reported without aborting completed domains.
+- [x] **I56 — Stream retention and own-entry exclusion.**
+  - [x] **Problem:** `run_stream` does not set `library_before_seq` or exclude the current task's prior entry.
+  - [x] **Fix:** compute the cutoff before each task, add an explicit excluded-task set to `HarnessTask`, filter cues and full library entries by both, and reconcile the library on resume.
+  - [x] **Acceptance:** task B sees task A; task A rerun does not see its own old entry; future entries invisible; concurrent domains isolated.
 
 ### Phase H9 — Verification and documentation
 
-- [ ] **I57 — Parity regression suite and docs.**
-  - [ ] **Problem:** the parity contract crosses approval, filesystem, library, and stream boundaries with no single suite.
-  - [ ] **Fix:** hermetic `FakeAgentTransport` tests for approval outcomes, full library context, adopt safety, stream order/retention, and task A → B → C learning; CLI tests; update plan/checklist; assert `HARNESS_DIR` has a production reader; correct the `user_experience` user-mirror claim or add an explicit user-scope write path (default stays workspace-only).
-  - [ ] **Acceptance:** all H5–H8 contracts covered without network; user-mirror documentation matches code; fmt/clippy/targeted tests; every touched code file under 1,000 LOC.
+- [x] **I57 — Parity regression suite and docs.**
+  - [x] **Problem:** the parity contract crosses approval, filesystem, library, and stream boundaries with no single suite.
+  - [x] **Fix:** hermetic `FakeAgentTransport` tests for approval outcomes, full library context, adopt safety, stream order/retention, and task A → B → C learning; CLI tests; update plan/checklist; assert `HARNESS_DIR` has a production reader; correct the `user_experience` user-mirror claim or add an explicit user-scope write path (default stays workspace-only).
+  - [x] **Acceptance:** all H5–H8 contracts covered without network; user-mirror documentation matches code; fmt/clippy/targeted tests; every touched code file under 1,000 LOC.

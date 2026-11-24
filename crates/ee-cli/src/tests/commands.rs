@@ -241,6 +241,148 @@ fn cli_utility_commands_live_under_do() {
             && args.mode == crate::HarnessModeArg::Sequential
     ));
 
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "harness",
+        "improve",
+        "--prompt",
+        "do the task",
+        "--reflection",
+        "decline",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Harness {
+                    command: crate::HarnessCommands::Improve(args)
+                }
+            }
+        }) if args.reflection == crate::args::ReflectionChoiceArg::Decline
+            && !args.no_reflect
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "harness",
+        "improve",
+        "--prompt",
+        "do the task",
+        "--no-reflect",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Harness {
+                    command: crate::HarnessCommands::Improve(args)
+                }
+            }
+        }) if args.no_reflect
+            && args.reflection == crate::args::ReflectionChoiceArg::Accept
+    ));
+    assert!(
+        crate::Cli::try_parse_from([
+            "ee",
+            "do",
+            "agent",
+            "harness",
+            "improve",
+            "--prompt",
+            "do the task",
+            "--yes",
+        ])
+        .is_err(),
+        "improve no longer accepts --yes; adoption owns it"
+    );
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "harness",
+        "adopt",
+        "--run-root",
+        "/tmp/run",
+        "--workspace",
+        ".",
+        "--dry-run",
+        "--include-memories",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Harness {
+                    command: crate::HarnessCommands::Adopt(args)
+                }
+            }
+        }) if args.run_root.as_deref() == Some(std::path::Path::new("/tmp/run"))
+            && args.dry_run
+            && args.include_memories
+            && !args.yes
+    ));
+    assert!(
+        crate::Cli::try_parse_from([
+            "ee",
+            "do",
+            "agent",
+            "harness",
+            "adopt",
+            "--run-root",
+            "/tmp/run",
+            "--experience",
+            "rust/1",
+        ])
+        .is_err(),
+        "adopt takes one source"
+    );
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "harness",
+        "sweep",
+        "--tasks",
+        "tasks.json",
+        "--k",
+        "2",
+        "--mode",
+        "sequential",
+        "--workers",
+        "3",
+        "--run-root",
+        "/tmp/run",
+        "--library-root",
+        "/tmp/lib",
+        "--no-reflect",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Harness {
+                    command: crate::HarnessCommands::Sweep(args)
+                }
+            }
+        }) if args.k == 2
+            && args.mode == crate::HarnessModeArg::Sequential
+            && args.workers == 3
+            && args.no_reflect
+            && args.dry_run
+            && args.library_root.as_deref() == Some(std::path::Path::new("/tmp/lib"))
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "grant"]).unwrap();
 
     assert!(matches!(

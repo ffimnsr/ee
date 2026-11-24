@@ -199,6 +199,7 @@ pub async fn run_demo(root: &Path) -> HarnessResult<HarnessRun> {
         mode: HarnessMode::Parallel,
         dry_run: false,
         reflect: true,
+        reflection_source: crate::driver::ReflectionSource::Invocation,
         improver: crate::channel::ImproverModel {
             model_id: None,
             effort: None,

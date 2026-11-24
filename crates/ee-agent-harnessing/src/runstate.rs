@@ -44,6 +44,18 @@ pub struct RunSummary {
     pub completed: bool,
     /// Recorded terminal state (`delivered`, `base-failed`, ...).
     pub terminal_state: String,
+    /// Experience-library root used by both reader and writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_root: Option<String>,
+    /// Reflection persistence outcome (`written`, `declined`, `failed`, `disabled`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reflection_write: String,
+    /// Reflection consent provenance (`invocation`, `flag`, `none`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reflection_source: String,
+    /// Written experience entry path, when one landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reflected_path: Option<String>,
 }
 
 /// Resume decision for one task.
@@ -92,9 +104,11 @@ pub fn fingerprint_task(task: &HarnessTask) -> Fingerprint {
     for seq in &task.excluded_experience_seqs {
         hasher.update(seq.to_le_bytes());
     }
-    hasher.update(
-        task.library_root.as_deref().map(Path::to_string_lossy).unwrap_or_default().as_bytes(),
-    );
+    for task_id in &task.excluded_task_ids {
+        hasher.update(task_id.as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update(task.library_root().to_string_lossy().as_bytes());
     for file in task.source_files() {
         hasher.update(file.name.as_bytes());
         hasher.update([0]);
@@ -321,6 +335,10 @@ mod tests {
             task_fingerprint: fingerprint_task(&task),
             completed: true,
             terminal_state: "delivered".into(),
+            library_root: None,
+            reflection_write: String::new(),
+            reflection_source: String::new(),
+            reflected_path: None,
         };
         assert_eq!(resume_decision(&summary, &tree, &task, true), ResumeDecision::Resume);
         assert!(matches!(resume_decision(&summary, &tree, &task, false), ResumeDecision::Rerun(_)));
@@ -352,6 +370,10 @@ mod tests {
             task_fingerprint: String::new(),
             completed: false,
             terminal_state: "running".into(),
+            library_root: None,
+            reflection_write: String::new(),
+            reflection_source: String::new(),
+            reflected_path: None,
         };
         assert!(save_summary(root.path(), &summary).is_err());
         summary.completed = true;

@@ -1,6 +1,6 @@
 # PLAN-HARNESS — Recursive Harnessing Adaptation (Harness2 → ee agents mode)
 
-Status: **implemented (Part 11 phases H0–H4 landed 2026-11-23)** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces. Follow-up parity closure: [`PLAN-HARNESS-PARITY.md`](PLAN-HARNESS-PARITY.md) (proposed 2026-11-24).
+Status: **implemented (Part 11 phases H0–H4 landed 2026-11-23; parity closure H5–H9 landed 2026-11-24)** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces. Follow-up parity closure: [`PLAN-HARNESS-PARITY.md`](PLAN-HARNESS-PARITY.md) (implemented 2026-11-24).
 
 Sources:
 
@@ -115,8 +115,13 @@ Gaps (nothing exists for these — verified zero graph matches):
       EXPERIENCE.md               #   edits verdict rows + cue/lesson/evidence/confidence
 
 $XDG_CONFIG_HOME/ee/
-  guardrails.md  tool_guidance.md  middleware.toml  scripts/  experience/   # H1/H2 mirrors, trusted user plane
+  guardrails.md  tool_guidance.md  middleware.toml  scripts/   # H1 user mirrors, trusted user plane
+  experience/                                                # read-only discovery; no implicit write mirror
 ```
+
+Writes are workspace-scoped: `save_entry`/`save_entry_at` only write under the
+resolved experience-library root. `$XDG_CONFIG_HOME/ee/experience` is read when
+a caller supplies that root, but no invocation mirrors entries into it.
 
 Bounds follow the existing discipline (per-file 64 KiB, catalog 8 KiB, bounded scan counts, warning-skip on malformed/oversized/duplicate).
 

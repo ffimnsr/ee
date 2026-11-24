@@ -244,6 +244,7 @@ mod tests {
             mode: HarnessMode::Parallel,
             dry_run: false,
             reflect: false,
+            reflection_source: crate::driver::ReflectionSource::None,
             improver: crate::channel::ImproverModel {
                 model_id: None,
                 effort: None,

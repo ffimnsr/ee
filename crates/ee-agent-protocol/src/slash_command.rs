@@ -65,8 +65,13 @@ pub const PRIMARY_AGENT_COMMAND_NAME: &str = "primary-agent";
 pub const REFLECT_COMMAND_NAME: &str = "reflect";
 
 /// The advertised slash-command name for the recursive harness improvement
-/// loop. Arguments: `k=N`, `mode=parallel|sequential`, `workers=N`, `dry-run`.
+/// loop. Arguments: `k=N`, `mode=parallel|sequential`, `workers=N`, `dry-run`,
+/// `no-reflect`.
 pub const HARNESS_COMMAND_NAME: &str = "harness";
+
+/// The advertised slash-command name for applying the last harness run's
+/// chosen tree to the active `.agents` surface after confirmation.
+pub const ADOPT_COMMAND_NAME: &str = "adopt";
 
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +185,20 @@ pub fn harness_available_command() -> AvailableCommand {
         "Run one task through Propose -> Probe -> Compose -> Select and reflect on the result.",
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
-        "k=N mode=parallel|sequential workers=N dry-run",
+        "k=N mode=parallel|sequential workers=N dry-run no-reflect",
+    )))
+}
+
+/// The `/adopt` command advertised by providers that can apply the last
+/// harness run's chosen tree to the active `.agents` surface.
+#[must_use]
+pub fn adopt_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        ADOPT_COMMAND_NAME,
+        "Apply the last `/harness` run's chosen tree to the managed `.agents` surface after a diff and explicit confirmation.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional --include-memories",
     )))
 }
 

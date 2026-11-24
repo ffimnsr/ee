@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ee_agent_orchestrator::harness_validation::HarnessTree;
+use ee_agent_orchestrator::user_experience::WORKSPACE_EXPERIENCE_DIR;
 
 use crate::channel::{Deliverable, DeliverableAsset, RunRecord};
 use crate::error::{HarnessError, HarnessResult};
@@ -49,8 +50,12 @@ pub struct HarnessTask {
     /// Leave-one-out evaluation excludes only the task's own entry; later
     /// entries stay visible.
     pub excluded_experience_seqs: BTreeSet<u64>,
-    /// Experience-library root. `None` uses the task workspace; measurement
-    /// runs set a scratch root so they never contaminate the daily library.
+    /// Task ids whose prior entries are hidden from this run. Stream reruns
+    /// exclude their own task id so a previous attempt cannot leak its lesson.
+    pub excluded_task_ids: BTreeSet<String>,
+    /// Explicit experience-library root (the library directory itself).
+    /// `None` uses `<workspace>/.agents/experience`; measurement runs set a
+    /// scratch root so they never contaminate the daily library.
     pub library_root: Option<PathBuf>,
 }
 
@@ -72,11 +77,12 @@ impl HarnessTask {
             attachments: Vec::new(),
             library_before_seq: None,
             excluded_experience_seqs: BTreeSet::new(),
+            excluded_task_ids: BTreeSet::new(),
             library_root: None,
         }
     }
 
-    /// Scopes library reads and writes to a measurement root.
+    /// Scopes library reads and writes to an explicit experience-library root.
     #[must_use]
     pub fn with_library_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.library_root = Some(root.into());
@@ -85,8 +91,8 @@ impl HarnessTask {
 
     /// Root experience discovery should use for this task.
     #[must_use]
-    pub fn library_root(&self) -> &Path {
-        self.library_root.as_deref().unwrap_or(&self.workspace)
+    pub fn library_root(&self) -> PathBuf {
+        self.library_root.clone().unwrap_or_else(|| self.workspace.join(WORKSPACE_EXPERIENCE_DIR))
     }
 
     /// Excludes the task's own experience entry (and every later entry) from
@@ -105,10 +111,24 @@ impl HarnessTask {
         self
     }
 
+    /// Hides every prior entry produced by one task id. Stream reruns exclude
+    /// their own task id so a previous attempt cannot leak its lesson.
+    #[must_use]
+    pub fn with_excluded_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.excluded_task_ids.insert(task_id.into());
+        self
+    }
+
     /// Whether a discovered entry must be hidden from this task's cues.
     #[must_use]
     pub fn excludes_experience(&self, seq: u64) -> bool {
         self.excluded_experience_seqs.contains(&seq)
+    }
+
+    /// Whether a discovered entry belongs to an excluded task.
+    #[must_use]
+    pub fn excludes_task(&self, task: &str) -> bool {
+        self.excluded_task_ids.contains(task)
     }
 
     /// Validates the contract before any model call.
@@ -311,10 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn library_root_defaults_to_the_workspace_and_can_be_scoped() {
+    fn library_root_defaults_to_the_workspace_experience_dir_and_can_be_scoped() {
         let workspace = tempfile::tempdir().expect("workspace");
         let task = HarnessTask::new("t", "p", "rust", workspace.path());
-        assert_eq!(task.library_root(), workspace.path());
+        assert_eq!(task.library_root(), workspace.path().join(WORKSPACE_EXPERIENCE_DIR));
         let scratch = tempfile::tempdir().expect("scratch");
         let scoped = task.with_library_root(scratch.path());
         assert_eq!(scoped.library_root(), scratch.path());
