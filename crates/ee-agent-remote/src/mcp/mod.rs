@@ -65,7 +65,13 @@ impl RemoteMcpServer {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        tools::tool_list(&self.host)
+        tools::tool_list()
+    }
+
+    /// Stable names of the tools this server advertises.
+    #[must_use]
+    pub fn tool_names() -> &'static [&'static str] {
+        tools::TOOL_NAMES
     }
 }
 

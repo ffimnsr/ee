@@ -29,9 +29,24 @@ const MAX_ACTIVE_TOOLS: usize = 8;
 /// Maximum plan entries reported by one poll.
 const MAX_PLAN_ENTRIES: usize = 20;
 
+/// Stable names of every tool advertised by this server, in discovery order.
+///
+/// Keep this list aligned with [`tool_list`]; the unit test below fails when
+/// they diverge, and the documentation drift test reads this list.
+pub(crate) const TOOL_NAMES: &[&str] = &[
+    "ee_status",
+    "ee_sessions_list",
+    "ee_session_new",
+    "ee_task_send",
+    "ee_updates_poll",
+    "ee_turn_interrupt",
+    "ee_permissions_pending",
+    "ee_permission_respond",
+    "ee_session_history",
+];
+
 /// The tool list advertised by this server.
-pub(crate) fn tool_list(host: &RemoteHost) -> Vec<Tool> {
-    let _ = host;
+pub(crate) fn tool_list() -> Vec<Tool> {
     vec![
         Tool::new(
             "ee_status",
@@ -378,4 +393,16 @@ fn status(host: &RemoteHost) -> Value {
 
 fn schema(value: Value) -> JsonObject {
     value.as_object().expect("tool schema must be an object").clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertised_tool_names_match_stable_list() {
+        let advertised: Vec<String> =
+            tool_list().iter().map(|tool| tool.name.to_string()).collect();
+        assert_eq!(advertised, TOOL_NAMES);
+    }
 }
