@@ -256,9 +256,9 @@ fn setup_rubber_duck(
     scope: config::ConfigScope,
 ) -> Result<(), String> {
     println!(
-        "\nRubber duck critic (ee-level second opinion; separate from the agent's own rubber-duck mode)"
+        "\nEE rubber duck critic (second opinion requested by ee; separate from any built-in critic inside the agent)"
     );
-    if !confirm("Enable the ee-level rubber duck critic? [y/N]: ")? {
+    if !confirm("Enable the EE rubber duck critic? [y/N]: ")? {
         return Ok(());
     }
 
@@ -267,16 +267,16 @@ fn setup_rubber_duck(
         (String::from("automatic"), String::from("automatic: review risky turns")),
     ];
     let mode =
-        match prompt_selection("Critic mode", &mode_choices, Some("manual"), true)?.as_deref() {
+        match prompt_selection("EE critic mode", &mode_choices, Some("manual"), true)?.as_deref() {
             Some("automatic") => config::RubberDuckModeSetting::Automatic,
             _ => config::RubberDuckModeSetting::Manual,
         };
 
-    println!("Critic backend:");
+    println!("EE critic backend:");
     println!("  1) Internal model (EE host model)");
     println!("  2) External agent server");
     let backend = loop {
-        let selected = prompt_line("Select backend [1-2]: ")?;
+        let selected = prompt_line("Select EE critic backend [1-2]: ")?;
         match selected.trim() {
             "1" => break RubberDuckBackendChoice::InternalModel,
             "2" => break RubberDuckBackendChoice::ExternalAgent,
@@ -313,7 +313,7 @@ fn setup_rubber_duck(
         config::RubberDuckModeSetting::Automatic => "automatic",
         config::RubberDuckModeSetting::Off => unreachable!("wizard never writes off"),
     };
-    println!("Rubber duck enabled (mode: {mode_name}, backend: {backend}).");
+    println!("EE rubber duck critic enabled (mode: {mode_name}, backend: {backend}).");
     println!("Wrote [agents.rubber_duck] to {}.", path.display());
     Ok(())
 }

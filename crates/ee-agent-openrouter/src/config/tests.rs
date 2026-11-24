@@ -216,20 +216,43 @@ fn setup_manifest_advertises_required_values_and_defaults() {
     assert_eq!(manifest.inputs[0].key, "model");
     assert_eq!(manifest.inputs[0].default.as_deref(), Some(DEFAULT_MODEL));
     assert_eq!(manifest.inputs[0].config.env, "OPENROUTER_MODEL");
-    assert_eq!(manifest.inputs.len(), 11);
+    assert_eq!(manifest.inputs.len(), 13);
     assert_eq!(manifest.inputs[1].key, "model_family");
     assert_eq!(manifest.inputs[1].config.env, "OPENROUTER_MODEL_FAMILY");
     assert_eq!(manifest.inputs[2].key, "rubber_duck_model");
     assert_eq!(manifest.inputs[2].config.env, "OPENROUTER_RUBBER_DUCK_MODEL");
     assert_eq!(manifest.inputs[3].key, "rubber_duck_model_family");
     assert_eq!(manifest.inputs[3].config.env, "OPENROUTER_RUBBER_DUCK_MODEL_FAMILY");
-    assert_eq!(manifest.inputs[4].key, "rubber_duck_mode");
-    assert_eq!(manifest.inputs[4].config.env, "OPENROUTER_RUBBER_DUCK_MODE");
-    assert_eq!(manifest.inputs[9].key, "max_iterations");
-    assert_eq!(manifest.inputs[9].default, None);
-    assert_eq!(manifest.inputs[9].config.env, "OPENROUTER_MAX_ITERATIONS");
-    assert_eq!(manifest.inputs[10].key, "session_log_dir");
-    assert_eq!(manifest.inputs[10].config.env, "EE_SESSION_LOG_DIR");
+    assert_eq!(manifest.inputs[4].key, "approval_classifier");
+    assert_eq!(manifest.inputs[4].config.env, "EE_APPROVAL_CLASSIFIER");
+    assert_eq!(manifest.inputs[4].default.as_deref(), Some("off"));
+    assert_eq!(
+        manifest.inputs[4].choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["off", "auto"]
+    );
+    assert_eq!(manifest.inputs[5].key, "approval_classifier_model");
+    assert_eq!(manifest.inputs[5].config.env, "EE_APPROVAL_CLASSIFIER_MODEL");
+    assert!(!manifest.inputs[5].remote_choices);
+    assert_eq!(
+        manifest.inputs[5].choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["default", "rubber_duck"]
+    );
+    assert_eq!(manifest.inputs[6].key, "rubber_duck_mode");
+    assert_eq!(manifest.inputs[6].config.env, "OPENROUTER_RUBBER_DUCK_MODE");
+    assert!(
+        manifest.inputs[6].advanced && !manifest.inputs[6].required,
+        "the built-in critic mode hides behind advanced setup so EE's critic is prompted first"
+    );
+    assert!(
+        manifest.inputs[6].label.contains("Built-in"),
+        "the built-in critic is named separately from EE's rubber-duck critic: {}",
+        manifest.inputs[6].label
+    );
+    assert_eq!(manifest.inputs[11].key, "max_iterations");
+    assert_eq!(manifest.inputs[11].default, None);
+    assert_eq!(manifest.inputs[11].config.env, "OPENROUTER_MAX_ITERATIONS");
+    assert_eq!(manifest.inputs[12].key, "session_log_dir");
+    assert_eq!(manifest.inputs[12].config.env, "EE_SESSION_LOG_DIR");
 }
 
 #[test]

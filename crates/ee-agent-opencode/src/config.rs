@@ -47,6 +47,10 @@ pub const MODEL_ENV: &str = "OPENCODE_MODEL";
 pub const CRITIC_MODEL_ENV: &str = "OPENCODE_CRITIC_MODEL";
 /// Rubber-duck mode selector: `off`, `manual`, or `automatic`.
 pub const RUBBER_DUCK_MODE_ENV: &str = "OPENCODE_RUBBER_DUCK_MODE";
+/// Approval classifier mode selector: `off` or `auto`.
+pub const APPROVAL_CLASSIFIER_ENV: &str = "EE_APPROVAL_CLASSIFIER";
+/// Optional approval classifier model id; the root model is used when unset.
+pub const APPROVAL_CLASSIFIER_MODEL_ENV: &str = "EE_APPROVAL_CLASSIFIER_MODEL";
 /// Optional reasoning-effort selector: `low`, `medium`, or `high`.
 pub const REASONING_EFFORT_ENV: &str = "OPENCODE_REASONING_EFFORT";
 
@@ -74,7 +78,7 @@ pub const SURFACE_LABEL: &str = "OpenCode surface";
 /// Model input label shown during setup.
 pub const MODEL_LABEL: &str = "Model for the selected surface (bare documented id; not an OpenCode TUI alias such as opencode/gpt-5.5)";
 /// Critic input label shown during setup.
-pub const CRITIC_LABEL: &str = "Optional critic model on the same surface (a different vendor is recommended; leave empty to run without a critic)";
+pub const CRITIC_LABEL: &str = "Optional built-in critic model on the same surface (a different vendor is recommended; leave empty to run without a built-in critic)";
 /// Default request timeout: 120 seconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Default model context-window size in tokens, used when the catalog carries

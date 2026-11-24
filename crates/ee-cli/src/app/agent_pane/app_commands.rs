@@ -770,9 +770,20 @@ impl App {
     }
 
     pub(super) fn agents_show_key_help(&mut self) {
-        self.backend.status_message = Some(String::from(
+        let help = String::from(
             "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-K toggle agents pane/editor · Insert prompt editor (Insert accept) · Ctrl-←/→ response group · agent_fork_selected_response forks from the selected response · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
-        ));
+        );
+        match self.agents.active_thread_index() {
+            Some(active) => {
+                // Transcript notices keep repeated `/keys` invocations visible;
+                // a status toast deduplicates the identical string after the
+                // first display.
+                self.agents.threads[active].push_system(help);
+                self.backend.status_message =
+                    Some(String::from("Agents key help added to transcript"));
+            }
+            None => self.backend.status_message = Some(help),
+        }
     }
 
     pub(super) fn agents_stop_command(&mut self, args: &str) {

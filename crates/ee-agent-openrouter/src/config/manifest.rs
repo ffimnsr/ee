@@ -56,7 +56,7 @@ pub fn setup_manifest() -> SetupManifest {
 
     let mut rubber_duck_model = input(
         "rubber_duck_model",
-        "Rubber duck model",
+        "Built-in critic model (optional; separate from EE's rubber-duck critic)",
         None,
         false,
         BEHAVIOR_SECTION,
@@ -90,24 +90,61 @@ pub fn setup_manifest() -> SetupManifest {
             rubber_duck_model,
             input(
                 "rubber_duck_model_family",
-                "Rubber duck model family",
+                "Built-in critic model family (required with a built-in critic)",
                 None,
                 false,
                 BEHAVIOR_SECTION,
                 "OPENROUTER_RUBBER_DUCK_MODEL_FAMILY",
             ),
             {
-                let mut mode = input(
-                    "rubber_duck_mode",
-                    "OpenRouter's own rubber-duck mode (off, manual, automatic; independent of ee's critic)",
-                    Some("manual"),
+                let mut classifier = input(
+                    "approval_classifier",
+                    "Tool approval classifier (off, auto; auto approves low-risk calls)",
+                    Some("off"),
                     true,
                     BEHAVIOR_SECTION,
+                    "EE_APPROVAL_CLASSIFIER",
+                );
+                classifier.choices = vec![
+                    choice("off", Some("off: always ask (default)")),
+                    choice(
+                        "auto",
+                        Some("auto: auto-approve low-risk tool calls; medium/high still ask"),
+                    ),
+                ];
+                classifier
+            },
+            {
+                let mut classifier_model = input(
+                    "approval_classifier_model",
+                    "Approval classifier model slot (default: root model; rubber_duck: built-in critic model)",
+                    None,
+                    false,
+                    BEHAVIOR_SECTION,
+                    "EE_APPROVAL_CLASSIFIER_MODEL",
+                );
+                classifier_model.choices = vec![
+                    choice("default", Some("default: root model")),
+                    choice("rubber_duck", Some("rubber_duck: configured built-in critic model")),
+                ];
+                classifier_model
+            },
+            {
+                // The built-in critic is independent of EE's rubber-duck critic.
+                // Keep its mode behind the advanced gate so normal setup asks
+                // about EE's critic first; manual remains the safe default.
+                let mut mode = input(
+                    "rubber_duck_mode",
+                    "Built-in critic mode (off, manual, automatic; separate from EE's rubber-duck critic)",
+                    Some("manual"),
+                    false,
+                    ADVANCED_SECTION,
                     "OPENROUTER_RUBBER_DUCK_MODE",
                 );
+                mode.advanced = true;
                 mode.choices = vec![
-                    choice("off", Some("off: no agent-internal critic")),
-                    choice("manual", Some("manual: run only when you ask")),
+                    choice("off", Some("off: no built-in critic")),
+                    choice("manual", Some("manual: run only when asked")),
                     choice("automatic", Some("automatic: run on risky turns")),
                 ];
                 mode

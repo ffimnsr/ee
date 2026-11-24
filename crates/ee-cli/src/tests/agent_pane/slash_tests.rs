@@ -152,6 +152,24 @@ fn phase_one_slash_commands_are_local_and_safe() {
 }
 
 #[test]
+fn keys_command_renders_help_each_time_it_is_invoked() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    for _ in 0..2 {
+        type_text(&mut app, "/keys");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    }
+
+    let notices = app.agents.threads[0].system_notices().join("\n");
+    assert_eq!(
+        notices.matches("Agents keys:").count(),
+        2,
+        "repeated /keys must append help each time: {notices}"
+    );
+}
+
+#[test]
 fn phase_two_session_lifecycle_commands_keep_local_and_provider_state_distinct() {
     let script = base_script()
         .wait_for("session/new")

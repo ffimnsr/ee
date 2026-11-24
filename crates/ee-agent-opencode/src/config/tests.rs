@@ -196,6 +196,17 @@ fn manifest_text() -> Vec<String> {
 }
 
 #[test]
+fn setup_manifest_stays_under_the_host_byte_cap() {
+    let encoded = serde_json::to_string(&setup_manifest()).expect("manifest serializes");
+
+    assert!(
+        encoded.len() < 16 * 1024,
+        "setup manifest is {} bytes; the host cap is 16384",
+        encoded.len()
+    );
+}
+
+#[test]
 fn setup_manifest_describes_surfaces_with_their_distinct_endpoint_roots() {
     let text = manifest_text().join("\n");
 
@@ -536,10 +547,42 @@ fn setup_manifest_offers_surface_scoped_model_selections() {
     assert!(critic.remote_choices, "the critic can search the full catalog too");
     assert_eq!(critic.choices.len(), model.choices.len(), "critic reuses the curated catalog");
 
+    let approval_model = manifest
+        .inputs
+        .iter()
+        .find(|input| input.key == "approval_classifier_model")
+        .expect("approval classifier model");
+    assert!(!approval_model.required, "the classifier model stays optional");
+    assert!(!approval_model.remote_choices, "the classifier uses registered model slots");
+    assert_eq!(
+        approval_model.choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["default", "rubber_duck"]
+    );
+
+    let approval = manifest
+        .inputs
+        .iter()
+        .find(|input| input.key == "approval_classifier")
+        .expect("approval classifier");
+    assert_eq!(approval.default.as_deref(), Some("off"));
+    assert_eq!(
+        approval.choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
+        ["off", "auto"]
+    );
+
     let mode = manifest.inputs.iter().find(|input| input.key == "rubber_duck_mode").expect("mode");
     assert_eq!(
         mode.choices.iter().map(|choice| choice.value.as_str()).collect::<Vec<_>>(),
         ["off", "manual", "automatic"]
+    );
+    assert!(
+        mode.advanced && !mode.required,
+        "the built-in critic mode hides behind advanced setup so EE's critic is prompted first"
+    );
+    assert!(
+        mode.label.contains("Built-in"),
+        "the built-in critic is named separately from EE's rubber-duck critic: {}",
+        mode.label
     );
 
     let timeout = manifest.inputs.iter().find(|input| input.key == "timeout_ms").expect("timeout");
@@ -581,6 +624,7 @@ fn remote_choices_return_only_the_selected_surface() {
             Some(model.len()),
             "the critic reuses the same catalog"
         );
+        assert!(remote_choices(surface, "approval_classifier_model").is_none());
         assert!(remote_choices(surface, "surface").is_none());
     }
 }
@@ -592,6 +636,8 @@ fn setup_manifest_exposes_the_critic_mode_and_effort_knobs() {
     for (key, env) in [
         ("critic_model", CRITIC_MODEL_ENV),
         ("rubber_duck_mode", RUBBER_DUCK_MODE_ENV),
+        ("approval_classifier", APPROVAL_CLASSIFIER_ENV),
+        ("approval_classifier_model", APPROVAL_CLASSIFIER_MODEL_ENV),
         ("reasoning_effort", REASONING_EFFORT_ENV),
     ] {
         let input = manifest

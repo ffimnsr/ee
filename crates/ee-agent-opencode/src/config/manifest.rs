@@ -4,20 +4,20 @@
 //! repository's 1,000-line threshold. Every default here is deliberate: a value
 //! with no default must be supplied explicitly by the host.
 //!
-//! Setup clients render `choices` as numbered selections. Model and critic
-//! choices carry a `when` condition on the `surface` input so the host can show
-//! only the ids valid for the surface the user just picked, and they stay
-//! curated: the complete catalog is fetched on demand through
+//! Setup clients render `choices` as numbered selections. Model, critic, and
+//! approval-classifier choices carry a `when` condition on the `surface` input
+//! so the host can show only the ids valid for the surface the user just picked,
+//! and they stay curated: the complete catalog is fetched on demand through
 //! `--ee-config-choices` (see [`remote_choices`]) so the manifest stays small.
 
 use ee_agent_protocol::setup::{SetupChoice, SetupChoiceWhen};
 
 use super::{
-    API_KEY_DESCRIPTION, API_KEY_ENV, CRITIC_LABEL, CRITIC_MODEL_ENV, DEFAULT_RETRY_BASE_DELAY_MS,
-    DEFAULT_RETRY_MAX_ATTEMPTS, DEFAULT_RETRY_MAX_DELAY_MS, DEFAULT_SYSTEM_PROMPT, MODEL_ENV,
-    MODEL_LABEL, REASONING_EFFORT_ENV, RUBBER_DUCK_MODE_ENV, SETUP_MANIFEST_SCHEMA_VERSION,
-    SURFACE_ENV, SURFACE_LABEL, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig,
-    SetupManifest,
+    API_KEY_DESCRIPTION, API_KEY_ENV, APPROVAL_CLASSIFIER_ENV, APPROVAL_CLASSIFIER_MODEL_ENV,
+    CRITIC_LABEL, CRITIC_MODEL_ENV, DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_RETRY_MAX_ATTEMPTS,
+    DEFAULT_RETRY_MAX_DELAY_MS, DEFAULT_SYSTEM_PROMPT, MODEL_ENV, MODEL_LABEL,
+    REASONING_EFFORT_ENV, RUBBER_DUCK_MODE_ENV, SETUP_MANIFEST_SCHEMA_VERSION, SURFACE_ENV,
+    SURFACE_LABEL, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig, SetupManifest,
 };
 use crate::routes::{self, OpenCodeSurface};
 
@@ -85,17 +85,47 @@ pub fn setup_manifest() -> SetupManifest {
     critic.choices = model_choices();
     critic.remote_choices = true;
 
-    let mut rubber_duck_mode = input(
-        "rubber_duck_mode",
-        "OpenCode's own rubber-duck mode (off, manual, automatic; independent of ee's critic)",
-        Some("manual"),
+    let mut approval_classifier = input(
+        "approval_classifier",
+        "Tool approval classifier (off, auto; auto approves low-risk calls)",
+        Some("off"),
         true,
         BEHAVIOR_SECTION,
+        APPROVAL_CLASSIFIER_ENV,
+    );
+    approval_classifier.choices = vec![
+        choice("off", "off: always ask (default)"),
+        choice("auto", "auto: auto-approve low-risk tool calls; medium/high still ask"),
+    ];
+
+    let mut approval_classifier_model = input(
+        "approval_classifier_model",
+        "Approval classifier model slot (default: root model; rubber_duck: built-in critic model)",
+        None,
+        false,
+        BEHAVIOR_SECTION,
+        APPROVAL_CLASSIFIER_MODEL_ENV,
+    );
+    approval_classifier_model.choices = vec![
+        choice("default", "default: root model"),
+        choice("rubber_duck", "rubber_duck: configured built-in critic model"),
+    ];
+
+    // The built-in critic is independent of EE's rubber-duck critic. Keep its
+    // mode behind the advanced gate so normal setup asks about EE's critic
+    // first; manual remains the safe default.
+    let mut rubber_duck_mode = input(
+        "rubber_duck_mode",
+        "Built-in critic mode (off, manual, automatic; separate from EE's rubber-duck critic)",
+        Some("manual"),
+        false,
+        ADVANCED_SECTION,
         RUBBER_DUCK_MODE_ENV,
     );
+    rubber_duck_mode.advanced = true;
     rubber_duck_mode.choices = vec![
-        choice("off", "off: no OpenCode-internal critic"),
-        choice("manual", "manual: run only when you ask"),
+        choice("off", "off: no built-in critic"),
+        choice("manual", "manual: run only when asked"),
         choice("automatic", "automatic: run on risky turns"),
     ];
 
@@ -133,6 +163,8 @@ pub fn setup_manifest() -> SetupManifest {
             surface,
             model,
             critic,
+            approval_classifier,
+            approval_classifier_model,
             rubber_duck_mode,
             reasoning_effort,
             advanced_input(
