@@ -1,6 +1,6 @@
 # PLAN-HARNESS — Recursive Harnessing Adaptation (Harness2 → ee agents mode)
 
-Status: **implemented (Part 11 phases H0–H4 landed 2026-11-23)** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces.
+Status: **implemented (Part 11 phases H0–H4 landed 2026-11-23)** · Scope: `ee-agent-orchestrator`, a new `ee-agent-harnessing` crate, `ee-agent-remote` reuse, `ee-cli` surfaces. Follow-up parity closure: [`PLAN-HARNESS-PARITY.md`](PLAN-HARNESS-PARITY.md) (proposed 2026-11-24).
 
 Sources:
 
