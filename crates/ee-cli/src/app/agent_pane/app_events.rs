@@ -174,6 +174,7 @@ impl App {
                     self.agents.threads[index].verification_paths.clear();
                     self.agents.threads[index].verification_revision = None;
                     self.agents.threads[index].active_response_group = None;
+                    self.agents.threads[index].selected_final_response = None;
                     self.agents.threads[index].turn_started_at = Some(Instant::now());
                     // Lifecycle markers are debugging aids, not chat content;
                     // they live in the private evidence audit log.
@@ -191,6 +192,7 @@ impl App {
             AgentEvent::TurnQueued { session_id, position } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Queued;
+                    self.agents.threads[index].selected_final_response = None;
                     self.agents.threads[index]
                         .push_system(format!("provider prompt queued (position {position})"));
                     self.notify_unread(index);
@@ -823,6 +825,7 @@ impl App {
             active_response_group: None,
             next_response_group,
             selected_response_group: None,
+            selected_final_response: None,
             collapsed_response_groups: BTreeSet::new(),
             expanded_tool_details: BTreeSet::new(),
             current_plan: Vec::new(),

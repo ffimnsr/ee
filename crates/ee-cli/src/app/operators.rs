@@ -139,6 +139,7 @@ impl App {
         match action {
             crate::ui::agents_pane::TranscriptRowAction::ToggleCollapse(group) => {
                 self.agents.threads[active].selected_response_group = Some(group);
+                self.agents.threads[active].selected_final_response = None;
                 self.agents_toggle_selected_response_group();
             }
             crate::ui::agents_pane::TranscriptRowAction::ToggleToolDetail(group) => {
@@ -148,6 +149,7 @@ impl App {
                     return;
                 }
                 self.agents.threads[active].selected_response_group = Some(group);
+                self.agents.threads[active].selected_final_response = None;
                 self.agents_toggle_selected_tool_details();
             }
         }

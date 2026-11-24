@@ -476,7 +476,7 @@ pub(super) const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/review [target]", "send bounded EE evidence for agent-generated review"),
     ("/security-review [target]", "send bounded EE evidence for security review"),
     ("/diff", "open bounded workspace diff"),
-    ("/copy [N]", "copy Nth completed assistant response"),
+    ("/copy [N]", "copy selected, latest, or Nth completed assistant response"),
     ("/rename <name>", "set persisted local session name"),
     ("/new, /new_thread", "start a fresh provider session"),
     ("/clear", "clear visible local scrollback; provider context stays"),

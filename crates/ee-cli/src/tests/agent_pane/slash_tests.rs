@@ -167,6 +167,12 @@ fn keys_command_renders_help_each_time_it_is_invoked() {
         2,
         "repeated /keys must append help each time: {notices}"
     );
+    assert!(notices.contains("Ctrl-↑/↓"), "final-response keys are listed: {notices}");
+    assert!(notices.contains("Ctrl-←/→"), "response-group keys are listed: {notices}");
+    assert!(
+        notices.lines().filter(|line| line.contains("Ctrl-") || line.contains("↑/↓")).count() >= 10,
+        "shortcuts are rendered line by line: {notices}"
+    );
 }
 
 #[test]
@@ -425,6 +431,55 @@ fn fork_response_position_rejects_invalid_arguments_without_creating_threads() {
         Some("no completed assistant response to fork from")
     );
     assert_eq!(app.agents.threads.len(), 1);
+}
+
+#[test]
+fn final_response_navigation_selects_copy_target_and_clears_on_new_turn() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    push_transcript_message(&mut app, "you", "first question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "first answer",
+        MessageRenderKind::Assistant,
+        Some(1),
+    );
+    push_transcript_message(&mut app, "you", "second question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "second answer",
+        MessageRenderKind::Assistant,
+        Some(2),
+    );
+    push_transcript_message(&mut app, "you", "third question", MessageRenderKind::User, None);
+    push_transcript_message(
+        &mut app,
+        "agent",
+        "third answer",
+        MessageRenderKind::Assistant,
+        Some(3),
+    );
+
+    press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+    assert_eq!(app.agents.threads[0].selected_final_response, Some(3));
+    assert_eq!(app.agents.threads[0].selected_response_group, None);
+
+    press(&mut app, KeyCode::Up, KeyModifiers::CONTROL);
+    assert_eq!(app.agents.threads[0].selected_final_response, Some(2));
+
+    type_text(&mut app, "/copy");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.registers.get(&RegisterName::Clipboard), "second answer");
+    assert_eq!(app.backend.status_message.as_deref(), Some("copied selected assistant response"));
+
+    type_text(&mut app, "next turn");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.agents.threads[0].selected_final_response, None,
+        "starting a turn must turn the selection highlight off"
+    );
 }
 
 #[test]
@@ -770,6 +825,22 @@ fn phase_four_history_queue_transcript_and_draft_controls_stay_local_and_safe() 
     assert_eq!(app.agents.threads[0].state, ThreadUiState::Running);
     type_text(&mut app, "second prompt");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 1);
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("follow-up queued (1/")),
+        "queueing must report visible feedback: {:?}",
+        app.backend.status_message
+    );
+    assert!(
+        app.agents.threads[0]
+            .system_notices()
+            .iter()
+            .any(|notice| notice.contains("queued follow-up 1/")),
+        "queueing must add a transcript notice"
+    );
     type_text(&mut app, "third prompt");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.agents.threads[0].queued_prompts.len(), 2);

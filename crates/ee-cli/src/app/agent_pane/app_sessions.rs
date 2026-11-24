@@ -262,7 +262,7 @@ impl App {
             Some(String::from("visible scrollback cleared; provider conversation remains intact"));
     }
 
-    fn agents_thread_is_idle(&self, index: usize) -> bool {
+    pub(super) fn agents_thread_is_idle(&self, index: usize) -> bool {
         let Some(thread) = self.agents.threads.get(index) else {
             return false;
         };
@@ -327,20 +327,22 @@ impl App {
         self.agents_fork_session_with_cutoff(activate_child, &requested_agent_id, cutoff_group);
     }
 
-    /// Keymap action `agent_fork_selected_response`: fork from the response
-    /// group currently selected in the transcript (Ctrl+Left/Ctrl+Right)
-    /// instead of a numeric position.
+    /// Keymap action `agent_fork_selected_response`: fork from the selected
+    /// final agent response, or from the response group selected with
+    /// Ctrl+Left/Ctrl+Right when no final response is selected.
     pub(super) fn agents_fork_selected_response(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session to fork"));
             return;
         };
-        let Some(group) = self.agents.threads[active].selected_response_group else {
-            self.backend.status_message =
-                Some(String::from("no response selected; Ctrl+Left/Ctrl+Right selects one"));
+        let thread = &self.agents.threads[active];
+        let Some(group) = thread.selected_final_response.or(thread.selected_response_group) else {
+            self.backend.status_message = Some(String::from(
+                "no response selected; Ctrl+Up/Ctrl+Down selects a final response, Ctrl+Left/Ctrl+Right selects a group",
+            ));
             return;
         };
-        if !self.agents.threads[active].has_response_group(group) {
+        if !thread.has_response_group(group) {
             self.backend.status_message = Some(String::from("selected response no longer exists"));
             return;
         }

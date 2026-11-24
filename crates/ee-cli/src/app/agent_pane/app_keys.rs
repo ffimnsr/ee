@@ -532,6 +532,12 @@ impl App {
                     self.agents_append_draft(&c.to_string());
                 }
             }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_select_final_response(-1);
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_select_final_response(1);
+            }
             KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.agents_select_response_group(-1);
             }
@@ -601,18 +607,100 @@ impl App {
         let Some(active) = self.agents.active_thread_index() else {
             return;
         };
-        let thread = &mut self.agents.threads[active];
-        let groups = thread.response_group_ids();
-        let Some(current) = thread.selected_response_group else {
-            thread.selected_response_group = groups.last().copied();
+        let groups = self.agents.threads[active].response_group_ids();
+        if groups.is_empty() {
+            self.backend.status_message = Some(String::from("no response groups to select"));
+            return;
+        }
+        let selected = {
+            let thread = &mut self.agents.threads[active];
+            let selected = match thread
+                .selected_response_group
+                .and_then(|group| groups.iter().position(|candidate| *candidate == group))
+            {
+                Some(index) => {
+                    groups[(index as isize + delta).rem_euclid(groups.len() as isize) as usize]
+                }
+                None => groups[groups.len() - 1],
+            };
+            thread.selected_response_group = Some(selected);
+            thread.selected_final_response = None;
+            selected
+        };
+        self.agents_scroll_to_response_anchor(active, selected, false);
+    }
+
+    /// Selects one completed final agent response for copy/fork navigation.
+    fn agents_select_final_response(&mut self, delta: isize) {
+        let Some(active) = self.agents.active_thread_index() else {
             return;
         };
-        let Some(index) = groups.iter().position(|group| *group == current) else {
-            thread.selected_response_group = groups.last().copied();
+        if !self.agents_thread_is_idle(active) {
+            self.agents.threads[active].selected_final_response = None;
+            self.backend.status_message =
+                Some(String::from("agent is active; final-response selection resumes when idle"));
+            return;
+        }
+        let groups = self.agents.threads[active].completed_assistant_response_groups();
+        if groups.is_empty() {
+            self.backend.status_message =
+                Some(String::from("no completed agent responses to select"));
+            return;
+        }
+        let (selected, position, total) = {
+            let thread = &mut self.agents.threads[active];
+            let index = match thread
+                .selected_final_response
+                .and_then(|group| groups.iter().position(|candidate| *candidate == group))
+            {
+                Some(index) => (index as isize + delta).rem_euclid(groups.len() as isize) as usize,
+                None => groups.len() - 1,
+            };
+            let selected = groups[index];
+            thread.selected_final_response = Some(selected);
+            thread.selected_response_group = None;
+            (selected, index + 1, groups.len())
+        };
+        self.agents_scroll_to_response_anchor(active, selected, true);
+        self.backend.status_message = Some(format!(
+            "agent response {position}/{total} selected; /copy copies it, agent_fork_selected_response forks from it"
+        ));
+    }
+
+    /// Scrolls the transcript so `group`'s header or final response is visible.
+    fn agents_scroll_to_response_anchor(
+        &mut self,
+        active: usize,
+        group: crate::app::ResponseGroupId,
+        final_response: bool,
+    ) {
+        let Ok((width, height)) = crossterm::terminal::size() else {
             return;
         };
-        thread.selected_response_group =
-            Some(groups[(index as isize + delta).rem_euclid(groups.len() as isize) as usize]);
+        let area = Rect { x: 0, y: 0, width, height };
+        let Some(pane) = crate::ui::agents_pane_rect_for(area, self) else {
+            return;
+        };
+        let transcript_area = crate::ui::agents_pane::agents_pane_rows(self, pane)[0];
+        let width = transcript_area.width.saturating_sub(1) as usize;
+        let thread = &self.agents.threads[active];
+        let anchor = if final_response {
+            crate::ui::agents_pane::agent_transcript_final_response_line(self, thread, width, group)
+        } else {
+            crate::ui::agents_pane::agent_transcript_group_header_line(self, thread, width, group)
+                .or_else(|| {
+                    crate::ui::agents_pane::agent_transcript_final_response_line(
+                        self, thread, width, group,
+                    )
+                })
+        };
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let max_scroll = crate::ui::agents_pane::agents_transcript_scroll_max(self, pane);
+        let visible = transcript_area.height as usize;
+        let target = transcript_reveal_offset(anchor, visible, max_scroll);
+        self.agents.threads[active].scroll_to(target, max_scroll);
     }
 
     /// Toggles reasoning and tool visibility for the selected response group
@@ -1040,6 +1128,30 @@ impl App {
     pub(super) fn return_to_editor(&mut self) {
         if self.agents_focused() {
             self.mode = self.agents.previous_editor_mode.take().unwrap_or(Mode::Normal);
+        }
+    }
+}
+
+/// Visual-row offset that keeps a selected transcript anchor in view while
+/// leaving roughly a third of the viewport as context above it.
+fn transcript_reveal_offset(anchor: usize, visible: usize, max_scroll: usize) -> usize {
+    anchor.saturating_sub(visible / 3).min(max_scroll)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transcript_reveal_offset;
+
+    #[test]
+    fn reveal_offset_keeps_selected_anchor_visible() {
+        assert_eq!(transcript_reveal_offset(0, 10, 20), 0);
+        assert_eq!(transcript_reveal_offset(15, 10, 20), 12);
+        let clamped = transcript_reveal_offset(30, 10, 20);
+        assert_eq!(clamped, 20);
+        assert!(clamped <= 20, "offset never exceeds the rendered maximum");
+        for anchor in [0, 5, 12, 18] {
+            let offset = transcript_reveal_offset(anchor, 10, 20);
+            assert!(anchor >= offset && anchor < offset + 10, "anchor {anchor} is in view");
         }
     }
 }

@@ -394,6 +394,11 @@ impl App {
         self.backend.status_message = Some(format!(
             "follow-up queued ({queued_count}/{AGENT_PROMPT_QUEUE_MAX}); /stop cancels turn and queued follow-ups, /stop all stops every thread, /queue edits pending prompts"
         ));
+        if let Some(thread) = self.agents.threads.get_mut(active) {
+            thread.push_system(format!(
+                "queued follow-up {queued_count}/{AGENT_PROMPT_QUEUE_MAX}; runs after the current turn"
+            ));
+        }
     }
 
     pub(super) fn queue_agent_prompt(
@@ -477,6 +482,7 @@ impl App {
             thread.state = ThreadUiState::Running;
             thread.turn_started_at = Some(Instant::now());
             thread.active_response_group = None;
+            thread.selected_final_response = None;
             thread.push_message("you", &display_text, MessageRenderKind::User, None, None);
             thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
             thread.last_prompt = Some(blocks.clone());

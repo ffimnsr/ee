@@ -313,6 +313,135 @@ fn mouse_click_on_tool_call_row_toggles_group_tool_detail() {
 }
 
 #[test]
+fn response_anchors_follow_rendered_group_order() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    let thread = &mut app.agents.threads[0];
+    for (group, answer) in [(1, "first final"), (2, "second final")] {
+        thread.transcript.push(TranscriptItem::Message {
+            nick: String::from("think"),
+            text: String::from("reasoning"),
+            kind: MessageRenderKind::Thought,
+            message_id: None,
+            response_group: Some(group),
+            at: SystemTime::now(),
+        });
+        thread.transcript.push(TranscriptItem::ToolCall {
+            id: format!("call_{group}"),
+            title: String::from("tool"),
+            status: String::from("completed"),
+            detail: String::new(),
+            response_group: group,
+            at: SystemTime::now(),
+        });
+        thread.transcript.push(TranscriptItem::Message {
+            nick: String::from("agent"),
+            text: String::from(answer),
+            kind: MessageRenderKind::Assistant,
+            message_id: None,
+            response_group: Some(group),
+            at: SystemTime::now(),
+        });
+    }
+    thread.transcript.push(TranscriptItem::Message {
+        nick: String::from("agent"),
+        text: String::from("plain final"),
+        kind: MessageRenderKind::Assistant,
+        message_id: None,
+        response_group: Some(3),
+        at: SystemTime::now(),
+    });
+
+    let header_one = crate::ui::agents_pane::agent_transcript_group_header_line(
+        &app,
+        &app.agents.threads[0],
+        80,
+        1,
+    )
+    .expect("group 1 header");
+    let final_one = crate::ui::agents_pane::agent_transcript_final_response_line(
+        &app,
+        &app.agents.threads[0],
+        80,
+        1,
+    )
+    .expect("group 1 final response");
+    let header_two = crate::ui::agents_pane::agent_transcript_group_header_line(
+        &app,
+        &app.agents.threads[0],
+        80,
+        2,
+    )
+    .expect("group 2 header");
+    let final_two = crate::ui::agents_pane::agent_transcript_final_response_line(
+        &app,
+        &app.agents.threads[0],
+        80,
+        2,
+    )
+    .expect("group 2 final response");
+    let final_three = crate::ui::agents_pane::agent_transcript_final_response_line(
+        &app,
+        &app.agents.threads[0],
+        80,
+        3,
+    )
+    .expect("assistant-only group has a final response anchor");
+
+    assert!(header_one < final_one, "header precedes its final response");
+    assert!(final_one < header_two, "groups stay in transcript order");
+    assert!(header_two < final_two);
+    assert!(final_two < final_three);
+    assert!(
+        crate::ui::agents_pane::agent_transcript_group_header_line(
+            &app,
+            &app.agents.threads[0],
+            80,
+            3
+        )
+        .is_none(),
+        "assistant-only groups have no reasoning/tool header"
+    );
+}
+
+#[test]
+fn selected_final_response_highlights_only_that_answer() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    let thread = &mut app.agents.threads[0];
+    for (text, group) in [("first answer", 1), ("second answer", 2)] {
+        thread.transcript.push(TranscriptItem::Message {
+            nick: String::from("agent"),
+            text: String::from(text),
+            kind: MessageRenderKind::Assistant,
+            message_id: None,
+            response_group: Some(group),
+            at: SystemTime::now(),
+        });
+    }
+    thread.selected_final_response = Some(2);
+
+    let lines = crate::ui::agents_pane::agent_transcript_lines(&app, &app.agents.threads[0], 80);
+    let highlighted = lines
+        .iter()
+        .filter(|line| {
+            line.spans.iter().any(|span| span.style.bg == Some(crate::ui::theme::BG_SELECTION))
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    assert!(
+        highlighted.iter().any(|line| line.contains("second answer")),
+        "selected final response is highlighted: {highlighted:?}"
+    );
+    assert!(
+        !highlighted.iter().any(|line| line.contains("first answer")),
+        "other final responses stay unhighlighted: {highlighted:?}"
+    );
+}
+
+#[test]
 fn mouse_click_on_header_respects_scroll_offset() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);

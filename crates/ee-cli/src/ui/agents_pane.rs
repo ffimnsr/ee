@@ -219,8 +219,51 @@ pub(crate) fn agent_transcript_lines_with_actions(
     thread: &crate::app::AgentThreadUi,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<Option<TranscriptRowAction>>) {
+    let render = render_agent_transcript(app, thread, width);
+    (render.lines, render.row_action_at)
+}
+
+/// Visual row where one response group's header or final assistant message starts.
+#[cfg(feature = "agents")]
+pub(crate) fn agent_transcript_group_header_line(
+    app: &App,
+    thread: &crate::app::AgentThreadUi,
+    width: usize,
+    group: crate::app::ResponseGroupId,
+) -> Option<usize> {
+    render_agent_transcript(app, thread, width).group_header_at.get(&group).copied()
+}
+
+/// Visual row where one response group's final assistant message starts.
+#[cfg(feature = "agents")]
+pub(crate) fn agent_transcript_final_response_line(
+    app: &App,
+    thread: &crate::app::AgentThreadUi,
+    width: usize,
+    group: crate::app::ResponseGroupId,
+) -> Option<usize> {
+    render_agent_transcript(app, thread, width).final_response_at.get(&group).copied()
+}
+
+#[cfg(feature = "agents")]
+#[derive(Default)]
+struct AgentTranscriptRender {
+    lines: Vec<Line<'static>>,
+    row_action_at: Vec<Option<TranscriptRowAction>>,
+    group_header_at: std::collections::BTreeMap<crate::app::ResponseGroupId, usize>,
+    final_response_at: std::collections::BTreeMap<crate::app::ResponseGroupId, usize>,
+}
+
+#[cfg(feature = "agents")]
+fn render_agent_transcript(
+    app: &App,
+    thread: &crate::app::AgentThreadUi,
+    width: usize,
+) -> AgentTranscriptRender {
     let mut lines = Vec::new();
     let mut row_action_at = Vec::new();
+    let mut group_header_at = std::collections::BTreeMap::new();
+    let mut final_response_at = std::collections::BTreeMap::new();
     let mut rendered_response_groups = std::collections::BTreeSet::new();
     for item in &thread.transcript {
         if matches!(item, crate::app::TranscriptItem::Message { text, .. } if text.trim().is_empty())
@@ -239,6 +282,14 @@ pub(crate) fn agent_transcript_lines_with_actions(
             continue;
         }
         let response_group = thread.response_group_for_item(item);
+        let final_response_group = match item {
+            crate::app::TranscriptItem::Message {
+                kind: crate::app::MessageRenderKind::Assistant,
+                response_group: Some(group),
+                ..
+            } => Some(*group),
+            _ => None,
+        };
         let show_tool_detail = thread.transcript_raw
             || thread.transcript_detail
             || response_group.is_some_and(|group| thread.expanded_tool_details.contains(&group));
@@ -265,6 +316,7 @@ pub(crate) fn agent_transcript_lines_with_actions(
                         crate::app::format_duration(started.elapsed())
                     ));
                 }
+                group_header_at.insert(group, lines.len());
                 lines.push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
                 row_action_at.push(Some(TranscriptRowAction::ToggleCollapse(group)));
             }
@@ -272,10 +324,21 @@ pub(crate) fn agent_transcript_lines_with_actions(
                 continue;
             }
         }
+        if let Some(group) = final_response_group {
+            final_response_at.entry(group).or_insert(lines.len());
+        }
         let span_start = lines.len();
         lines.extend(transcript_lines(item, width, show_tool_detail));
         let span_end = lines.len();
         row_action_at.resize(span_end, None);
+        if final_response_group == thread.selected_final_response {
+            for line in &mut lines[span_start..span_end] {
+                line.style = line.style.bg(theme::BG_SELECTION);
+                for span in &mut line.spans {
+                    span.style = span.style.bg(theme::BG_SELECTION);
+                }
+            }
+        }
         if let crate::app::TranscriptItem::ToolCall { response_group, .. } = item {
             // Detail continuation rows belong to the same clickable tool entry.
             for slot in &mut row_action_at[span_start..span_end] {
@@ -287,7 +350,7 @@ pub(crate) fn agent_transcript_lines_with_actions(
         lines.push(line);
         row_action_at.push(None);
     }
-    (lines, row_action_at)
+    AgentTranscriptRender { lines, row_action_at, group_header_at, final_response_at }
 }
 
 /// Spinner frames cycled while a turn runs (classic cli-spinners style).

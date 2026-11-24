@@ -18,7 +18,7 @@ use super::format::{
     prompt_blocks_with_context, thread_state_label,
 };
 use super::state::PendingExternalCritic;
-use super::thread_ui::{MessageRenderKind, ThreadUiState, TranscriptItem};
+use super::thread_ui::ThreadUiState;
 use crate::clipboard::ClipboardSelection;
 impl App {
     pub(super) fn agents_show_help(&mut self) {
@@ -490,9 +490,9 @@ impl App {
 
     pub(super) fn agents_copy_assistant_response(&mut self, args: &str) {
         let position = match args {
-            "" => 1,
+            "" => None,
             value => match value.parse::<usize>() {
-                Ok(position) if position > 0 => position,
+                Ok(position) if position > 0 => Some(position),
                 _ => {
                     self.backend.status_message =
                         Some(String::from("usage: /copy [positive response number]"));
@@ -505,26 +505,29 @@ impl App {
             return;
         };
         let thread = &self.agents.threads[active];
-        let Some(group) =
-            thread.completed_assistant_response_groups().into_iter().rev().nth(position - 1)
-        else {
-            self.backend.status_message =
-                Some(String::from("no completed assistant response to copy"));
-            return;
+        let (group, label) = if let Some(position) = position {
+            let Some(group) =
+                thread.completed_assistant_response_groups().into_iter().rev().nth(position - 1)
+            else {
+                self.backend.status_message =
+                    Some(String::from("no completed assistant response to copy"));
+                return;
+            };
+            (group, format!("assistant response {position}"))
+        } else if let Some(group) =
+            thread.selected_final_response.filter(|group| thread.has_response_group(*group))
+        {
+            (group, String::from("selected assistant response"))
+        } else {
+            let Some(group) = thread.completed_assistant_response_groups().into_iter().last()
+            else {
+                self.backend.status_message =
+                    Some(String::from("no completed assistant response to copy"));
+                return;
+            };
+            (group, String::from("assistant response 1"))
         };
-        let text = thread
-            .transcript
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::Message {
-                    text,
-                    kind: MessageRenderKind::Assistant,
-                    response_group: Some(item_group),
-                    ..
-                } if *item_group == group => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
+        let text = thread.assistant_response_text(group);
         if text.trim().is_empty() {
             self.backend.status_message =
                 Some(String::from("no completed assistant response to copy"));
@@ -532,7 +535,7 @@ impl App {
         }
         let text = ee_agent_host::redact::redact_secret_values(&text, &self.agents_secret_values());
         if self.registers.clipboard().write_text(ClipboardSelection::Clipboard, text) {
-            self.backend.status_message = Some(format!("copied assistant response {position}"));
+            self.backend.status_message = Some(format!("copied {label}"));
         } else {
             self.backend.status_message = Some(String::from("system clipboard unavailable"));
         }

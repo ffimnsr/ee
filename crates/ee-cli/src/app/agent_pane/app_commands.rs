@@ -771,7 +771,26 @@ impl App {
 
     pub(super) fn agents_show_key_help(&mut self) {
         let help = String::from(
-            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-K toggle agents pane/editor · Insert prompt editor (Insert accept) · Ctrl-←/→ response group · agent_fork_selected_response forks from the selected response · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
+            "Agents keys:\n\
+  ↑/↓                 prompt history\n\
+  Ctrl-R              reverse history search\n\
+  Ctrl-Shift-R        collapse selected response group\n\
+  Enter               send, or queue while the turn runs\n\
+  Alt-Enter           insert newline\n\
+  Ctrl-U              clear draft\n\
+  Ctrl-S / Ctrl-O     stash / restore draft\n\
+  Ctrl-Shift-E        external editor\n\
+  Ctrl-G              plan modal\n\
+  Ctrl-E              toggle selected group's tool detail\n\
+  Ctrl-K              toggle agents pane/editor\n\
+  Insert              open prompt editor (Insert accepts)\n\
+  Ctrl-←/→            select response group\n\
+  Ctrl-↑/↓            select agent final response\n\
+  agent_fork_selected_response  fork from selected response\n\
+  /copy               copy selected final response, else latest\n\
+  PgUp/PgDn/Home/End  scroll transcript\n\
+  Tab                 slash/@ completion\n\
+Configure mode=agent bindings in [keymap].",
         );
         match self.agents.active_thread_index() {
             Some(active) => {

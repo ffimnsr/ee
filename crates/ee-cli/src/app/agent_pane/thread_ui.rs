@@ -197,6 +197,8 @@ pub(crate) struct AgentThreadUi {
     pub(crate) next_response_group: ResponseGroupId,
     /// Response group selected for keyboard collapse control.
     pub(crate) selected_response_group: Option<ResponseGroupId>,
+    /// Completed assistant response selected for copy/fork navigation.
+    pub(crate) selected_final_response: Option<ResponseGroupId>,
     /// Response groups whose reasoning and tools are hidden.
     pub(crate) collapsed_response_groups: BTreeSet<ResponseGroupId>,
     /// Response groups whose tool input/output detail is expanded.
@@ -414,6 +416,7 @@ impl AgentThreadUi {
         self.next_response_group += 1;
         self.active_response_group = Some(group);
         self.selected_response_group = Some(group);
+        self.selected_final_response = None;
         group
     }
 
@@ -494,6 +497,22 @@ impl AgentThreadUi {
             }
         }
         groups.into_iter().collect()
+    }
+
+    /// Visible final assistant text for one completed response group.
+    pub(crate) fn assistant_response_text(&self, group: ResponseGroupId) -> String {
+        self.transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message {
+                    text,
+                    kind: MessageRenderKind::Assistant,
+                    response_group: Some(item_group),
+                    ..
+                } if *item_group == group => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn response_group_counts(&self, group: ResponseGroupId) -> (usize, usize) {
@@ -713,6 +732,7 @@ impl AgentThreadUi {
         self.active_response_group = None;
         self.next_response_group = 1;
         self.selected_response_group = None;
+        self.selected_final_response = None;
         self.collapsed_response_groups.clear();
         self.expanded_tool_details.clear();
         self.turn_metrics.clear();
