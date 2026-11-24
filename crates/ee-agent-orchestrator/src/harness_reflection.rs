@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use crate::harness_validation::HarnessTree;
 use crate::user_experience::{
-    EditRow, EditVerdict, ExperienceConfidence, ExperienceEntry, ExperienceScope, save_entry,
+    EditRow, EditVerdict, ExperienceConfidence, ExperienceEntry, ExperienceScope,
 };
 
 /// Maximum size of one reflection projection.
@@ -472,8 +472,11 @@ pub fn build_entry(
 }
 
 /// Writes a parsed reflection only after explicit approval.
+///
+/// `library_root` is the experience-library directory itself
+/// (`<workspace>/.agents/experience` or a run-scoped library).
 pub fn write_reflection(
-    workspace_root: &Path,
+    library_root: &Path,
     entry: &ExperienceEntry,
     harness: Option<&HarnessTree>,
     approved: bool,
@@ -481,7 +484,7 @@ pub fn write_reflection(
     if !approved {
         return Err(String::from("reflection write declined"));
     }
-    save_entry(workspace_root, entry, harness)
+    crate::user_experience::save_entry_at(library_root, entry, harness)
 }
 
 fn truncate_chars(text: &str, max_bytes: usize) -> String {
@@ -645,27 +648,28 @@ mod tests {
     #[test]
     fn declined_write_leaves_no_entry() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let library = workspace.path().join(crate::user_experience::WORKSPACE_EXPERIENCE_DIR);
         let output = parse_reflection(&reply("cue: cue\nlesson: lesson\nevidence: evidence"))
             .expect("parses");
         let entry =
             build_entry(&output, 1, "rust", "task", ExperienceConfidence::Medium).expect("entry");
-        let error = write_reflection(workspace.path(), &entry, None, false).expect_err("declined");
+        let error = write_reflection(&library, &entry, None, false).expect_err("declined");
         assert!(error.contains("declined"));
-        assert!(!workspace.path().join(".agents/experience").exists());
+        assert!(!library.exists());
     }
 
     #[test]
     fn no_entry_is_written_with_edits_only() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let library = workspace.path().join(crate::user_experience::WORKSPACE_EXPERIENCE_DIR);
         let output = parse_reflection(&reply("NO_ENTRY")).expect("parses");
         let entry =
             build_entry(&output, 1, "rust", "task", ExperienceConfidence::Low).expect("entry");
-        let dir = write_reflection(workspace.path(), &entry, None, true).expect("write");
+        let dir = write_reflection(&library, &entry, None, true).expect("write");
         let text = std::fs::read_to_string(dir.join("EXPERIENCE.md")).expect("entry file");
         assert!(text.contains("NO_ENTRY"));
         assert!(!text.contains("lesson:"));
-        let registry =
-            crate::user_experience::ExperienceRegistry::discover(workspace.path(), &[], None);
+        let registry = crate::user_experience::ExperienceRegistry::discover_at(&library);
         let loaded = registry.iter().next().expect("reloaded");
         assert!(loaded.is_no_entry());
     }
@@ -673,6 +677,7 @@ mod tests {
     #[test]
     fn approved_write_stores_the_entry_and_harness_tree() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let library = workspace.path().join(crate::user_experience::WORKSPACE_EXPERIENCE_DIR);
         let output = parse_reflection(&reply(
             "cue: writes not reopened\nlesson: add verify rule\nevidence: c2 vs base b1",
         ))
@@ -680,7 +685,7 @@ mod tests {
         let entry =
             build_entry(&output, 1, "rust", "task", ExperienceConfidence::Medium).expect("entry");
         let harness = tree(&[("guardrails.md", "verify writes\n")]);
-        let dir = write_reflection(workspace.path(), &entry, Some(&harness), true).expect("write");
+        let dir = write_reflection(&library, &entry, Some(&harness), true).expect("write");
         assert!(dir.join("EXPERIENCE.md").is_file());
         assert!(dir.join("harness/guardrails.md").is_file());
         let registry =

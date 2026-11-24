@@ -1,6 +1,7 @@
 //! `/reflect` curates the last task into the workspace experience library.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -17,7 +18,7 @@ use crate::harness_validation::HarnessTree;
 use crate::model::{ModelContent, ModelMessage, ModelRole};
 use crate::observability::{TelemetryRecorder, TelemetryTurnOutcome};
 use crate::runtime::OrchestratorRuntime;
-use crate::user_experience::{ExperienceConfidence, ExperienceRegistry};
+use crate::user_experience::{ExperienceConfidence, ExperienceRegistry, WORKSPACE_EXPERIENCE_DIR};
 
 /// Inputs required to run one `/reflect` command.
 pub(super) struct ReflectCommand<'a> {
@@ -35,12 +36,21 @@ pub(super) struct ReflectCommand<'a> {
     pub(super) telemetry_event_start: usize,
 }
 
-/// Executes `/reflect [domain]` and returns the turn result.
+/// Parsed `/reflect` arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ReflectArgs {
+    pub(super) domain: Option<String>,
+    pub(super) library_root: Option<PathBuf>,
+}
+
+/// Executes `/reflect [--library-root DIR] [domain]` and returns the turn result.
 pub(super) async fn handle_reflect_command(
     ctx: ReflectCommand<'_>,
 ) -> Result<PromptResult, ProviderError> {
     let session = ctx.session_id.to_string();
-    let domain = resolve_domain(ctx.instructions, ctx.workspace)?;
+    let args = parse_reflect_args(ctx.instructions)?;
+    let domain = resolve_domain(args.domain.as_deref(), ctx.workspace)?;
+    let library_root = resolve_library_root(&args, ctx.workspace);
     let task = last_task(&ctx.history).ok_or_else(|| {
         ProviderError::InvalidRequest(String::from(
             "`/reflect` needs a completed task in this session; run the task first",
@@ -85,7 +95,7 @@ pub(super) async fn handle_reflect_command(
         .map_err(ProviderError::from)?;
     let output = harness_reflection::parse_reflection(&result.handoff.summary)
         .map_err(ProviderError::InvalidRequest)?;
-    let registry = ExperienceRegistry::discover(ctx.workspace, &[], None);
+    let registry = ExperienceRegistry::discover_at(&library_root);
     let seq = registry.next_seq(&domain);
     let entry =
         harness_reflection::build_entry(&output, seq, &domain, &task, ExperienceConfidence::Medium)
@@ -93,13 +103,17 @@ pub(super) async fn handle_reflect_command(
 
     let lesson = entry.lesson.as_deref().map_or("NO_ENTRY (edits only)", |lesson| lesson);
     let message = format!(
-        "/reflect wants to write `.agents/experience/{domain}/entries/{seq}-.../EXPERIENCE.md` \
-         with {} edit row(s) and lesson: {lesson}. Allow?",
+        "/reflect wants to write `{}` with {} edit row(s) and lesson: {lesson}. Allow?",
+        library_root
+            .join(&domain)
+            .join("entries")
+            .join(format!("{seq}-.../EXPERIENCE.md"))
+            .display(),
         entry.edits.len()
     );
     let approved = confirm(&ctx.client, ctx.session_id, message).await?;
     let written = if approved {
-        let dir = harness_reflection::write_reflection(ctx.workspace, &entry, Some(&chosen), true)
+        let dir = harness_reflection::write_reflection(&library_root, &entry, Some(&chosen), true)
             .map_err(ProviderError::BackendFailure)?;
         Some(dir.display().to_string())
     } else {
@@ -110,6 +124,7 @@ pub(super) async fn handle_reflect_command(
         "session_id": session,
         "domain": domain,
         "seq": seq,
+        "library_root": library_root.display().to_string(),
         "edits": entry.edits.len(),
         "no_entry": entry.is_no_entry(),
         "approved": approved,
@@ -142,16 +157,59 @@ async fn confirm(
     Ok(matches!(response.action, ElicitationAction::Accept(_)))
 }
 
+/// Parses `/reflect [--library-root DIR] [domain]`.
+pub(super) fn parse_reflect_args(instructions: Option<&str>) -> Result<ReflectArgs, ProviderError> {
+    let mut args = ReflectArgs::default();
+    let mut tokens = instructions.unwrap_or_default().split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--library-root" {
+            let value = tokens.next().ok_or_else(|| {
+                ProviderError::InvalidRequest(String::from(
+                    "usage: /reflect [--library-root DIR] [domain]; --library-root needs a directory",
+                ))
+            })?;
+            set_library_root(&mut args, value)?;
+        } else if let Some(value) = token.strip_prefix("--library-root=") {
+            set_library_root(&mut args, value)?;
+        } else if token.starts_with('-') {
+            return Err(ProviderError::InvalidRequest(format!(
+                "unknown `/reflect` argument {token:?}; usage: /reflect [--library-root DIR] [domain]"
+            )));
+        } else if args.domain.is_some() {
+            return Err(ProviderError::InvalidRequest(String::from(
+                "usage: /reflect [--library-root DIR] [domain]; only one domain is accepted",
+            )));
+        } else {
+            args.domain = Some(token.to_string());
+        }
+    }
+    Ok(args)
+}
+
+fn set_library_root(args: &mut ReflectArgs, value: &str) -> Result<(), ProviderError> {
+    if value.trim().is_empty() {
+        return Err(ProviderError::InvalidRequest(String::from(
+            "--library-root must not be empty",
+        )));
+    }
+    args.library_root = Some(PathBuf::from(value));
+    Ok(())
+}
+
+fn resolve_library_root(args: &ReflectArgs, workspace: &std::path::Path) -> PathBuf {
+    args.library_root.clone().unwrap_or_else(|| workspace.join(WORKSPACE_EXPERIENCE_DIR))
+}
+
 pub(super) fn resolve_domain(
-    instructions: Option<&str>,
+    domain: Option<&str>,
     workspace: &std::path::Path,
 ) -> Result<String, ProviderError> {
-    if let Some(domain) = instructions.map(str::trim).filter(|domain| !domain.is_empty()) {
+    if let Some(domain) = domain.map(str::trim).filter(|domain| !domain.is_empty()) {
         if valid_domain(domain) {
             return Ok(domain.to_string());
         }
         return Err(ProviderError::InvalidRequest(format!(
-            "usage: /reflect [domain]; domain {domain:?} must be lowercase letters, digits, '_', or '-'"
+            "usage: /reflect [--library-root DIR] [domain]; domain {domain:?} must be lowercase letters, digits, '_', or '-'"
         )));
     }
     let derived = workspace
@@ -260,5 +318,57 @@ fn diff_label(change: crate::workspace_snapshot::DiffChange) -> &'static str {
         DiffChange::Added => "added",
         DiffChange::Modified => "modified",
         DiffChange::Deleted => "deleted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reflect_arguments_parse_domain_and_library_root() {
+        assert_eq!(parse_reflect_args(None).expect("defaults"), ReflectArgs::default());
+        assert_eq!(
+            parse_reflect_args(Some("rust")).expect("domain"),
+            ReflectArgs { domain: Some(String::from("rust")), library_root: None }
+        );
+        assert_eq!(
+            parse_reflect_args(Some("--library-root /tmp/lib rust")).expect("flag first"),
+            ReflectArgs {
+                domain: Some(String::from("rust")),
+                library_root: Some(PathBuf::from("/tmp/lib")),
+            }
+        );
+        assert_eq!(
+            parse_reflect_args(Some("rust --library-root=/tmp/lib")).expect("equals form"),
+            ReflectArgs {
+                domain: Some(String::from("rust")),
+                library_root: Some(PathBuf::from("/tmp/lib")),
+            }
+        );
+    }
+
+    #[test]
+    fn reflect_arguments_reject_bad_flags() {
+        assert!(parse_reflect_args(Some("--library-root")).is_err());
+        assert!(parse_reflect_args(Some("--library-root=")).is_err());
+        assert!(parse_reflect_args(Some("--force")).is_err());
+        assert!(parse_reflect_args(Some("rust docs")).is_err());
+    }
+
+    #[test]
+    fn default_library_root_is_the_workspace_experience_directory() {
+        let workspace = std::path::Path::new("/work");
+        assert_eq!(
+            resolve_library_root(&ReflectArgs::default(), workspace),
+            std::path::PathBuf::from("/work/.agents/experience")
+        );
+        assert_eq!(
+            resolve_library_root(
+                &ReflectArgs { domain: None, library_root: Some(PathBuf::from("/scratch")) },
+                workspace,
+            ),
+            std::path::PathBuf::from("/scratch")
+        );
     }
 }

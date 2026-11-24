@@ -37,6 +37,9 @@ pub(super) struct AdoptCommand<'a> {
     pub(super) session_id: &'a SessionId,
     pub(super) instructions: Option<&'a str>,
     pub(super) workspace: &'a Path,
+    /// Test seam: an explicit `ee` executable; production resolves from the
+    /// environment/sibling/PATH.
+    pub(super) executable: Option<&'a Path>,
     pub(super) session_log: Option<Arc<SessionLog>>,
     pub(super) telemetry: &'a Arc<Mutex<TelemetryRecorder>>,
     pub(super) telemetry_turn: &'a str,
@@ -59,8 +62,11 @@ pub(super) async fn handle_adopt_command(
                 "`/adopt` needs a completed `/harness` run in this session; run `/harness` first",
             ))
         })?;
-    let executable =
-        super::harness_command::resolve_ee_executable().map_err(ProviderError::BackendFailure)?;
+    let executable = match ctx.executable {
+        Some(executable) => executable.to_path_buf(),
+        None => super::harness_command::resolve_ee_executable()
+            .map_err(ProviderError::BackendFailure)?,
+    };
     let dry = match run_adopt(
         &executable,
         Path::new(&run_root),
@@ -283,6 +289,7 @@ fn bounded(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn adopt_arguments_accept_only_the_memory_flag() {
@@ -331,5 +338,202 @@ mod tests {
             apply.iter().map(|value| value.to_string_lossy().to_string()).collect();
         assert!(rendered.iter().any(|value| value == "--yes"));
         assert!(!rendered.iter().any(|value| value == "--include-memories"));
+    }
+
+    #[cfg(unix)]
+    fn fake_ee(root: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("ee");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nworkspace=\"\"\nprevious=\"\"\nfor arg in \"$@\"; do\n  if [ \"$previous\" = \"--workspace\" ]; then workspace=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \" $* \" in\n  *\" --dry-run \"*) echo \"ee: adopt + guardrails.md\"; exit 0 ;;\n  *\" --yes \"*) mkdir -p \"$workspace/.agents\"; printf applied > \"$workspace/.agents/applied\"; echo \"ee: harness-adopt applied\"; exit 0 ;;\nesac\nexit 2\n",
+        )
+        .expect("fake ee");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("fake ee executable");
+        path
+    }
+
+    #[cfg(unix)]
+    struct AdoptFixture {
+        workspace: PathBuf,
+        log: Arc<SessionLog>,
+        runtime: Arc<OrchestratorRuntime>,
+        sink: UpdateSink,
+        sink_rx: tokio::sync::mpsc::UnboundedReceiver<ee_agent_acp_server::server::OutboundEvent>,
+        client: ClientBridge,
+        responder: tokio::task::JoinHandle<()>,
+    }
+
+    #[cfg(unix)]
+    fn adopt_fixture(root: &Path, action: &'static str) -> AdoptFixture {
+        use ee_agent_acp_server::server::OutboundEvent;
+        use ee_agent_protocol::{RawJsonRpcMessage, Response};
+        use tokio::sync::mpsc;
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".agents")).expect("workspace");
+        std::fs::write(workspace.join(".agents/guardrails.md"), "old\n").expect("old rule");
+        let run_root = root.join("run");
+        let adopted = run_root.join("adopted/.agents");
+        std::fs::create_dir_all(&adopted).expect("adopted");
+        std::fs::write(adopted.join("guardrails.md"), "new\n").expect("new rule");
+
+        let log = Arc::new(SessionLog::in_memory("session-1"));
+        log.record_harness_ledger(crate::session_log::HarnessLedgerReport {
+            task_id: String::from("task"),
+            run_root: Some(run_root.display().to_string()),
+            ..crate::session_log::HarnessLedgerReport::default()
+        })
+        .expect("ledger");
+
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let client = ClientBridge::new_for_test(Duration::from_secs(5), client_tx);
+        let responder_bridge = client.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(event) = client_rx.recv().await {
+                if let OutboundEvent::ClientRequest { frame } = event
+                    && let RawJsonRpcMessage::Request(request) = frame
+                {
+                    responder_bridge.handle_response(Response::new(
+                        request.id,
+                        Ok(serde_json::json!({ "action": action })),
+                    ));
+                }
+            }
+        });
+
+        let (sink_tx, sink_rx) = mpsc::unbounded_channel();
+        let sink = UpdateSink::new_for_test(SessionId::new("session-1"), sink_tx);
+        let runtime = Arc::new(OrchestratorRuntime::new(
+            crate::config::OrchestratorConfig::default(),
+            Arc::new(crate::test_support::FakeModel::new(Vec::new()))
+                as Arc<dyn crate::model::ModelAdapter>,
+        ));
+        AdoptFixture { workspace, log, runtime, sink, sink_rx, client, responder }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accept_applies_after_the_dry_run_diff() {
+        use ee_agent_acp_server::server::OutboundEvent;
+
+        let root = tempfile::tempdir().expect("root");
+        let executable = fake_ee(root.path());
+        let fixture = adopt_fixture(root.path(), "accept");
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let telemetry = Arc::new(Mutex::new(TelemetryRecorder::default()));
+        let session_id = SessionId::new("session-1");
+        let result = handle_adopt_command(AdoptCommand {
+            runtime: &fixture.runtime,
+            sink: &fixture.sink,
+            client: fixture.client.clone(),
+            cancel,
+            session_id: &session_id,
+            instructions: None,
+            workspace: &fixture.workspace,
+            executable: Some(&executable),
+            session_log: Some(fixture.log.clone()),
+            telemetry: &telemetry,
+            telemetry_turn: "turn-1",
+            telemetry_started_at: Instant::now(),
+            telemetry_event_start: 0,
+        })
+        .await
+        .expect("adopt");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            std::fs::read_to_string(fixture.workspace.join(".agents/applied")).expect("applied"),
+            "applied"
+        );
+        let mut text = String::new();
+        let mut sink_rx = fixture.sink_rx;
+        while let Ok(event) = sink_rx.try_recv() {
+            if let OutboundEvent::Update { update, .. } = event {
+                text.push_str(&format!("{update:?}"));
+            }
+        }
+        assert!(text.contains("dry-run"), "{text}");
+        assert!(text.contains("harness-adopt applied"), "{text}");
+        fixture.responder.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decline_writes_nothing() {
+        use ee_agent_acp_server::server::OutboundEvent;
+
+        let root = tempfile::tempdir().expect("root");
+        let executable = fake_ee(root.path());
+        let fixture = adopt_fixture(root.path(), "decline");
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let telemetry = Arc::new(Mutex::new(TelemetryRecorder::default()));
+        let session_id = SessionId::new("session-1");
+        let result = handle_adopt_command(AdoptCommand {
+            runtime: &fixture.runtime,
+            sink: &fixture.sink,
+            client: fixture.client.clone(),
+            cancel,
+            session_id: &session_id,
+            instructions: None,
+            workspace: &fixture.workspace,
+            executable: Some(&executable),
+            session_log: Some(fixture.log.clone()),
+            telemetry: &telemetry,
+            telemetry_turn: "turn-1",
+            telemetry_started_at: Instant::now(),
+            telemetry_event_start: 0,
+        })
+        .await
+        .expect("adopt");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert!(!fixture.workspace.join(".agents/applied").exists(), "decline writes nothing");
+        let mut text = String::new();
+        let mut sink_rx = fixture.sink_rx;
+        while let Ok(event) = sink_rx.try_recv() {
+            if let OutboundEvent::Update { update, .. } = event {
+                text.push_str(&format!("{update:?}"));
+            }
+        }
+        assert!(text.contains("declined"), "{text}");
+        fixture.responder.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_run_root_is_a_clear_error() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let log = Arc::new(SessionLog::in_memory("session-1"));
+        let (client_tx, _client_rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = ClientBridge::new_for_test(Duration::from_secs(5), client_tx);
+        let (sink_tx, _sink_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = UpdateSink::new_for_test(SessionId::new("session-1"), sink_tx);
+        let runtime = Arc::new(OrchestratorRuntime::new(
+            crate::config::OrchestratorConfig::default(),
+            Arc::new(crate::test_support::FakeModel::new(Vec::new()))
+                as Arc<dyn crate::model::ModelAdapter>,
+        ));
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let telemetry = Arc::new(Mutex::new(TelemetryRecorder::default()));
+        let session_id = SessionId::new("session-1");
+        let error = handle_adopt_command(AdoptCommand {
+            runtime: &runtime,
+            sink: &sink,
+            client,
+            cancel,
+            session_id: &session_id,
+            instructions: None,
+            workspace: &workspace,
+            executable: None,
+            session_log: Some(log),
+            telemetry: &telemetry,
+            telemetry_turn: "turn-1",
+            telemetry_started_at: Instant::now(),
+            telemetry_event_start: 0,
+        })
+        .await
+        .expect_err("missing run root");
+        assert!(error.to_string().contains("completed `/harness` run"), "{error}");
     }
 }

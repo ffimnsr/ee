@@ -685,6 +685,7 @@ impl AgentProvider for OrchestratorProvider {
                         session_id: &session_id,
                         instructions: command.instructions.as_deref(),
                         workspace: &workspace,
+                        executable: None,
                         session_log: runtime.session_log_for(&session_id.to_string()),
                         telemetry: &telemetry,
                         telemetry_turn: &telemetry_turn,

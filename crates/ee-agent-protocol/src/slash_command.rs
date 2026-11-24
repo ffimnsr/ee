@@ -61,7 +61,7 @@ pub const PRIMARY_AGENT_COMMAND_NAME: &str = "primary-agent";
 
 /// The advertised slash-command name for reflecting on the last task and
 /// writing at most one contrast-backed experience entry. The optional
-/// argument overrides the library domain.
+/// arguments override the library domain and experience-library root.
 pub const REFLECT_COMMAND_NAME: &str = "reflect";
 
 /// The advertised slash-command name for the recursive harness improvement
@@ -172,7 +172,7 @@ pub fn reflect_available_command() -> AvailableCommand {
         "Reflect on the last task and write at most one contrast-backed experience entry after confirmation.",
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
-        "optional domain override",
+        "optional domain and --library-root DIR",
     )))
 }
 
