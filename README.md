@@ -587,6 +587,8 @@ Repeat `--profile` to select several. Profile names are application-owned; confi
 
 Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
 
+A `trusted` workspace decision also auto-allows the application-owned `safe_read` allowlist on the built-in ACP terminal, covering bounded read-only inspection commands (listing, reading, hashing, searching, read-only Git, and language toolchain version probes). The list includes the exact `mk lf` task only: `mk run`, `mk secrets`, `mk watch`, `-c` config overrides, and forwarded trailing arguments still prompt. Built-in safeguards run before this allowlist, so shell-parse failures and special-file mutations stay denied even on a trusted workspace.
+
 ### MCP server trust
 
 One explicit trust decision can cover the pinned tool surface of the built-in `ee` MCP server instead of approving each MCP write prompt:

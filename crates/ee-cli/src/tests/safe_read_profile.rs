@@ -78,6 +78,7 @@ mod gate {
             ("printf", &["%s\\n", "value"][..]),
             ("date", &["-u"][..]),
             ("ps", &["aux"][..]),
+            ("mk", &["lf"][..]),
         ] {
             let profiles = profiles_for(executable, argv);
             assert!(
@@ -130,6 +131,13 @@ mod gate {
             ("xargs", &["rm"][..]),
             ("sh", &["-c", "ls"][..]),
             ("bash", &["-lc", "ls"][..]),
+            // Task runners: only the fixed `mk lf` task is registered.
+            ("mk", &[][..]),
+            ("mk", &["run", "install"][..]),
+            ("mk", &["secrets", "get"][..]),
+            ("mk", &["list"][..]),
+            ("mk", &["lf", "extra"][..]),
+            ("mk", &["-c", "other.yaml", "lf"][..]),
             // Secret dumps.
             ("env", &[][..]),
             ("printenv", &[][..]),
@@ -153,7 +161,7 @@ mod gate {
 
     #[test]
     fn safe_read_registry_hygiene() {
-        assert_eq!(PROFILE_REGISTRY_VERSION, 3);
+        assert_eq!(PROFILE_REGISTRY_VERSION, 4);
         let forbidden_executables = [
             "rm", "mv", "cp", "mkdir", "touch", "chmod", "chown", "ln", "dd", "tee", "truncate",
             "sh", "bash", "zsh", "fish", "python", "python3", "perl", "ruby", "awk", "sed",
@@ -193,6 +201,12 @@ mod gate {
         // exact so `-e`/script execution can never match.
         for entry in safe.entries.iter().filter(|entry| entry.executable == "node") {
             assert_eq!(entry.argv, &["--version"]);
+            assert_eq!(entry.args, ProfileArgPolicy::EXACT);
+        }
+        // `mk` is a workspace task runner: keep only the exact read-only `lf`
+        // task so `run`, `secrets`, `watch`, and forwarded args never match.
+        for entry in safe.entries.iter().filter(|entry| entry.executable == "mk") {
+            assert_eq!(entry.argv, &["lf"]);
             assert_eq!(entry.args, ProfileArgPolicy::EXACT);
         }
         // Traversal widening stays out: recursive grep ignores ignore rules,
@@ -275,6 +289,7 @@ mod gate {
             ("diff", &["-u", "src/main.rs", "src/main.rs"][..]),
             ("sha256sum", &["src/main.rs"][..]),
             ("echo", &["hello", "world"][..]),
+            ("mk", &["lf"][..]),
         ] {
             let mut reply = queue(&mut app, temp.path(), command, args);
             assert!(
@@ -326,6 +341,8 @@ mod gate {
             ("npm", &["outdated"][..]),
             ("cargo", &["check"][..]),
             ("rm", &["-rf", "target"][..]),
+            ("mk", &["run", "install"][..]),
+            ("mk", &["lf", "extra"][..]),
         ] {
             let mut reply = queue(&mut app, temp.path(), command, args);
             assert_eq!(

@@ -89,7 +89,7 @@ fn decide(
 
 #[test]
 fn profile_registry_is_versioned_and_application_owned() {
-    assert_eq!(PROFILE_REGISTRY_VERSION, 3);
+    assert_eq!(PROFILE_REGISTRY_VERSION, 4);
     let ids: Vec<&str> = PROFILES.iter().map(|profile| profile.id).collect();
     assert_eq!(
         ids,
