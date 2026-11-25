@@ -209,6 +209,7 @@ fn terminal_create(id: i64, session_id: &str, command: &str, args: Value, extra:
 
 mod alignment_tests;
 mod read_tests;
+mod terminal_exec_trust;
 mod terminal_tests;
 mod write_tests;
 

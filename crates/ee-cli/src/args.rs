@@ -66,7 +66,7 @@ pub(crate) enum DoCommands {
         #[command(subcommand)]
         command: AgentCommands,
     },
-    /// Manage host-local workspace trust for workspace secret references
+    /// Manage host-local workspace trust for secret references and terminal execution
     Trust {
         #[command(subcommand)]
         command: WorkspaceTrustCommands,
@@ -415,9 +415,17 @@ pub(crate) enum McpCommands {
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkspaceTrustCommands {
     /// Trust the current workspace and allow its secret references
-    Grant,
+    Grant {
+        /// Also grant prompt-free native terminal execution for this workspace
+        #[arg(long)]
+        execute: bool,
+    },
     /// Record the current workspace as untrusted and block its secret references
-    Revoke,
+    Revoke {
+        /// Revoke only terminal execution, keeping the workspace trust decision
+        #[arg(long)]
+        execute: bool,
+    },
     /// Print the recorded workspace trust decision
     Status,
 }

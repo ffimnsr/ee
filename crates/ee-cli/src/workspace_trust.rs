@@ -28,7 +28,7 @@ use crate::secrets::resolve::{
 };
 
 /// Schema version of the workspace trust decision file.
-pub(crate) const WORKSPACE_TRUST_SCHEMA_VERSION: u64 = 1;
+pub(crate) const WORKSPACE_TRUST_SCHEMA_VERSION: u64 = 2;
 
 const WORKSPACE_TRUST_DIR: &str = "workspace-trust";
 
@@ -41,6 +41,14 @@ pub(crate) enum WorkspaceTrustDecision {
     /// Workspace config must never resolve `secret://` references, and
     /// always-allow approvals stay hidden while stored rules remain inert.
     Untrusted,
+}
+
+/// Parsed trust document: the workspace decision plus the separate terminal
+/// execution opt-in. The opt-in is inert unless `decision` is `Trusted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceTrustRecord {
+    decision: WorkspaceTrustDecision,
+    terminal_execution: bool,
 }
 
 impl WorkspaceTrustDecision {
@@ -97,6 +105,19 @@ impl WorkspaceTrustStore {
     /// Recorded decision; a missing file is `Ok(None)` (undecided). Every
     /// document-level problem stays a typed error so callers fail closed.
     pub(crate) fn decision(&self) -> Result<Option<WorkspaceTrustDecision>, TrustStoreError> {
+        Ok(self.record()?.map(|record| record.decision))
+    }
+
+    /// Recorded terminal execution opt-in. Missing documents and untrusted
+    /// workspaces report `false`; malformed documents stay an error so callers
+    /// fail closed instead of inheriting stale authority.
+    pub(crate) fn terminal_execution(&self) -> Result<bool, TrustStoreError> {
+        Ok(self.record()?.is_some_and(|record| {
+            record.decision == WorkspaceTrustDecision::Trusted && record.terminal_execution
+        }))
+    }
+
+    fn record(&self) -> Result<Option<WorkspaceTrustRecord>, TrustStoreError> {
         let bytes = match read_verified_decision(&self.path) {
             Ok(bytes) => bytes,
             Err(TrustStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -108,12 +129,54 @@ impl WorkspaceTrustStore {
     }
 
     /// Atomically records a decision, creating the owner-only directory on
-    /// first use.
+    /// first use. Re-granting trust preserves an existing terminal execution
+    /// opt-in; recording `Untrusted` always clears it.
     pub(crate) fn set_decision(
         &self,
         decision: WorkspaceTrustDecision,
     ) -> Result<(), TrustStoreError> {
-        let text = serialize_decision_document(self.workspace, decision, SystemTime::now())?;
+        let existing_terminal = self.record().ok().flatten().is_some_and(|record| {
+            record.decision == WorkspaceTrustDecision::Trusted && record.terminal_execution
+        });
+        let terminal_execution = decision == WorkspaceTrustDecision::Trusted && existing_terminal;
+        self.write_record(decision, terminal_execution)
+    }
+
+    /// Records or clears the separate terminal execution opt-in. Granting
+    /// requires an already-trusted workspace; clearing a missing or untrusted
+    /// document is a no-op so revocation never creates authority.
+    pub(crate) fn set_terminal_execution(&self, granted: bool) -> Result<(), TrustStoreError> {
+        let Some(record) = self.record()? else {
+            if granted {
+                return Err(TrustStoreError::ValidationFailure(
+                    "workspace trust decision is not recorded; run `ee do trust grant` first"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        };
+        if granted && record.decision != WorkspaceTrustDecision::Trusted {
+            return Err(TrustStoreError::ValidationFailure(
+                "terminal execution requires a trusted workspace".into(),
+            ));
+        }
+        self.write_record(
+            record.decision,
+            granted && record.decision == WorkspaceTrustDecision::Trusted,
+        )
+    }
+
+    fn write_record(
+        &self,
+        decision: WorkspaceTrustDecision,
+        terminal_execution: bool,
+    ) -> Result<(), TrustStoreError> {
+        let text = serialize_decision_document(
+            self.workspace,
+            decision,
+            terminal_execution,
+            SystemTime::now(),
+        )?;
         parse_decision_document(text.as_bytes(), self.workspace)?;
         atomic_write(&self.path, text.as_bytes())
     }
@@ -229,20 +292,58 @@ pub(crate) fn workspace_root_for_cli() -> io::Result<PathBuf> {
     Ok(crate::config::find_git_root(&cwd).unwrap_or(cwd))
 }
 
-pub(crate) fn cmd_trust_grant() -> io::Result<()> {
-    set_current_workspace_decision(WorkspaceTrustDecision::Trusted, "granted")
+pub(crate) fn cmd_trust_grant(execute: bool) -> io::Result<()> {
+    set_current_workspace_decision(WorkspaceTrustDecision::Trusted, execute, "granted")
 }
 
-pub(crate) fn cmd_trust_revoke() -> io::Result<()> {
-    set_current_workspace_decision(WorkspaceTrustDecision::Untrusted, "revoked")
+pub(crate) fn cmd_trust_revoke(execute: bool) -> io::Result<()> {
+    let workspace = workspace_root_for_cli()?;
+    let store = WorkspaceTrustStore::default_for(&workspace).map_err(io::Error::other)?;
+    if execute {
+        let had_grant = store.terminal_execution().unwrap_or(false);
+        store.set_terminal_execution(false).map_err(io::Error::other)?;
+        if had_grant {
+            println!("workspace terminal execution revoked for {}", workspace.display());
+        } else {
+            println!("no terminal execution grant recorded for {}", workspace.display());
+        }
+        println!("workspace trust decision unchanged");
+        println!("host-local decision file: {}", store.path().display());
+        return Ok(());
+    }
+    store.set_decision(WorkspaceTrustDecision::Untrusted).map_err(io::Error::other)?;
+    println!("workspace trust revoked for {}", workspace.display());
+    println!("host-local decision file: {}", store.path().display());
+    Ok(())
 }
 
-fn set_current_workspace_decision(decision: WorkspaceTrustDecision, verb: &str) -> io::Result<()> {
+fn set_current_workspace_decision(
+    decision: WorkspaceTrustDecision,
+    execute: bool,
+    verb: &str,
+) -> io::Result<()> {
     let workspace = workspace_root_for_cli()?;
     let store = WorkspaceTrustStore::default_for(&workspace).map_err(io::Error::other)?;
     store.set_decision(decision).map_err(io::Error::other)?;
+    if execute {
+        store.set_terminal_execution(true).map_err(io::Error::other)?;
+    }
+    let terminal = store.terminal_execution().unwrap_or(false);
     println!("workspace trust {verb} for {}", workspace.display());
+    println!(
+        "terminal execution: {}",
+        if terminal {
+            "granted (agents may run simple commands with a workspace cwd without approval)"
+        } else {
+            "not granted"
+        }
+    );
     println!("host-local decision file: {}", store.path().display());
+    if terminal {
+        println!(
+            "warning: terminal execution is not a sandbox; granted commands run with your user account"
+        );
+    }
     Ok(())
 }
 
@@ -250,6 +351,7 @@ pub(crate) fn cmd_trust_status() -> io::Result<()> {
     let workspace = workspace_root_for_cli()?;
     let store = WorkspaceTrustStore::default_for(&workspace).map_err(io::Error::other)?;
     let decision = store.decision().map_err(io::Error::other)?;
+    let terminal = store.terminal_execution().unwrap_or(false);
     let label = match decision {
         Some(WorkspaceTrustDecision::Trusted) => "trusted",
         Some(WorkspaceTrustDecision::Untrusted) => "untrusted",
@@ -257,11 +359,25 @@ pub(crate) fn cmd_trust_status() -> io::Result<()> {
     };
     println!("workspace: {}", workspace.display());
     println!("workspace trust: {label}");
+    println!(
+        "terminal execution: {}",
+        match (decision, terminal) {
+            (Some(WorkspaceTrustDecision::Trusted), true) => "granted",
+            (_, true) => "granted but inert (workspace not trusted)",
+            _ => "not granted",
+        }
+    );
     println!("host-local decision file: {}", store.path().display());
     if decision.is_none() {
         println!(
             "workspace secret references stay blocked until the workspace is trusted \
              (`ee do trust grant`)"
+        );
+    }
+    if !terminal {
+        println!(
+            "terminal commands stay on the approval path; grant prompt-free execution with \
+             `ee do trust grant --execute`"
         );
     }
     Ok(())
@@ -289,6 +405,7 @@ fn decision_path_from(base_state_dir: &Path, workspace: &WorkspaceIdentity) -> P
 fn serialize_decision_document(
     workspace: WorkspaceIdentity,
     decision: WorkspaceTrustDecision,
+    terminal_execution: bool,
     decided_at: SystemTime,
 ) -> Result<String, TrustStoreError> {
     let datetime: chrono::DateTime<chrono::Utc> = decided_at.into();
@@ -303,13 +420,14 @@ fn serialize_decision_document(
         "decided_at = \"{}\"",
         datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
+    let _ = writeln!(text, "terminal_execution = {terminal_execution}");
     Ok(text)
 }
 
 fn parse_decision_document(
     bytes: &[u8],
     expected: WorkspaceIdentity,
-) -> Result<WorkspaceTrustDecision, TrustStoreError> {
+) -> Result<WorkspaceTrustRecord, TrustStoreError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| TrustStoreError::ParseFailure("workspace trust file is not UTF-8".into()))?;
     let value = toml::from_str::<toml::Value>(text).map_err(|error| {
@@ -329,7 +447,7 @@ fn parse_decision_document(
         .get("schema_version")
         .and_then(toml::Value::as_integer)
         .ok_or_else(|| TrustStoreError::ValidationFailure("missing schema_version".into()))?;
-    if version != WORKSPACE_TRUST_SCHEMA_VERSION as i64 {
+    if !(1..=WORKSPACE_TRUST_SCHEMA_VERSION as i64).contains(&version) {
         return Err(TrustStoreError::UnsupportedSchemaVersion(version.max(0) as u64));
     }
     let workspace_table = table
@@ -355,13 +473,18 @@ fn parse_decision_document(
         .get("trust")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| TrustStoreError::ValidationFailure("missing [trust] table".into()))?;
-    if trust_table.len() != 2
-        || !trust_table.contains_key("decision")
-        || !trust_table.contains_key("decided_at")
+    let expected_fields: &[&str] = if version == 1 {
+        &["decision", "decided_at"]
+    } else {
+        &["decision", "decided_at", "terminal_execution"]
+    };
+    if trust_table.len() != expected_fields.len()
+        || !expected_fields.iter().all(|field| trust_table.contains_key(*field))
     {
-        return Err(TrustStoreError::ValidationFailure(
-            "[trust] must contain exactly decision and decided_at".into(),
-        ));
+        return Err(TrustStoreError::ValidationFailure(format!(
+            "[trust] must contain exactly {}",
+            expected_fields.join(", ")
+        )));
     }
     let decision_text =
         trust_table.get("decision").and_then(toml::Value::as_str).ok_or_else(|| {
@@ -379,7 +502,14 @@ fn parse_decision_document(
             "trust.decided_at must be bounded and control-free".into(),
         ));
     }
-    Ok(decision)
+    let terminal_execution = if version == 1 {
+        false
+    } else {
+        trust_table.get("terminal_execution").and_then(toml::Value::as_bool).ok_or_else(|| {
+            TrustStoreError::ValidationFailure("trust.terminal_execution must be a boolean".into())
+        })? && decision == WorkspaceTrustDecision::Trusted
+    };
+    Ok(WorkspaceTrustRecord { decision, terminal_execution })
 }
 
 /// Owner-only read: rejects symlinks, non-regular files, unsafe modes, and
@@ -552,12 +682,57 @@ mod tests {
         let store = store_for(&base, &root);
 
         assert_eq!(store.decision().unwrap(), None, "missing file is undecided");
+        assert!(!store.terminal_execution().unwrap(), "missing file grants no execution");
 
         store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
         assert_eq!(store.decision().unwrap(), Some(WorkspaceTrustDecision::Trusted));
+        assert!(!store.terminal_execution().unwrap(), "plain trust grants no execution");
 
         store.set_decision(WorkspaceTrustDecision::Untrusted).unwrap();
         assert_eq!(store.decision().unwrap(), Some(WorkspaceTrustDecision::Untrusted));
+    }
+
+    #[test]
+    fn terminal_execution_round_trips_and_untrusted_clears_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = workspace_root(temp.path(), "repo");
+        let base = temp.path().join("state");
+        let store = store_for(&base, &root);
+
+        assert!(
+            store.set_terminal_execution(true).is_err(),
+            "execution cannot be granted before the workspace is trusted"
+        );
+        store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
+        store.set_terminal_execution(true).unwrap();
+        assert!(store.terminal_execution().unwrap(), "grant round-trips");
+
+        // Re-granting plain trust preserves the explicit opt-in.
+        store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
+        assert!(store.terminal_execution().unwrap(), "re-grant preserves execution");
+
+        store.set_terminal_execution(false).unwrap();
+        assert!(!store.terminal_execution().unwrap(), "revoke clears execution");
+
+        store.set_terminal_execution(true).unwrap();
+        store.set_decision(WorkspaceTrustDecision::Untrusted).unwrap();
+        assert!(!store.terminal_execution().unwrap(), "untrusted always clears execution");
+    }
+
+    #[test]
+    fn version_one_documents_read_as_not_granted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = workspace_root(temp.path(), "repo");
+        let base = temp.path().join("state");
+        let store = store_for(&base, &root);
+        store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
+        let legacy = format!(
+            "schema_version = 1\n\n[workspace]\nidentity = \"{}\"\n\n[trust]\ndecision = \"trusted\"\ndecided_at = \"2026-01-01T00:00:00Z\"\n",
+            store.workspace().as_string()
+        );
+        fs::write(store.path(), legacy).unwrap();
+        assert_eq!(store.decision().unwrap(), Some(WorkspaceTrustDecision::Trusted));
+        assert!(!store.terminal_execution().unwrap(), "v1 never carries execution authority");
     }
 
     #[test]
@@ -635,6 +810,7 @@ mod tests {
             serialize_decision_document(
                 *store.workspace(),
                 WorkspaceTrustDecision::Untrusted,
+                false,
                 SystemTime::UNIX_EPOCH,
             )
             .unwrap(),

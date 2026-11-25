@@ -293,8 +293,12 @@ pub fn run_cli() -> io::Result<()> {
                     }
                 }
                 DoCommands::Trust { command } => match command {
-                    WorkspaceTrustCommands::Grant => workspace_trust::cmd_trust_grant()?,
-                    WorkspaceTrustCommands::Revoke => workspace_trust::cmd_trust_revoke()?,
+                    WorkspaceTrustCommands::Grant { execute } => {
+                        workspace_trust::cmd_trust_grant(execute)?
+                    }
+                    WorkspaceTrustCommands::Revoke { execute } => {
+                        workspace_trust::cmd_trust_revoke(execute)?
+                    }
                     WorkspaceTrustCommands::Status => workspace_trust::cmd_trust_status()?,
                 },
                 DoCommands::Mcp { command } => match command {

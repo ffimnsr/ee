@@ -109,6 +109,7 @@ fn decide(
         workspace_enabled,
         safe_read_enabled: false,
         trusted_write_enabled: false,
+        workspace_execute_enabled: false,
         mcp_server_trust: None,
         built_in_deny: None,
         tool_default: None,

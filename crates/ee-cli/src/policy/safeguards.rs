@@ -6,7 +6,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::command::SHELL_WRAPPERS;
+use super::command::{SHELL_WRAPPERS, is_env_assignment};
 
 pub(crate) const SAFEGUARD_REGISTRY_VERSION: u64 = 1;
 
@@ -150,19 +150,8 @@ fn inspect_commands(
 }
 
 fn split_executable(command: &[String]) -> Option<(&str, &[String])> {
-    let index = command.iter().position(|token| !is_assignment(token))?;
+    let index = command.iter().position(|token| !is_env_assignment(token))?;
     Some((&command[index], &command[index + 1..]))
-}
-
-fn is_assignment(token: &str) -> bool {
-    let Some((name, _)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name.chars().enumerate().all(|(index, character)| {
-            character == '_'
-                || character.is_ascii_alphanumeric() && (index > 0 || !character.is_ascii_digit())
-        })
 }
 
 fn inspect_command_mutation_paths(

@@ -20,6 +20,7 @@ use crate::policy::{
 };
 
 use super::agent_permissions::AgentPermissionAlignment;
+use super::app_trust::TrustEvaluationFlags;
 use super::app_web::{NEXT_WEB_LIFECYCLE_ID, web_context_agent_error};
 use super::approval::{
     ApprovalChoice, ApprovalKind, DenyScopePreview, MandatoryConfirmation, PersistentDenyCandidate,
@@ -499,14 +500,18 @@ impl App {
         self.attach_always_allows(&mut prompt, &operation);
         self.attach_persistent_deny(&mut prompt, &operation);
         let trusted_write = self.trusted_write_eligible(&prompt);
+        let workspace_execute = self.terminal_execution_trust_eligible(&prompt);
         let server_trust_allowed = self.server_trust_prompt_eligible(&prompt);
         let mut decision = self.evaluate_operation_with_safeguard(
             &operation,
             &session_id,
             &fingerprint,
             safeguard,
-            trusted_write,
-            server_trust_allowed,
+            TrustEvaluationFlags {
+                trusted_write,
+                workspace_execute,
+                mcp_server_trust: server_trust_allowed,
+            },
         );
         // Phase 4 curated-profile fallback: a terminal request that matches
         // a fixed registry entry is evaluated as its profile when the exact
@@ -639,13 +644,12 @@ impl App {
                     // Workspace-trusted allowlist: dispatch silently, never
                     // record a session decision, and keep the audit trail
                     // entry for the automatic allow.
-                    let summary = if matches!(
-                        audited_operation.category,
-                        TrustCategory::WriteCreate | TrustCategory::WriteModify
-                    ) {
-                        String::from("trusted workspace write")
-                    } else {
-                        String::from("trusted built-in read-only command")
+                    let summary = match audited_operation.category {
+                        TrustCategory::WriteCreate | TrustCategory::WriteModify => {
+                            String::from("trusted workspace write")
+                        }
+                        TrustCategory::Execute => String::from("trusted workspace terminal"),
+                        _ => String::from("trusted built-in read-only command"),
                     };
                     if let Some(thread_index) = thread_index
                         && let Some(thread) = self.agents.threads.get_mut(thread_index)

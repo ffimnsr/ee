@@ -83,6 +83,54 @@ pub(crate) fn resolve_command_cwd(
     Ok(canonical)
 }
 
+/// Whether `token` is a leading environment assignment (`NAME=value`) rather
+/// than an executable or argument. Assignment prefixes change the shell
+/// execution target, so they are never eligible for terminal trust.
+pub(crate) fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().enumerate().all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_alphanumeric() && (index > 0 || !character.is_ascii_digit())
+        })
+}
+
+/// Splits one ACP v1 `terminal/create` request into the structured command
+/// used by trust evaluation. `command` may be a single simple shell command
+/// (`"mk lf"`) or a bare executable with structured `args`; both forms
+/// normalize to the same executable + argv tokens.
+///
+/// Shell syntax, control characters, empty tokens, and leading environment
+/// assignments are rejected. Shell wrappers are rejected by
+/// [`parse_terminal_command`]; the policy-identity variant deliberately keeps
+/// them so an explicit persistent deny can still target a wrapper invocation.
+pub(crate) fn split_terminal_policy_command(
+    command: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), String> {
+    let (executable, mut argv) = split_simple_shell_tokens(command)?;
+    if is_env_assignment(&executable) {
+        return Err("environment assignments are ineligible for terminal trust".to_string());
+    }
+    validate_argv_tokens(args)?;
+    argv.extend_from_slice(args);
+    validate_argv_tokens(&argv)?;
+    Ok((executable, argv))
+}
+
+/// Strict variant used for prompt-free trust eligibility: additionally rejects
+/// shell wrappers, which would bypass the structured argv contract.
+pub(crate) fn parse_terminal_command(
+    command: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), String> {
+    let (executable, argv) = split_terminal_policy_command(command, args)?;
+    validate_command_tokens(&executable, &argv)?;
+    Ok((executable, argv))
+}
+
 /// Splits an agent-owned ACP v2 command string into an executable and argv
 /// only when it is a single simple command with no shell syntax.
 ///
@@ -92,6 +140,15 @@ pub(crate) fn resolve_command_cwd(
 /// separators, globs, comments, control characters) is rejected so the
 /// request falls back to an explicit prompt.
 pub(crate) fn split_simple_shell_command(command: &str) -> Result<(String, Vec<String>), String> {
+    let (executable, argv) = split_simple_shell_tokens(command)?;
+    validate_command_tokens(&executable, &argv)?;
+    Ok((executable, argv))
+}
+
+/// Tokenizes a simple shell command without applying the executable-trust
+/// checks. Callers decide whether shell wrappers are eligible for their
+/// identity.
+fn split_simple_shell_tokens(command: &str) -> Result<(String, Vec<String>), String> {
     const FORBIDDEN: &str = "'\"\\$`|&;<>(){}[]*?!#~";
     if command.is_empty() {
         return Err("command must not be empty".to_string());
@@ -106,7 +163,6 @@ pub(crate) fn split_simple_shell_command(command: &str) -> Result<(String, Vec<S
     let Some((executable, argv)) = tokens.split_first() else {
         return Err("command must not be empty".to_string());
     };
-    validate_command_tokens(executable, argv)?;
     Ok((executable.clone(), argv.to_vec()))
 }
 
@@ -143,6 +199,37 @@ mod tests {
             (String::from("cargo"), vec![String::from("test"), String::from("--quiet")])
         );
         assert_eq!(split_simple_shell_command("pwd").unwrap(), (String::from("pwd"), Vec::new()));
+    }
+
+    #[test]
+    fn terminal_requests_normalize_text_and_structured_args() {
+        let args =
+            |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_terminal_command("mk lf", &[]).unwrap(),
+            (String::from("mk"), vec![String::from("lf")])
+        );
+        assert_eq!(
+            parse_terminal_command("mk", &args(&["lf"])).unwrap(),
+            (String::from("mk"), vec![String::from("lf")])
+        );
+        assert_eq!(
+            parse_terminal_command("git status", &args(&["--short"])).unwrap(),
+            (String::from("git"), args(&["status", "--short"]))
+        );
+        for request in [
+            ("FOO=bar ls", args(&[])),
+            ("PATH=/tmp/evil ls", args(&[])),
+            ("sh -c ls", args(&[])),
+            ("mk lf | cat", args(&[])),
+            ("mk `id`", args(&[])),
+        ] {
+            assert!(
+                parse_terminal_command(request.0, &request.1).is_err(),
+                "{:?} must stay ineligible for terminal trust",
+                request.0
+            );
+        }
     }
 
     #[test]

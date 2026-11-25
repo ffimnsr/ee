@@ -487,3 +487,53 @@ Acceptance:
 - [x] `cargo test --quiet -p ee-cli --features agents --lib mcp_json` and `config::` pass.
 - [x] `cargo clippy --quiet -p ee-cli --features agents --lib --tests -- -D warnings` passes.
 - [x] `cargo fmt --all --check` passes.
+
+## Workspace Terminal Execution Trust (2026-11-26)
+
+Goal: let a user explicitly authorize prompt-free native ACP `terminal/create` commands for one trusted workspace, mirroring the MCP `--execute` opt-in without widening plain workspace trust into implicit arbitrary code execution.
+
+Rules:
+
+- Workspace trust alone is not enough. The grant is a separate explicit opt-in on the same owner-only, host-local workspace trust document; repository configuration cannot create it.
+- Revoking workspace trust clears and inerts the terminal grant. `ee do trust revoke --execute` removes only the terminal grant and keeps the workspace trust decision.
+- Applies only to native ACP v1 `terminal/create`. MCP `ee_terminal_create` keeps its separate `ee do mcp trust grant --execute` opt-in; neither grant crosses into the other route.
+- Auto-allow requires a validated simple command: shell syntax and shell wrappers are rejected, the command text/args normalize to structured executable + argv, and the canonical cwd must stay inside the primary workspace root. Extra workspace roots and external directories still prompt.
+- A leading environment assignment, loader/path environment overrides, an invalid request, a read-only agent mode (`agents.read_only_modes`, default `ask`/`plan`), a safeguard, a persistent deny, or a mandatory-confirm rule still wins; the grant is implicit consent for routine commands, not for unbounded ones.
+- ACP v2 agent-owned command permissions stay on the existing curated `safe_read` reply path: the agent runs those commands itself, so the host cannot enforce workspace containment. MCP terminal tools remain covered by the MCP execute grant.
+
+Work items:
+
+### Phase T1 — Host-local terminal grant and CLI
+
+- [x] Extend the workspace trust document with `terminal_execution` in schema v2, accepting v1 documents as "not granted", preserving owner-only/atomic/identity invariants, and writing v2 only.
+- [x] Add `WorkspaceTrustStore::terminal_execution` and `set_terminal_execution`; `set_decision(Untrusted)` clears the grant, and granting it requires a trusted workspace.
+- [x] Add `ee do trust grant --execute`, `ee do trust revoke --execute`, and a status line that distinguishes granted, not granted, and inert (workspace not trusted).
+- [x] Tests: v2 round trip, v1 compatibility, untrusted clearing, grant-requires-trust, malformed/identity behavior unchanged, and CLI flag parsing.
+
+### Phase T2 — Native terminal evaluation
+
+- [x] Add `parse_terminal_command` so simple ACP v1 command text (`"mk lf"`) and structured `command` + `args` normalize identically; reject shell syntax, shell wrappers, and leading environment assignments.
+- [x] Use the shared parser for command policy identity, persistent command trust, and the new terminal execution gate; keep shell wrappers and invalid cwd ineligible.
+- [x] Add `workspace_execute_enabled` to the policy evaluator as a built-in allow after safeguards, persistent/session denies, and mandatory confirms; only `Execute` + validated `Command` identities match.
+- [x] Add `app_terminal_trust.rs`: require workspace trust, the host-local terminal grant, a non-read-only agent mode, a canonical primary-workspace cwd, and no execution-affecting environment overrides; reject MCP-originated prompts so the routes stay separate.
+- [x] Wire `request_bridge_approval` and summarize the automatic decision as `trusted workspace terminal`.
+- [x] Tests: native `touch` auto-spawns in the workspace root and subdirectory; untrusted, no-grant, shell-wrapper, external-cwd, env-override, read-only-mode, persistent-deny, and MCP-route requests still prompt or deny; simple shell-text safe-read still auto-allows.
+
+### Phase T3 — Boundaries and documentation
+
+- [x] Document the grant in `README.md` and `CHANGELOG.md`, including the warning that it authorizes arbitrary user-level commands inside the workspace, is not a sandbox, and does not cover MCP or ACP v2.
+- [x] Record the separate-route boundary and the deferred ACP v2 broad-execution decision in this section.
+- [x] Run `cargo fmt --all --check`, targeted `cargo clippy`, and the terminal/trust/policy test filters; verify every touched code file stays under 1,000 LOC.
+
+Acceptance:
+
+- [x] `cargo test --quiet -p ee-cli --features agents --lib workspace_trust` passes.
+- [x] `cargo test --quiet -p ee-cli --features agents --lib terminal_exec_trust` passes.
+- [x] `cargo test --quiet -p ee-cli --features agents --lib command_trust` and `safe_read_profile` pass unchanged except for intentional parser coverage.
+- [x] `cargo clippy --quiet -p ee-cli --features agents --lib --tests -- -D warnings` passes.
+- [x] Plain workspace trust remains inert for terminal execution; the explicit grant and its revoke are observable through `ee do trust status` and tests.
+
+Deferred boundaries:
+
+- MCP `ee_terminal_create` keeps its own pinned `ee do mcp trust grant --execute` grant; the native workspace grant never auto-allows proxy-originated terminal calls, and the MCP grant never auto-allows ACP v1 `terminal/create`.
+- ACP v2 agent-owned command permissions keep the curated `safe_read` reply path. Widening them would be advisory only because the agent, not ee, runs the command; revisit only with an explicit v2 execution contract.

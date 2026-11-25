@@ -48,6 +48,12 @@ pub(crate) struct PolicyInput<'a> {
     /// the secret store, so a write outside the workspace directory can
     /// never reach the built-in allow below.
     pub(crate) trusted_write_enabled: bool,
+    /// Injected host-local workspace trust decision for native terminal
+    /// execution. The caller sets this only for an explicitly granted,
+    /// trusted workspace whose validated command has a canonical primary-
+    /// workspace cwd, no shell syntax or wrapper, and no execution-affecting
+    /// environment overrides.
+    pub(crate) workspace_execute_enabled: bool,
     /// Effective pinned MCP server grants for this workspace. The caller
     /// supplies this only while the host-local workspace decision is
     /// `trusted`; a stale or malformed grant set is represented as `None` and
@@ -202,6 +208,18 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
             TrustCategory::WriteCreate | TrustCategory::WriteModify
         )
         && matches!(input.operation.identity, OperationIdentity::Write { .. })
+    {
+        finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
+    }
+    no_match!("built_in_allow");
+    // Built-in workspace-trusted native terminal execution allow. Same
+    // precedence slot as the write and read-only allows: denies, safeguards,
+    // and mandatory-confirm rules above still win, and the caller only
+    // enables the flag for a separately granted, trusted workspace with a
+    // validated simple command rooted in the primary workspace.
+    if input.workspace_execute_enabled
+        && input.operation.category == TrustCategory::Execute
+        && matches!(input.operation.identity, OperationIdentity::Command { .. })
     {
         finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
     }

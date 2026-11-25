@@ -14,7 +14,8 @@ use crate::policy::{
     TrustStoreDocument, TrustStoreError, WorkspaceIdentity, evaluate, inspect_path_escape,
     inspect_protected_state_path, inspect_special_file, inspect_terminal_command,
     is_protected_relative_path, is_safe_read_profile, match_profile_candidates,
-    resolve_command_cwd, split_simple_shell_command, validate_argv_tokens, validate_command_tokens,
+    parse_terminal_command, resolve_command_cwd, split_terminal_policy_command,
+    validate_command_tokens,
 };
 
 use super::app_search::paths_equivalent;
@@ -34,6 +35,14 @@ pub(crate) enum V2CommandPermission {
     Ask,
 }
 
+/// Injected built-in authority flags for one policy evaluation.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TrustEvaluationFlags {
+    pub(super) trusted_write: bool,
+    pub(super) workspace_execute: bool,
+    pub(super) mcp_server_trust: bool,
+}
+
 impl App {
     /// Outcome of classifying one ACP v2 agent-owned command permission.
     pub(crate) fn v2_command_permission(&self, command: &str, cwd: &Path) -> V2CommandPermission {
@@ -46,7 +55,7 @@ impl App {
         if canonical_cwd != primary {
             return V2CommandPermission::Ask;
         }
-        let Ok((executable, argv)) = split_simple_shell_command(command) else {
+        let Ok((executable, argv)) = parse_terminal_command(command, &[]) else {
             return V2CommandPermission::Ask;
         };
         // Safeguards stay hard denials: an agent-owned command cannot be
@@ -91,8 +100,7 @@ impl App {
             "v2-permission",
             "v2-permission",
             None,
-            false,
-            false,
+            TrustEvaluationFlags::default(),
         );
         match command_decision.outcome {
             TrustOutcome::Deny => return V2CommandPermission::Deny,
@@ -115,8 +123,7 @@ impl App {
             "v2-permission",
             "v2-permission",
             None,
-            false,
-            false,
+            TrustEvaluationFlags::default(),
         );
         match decision.outcome {
             TrustOutcome::Allow => V2CommandPermission::Allow,
@@ -372,20 +379,12 @@ impl App {
         &self,
         request: &CreateTerminalRequest,
     ) -> Result<OperationIdentity, String> {
-        if request.command.is_empty()
-            || request.command.chars().any(|character| character.is_control())
-        {
-            return Err("invalid executable token".into());
-        }
-        validate_argv_tokens(&request.args)?;
+        let (executable, argv) = split_terminal_policy_command(&request.command, &request.args)?;
         let primary =
             std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
         let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
         resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())?;
-        Ok(OperationIdentity::Command {
-            executable: request.command.clone(),
-            argv: request.args.clone(),
-        })
+        Ok(OperationIdentity::Command { executable, argv })
     }
 
     fn filesystem_policy_identity(
@@ -431,32 +430,25 @@ impl App {
 
     /// Validated command invocation for a terminal request: structured
     /// executable + argv tokens, canonical in-workspace cwd, and the
-    /// canonical workspace identity.  Invalid requests (shell wrappers,
-    /// control characters, empty tokens, external/relative/traversal/
-    /// symlink-escape cwd) return an error and are never eligible for
-    /// persistent trust.
+    /// canonical workspace identity.  Invalid requests (shell syntax, shell
+    /// wrappers, environment assignments, control characters, empty tokens,
+    /// external/relative/traversal/symlink-escape cwd) return an error and are
+    /// never eligible for persistent trust.
     pub(super) fn command_invocation_for_request(
         &self,
         request: &CreateTerminalRequest,
     ) -> Result<CommandInvocation, String> {
         let primary =
             std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
-        if request
-            .command
-            .chars()
-            .any(|character| character.is_whitespace() || ";&|()<>$`'\"\\".contains(character))
-        {
-            return Err("shell command text is ineligible for persistent allow".into());
-        }
-        validate_command_tokens(&request.command, &request.args)?;
+        let (executable, argv) = parse_terminal_command(&request.command, &request.args)?;
         let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
         let canonical_cwd = resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())?;
         Ok(CommandInvocation {
             workspace: WorkspaceIdentity::from_canonical_root_bytes(
                 primary.as_os_str().as_encoded_bytes(),
             ),
-            executable: request.command.clone(),
-            argv: request.args.clone(),
+            executable,
+            argv,
             canonical_cwd,
         })
     }
@@ -524,7 +516,7 @@ impl App {
     /// decision. Always-allow candidate generation, persistence, and rule
     /// matching all require it; undecided, untrusted, unreadable, or
     /// wrong-identity decisions fail closed.
-    pub(super) fn workspace_trusted(&self) -> bool {
+    pub(crate) fn workspace_trusted(&self) -> bool {
         self.workspace_secret_ref_policy() == crate::secrets::resolve::WorkspaceRefPolicy::Resolve
     }
 
@@ -621,8 +613,7 @@ impl App {
             session_id,
             fingerprint,
             None,
-            false,
-            true,
+            TrustEvaluationFlags { mcp_server_trust: true, ..TrustEvaluationFlags::default() },
         )
     }
 
@@ -632,14 +623,13 @@ impl App {
         session_id: &str,
         fingerprint: &str,
         built_in_deny: Option<SafeguardMatch>,
-        trusted_write_enabled: bool,
-        mcp_server_trust_allowed: bool,
+        flags: TrustEvaluationFlags,
     ) -> TrustDecision {
         let now = self.trust_clock.now();
         let effective = self.effective_trust_document(operation.workspace);
         let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
         let mcp_server_trust =
-            mcp_server_trust_allowed.then(|| self.effective_mcp_server_trust()).flatten();
+            flags.mcp_server_trust.then(|| self.effective_mcp_server_trust()).flatten();
         let tool_key = operation.tool_key();
         let tool_default = effective
             .tool_defaults
@@ -661,7 +651,8 @@ impl App {
             usage: &usage,
             workspace_enabled: effective.workspace_enabled,
             safe_read_enabled: self.workspace_trusted(),
-            trusted_write_enabled,
+            trusted_write_enabled: flags.trusted_write,
+            workspace_execute_enabled: flags.workspace_execute,
             mcp_server_trust: mcp_server_trust.as_ref(),
             built_in_deny,
             tool_default,
@@ -742,7 +733,8 @@ impl App {
         if canonical_cwd != primary {
             return None;
         }
-        let candidates: Vec<_> = match_profile_candidates(&request.command, &request.args)
+        let (executable, argv) = parse_terminal_command(&request.command, &request.args).ok()?;
+        let candidates: Vec<_> = match_profile_candidates(&executable, &argv)
             .into_iter()
             .filter(|matched| {
                 matched
@@ -751,7 +743,7 @@ impl App {
                     .all(|operand| self.validate_profile_operand(&primary, operand))
             })
             .collect();
-        let special_cat = self.terminal_readonly_cat_profile(&primary, request);
+        let special_cat = self.terminal_readonly_cat_profile(&primary, &executable, &argv);
         if candidates.is_empty() && special_cat.is_none() {
             return None;
         }
@@ -842,13 +834,14 @@ impl App {
     fn terminal_readonly_cat_profile(
         &self,
         primary: &Path,
-        request: &CreateTerminalRequest,
+        executable: &str,
+        argv: &[String],
     ) -> Option<&'static str> {
-        if request.command != "cat" || request.args.len() != 1 {
+        if executable != "cat" || argv.len() != 1 {
             return None;
         }
-        validate_command_tokens(&request.command, &request.args).ok()?;
-        let operand = &request.args[0];
+        validate_command_tokens(executable, argv).ok()?;
+        let operand = &argv[0];
         let path = Path::new(operand);
         if operand.starts_with('-')
             || path.is_absolute()

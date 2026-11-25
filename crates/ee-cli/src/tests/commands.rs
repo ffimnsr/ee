@@ -528,6 +528,34 @@ fn cli_utility_commands_live_under_do() {
         }) if server == "ee"
     ));
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "trust", "grant", "--execute"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Trust {
+                command: crate::WorkspaceTrustCommands::Grant { execute: true }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "trust", "revoke", "--execute"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Trust {
+                command: crate::WorkspaceTrustCommands::Revoke { execute: true }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "trust", "status"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Trust { command: crate::WorkspaceTrustCommands::Status }
+        })
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
 
     assert!(matches!(

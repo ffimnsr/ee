@@ -485,7 +485,7 @@ impl App {
     /// decision is resolved from the active workspace, so the trusted-write
     /// built-in allow must be scoped to that same root; extra workspace roots
     /// stay out of scope.
-    fn primary_workspace_root(&self) -> Option<PathBuf> {
+    pub(super) fn primary_workspace_root(&self) -> Option<PathBuf> {
         std::fs::canonicalize(self.current_workspace_root()).ok()
     }
 
@@ -538,7 +538,7 @@ impl App {
             .as_ref()
             .is_some_and(|invocation| ee_mcp::classify::exact_trust_eligible(&invocation.tool))
             || !self.workspace_trusted()
-            || !self.trusted_write_mode_allows(&prompt.session_id)
+            || !self.trusted_mode_allows(&prompt.session_id)
         {
             return false;
         }
@@ -562,12 +562,13 @@ impl App {
     }
 
     /// Whether the prompting session's active agent mode permits implicit
-    /// write consent.  Modes are agent-advertised ids with no capability flags,
-    /// so only the configured read-only set is trusted to mean "no writes".
-    /// Prompts that map to no live thread (proxy-originated app tools) fall
-    /// back to the active thread's mode; with no mode information at all the
-    /// agent backend still decides, so the trusted-write path stays enabled.
-    fn trusted_write_mode_allows(&self, session_id: &str) -> bool {
+    /// consent for writes or terminal execution. Modes are agent-advertised ids
+    /// with no capability flags, so only the configured read-only set is
+    /// trusted to mean "no side effects". Prompts that map to no live thread
+    /// (proxy-originated app tools) fall back to the active thread's mode; with
+    /// no mode information at all the agent backend still decides, so the
+    /// trusted paths stay enabled.
+    pub(super) fn trusted_mode_allows(&self, session_id: &str) -> bool {
         if self.config.agents.read_only_modes.is_empty() {
             return true;
         }

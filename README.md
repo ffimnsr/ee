@@ -605,6 +605,21 @@ Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspac
 
 A `trusted` workspace decision also auto-allows the application-owned `safe_read` allowlist on the built-in ACP terminal, covering bounded read-only inspection commands (listing, reading, hashing, searching, read-only Git, and language toolchain version probes). The list includes the exact `mk lf` task only: `mk run`, `mk secrets`, `mk watch`, `-c` config overrides, and forwarded trailing arguments still prompt. Built-in safeguards run before this allowlist, so shell-parse failures and special-file mutations stay denied even on a trusted workspace.
 
+### Workspace terminal execution trust
+
+Plain workspace trust never authorizes arbitrary command execution. To let an agent run normal terminal commands in a trusted workspace without an approval prompt, add the separate explicit opt-in:
+
+```sh
+cd /path/to/workspace
+ee do trust grant --execute   # trust the workspace and grant terminal execution
+ee do trust revoke --execute  # remove only the terminal opt-in
+ee do trust status            # granted / not granted / inert
+```
+
+The opt-in is stored on the same owner-only, host-local workspace trust document (`$XDG_STATE_HOME/ee/workspace-trust/`) and is inert unless the workspace decision is `trusted`. Revoking workspace trust clears it. It applies only to native ACP v1 `terminal/create`: a command is auto-spawned only when it normalizes to a simple executable + argv (no shell syntax, shell wrappers, or leading environment assignments), the canonical cwd stays inside the primary workspace root, the agent mode is not in `agents.read_only_modes` (default `ask`/`plan`), and no loader/path environment override is requested. Extra workspace roots, external directories, protected paths, built-in safeguards, persistent command denies, and mandatory-confirm rules still prompt or deny.
+
+This grant is not a sandbox: accepted commands run with your user account and can reach anything that account can reach. It does not cover MCP `ee_terminal_create` (use `ee do mcp trust grant --execute` for that route) or ACP v2 agent-owned command permissions (the agent runs those itself, so ee keeps the curated `safe_read` reply there).
+
 ### MCP server trust
 
 One explicit trust decision can cover the pinned tool surface of the built-in `ee` MCP server instead of approving each MCP write prompt:

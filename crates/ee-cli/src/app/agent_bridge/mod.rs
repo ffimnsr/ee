@@ -48,6 +48,7 @@ mod app_decision;
 mod app_proxy;
 mod app_proxy_ops;
 mod app_search;
+mod app_terminal_trust;
 mod app_test_hooks;
 mod app_trust;
 mod app_validation;

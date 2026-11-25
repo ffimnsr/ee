@@ -134,7 +134,7 @@ pub(crate) use args::{
     ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentTrustCommands, AgentTrustProfile, Cli, Commands,
     ConfigCommands, DoCommands, FileCommands, HarnessCommands, HarnessModeArg, LanguageCommands,
     McpCommands, McpTrustCommands, McpTrustTransport, PluginCommands, RuntimeCommands,
-    SecretsCommands,
+    SecretsCommands, WorkspaceTrustCommands,
 };
 #[cfg(test)]
 pub(crate) use doctor::doctor_report;
