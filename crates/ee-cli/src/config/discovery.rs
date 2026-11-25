@@ -14,6 +14,7 @@ use super::constants::SYSTEM_CONFIG_PATH;
 use super::editor_settings::{EditorSettings, apply_clipboard_env};
 use super::editorconfig::apply_editorconfig;
 use super::lsp::LspSettingsBuilder;
+use super::mcp_json::load_standard_mcp_config;
 use super::raw::{EeToml, parse_ee_toml};
 #[cfg(any(feature = "agents", test))]
 use super::web_context_merge::resolve_agent_web_context_with_env;
@@ -189,7 +190,27 @@ pub(super) struct ConfigProbe {
 #[derive(Debug, Clone)]
 pub(super) struct ConfigDiscovery {
     pub(super) layers: Vec<ConfigLayer>,
+    /// Every configuration source in merge order (lowest priority first).
+    /// `layers` remains the TOML-only view used by callers that do not import
+    /// standard MCP JSON.
+    pub(super) sources: Vec<ConfigSource>,
     pub(super) root_stop_path: Option<PathBuf>,
+}
+
+/// One ordered config source. Standard MCP JSON entries are complete server
+/// definitions, so they merge through the same `[mcp.servers]` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ConfigSource {
+    Toml(ConfigLayer),
+    StandardMcp { kind: ConfigLayerKind, path: PathBuf, base_dir: PathBuf },
+}
+
+fn standard_mcp_source(
+    path: PathBuf,
+    base_dir: PathBuf,
+    kind: ConfigLayerKind,
+) -> Option<ConfigSource> {
+    path.is_file().then_some(ConfigSource::StandardMcp { kind, path, base_dir })
 }
 
 pub(super) fn probe_config_file(path: &Path) -> ConfigProbe {
@@ -209,18 +230,30 @@ pub(super) fn discover_config_layers_with_env(
 ) -> ConfigDiscovery {
     let workspace_candidates = env.workspace_candidate_paths(file_path);
     let mut high_to_low_layers = Vec::new();
+    let mut high_to_low_sources = Vec::new();
     let mut root_stop_path = None;
 
     for path in workspace_candidates.iter().rev() {
         let probe = probe_config_file(path);
-        if !probe.exists {
-            continue;
+        let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if probe.exists {
+            let layer = ConfigLayer {
+                kind: ConfigLayerKind::Ancestor,
+                path: path.clone(),
+                root: probe.root,
+            };
+            high_to_low_layers.push(layer.clone());
+            high_to_low_sources.push(ConfigSource::Toml(layer));
         }
-        high_to_low_layers.push(ConfigLayer {
-            kind: ConfigLayerKind::Ancestor,
-            path: path.clone(),
-            root: probe.root,
-        });
+        // Push the standard file after its directory's TOML layer; the final
+        // reversal then makes TOML win on duplicate ids in the same directory.
+        if let Some(source) = standard_mcp_source(
+            directory.join(".agents").join("mcp.json"),
+            directory,
+            ConfigLayerKind::Ancestor,
+        ) {
+            high_to_low_sources.push(source);
+        }
         if probe.root == Some(true) {
             root_stop_path = Some(path.clone());
             break;
@@ -235,39 +268,55 @@ pub(super) fn discover_config_layers_with_env(
             && xdg_exists
         {
             let probe = probe_config_file(&path);
-            high_to_low_layers.push(ConfigLayer {
+            let layer = ConfigLayer {
                 kind: ConfigLayerKind::UserXdg,
                 path: path.clone(),
                 root: probe.root,
-            });
+            };
+            high_to_low_layers.push(layer.clone());
+            high_to_low_sources.push(ConfigSource::Toml(layer));
             if probe.root == Some(true) {
                 root_stop_path = Some(path);
             }
         } else if let Some(legacy_path) = env.legacy_user_config_path() {
             let legacy_probe = probe_config_file(&legacy_path);
             if legacy_probe.exists {
-                high_to_low_layers.push(ConfigLayer {
+                let layer = ConfigLayer {
                     kind: ConfigLayerKind::UserLegacy,
                     path: legacy_path.clone(),
                     root: legacy_probe.root,
-                });
+                };
+                high_to_low_layers.push(layer.clone());
+                high_to_low_sources.push(ConfigSource::Toml(layer));
                 if legacy_probe.root == Some(true) {
                     root_stop_path = Some(legacy_path);
                 }
             }
         }
+        // The user standard MCP file is independent of whether a user
+        // `config.toml` exists; it is a standalone import layer. Pushing it
+        // after the user TOML keeps TOML authoritative on duplicate ids.
+        if let Some(directory) = env.config_dir.as_ref().map(|dir| dir.join("ee"))
+            && let Some(source) =
+                standard_mcp_source(directory.join("mcp.json"), directory, ConfigLayerKind::UserXdg)
+        {
+            high_to_low_sources.push(source);
+        }
     }
 
     if root_stop_path.is_none() && probe_config_file(&env.system_config_path).exists {
-        high_to_low_layers.push(ConfigLayer {
+        let layer = ConfigLayer {
             kind: ConfigLayerKind::System,
             path: env.system_config_path.clone(),
             root: Some(true),
-        });
+        };
+        high_to_low_layers.push(layer.clone());
+        high_to_low_sources.push(ConfigSource::Toml(layer));
     }
 
     high_to_low_layers.reverse();
-    ConfigDiscovery { layers: high_to_low_layers, root_stop_path }
+    high_to_low_sources.reverse();
+    ConfigDiscovery { layers: high_to_low_layers, sources: high_to_low_sources, root_stop_path }
 }
 
 pub(super) fn load_config_with_env(
@@ -277,15 +326,24 @@ pub(super) fn load_config_with_env(
     let mut settings = EditorSettings::default();
     let mut lsp = LspSettingsBuilder::default();
 
-    for layer in discover_config_layers_with_env(env, file_path).layers {
-        if let Some(patch) = parse_ee_toml(&layer.path) {
-            settings.merge_toml(&patch, layer.kind);
-            if let Some(lsp_patch) = &patch.lsp {
-                lsp.merge_toml(lsp_patch);
+    for source in discover_config_layers_with_env(env, file_path).sources {
+        match source {
+            ConfigSource::Toml(layer) => {
+                if let Some(patch) = parse_ee_toml(&layer.path) {
+                    settings.merge_toml(&patch, layer.kind);
+                    if let Some(lsp_patch) = &patch.lsp {
+                        lsp.merge_toml(lsp_patch);
+                    }
+                    lsp.merge_formatters_toml(&patch.formatters);
+                    for (language_id, language_patch) in &patch.languages {
+                        lsp.merge_language_toml(language_id, language_patch);
+                    }
+                }
             }
-            lsp.merge_formatters_toml(&patch.formatters);
-            for (language_id, language_patch) in &patch.languages {
-                lsp.merge_language_toml(language_id, language_patch);
+            ConfigSource::StandardMcp { kind, path, base_dir } => {
+                if let Some(mcp) = load_standard_mcp_config(&path, &base_dir) {
+                    settings.merge_mcp_toml(&mcp, kind);
+                }
             }
         }
     }
@@ -424,6 +482,19 @@ pub(super) fn config_search_report_with_env(
                     .map(|stop| format!("skipped: root=true at {}", stop.display()))
             },
         });
+    }
+
+    for source in &discovery.sources {
+        if let ConfigSource::StandardMcp { kind, path, .. } = source {
+            layers.push(ConfigLayerReport {
+                kind: *kind,
+                path: path.clone(),
+                exists: true,
+                loaded: true,
+                root: None,
+                note: Some(String::from("standard MCP JSON")),
+            });
+        }
     }
 
     ConfigSearchReport {

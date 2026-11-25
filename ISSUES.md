@@ -462,3 +462,28 @@ Scope and non-goals:
 ### v2 default-flip gate (not part of this work)
 
 Do not flip the global host default to v2 in these phases. Reopen only when ACP v2 leaves Preview, every shipped agent passes v2 with either `session.mcp.acp` or the stdio fallback, and V0–V5 acceptance holds.
+
+## Standard MCP JSON Configuration (2026-11-26)
+
+Goal: load the ecosystem-standard `mcpServers` JSON shape from `.agents/mcp.json` and `$XDG_CONFIG_HOME/ee/mcp.json` alongside explicit `[mcp.servers]` TOML, without weakening trust or merge rules.
+
+Rules:
+
+- Standard JSON is an import layer. ee never rewrites it; `ee do config setup mcp` continues to manage TOML only.
+- The user standard file is `$XDG_CONFIG_HOME/ee/mcp.json`; the workspace standard file is `<dir>/.agents/mcp.json` for every directory in `.ee.toml` discovery, and `root = true` stops it.
+- Within one directory, standard JSON merges before `.ee.toml`, so an explicit `[mcp.servers.<id>]` entry wins on a duplicate id.
+- Workspace JSON env/header values keep `Ancestor` provenance, so `secret://` references still require workspace trust.
+- HTTP+SSE, ambiguous `command` + `url` entries, invalid URLs, oversized files, and malformed entries are reported and skipped per server; one bad entry cannot disable the rest.
+
+Work items:
+
+- [x] Add `config/mcp_json.rs`: `command`/`args`/`env`/`cwd` and `url`/`headers`/`timeout_ms`, `transport`/`type` inference, `disabled`/`enabled`, relative `cwd` resolution, a 1 MiB size cap, and per-entry failure isolation.
+- [x] Add ordered `ConfigSource` discovery so user and ancestor standard files interleave with TOML layers and honor `root = true`.
+- [x] Surface imported files in `ee do config doctor` and cover parser, precedence, provenance, root-boundary, disabled, malformed, relative-cwd, and report cases.
+- [x] Update README, wiki config reference, and CHANGELOG; regenerate the checked-in schema for the already-landed per-agent `protocol` field so the config schema drift test passes.
+
+Acceptance:
+
+- [x] `cargo test --quiet -p ee-cli --features agents --lib mcp_json` and `config::` pass.
+- [x] `cargo clippy --quiet -p ee-cli --features agents --lib --tests -- -D warnings` passes.
+- [x] `cargo fmt --all --check` passes.

@@ -5,6 +5,7 @@ mod editor;
 mod init;
 mod lsp;
 mod mcp;
+mod mcp_json;
 mod runtime;
 mod value;
 mod web_context;

@@ -444,7 +444,7 @@ args = ["--stdio"]
 lsp = ["typescript", "eslint"]
 ```
 
-Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
+Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml` (plus `$XDG_CONFIG_HOME/ee/mcp.json`), legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost, with `.agents/mcp.json` from the same directory merged immediately before that directory's `.ee.toml`. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id. Standard MCP JSON never overrides an explicit `[mcp.servers.<id>]` entry in the same or a higher layer.
 
 Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 
@@ -469,6 +469,8 @@ ACP v1 is the host default. Set `protocol = "v2"` on one `[agents.servers.<id>]`
 The MCP tools route through the same host handlers as the v1 client methods, so workspace containment, write policy, command approval, and safeguards stay shared.
 
 Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, `cwd`, and `protocol` (`"v1"` default or `"v2"`) are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
+
+Standard MCP JSON is also imported from `.agents/mcp.json` in workspace directories and from `$XDG_CONFIG_HOME/ee/mcp.json`, using the ecosystem-standard `mcpServers` shape (`command`/`args`/`env` for local servers, `url`/`headers` for remote servers, optional `transport` or `type`). The files are read-only import layers: explicit `[mcp.servers.<id>]` entries win on duplicate ids, `disabled = true` skips an entry, and HTTP+SSE entries are reported and skipped because ee only implements stdio and streamable HTTP.
 
 ```toml
 [agents]

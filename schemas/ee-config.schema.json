@@ -950,6 +950,13 @@
             "string",
             "null"
           ]
+        },
+        "protocol": {
+          "description": "ACP protocol version for this agent: `v1` (default) or `v2`.\nACP v2 is Preview and requires an MCP route for client tools.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

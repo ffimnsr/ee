@@ -603,7 +603,7 @@ impl EditorSettings {
         }
     }
 
-    fn merge_mcp_toml(&mut self, patch: &McpToml, kind: ConfigLayerKind) {
+    pub(super) fn merge_mcp_toml(&mut self, patch: &McpToml, kind: ConfigLayerKind) {
         if let Some(proxy) = &patch.proxy {
             self.mcp.proxy_explicit = true;
             if let Some(enabled) = proxy.enabled {

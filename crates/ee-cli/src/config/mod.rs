@@ -19,6 +19,7 @@ mod editorconfig;
 mod init;
 mod lsp;
 mod mcp;
+mod mcp_json;
 mod raw;
 mod rubber_duck;
 mod runtime_languages;
@@ -35,8 +36,8 @@ mod workspace_memory;
 #[allow(unused_imports)]
 pub(super) use {
     agents::*, agents_settings::*, constants::*, discovery::*, editor_settings::*, editorconfig::*,
-    init::*, lsp::*, mcp::*, raw::*, rubber_duck::*, runtime_languages::*, secret_value::*,
-    value::*, web_context::*, web_context_merge::*, workspace_memory::*,
+    init::*, lsp::*, mcp::*, mcp_json::*, raw::*, rubber_duck::*, runtime_languages::*,
+    secret_value::*, value::*, web_context::*, web_context_merge::*, workspace_memory::*,
 };
 
 #[cfg(test)]
