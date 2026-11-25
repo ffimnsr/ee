@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned: the rustc hash is part of every sccache and rust-cache key, so
+# floating stable silently invalidates both caches whenever Rust releases.
+channel = "1.100.0"
+# Avoid inheriting the developer's global rustup `complete` profile, whose
+# extra components (miri, cranelift) are not shipped for every channel.
+profile = "minimal"
+components = ["clippy", "rustfmt"]

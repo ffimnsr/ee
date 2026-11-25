@@ -249,7 +249,13 @@ mod tests {
         let tasks = parse_manifest(&path).expect("manifest");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "t1");
-        assert_eq!(tasks[0].workspace, root.path().join("workspace"));
+        // macOS tempdirs live under /var, a symlink to /private/var, and
+        // parse_manifest canonicalizes the workspace (source roots and
+        // attachments stay as resolved). Canonicalize the expectation too so
+        // the test is stable on both layouts.
+        let expected_workspace =
+            std::fs::canonicalize(root.path().join("workspace")).expect("canonical workspace");
+        assert_eq!(tasks[0].workspace, expected_workspace);
         assert_eq!(tasks[0].source_roots, vec![root.path().join("workspace/src")]);
         assert_eq!(tasks[0].attachments, vec![root.path().join("notes.md")]);
     }

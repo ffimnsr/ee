@@ -26,13 +26,17 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Set up mold linker
         if: runner.os == 'Linux'
         uses: rui314/setup-mold@v1
         with:
           make-default: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Bench artifacts are never reused by other jobs; only cache the
+          # cargo registry so the repo quota stays available for sccache.
+          cache-targets: "false"
       - name: Configure cargo jobs
         uses: ./.github/actions/cargo-jobs
 
