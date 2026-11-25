@@ -9,6 +9,9 @@ cd "$repo_root"
 # One-shot hook builds: disable incremental so stale caches cannot rot into
 # rust-lld "undefined hidden symbol" link failures or unbounded target/ growth.
 export CARGO_INCREMENTAL=0
+# Use the sccache binary when installed; one-shot hook builds are the exact
+# workload it can reuse across branches and `cargo clean`.
+githooks_enable_sccache
 
 needs_rust_checks=0
 

@@ -322,7 +322,7 @@ pub enum Piece {
     ///
     /// `file_range` is an **absolute** byte range in the file.  The piece does
     /// not hold a copy of the bytes; they are read on demand through
-    /// [`super::pager::FilePager`].
+    /// [`crate::vlf::pager::FilePager`].
     Original { file_range: ByteRange, metrics: TextMetrics },
     /// A slice of an append-only [`InsertBuffer`].
     ///

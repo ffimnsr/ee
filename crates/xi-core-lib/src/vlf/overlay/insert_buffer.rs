@@ -10,7 +10,7 @@ use super::*;
 /// can only grow; individual bytes are never removed.  Old pieces that
 /// reference an earlier slice of the buffer remain valid indefinitely.
 ///
-/// Inserted bytes are **never** copied into the [`super::pager::FilePager`]
+/// Inserted bytes are **never** copied into the [`crate::vlf::pager::FilePager`]
 /// page cache; they are separate from the original file.
 pub struct InsertBuffer {
     /// Stable identifier.

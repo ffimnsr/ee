@@ -59,8 +59,53 @@ docs_output="$(capture_docs_check_call)"
 
 (
     set -euo pipefail
+    unset RUSTC_WRAPPER
+    PATH="$shim_dir:$PATH"
     source "$hook_path"
     [[ "${CARGO_INCREMENTAL:-}" == "0" ]]
+)
+
+# sccache wiring: enabled when installed, skipped for an explicit wrapper or
+# EE_DISABLE_SCCACHE=1.
+sccache_dir="$shim_dir/sccache-bin"
+mkdir -p "$sccache_dir"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$sccache_dir/sccache"
+chmod +x "$sccache_dir/sccache"
+
+(
+    set -euo pipefail
+    unset RUSTC_WRAPPER
+    PATH="$sccache_dir:$PATH"
+    source "$hook_path"
+    [[ "${RUSTC_WRAPPER:-}" == "sccache" ]]
+)
+
+(
+    set -euo pipefail
+    source "$hook_path"
+    unset RUSTC_WRAPPER
+    PATH="$shim_dir"
+    githooks_enable_sccache
+    [[ -z "${RUSTC_WRAPPER:-}" ]]
+)
+
+(
+    set -euo pipefail
+    source "$hook_path"
+    export RUSTC_WRAPPER=my-wrapper
+    PATH="$shim_dir"
+    githooks_enable_sccache
+    [[ "${RUSTC_WRAPPER:-}" == "my-wrapper" ]]
+)
+
+(
+    set -euo pipefail
+    source "$hook_path"
+    unset RUSTC_WRAPPER
+    export EE_DISABLE_SCCACHE=1
+    PATH="$sccache_dir"
+    githooks_enable_sccache
+    [[ -z "${RUSTC_WRAPPER:-}" ]]
 )
 
 # State-gated test cache: canonical command + record/match roundtrip.

@@ -19,6 +19,17 @@ githooks_test_cmd() {
     printf '%s\n' 'cargo test --quiet --workspace --all-features --locked'
 }
 
+# Route hook builds through sccache when it is installed. An explicit
+# RUSTC_WRAPPER wins, and EE_DISABLE_SCCACHE=1 bypasses the cache entirely.
+githooks_enable_sccache() {
+    if [ "${EE_DISABLE_SCCACHE:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ -z "${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
+        export RUSTC_WRAPPER=sccache
+    fi
+}
+
 # State file lives inside target/ (gitignored): `cargo clean` wipes it too,
 # forcing a fresh test run.
 githooks_state_file() {

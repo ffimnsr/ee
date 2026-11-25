@@ -2,6 +2,11 @@
 
 use_cargo: true
 
+# Route every mk-driven rustc invocation through sccache when it is installed.
+# The wrapper falls back to plain rustc; set EE_DISABLE_SCCACHE=1 to bypass it.
+environment:
+  RUSTC_WRAPPER: ./scripts/sccache-rustc.sh
+
 tasks:
   format:
     commands:
