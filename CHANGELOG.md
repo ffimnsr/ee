@@ -45,6 +45,24 @@
 - add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
+## 0.11.19 - 2026-11-25
+
+### Fixes
+
+- retry grammar fetches and shallow-clone rev pins (`6e888cc`)
+- repair vlf overlay pager intra-doc links (`35c5dab`)
+
+
+### CI
+
+- make prebuilt language pack optional (`a597776`)
+
+
+### Maintenance
+
+- split modules above 1600 loc (`bb18985`)
+
+
 ## 0.11.18 - 2026-11-25
 
 ### Fixes
