@@ -243,6 +243,13 @@ jobs:
           echo "packname=${PACKNAME}" >> "${GITHUB_OUTPUT}"
 
       - name: Build prebuilt language pack
+        id: language_pack
+        # The all-language pack is an optional extra. A missing grammar or a
+        # flaky remote must not block the platform archive; the default runtime
+        # assets below still build and ship without it.
+        continue-on-error: true
+        # Keep a wedged download from consuming the whole job budget.
+        timeout-minutes: 30
         shell: bash
         run: |
           set -euo pipefail
@@ -273,6 +280,16 @@ jobs:
           shasum -a 256 "${PACK}" \
             | awk -v name="${PACK}" '{print $1 "  " name}' \
             > "${PACK}.sha256"
+
+      - name: Remove incomplete language pack
+        if: steps.language_pack.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKNAME="${{ steps.meta.outputs.packname }}"
+          rm -f "${PACKNAME}.tar.gz" "${PACKNAME}.tar.gz.sha256" "${PACKNAME}.tar.gz.sigstore.json"
+          echo "::warning::prebuilt language pack was not produced; continuing without it"
 
       - name: Build default runtime assets
         shell: bash
@@ -336,10 +353,17 @@ jobs:
           set -euo pipefail
 
           BASENAME="${{ steps.meta.outputs.basename }}"
-          PACKNAME="${{ steps.meta.outputs.packname }}"
           cosign sign-blob --yes --bundle "${BASENAME}.tar.gz.sigstore.json" "${BASENAME}.tar.gz"
-          cosign sign-blob --yes --bundle "${PACKNAME}.tar.gz.sigstore.json" "${PACKNAME}.tar.gz"
           cosign sign-blob --yes --bundle "${BASENAME}.spdx.json.sigstore.json" "${BASENAME}.spdx.json"
+
+      - name: Sign language pack
+        if: steps.language_pack.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKNAME="${{ steps.meta.outputs.packname }}"
+          cosign sign-blob --yes --bundle "${PACKNAME}.tar.gz.sigstore.json" "${PACKNAME}.tar.gz"
 
       - name: Attest archive provenance
         uses: actions/attest-build-provenance@v4
@@ -347,6 +371,7 @@ jobs:
           subject-path: ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}
 
       - name: Attest language pack provenance
+        if: steps.language_pack.outcome == 'success'
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.meta.outputs.packname }}.tar.gz
