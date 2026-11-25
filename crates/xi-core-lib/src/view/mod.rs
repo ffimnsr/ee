@@ -58,7 +58,13 @@ const FIND_BATCH_SIZE: usize = 500000;
 /// Bounded context for normal/constrained backend syntax rendering.
 const BACKEND_SYNTAX_CONTEXT_LINES: usize = 32;
 /// Normal/constrained buffers can spend more than VLF's tight visible-range budget.
+#[cfg(not(test))]
 const BACKEND_SYNTAX_TIMEOUT: Duration = Duration::from_millis(100);
+/// Unit tests run in parallel on saturated hosts; the production wall-clock
+/// cap turns these semantic span assertions into load-dependent flakes. Give
+/// tests the same 5s budget the tree-sitter test helpers already use.
+#[cfg(test)]
+const BACKEND_SYNTAX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A view to a buffer. It is the buffer plus additional information
 /// like line breaks and selection state.
