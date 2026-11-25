@@ -1,6 +1,10 @@
 //! Runtime-loader tests: git.
 use super::*;
 
+use std::time::Duration;
+
+use super::super::git_ops::run_git_network_with_retry_using;
+
 fn run_git_fixture(repo: &Path, args: &[&str]) {
     let status = Command::new("git").arg("-C").arg(repo).args(args).status().unwrap();
     assert!(status.success(), "git {:?} failed in {}", args, repo.display());
@@ -108,6 +112,43 @@ fn demo_git_loader(repo: &Path, ref_kind: &str, ref_value: &str, symbol: &str) -
 }
 
 #[test]
+fn git_network_retry_retries_transient_failures() {
+    let mut attempts = 0;
+    let result = run_git_network_with_retry_using(
+        3,
+        |_| Duration::ZERO,
+        || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(RuntimeOperationError::grammar_source("transient git failure"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(attempts, 3);
+}
+
+#[test]
+fn git_network_retry_returns_last_error_after_exhaustion() {
+    let mut attempts = 0;
+    let result = run_git_network_with_retry_using(
+        3,
+        |_| Duration::ZERO,
+        || {
+            attempts += 1;
+            Err(RuntimeOperationError::grammar_source(format!("attempt {attempts}")))
+        },
+    );
+
+    let error = result.unwrap_err().to_string();
+    assert_eq!(attempts, 3);
+    assert!(error.contains("attempt 3"), "unexpected error: {error}");
+}
+
+#[test]
 fn runtime_loader_fetches_git_branch_source_and_reuses_checkout() {
     let _guard = env_lock();
     let temp_dir = TempDir::new().unwrap();
@@ -168,6 +209,10 @@ fn runtime_loader_fetches_git_rev_source_with_exact_commit() {
     assert!(failures.is_empty());
 
     assert_eq!(fetched[0].resolved_rev.as_deref(), Some(tag_rev.as_str()));
+    assert!(
+        fetched[0].source_dir.join(".git").join("shallow").is_file(),
+        "rev-pinned staging must shallow-fetch only the pinned commit"
+    );
 }
 
 #[test]
@@ -389,7 +434,7 @@ fn runtime_build_skips_unchanged_rev_pinned_grammar_on_second_run() {
 fn runtime_build_reuses_rev_pinned_checkout_without_network() {
     let _guard = env_lock();
     let temp_dir = TempDir::new().unwrap();
-    let (repo, tag_rev, _branch_name, branch_rev) = create_demo_git_repo(&temp_dir);
+    let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
     let loader = demo_git_loader(&repo, "rev", &tag_rev, "tree_sitter_demo");
     let source_root = temp_dir.path().join("sources");
     let output_root = temp_dir.path().join("runtime");
@@ -415,8 +460,21 @@ fn runtime_build_reuses_rev_pinned_checkout_without_network() {
 
     // Move the checkout off the pin and make the remote unreachable. A
     // rev-pinned source must resolve and restore the pin from local objects
-    // instead of fetching over the network.
-    run_git_fixture(&staged, &["checkout", "--force", &branch_rev]);
+    // instead of fetching over the network. Rev pins are staged shallowly, so
+    // diverge with a local commit instead of checking out an older remote one.
+    run_git_fixture(
+        &staged,
+        &[
+            "-c",
+            "user.name=EE Tests",
+            "-c",
+            "user.email=ee-tests@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "diverge",
+        ],
+    );
     run_git_fixture(&staged, &["remote", "set-url", "origin", "/nonexistent/ee-offline-grammar"]);
 
     let (second, second_failures) = loader

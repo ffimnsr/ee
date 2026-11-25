@@ -9,6 +9,7 @@ use semver::Version;
 use serde::Deserialize;
 use tree_sitter_loader::Loader;
 
+use super::git_ops::{clone_git_grammar_source, run_git_network_with_retry};
 // Re-exported so existing `runtime_loader::grammar::run_git` callers keep working.
 pub use super::git_ops::{git_rev_parse, run_git};
 
@@ -500,19 +501,35 @@ pub fn fetch_git_grammar_source(
             return Ok(rev.clone());
         }
     } else {
-        run_git(None, ["clone", "--no-checkout", &spec.url, &source_dir.display().to_string()])
-            .map_err(|error| {
+        clone_git_grammar_source(spec, source_dir).map_err(|error| {
+            RuntimeOperationError::grammar_source(format!("{source_label}: {error}"))
+        })?;
+        // A fresh rev pin was fetched shallowly, so the regular fetch below
+        // would pull the whole repository back in. Resolve the pin locally
+        // and stop after checking it out.
+        if let (None, None, Some(rev)) = (&spec.branch, &spec.tag, &spec.rev) {
+            let pinned_local = git_rev_parse(
+                source_dir,
+                &format!("{rev}^{{commit}}"),
+                &format!("rev `{rev}`"),
+                &source_label,
+            )?;
+            run_git(Some(source_dir), ["checkout", "--force", &pinned_local]).map_err(|error| {
                 RuntimeOperationError::grammar_source(format!("{source_label}: {error}"))
             })?;
+            return Ok(rev.clone());
+        }
     }
 
     run_git(Some(source_dir), ["remote", "set-url", "origin", &spec.url]).map_err(|error| {
         RuntimeOperationError::grammar_source(format!("{source_label}: {error}"))
     })?;
-    run_git(
-        Some(source_dir),
-        ["fetch", "--tags", "--force", "origin", "+refs/heads/*:refs/remotes/origin/*"],
-    )
+    run_git_network_with_retry(|| {
+        run_git(
+            Some(source_dir),
+            ["fetch", "--tags", "--force", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+        )
+    })
     .map_err(|error| RuntimeOperationError::grammar_source(format!("{source_label}: {error}")))?;
 
     let resolved_rev = match (&spec.branch, &spec.tag, &spec.rev) {
