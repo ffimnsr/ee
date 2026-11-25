@@ -309,12 +309,17 @@ fn project_lsp_config_starts_and_reloads_custom_server() {
     fs::write(&file, "pub fn main() { 1 }\n").unwrap();
     write_lsp_config(&config_path, &fake_server, &log_one);
 
+    // Startup waits on a spawned fake server plus plugin IPC. The same wait
+    // takes ~4s unloaded, so 5s flakes under full-suite CPU contention; other
+    // process-spawning suites use 15s for the same reason.
+    const LSP_STARTUP_WAIT: Duration = Duration::from_secs(15);
+
     let mut app = App::from_path(Some(file.clone())).unwrap();
 
     wait_until_with_backend(
         &mut app.backend,
         "initial custom LSP startup",
-        Duration::from_secs(5),
+        LSP_STARTUP_WAIT,
         |_| log_contains_methods(&log_one, &["initialize", "textDocument/didOpen"]),
     );
 
@@ -324,15 +329,12 @@ fn project_lsp_config_starts_and_reloads_custom_server() {
     wait_until_with_backend(
         &mut app.backend,
         "reloaded custom LSP startup",
-        Duration::from_secs(5),
+        LSP_STARTUP_WAIT,
         |_| log_contains_methods(&log_two, &["initialize", "textDocument/didOpen"]),
     );
-    wait_until_with_backend(
-        &mut app.backend,
-        "original LSP shutdown",
-        Duration::from_secs(5),
-        |_| log_contains_methods(&log_one, &["shutdown", "exit"]),
-    );
+    wait_until_with_backend(&mut app.backend, "original LSP shutdown", LSP_STARTUP_WAIT, |_| {
+        log_contains_methods(&log_one, &["shutdown", "exit"])
+    });
 }
 
 // ── Open / benchmark ──────────────────────────────────────────────────────────
