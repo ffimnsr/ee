@@ -46,6 +46,7 @@ impl AgentConnection {
             NewSessionRequest::new(cwd).additional_directories(additional).mcp_servers(mcp_servers);
         let proxy_mode =
             self.append_ee_proxy_entry(&mut request.mcp_servers, ee_proxy_stdio_fallback);
+        self.require_v2_client_tool_route(proxy_mode, "session/new")?;
 
         let response =
             self.send_command(|tx| ConnectionCommand::NewSession { request, tx }).await?;
@@ -67,11 +68,25 @@ impl AgentConnection {
         mcp_servers: &mut Vec<McpServer>,
         ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> EeProxyMode {
-        if let Some(server_id) = self.inner.mcp.server_id()
-            && self.agent_capabilities().is_some_and(|caps| caps.mcp_capabilities.acp)
-        {
-            mcp_servers.push(ee_agent_protocol::ee_proxy_acp_entry(server_id.clone()));
-            return EeProxyMode::AcpNative;
+        if let Some(server_id) = self.inner.mcp.server_id() {
+            // A caller may already have advertised the ee route (for example
+            // an ACP-native entry resolved by another layer); never duplicate
+            // the server id.
+            if mcp_servers.iter().any(|server| match server {
+                McpServer::Acp(acp) => acp.server_id == *server_id,
+                McpServer::Stdio(stdio) => stdio.name == "ee",
+                _ => false,
+            }) {
+                return if mcp_servers.iter().any(|server| matches!(server, McpServer::Acp(_))) {
+                    EeProxyMode::AcpNative
+                } else {
+                    EeProxyMode::StdioFallback
+                };
+            }
+            if self.agent_capabilities().is_some_and(|caps| caps.mcp_capabilities.acp) {
+                mcp_servers.push(ee_agent_protocol::ee_proxy_acp_entry(server_id.clone()));
+                return EeProxyMode::AcpNative;
+            }
         }
         if let Some(fallback) = ee_proxy_stdio_fallback {
             mcp_servers.push(McpServer::Stdio(fallback));
@@ -79,6 +94,29 @@ impl AgentConnection {
         } else {
             EeProxyMode::Disabled
         }
+    }
+
+    /// Refuses to create or resume a v2 session that has no MCP route for
+    /// client tools.
+    ///
+    /// ACP v2 removed the client filesystem and terminal methods. When the ee
+    /// proxy is armed but neither `session.mcp.acp` nor the stdio fallback is
+    /// available, the agent would silently lose every client tool, so the
+    /// request fails with actionable guidance instead.
+    fn require_v2_client_tool_route(
+        &self,
+        proxy_mode: EeProxyMode,
+        method: &str,
+    ) -> Result<(), AgentError> {
+        if self.negotiated_protocol_version() == Some(ProtocolVersion::V2)
+            && self.inner.mcp.server_id().is_some()
+            && proxy_mode == EeProxyMode::Disabled
+        {
+            return Err(AgentError::invalid_params(format!(
+                "{method}: ACP v2 has no client filesystem/terminal methods and the ee MCP proxy could not advertise a server; enable [mcp.proxy] enabled = true for the stdio ee --mcp-proxy fallback, or use an agent that advertises session.mcp.acp"
+            )));
+        }
+        Ok(())
     }
 
     /// Loads an existing session; only allowed when the agent advertises
@@ -202,13 +240,17 @@ impl AgentConnection {
     ///
     /// `cwd` and every `additional_directories` entry must be absolute.
     /// Non-empty `additional_directories` also require the
-    /// `sessionCapabilities.additionalDirectories` capability.
+    /// `sessionCapabilities.additionalDirectories` capability. MCP servers are
+    /// re-advertised on every resume: v2 resumes require the complete set, and
+    /// the ee proxy entry follows the same ACP-native-or-stdio rule as
+    /// `session/new`. The resolved mode is available on the returned thread.
     pub async fn resume_session(
         &self,
         session_id: SessionId,
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> Result<AgentThread, AgentError> {
         self.wait_ready().await?;
         if !self.supports_session_resume() {
@@ -231,17 +273,15 @@ impl AgentConnection {
                 )));
             }
         }
+        let mut mcp_servers = mcp_servers;
+        let proxy_mode = self.append_ee_proxy_entry(&mut mcp_servers, ee_proxy_stdio_fallback);
+        self.require_v2_client_tool_route(proxy_mode, "session/resume")?;
         let request = ResumeSessionRequest::new(session_id.clone(), cwd)
             .additional_directories(additional_directories)
             .mcp_servers(mcp_servers);
         let response =
             self.send_command(|tx| ConnectionCommand::ResumeSession { request, tx }).await?;
-        Ok(self.spawn_thread(
-            session_id,
-            response.modes,
-            response.config_options,
-            EeProxyMode::Disabled,
-        ))
+        Ok(self.spawn_thread(session_id, response.modes, response.config_options, proxy_mode))
     }
 
     /// Closes one active session; only allowed when the agent advertises

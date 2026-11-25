@@ -9,14 +9,15 @@ use ee_agent_host::{
 };
 use ee_agent_protocol::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationMode, FINAL_RESPONSE_MESSAGE_ID_PREFIX, RequestPermissionOutcome,
-    SessionId, SessionUpdate,
+    ElicitationAction, ElicitationMode, FINAL_RESPONSE_MESSAGE_ID_PREFIX, PermissionOption,
+    PermissionOptionKind, RequestPermissionOutcome, SelectedPermissionOutcome, SessionId,
+    SessionUpdate,
 };
 
 use super::super::*;
 use super::pump;
 
-use crate::app::agent_bridge::AgentPermissionPreview;
+use crate::app::agent_bridge::{AgentPermissionPreview, V2CommandPermission};
 use crate::config::AgentAlignmentMode;
 
 use super::constants::{AGENT_DISPLAY_NAME, AGENT_PROMPT_HISTORY_MAX};
@@ -529,6 +530,46 @@ impl App {
 
     /// Presents a permission request as a prompt plus transcript notice.
     fn present_permission(&mut self, session_id: &SessionId, request: &PermissionRequestInfo) {
+        // ACP v2 command subjects carry the raw command the agent intends to
+        // execute. Classify it against the same workspace safe-read policy used
+        // for v1 terminal requests; auto-answer only when the policy is
+        // unambiguous.
+        if let Some(command) = &request.command
+            && let Some(thread_index) = self.agents.thread_index(session_id.0.as_ref())
+        {
+            let decision = self.v2_command_permission(&command.command, &command.cwd);
+            let outcome = match decision {
+                V2CommandPermission::Allow => {
+                    select_permission_option(&request.options, &[PermissionOptionKind::AllowOnce])
+                }
+                V2CommandPermission::Deny => Some(
+                    select_permission_option(
+                        &request.options,
+                        &[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways],
+                    )
+                    .unwrap_or(RequestPermissionOutcome::Cancelled),
+                ),
+                V2CommandPermission::Ask => None,
+            };
+            if let Some(outcome) = outcome
+                && self.agents.threads[thread_index]
+                    .host
+                    .respond_permission(request.request_id, outcome)
+            {
+                let notice = match decision {
+                    V2CommandPermission::Allow => {
+                        String::from("trusted built-in read-only command (ACP v2)")
+                    }
+                    V2CommandPermission::Deny => String::from(
+                        "command denied by built-in safeguard or trust policy (ACP v2)",
+                    ),
+                    V2CommandPermission::Ask => unreachable!("auto outcome only for allow/deny"),
+                };
+                self.agents.threads[thread_index].push_system(notice.clone());
+                self.backend.status_message = Some(notice);
+                return;
+            }
+        }
         let options = request.options.clone();
         let titles: Vec<String> = options.iter().map(|option| option.name.clone()).collect();
         let tool_title =
@@ -896,6 +937,55 @@ impl App {
             thread.index,
             thread.session_name.as_deref(),
             thread.session_title.as_deref(),
+        );
+    }
+}
+
+/// Selects an offered permission option by kind. Never fabricates an option
+/// the agent did not send.
+fn select_permission_option(
+    options: &[PermissionOption],
+    kinds: &[PermissionOptionKind],
+) -> Option<RequestPermissionOutcome> {
+    options.iter().find(|option| kinds.contains(&option.kind)).map(|option| {
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone()))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option(id: &str, kind: PermissionOptionKind) -> PermissionOption {
+        PermissionOption::new(id.to_string(), id.to_string(), kind)
+    }
+
+    #[test]
+    fn auto_outcome_never_selects_allow_always_or_missing_kinds() {
+        assert_eq!(
+            select_permission_option(
+                &[option("always", PermissionOptionKind::AllowAlways)],
+                &[PermissionOptionKind::AllowOnce]
+            ),
+            None,
+            "AllowAlways must never be auto-selected"
+        );
+        assert_eq!(
+            select_permission_option(
+                &[
+                    option("once", PermissionOptionKind::AllowOnce),
+                    option("always", PermissionOptionKind::AllowAlways),
+                ],
+                &[PermissionOptionKind::AllowOnce]
+            ),
+            Some(RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("once")))
+        );
+        assert_eq!(
+            select_permission_option(
+                &[option("reject", PermissionOptionKind::RejectOnce)],
+                &[PermissionOptionKind::RejectOnce, PermissionOptionKind::RejectAlways]
+            ),
+            Some(RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("reject")))
         );
     }
 }

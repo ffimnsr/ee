@@ -225,6 +225,15 @@ impl App {
         }
         self.agents.resolved_secret_values.extend(launches.secret_values);
         config.agents = launches.agents;
+        config.protocols = servers
+            .iter()
+            .filter_map(|(id, server)| match server.protocol {
+                crate::config::AgentProtocol::V1 => None,
+                crate::config::AgentProtocol::V2 => {
+                    Some((id.clone(), ee_agent_protocol::ProtocolVersion::V2))
+                }
+            })
+            .collect();
         // Always host policy-governed editor MCP for ACP-native agents. The
         // host default is already enabled; keep it explicit for editor
         // sessions. Explicit `[mcp.proxy]` configuration is still required

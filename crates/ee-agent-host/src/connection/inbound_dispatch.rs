@@ -101,6 +101,15 @@ pub(super) fn handle_permission_request_v2(
 ) -> Result<(), RpcError> {
     use crate::v2_updates::permission_subject_tool_call;
     let session_id = ee_agent_protocol::SessionId::new(request.session_id.0.clone());
+    let command = match request.subject.as_ref() {
+        Some(v2::RequestPermissionSubject::Command(command)) => {
+            Some(crate::events::PermissionCommand {
+                command: command.command.clone(),
+                cwd: command.cwd.0.clone(),
+            })
+        }
+        _ => None,
+    };
     let tool_call = permission_subject_tool_call(
         &request.title,
         request.subject.as_ref(),
@@ -123,7 +132,8 @@ pub(super) fn handle_permission_request_v2(
         let _ = responder.respond(v2::RequestPermissionResponse::new(v2_outcome));
         return Ok(());
     }
-    let (request_id, info, rx) = inner.broker.request(session_id.clone(), tool_call, options);
+    let (request_id, info, rx) =
+        inner.broker.request_with_command(session_id.clone(), tool_call, options, command);
     let _ = inner.events.send(AgentEvent::PermissionRequested {
         session_id: session_id.clone(),
         request: Box::new(info),

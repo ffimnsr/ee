@@ -14,7 +14,7 @@ use crate::policy::{
     TrustStoreDocument, TrustStoreError, WorkspaceIdentity, evaluate, inspect_path_escape,
     inspect_protected_state_path, inspect_special_file, inspect_terminal_command,
     is_protected_relative_path, is_safe_read_profile, match_profile_candidates,
-    resolve_command_cwd, validate_argv_tokens, validate_command_tokens,
+    resolve_command_cwd, split_simple_shell_command, validate_argv_tokens, validate_command_tokens,
 };
 
 use super::app_search::paths_equivalent;
@@ -23,7 +23,107 @@ use super::prompt::{ApprovalPrompt, TrustGrantStatus};
 use super::read::{READ_FINGERPRINT, READ_SESSION};
 use super::write::ActionLogEntry;
 
+/// Decision for one ACP v2 agent-owned command permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum V2CommandPermission {
+    /// Workspace-trusted safe-read/persistent allow: answer `allow_once`.
+    Allow,
+    /// Safeguard or persistent/session deny: answer a reject option.
+    Deny,
+    /// Anything ambiguous: keep the explicit UI prompt.
+    Ask,
+}
+
 impl App {
+    /// Outcome of classifying one ACP v2 agent-owned command permission.
+    pub(crate) fn v2_command_permission(&self, command: &str, cwd: &Path) -> V2CommandPermission {
+        let primary =
+            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        let roots = self.canonical_workspace_roots();
+        let Ok(canonical_cwd) = resolve_command_cwd(cwd, &roots) else {
+            return V2CommandPermission::Ask;
+        };
+        if canonical_cwd != primary {
+            return V2CommandPermission::Ask;
+        }
+        let Ok((executable, argv)) = split_simple_shell_command(command) else {
+            return V2CommandPermission::Ask;
+        };
+        // Safeguards stay hard denials: an agent-owned command cannot be
+        // executed by the host, so the best available response is an explicit
+        // deny and never an auto-allow.
+        if inspect_terminal_command(
+            &executable,
+            &argv,
+            &canonical_cwd,
+            &roots,
+            dirs::home_dir().as_deref(),
+            &self.protected_state_paths(),
+        )
+        .is_some()
+        {
+            return V2CommandPermission::Deny;
+        }
+        let request = CreateTerminalRequest::new(
+            ee_agent_protocol::SessionId::new("v2-permission"),
+            executable,
+        )
+        .args(argv)
+        .cwd(Some(canonical_cwd));
+        let Some(profile) = self.profile_id_for_request(&request) else {
+            return V2CommandPermission::Ask;
+        };
+        // Persistent/session deny and mandatory-confirm rules match the
+        // command identity, while the built-in safe-read allow matches the
+        // profile identity. Evaluate both so a command deny always wins.
+        let command_operation = TrustOperation {
+            workspace: self.primary_workspace_identity(),
+            agent: None,
+            transport: TransportKind::Acp,
+            category: TrustCategory::Execute,
+            identity: OperationIdentity::Command {
+                executable: request.command.clone(),
+                argv: request.args.clone(),
+            },
+        };
+        let command_decision = self.evaluate_operation_with_safeguard(
+            &command_operation,
+            "v2-permission",
+            "v2-permission",
+            None,
+            false,
+            false,
+        );
+        match command_decision.outcome {
+            TrustOutcome::Deny => return V2CommandPermission::Deny,
+            TrustOutcome::Confirm
+                if command_decision.reason == DecisionReason::MandatoryConfirm =>
+            {
+                return V2CommandPermission::Ask;
+            }
+            _ => {}
+        }
+        let operation = TrustOperation {
+            workspace: self.primary_workspace_identity(),
+            agent: None,
+            transport: TransportKind::Acp,
+            category: TrustCategory::Execute,
+            identity: OperationIdentity::Profile { profile: profile.to_string() },
+        };
+        let decision = self.evaluate_operation_with_safeguard(
+            &operation,
+            "v2-permission",
+            "v2-permission",
+            None,
+            false,
+            false,
+        );
+        match decision.outcome {
+            TrustOutcome::Allow => V2CommandPermission::Allow,
+            TrustOutcome::Deny => V2CommandPermission::Deny,
+            TrustOutcome::Confirm => V2CommandPermission::Ask,
+        }
+    }
     /// Whether a pending bridge operation is eligible for the active local
     /// approval mode. Invalid or unnormalizable operations always stay on the
     /// explicit approval path.

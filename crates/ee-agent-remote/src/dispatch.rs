@@ -213,6 +213,7 @@ impl RemoteHost {
                 cwd.clone(),
                 additional,
                 Vec::new(),
+                None,
             )
             .await
             .map_err(RemoteError::from)?;

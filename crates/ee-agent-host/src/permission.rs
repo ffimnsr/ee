@@ -17,7 +17,7 @@ use ee_agent_protocol::{
 };
 use tokio::sync::oneshot;
 
-use crate::events::{PermissionRequestId, PermissionRequestInfo};
+use crate::events::{PermissionCommand, PermissionRequestId, PermissionRequestInfo};
 use crate::permission_rules::{PermissionEffect, PermissionRules, PermissionTarget};
 
 /// Outcome channel for one pending permission request.
@@ -109,6 +109,19 @@ impl PermissionBroker {
         options: Vec<PermissionOption>,
     ) -> (PermissionRequestId, PermissionRequestInfo, oneshot::Receiver<RequestPermissionOutcome>)
     {
+        self.request_with_command(session_id, tool_call, options, None)
+    }
+
+    /// Like [`Self::request`], carrying an ACP v2 command subject when the
+    /// agent requested approval for an agent-owned command.
+    pub(crate) fn request_with_command(
+        &self,
+        session_id: SessionId,
+        tool_call: ToolCallUpdate,
+        options: Vec<PermissionOption>,
+        command: Option<PermissionCommand>,
+    ) -> (PermissionRequestId, PermissionRequestInfo, oneshot::Receiver<RequestPermissionOutcome>)
+    {
         let (respond_tx, respond_rx) = oneshot::channel::<RequestPermissionOutcome>();
         let target = PermissionTarget::from_tool_call(&tool_call);
         let mut state = self.state.lock().expect("permission broker poisoned");
@@ -123,7 +136,7 @@ impl PermissionBroker {
                 options: options.clone(),
             },
         );
-        let info = PermissionRequestInfo { request_id, session_id, tool_call, options };
+        let info = PermissionRequestInfo { request_id, session_id, tool_call, options, command };
         (request_id, info, respond_rx)
     }
 

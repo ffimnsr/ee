@@ -8,6 +8,8 @@
 //! Events never carry secrets: stderr lines are capped, and permission
 //! events carry only the wire `PermissionOption` values the agent sent.
 
+use std::path::PathBuf;
+
 use ee_agent_orchestrator::plugin_runtime::AgentHealthReport;
 use ee_agent_protocol::{
     AgentCapabilities, AuthMethod, ElicitationId, Implementation, PermissionOption,
@@ -61,6 +63,18 @@ pub enum AgentConnectionState {
     Closed(ConnectionCloseReason),
 }
 
+/// The command an ACP v2 `session/request_permission` subject describes.
+///
+/// ACP v2 has no client terminal methods, so the agent executes the command
+/// itself after approval. The host keeps the raw command and absolute cwd so
+/// the editor can classify it against the same workspace trust policy used
+/// for v1 terminal requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionCommand {
+    pub command: String,
+    pub cwd: PathBuf,
+}
+
 /// View of a pending permission request for UI rendering.
 ///
 /// Carries no response channel: decisions go through
@@ -73,6 +87,9 @@ pub struct PermissionRequestInfo {
     pub tool_call: ToolCallUpdate,
     /// Options the user may pick from.
     pub options: Vec<PermissionOption>,
+    /// ACP v2 command subject, when present. `None` for v1 requests and for
+    /// tool-call or unknown subjects.
+    pub command: Option<PermissionCommand>,
 }
 
 /// Wall-clock and token metrics for one completed agent turn.

@@ -134,6 +134,12 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # max_concurrent_prompts = 4 # per configured agent connection; valid 1..32
 # read_only_modes = ["ask", "plan"] # no trusted-write auto-approval in these modes
 #
+# # Per-agent ACP protocol. `v1` is the stable default; `v2` is Preview and
+# # requires an MCP route for client tools (ACP-native session.mcp.acp or the
+# # stdio `ee --mcp-proxy` fallback from [mcp.proxy]).
+# # [agents.servers.local]
+# # protocol = "v1"
+#
 # # Optional rubber duck. Select at most one backend.
 # # [agents.rubber_duck]
 # # mode = "manual" # "off", "manual", or "automatic"

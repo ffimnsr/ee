@@ -59,8 +59,8 @@ pub use ee_agent_orchestrator::{
 };
 pub use error::AgentError;
 pub use events::{
-    AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionRequestId,
-    PermissionRequestInfo, ThreadCloseReason, TurnMetrics,
+    AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionCommand,
+    PermissionRequestId, PermissionRequestInfo, ThreadCloseReason, TurnMetrics,
 };
 pub use inbound::{
     ClientRequest, ClientRequestHandler, ClientRequestResponse, ClientRequestResult,

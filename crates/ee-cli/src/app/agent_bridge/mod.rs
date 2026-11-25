@@ -80,6 +80,7 @@ pub(crate) use agent_permissions::{
 };
 #[allow(unused_imports)]
 pub(crate) use agent_preview::AgentPermissionPreview;
+pub(crate) use app_trust::V2CommandPermission;
 #[allow(unused_imports)]
 pub(crate) use approval::{
     ALWAYS_ALLOW_LABEL, ApprovalChoice, ApprovalPolicy, PreparedWrite, ToolApprovalMode,

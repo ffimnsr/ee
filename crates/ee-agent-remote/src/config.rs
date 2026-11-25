@@ -209,6 +209,7 @@ impl RemoteHostConfig {
         #[cfg(feature = "test-utils")]
         let manager = AgentManagerConfig {
             agents: self.agents.clone(),
+            protocols: std::collections::BTreeMap::new(),
             ee_proxy_enabled: self.ee_proxy_enabled,
             workspace_memory: self.workspace_memory.clone(),
             permission_rules,

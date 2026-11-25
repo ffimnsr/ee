@@ -95,6 +95,7 @@ fn referencing_server() -> AgentServerSettings {
         args: Vec::new(),
         env,
         cwd: None,
+        protocol: crate::config::AgentProtocol::V1,
     }
 }
 
@@ -376,6 +377,7 @@ fn secrets_e2e_agent_without_references_launches_through_existing_path() {
         args: Vec::new(),
         env,
         cwd: None,
+        protocol: crate::config::AgentProtocol::V1,
     };
     assert!(!resolve::agent_env_has_references(&server.env));
 

@@ -9,12 +9,26 @@ use super::*;
 use ee_agent_protocol::{MessageId, ToolCallId};
 
 /// A scripted agent answering the v2 handshake and a v2 session/new.
-fn v2_base_script() -> FakeAgentScript {
+pub(super) fn v2_base_script() -> FakeAgentScript {
     FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({
             "protocolVersion": 2,
             "info": { "name": "fake-agent-v2", "title": "Fake v2 Agent", "version": "1.0.0" },
+            "capabilities": { "session": { "mcp": { "stdio": {}, "acp": {} } } },
+            "authMethods": [],
+        }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1", "configOptions": [] }))
+}
+
+/// A v2 agent that only offers stdio MCP (no `session.mcp.acp`).
+pub(super) fn v2_no_acp_script() -> FakeAgentScript {
+    FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 2,
+            "info": { "name": "fake-agent-v2", "version": "1.0.0" },
             "capabilities": { "session": { "mcp": { "stdio": {} } } },
             "authMethods": [],
         }))
@@ -23,9 +37,18 @@ fn v2_base_script() -> FakeAgentScript {
 }
 
 /// Spawns a host connection in v2 mode.
-async fn spawn_host_v2(
+pub(super) async fn spawn_host_v2(
     script: FakeAgentScript,
     handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
+) -> (FakeAgent, TestHost) {
+    spawn_host_v2_with_proxy(script, handler, true).await
+}
+
+/// Spawns a host connection in v2 mode with an explicit proxy arming flag.
+pub(super) async fn spawn_host_v2_with_proxy(
+    script: FakeAgentScript,
+    handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
+    ee_proxy_enabled: bool,
 ) -> (FakeAgent, TestHost) {
     let (fake, transport) = FakeAgent::spawn(script);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -33,6 +56,7 @@ async fn spawn_host_v2(
         handshake_timeout: TEST_TIMEOUT,
         request_timeout: TEST_TIMEOUT,
         protocol_version: ProtocolVersion::V2,
+        ee_proxy_enabled,
         ..Default::default()
     };
     let connection = AgentConnection::connect_with_transport(
@@ -49,6 +73,28 @@ async fn spawn_host_v2(
 /// A v2-shaped `session/update` notification for `session_id`.
 fn v2_session_update(session_id: &str, update: Value) -> Value {
     wire::session_update(session_id, update)
+}
+
+/// A v2 command-subject permission request (agent-owned execution).
+fn v2_command_permission_request(session_id: &str, id: i64, command: &str, cwd: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": session_id,
+            "title": "Run this command?",
+            "subject": {
+                "type": "command",
+                "command": command,
+                "cwd": cwd,
+            },
+            "options": [
+                { "optionId": "allow_once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "reject_once", "name": "Reject", "kind": "reject_once" },
+            ],
+        },
+    })
 }
 
 /// A v2-shaped `session/request_permission` request.
@@ -172,7 +218,7 @@ async fn v2_session_new_sends_v2_wire_and_creates_thread() {
                 "fs",
                 "/usr/local/bin/mcp-fs",
             ))],
-            None,
+            Some(ee_agent_protocol::McpServerStdio::new("ee", "/usr/local/bin/ee")),
         )
         .await
         .expect("v2 session/new succeeds");
@@ -448,8 +494,14 @@ async fn v2_set_config_option_sends_config_id_and_value_on_v2_wire() {
         }));
     let (fake, host) = spawn_host_v2(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread =
-        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+    let thread = connection
+        .new_session(
+            vec![PathBuf::from("/work")],
+            Vec::new(),
+            Some(ee_agent_protocol::McpServerStdio::new("ee", "/usr/local/bin/ee")),
+        )
+        .await
+        .unwrap();
     let options = thread.config_options();
     assert_eq!(options.len(), 1, "v2 configOptions must reach the v1 state");
     assert_eq!(options[0].id, ee_agent_protocol::SessionConfigId::new("model"));
@@ -546,6 +598,54 @@ async fn v2_permission_request_flows_through_broker() {
     let response = prompt.await.expect("prompt task").expect("turn completes");
     assert_eq!(response.stop_reason, StopReason::EndTurn);
     assert!(fake.log_contains("\"outcome\":\"selected\""));
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+/// A v2 command subject keeps the raw command and cwd on the permission
+/// event, so the editor can classify it against workspace trust.
+#[tokio::test]
+async fn v2_command_permission_carries_typed_command() {
+    let script = v2_base_script()
+        .wait_for("session/prompt")
+        .emit(v2_command_permission_request("s1", 44, "mk lf", "/work"))
+        .wait_for_response(44)
+        .respond(json!({ "messageId": "msg_user-1" }))
+        .emit(v2_session_update(
+            "s1",
+            json!({ "sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn" }),
+        ));
+    let (fake, mut host) = spawn_host_v2(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread = thread.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await
+    });
+
+    let request_id = loop {
+        match next_event(&mut host.events).await {
+            AgentEvent::PermissionRequested { request, .. } => {
+                assert_eq!(
+                    request.command,
+                    Some(ee_agent_host::events::PermissionCommand {
+                        command: String::from("mk lf"),
+                        cwd: PathBuf::from("/work"),
+                    })
+                );
+                break request.request_id;
+            }
+            _ => continue,
+        }
+    };
+    let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow_once"));
+    assert!(thread.respond_permission(request_id, outcome));
+
+    let response = prompt.await.expect("prompt task").expect("turn completes");
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
 
     host.close().await;
     fake.join(TEST_TIMEOUT).await;

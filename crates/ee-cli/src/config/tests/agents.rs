@@ -358,6 +358,7 @@ fn validate_agent_server_rejects_malformed_secret_reference_with_field_path() {
             String::from("secret://bad name"),
         )]),
         cwd: None,
+        protocol: None,
     };
     let err = validate_agent_server("gh", &server).expect_err("rejected");
     assert!(err.contains("agents.servers.gh.env.OPENROUTER_API_KEY"), "field path: {err}");
@@ -375,6 +376,7 @@ fn agent_env_embedded_secret_reference_is_rejected_in_every_layer() {
             args: None,
             env: BTreeMap::from([(String::from("ENDPOINT"), String::from(raw))]),
             cwd: None,
+            protocol: None,
         };
         let err = validate_agent_server("gh", &server).expect_err("embedded token rejected");
         assert!(err.contains("agents.servers.gh.env.ENDPOINT"), "field path: {err}");
@@ -399,6 +401,7 @@ fn agent_env_literals_without_the_prefix_stay_literal() {
             (String::from("NOTE"), String::from("secretive but not a reference")),
         ]),
         cwd: None,
+        protocol: None,
     };
     let resolved =
         merge_agent_server("gh", &server, None, ConfigLayerKind::Ancestor).expect("literals");
@@ -793,4 +796,46 @@ fn rubber_duck_setup_rejects_ambiguous_or_missing_backend() {
     )
     .expect_err("off mode rejected");
     assert!(error.contains("mode `off`"));
+}
+
+#[test]
+fn agent_protocol_is_validated_merged_and_serialized() {
+    let v2 = AgentServerToml {
+        command: Some(String::from("agent-bin")),
+        protocol: Some(String::from("v2")),
+        ..Default::default()
+    };
+    let merged = merge_agent_server("gh", &v2, None, ConfigLayerKind::UserXdg)
+        .expect("v2 protocol accepted");
+    assert_eq!(merged.protocol, AgentProtocol::V2);
+
+    // A later layer that omits the field inherits the earlier selection.
+    let update =
+        AgentServerToml { command: Some(String::from("agent-bin-2")), ..Default::default() };
+    let merged = merge_agent_server("gh", &update, Some(&merged), ConfigLayerKind::UserXdg)
+        .expect("inherited protocol");
+    assert_eq!(merged.protocol, AgentProtocol::V2);
+
+    let invalid = AgentServerToml {
+        command: Some(String::from("agent-bin")),
+        protocol: Some(String::from("v3")),
+        ..Default::default()
+    };
+    let error = merge_agent_server("gh", &invalid, None, ConfigLayerKind::UserXdg)
+        .expect_err("unknown protocol rejected");
+    assert!(error.contains("agents.servers.gh.protocol"), "field path: {error}");
+
+    let mut settings = AgentsSettings::default();
+    settings.servers.insert(String::from("gh"), merged);
+    let toml = agents_settings_to_toml(&settings).expect("settings serialize");
+    assert_eq!(toml.servers["gh"].protocol.as_deref(), Some("v2"));
+}
+
+#[test]
+fn agent_protocol_defaults_to_v1() {
+    assert_eq!(AgentProtocol::default(), AgentProtocol::V1);
+    assert_eq!(AgentProtocol::parse("v1").unwrap(), AgentProtocol::V1);
+    assert_eq!(AgentProtocol::parse(" v2 ").unwrap(), AgentProtocol::V2);
+    assert!(AgentProtocol::parse("V2").is_err());
+    assert!(AgentProtocol::parse("3").is_err());
 }

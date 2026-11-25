@@ -46,6 +46,8 @@ pub(super) enum HostCommand {
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
+        /// Stdio `ee --mcp-proxy` fallback for the resume path (proxy mode on).
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
         reply: std_mpsc::Sender<Result<AgentThread, String>>,
     },
     SendPrompt {
@@ -153,6 +155,7 @@ pub(super) fn host_worker(
                     cwd,
                     additional_directories,
                     mcp_servers,
+                    ee_proxy_stdio_fallback,
                     reply,
                 } => {
                     let manager = manager.clone();
@@ -188,6 +191,7 @@ pub(super) fn host_worker(
                                         cwd,
                                         additional_directories,
                                         mcp_servers,
+                                        ee_proxy_stdio_fallback,
                                     )
                                     .await
                             }
@@ -325,6 +329,7 @@ impl AgentHostBridge {
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> std_mpsc::Receiver<Result<AgentThread, String>> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         let _ = self.commands.send(HostCommand::ReconnectSession {
@@ -333,6 +338,7 @@ impl AgentHostBridge {
             cwd,
             additional_directories,
             mcp_servers,
+            ee_proxy_stdio_fallback,
             reply: reply_tx,
         });
         reply_rx

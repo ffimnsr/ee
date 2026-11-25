@@ -1,5 +1,7 @@
 use super::*;
 
+use super::session_servers::mcp_servers_to_v2;
+
 type PromptTask = Pin<Box<dyn Future<Output = PromptTaskCompletion> + Send>>;
 type LifecycleTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -751,43 +753,6 @@ fn v2_set_config_option_request(
         request.config_id.0.clone(),
         value,
     ))
-}
-
-/// Maps the host's v1 MCP server configs onto the v2 wire (every server
-/// needs a transport `type`).  Configs that cannot be represented are
-/// dropped with a warning rather than failing the session request.
-fn mcp_servers_to_v2(servers: &[McpServer]) -> Vec<v2::McpServer> {
-    servers
-        .iter()
-        .filter_map(|server| match server {
-            McpServer::Stdio(stdio) => {
-                let env = stdio
-                    .env
-                    .iter()
-                    .filter_map(|variable| {
-                        serde_json::from_value(serde_json::to_value(variable).ok()?).ok()
-                    })
-                    .collect::<Vec<v2::EnvVariable>>();
-                let mut converted = v2::McpServerStdio::new(
-                    stdio.name.clone(),
-                    v2::AbsolutePath::new(stdio.command.clone()),
-                )
-                .args(stdio.args.clone())
-                .env(env);
-                if let Some(meta) = &stdio.meta {
-                    converted = converted.meta(meta.clone());
-                }
-                Some(v2::McpServer::Stdio(converted))
-            }
-            McpServer::Http(http) => Some(v2::McpServer::Http(
-                serde_json::from_value(serde_json::to_value(http).ok()?).ok()?,
-            )),
-            other => {
-                tracing::warn!(?other, "dropping MCP server config with no v2 representation");
-                None
-            }
-        })
-        .collect()
 }
 
 /// v2 `Implementation` → the v1-typed implementation the host stores.  The

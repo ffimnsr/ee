@@ -116,6 +116,8 @@ impl App {
         let additional_directories = roots.iter().skip(1).cloned().collect();
         // Resolve MCP entries (and redaction values) before borrowing the host.
         let mcp_servers = self.mcp_forward_entries();
+        let ee_proxy_stdio_fallback =
+            self.agents.mcp.proxy.as_ref().map(crate::app::agents_mcp::proxy_stdio_fallback_entry);
         let Some(host) = &self.agents.host else {
             return;
         };
@@ -125,6 +127,7 @@ impl App {
             cwd,
             additional_directories,
             mcp_servers,
+            ee_proxy_stdio_fallback,
         );
         let key = self
             .agents

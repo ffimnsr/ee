@@ -310,6 +310,7 @@ async fn resume_session_routes_without_replayed_history() {
             PathBuf::from("/work"),
             vec![PathBuf::from("/extra")],
             Vec::new(),
+            None,
         )
         .await
         .expect("resume_session");
@@ -340,6 +341,7 @@ async fn resume_session_requires_capabilities_and_absolute_paths() {
             PathBuf::from("/work"),
             vec![PathBuf::from("/extra")],
             Vec::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -359,7 +361,13 @@ async fn resume_session_requires_capabilities_and_absolute_paths() {
     let connection = ready_connection(&fake, &host).await;
 
     let error = connection
-        .resume_session(SessionId::new("s1"), PathBuf::from("relative"), Vec::new(), Vec::new())
+        .resume_session(
+            SessionId::new("s1"),
+            PathBuf::from("relative"),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, AgentError::InvalidParams(_)));
@@ -370,6 +378,7 @@ async fn resume_session_requires_capabilities_and_absolute_paths() {
             PathBuf::from("/work"),
             vec![PathBuf::from("relative")],
             Vec::new(),
+            None,
         )
         .await
         .unwrap_err();

@@ -686,6 +686,7 @@ mod tests {
                 args: Vec::new(),
                 env,
                 cwd: None,
+                protocol: crate::config::AgentProtocol::V1,
             },
         );
 

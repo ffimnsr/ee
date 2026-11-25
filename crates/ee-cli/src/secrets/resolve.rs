@@ -324,6 +324,7 @@ mod tests {
             args: Vec::new(),
             env,
             cwd: None,
+            protocol: crate::config::AgentProtocol::V1,
         }
     }
 
@@ -438,6 +439,7 @@ mod tests {
             args: vec![String::from("--serve")],
             env,
             cwd: None,
+            protocol: crate::config::AgentProtocol::V1,
         };
 
         let resolved = resolve_agent_env(&store, &server, WorkspaceRefPolicy::Resolve)

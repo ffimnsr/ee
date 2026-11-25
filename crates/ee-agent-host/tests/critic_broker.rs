@@ -116,6 +116,7 @@ fn manager(root: &ScriptedFake, critic: &ScriptedFake) -> (AgentManager, Arc<Rec
             ("root".into(), ee_agent_host::AgentProcessConfig::new("root-unused")),
             ("critic".into(), ee_agent_host::AgentProcessConfig::new("critic-unused")),
         ]),
+        protocols: BTreeMap::new(),
         ee_proxy_enabled: true,
         workspace_memory: Default::default(),
         permission_rules: Arc::new(ee_agent_host::PermissionRules::default()),

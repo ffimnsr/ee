@@ -450,11 +450,25 @@ Routing now resolves runtime language id first, then maps `[languages.<id>].lsp`
 
 ## Agents mode
 
-Agents mode is an optional ACP v1 agent chat plus MCP integration. It is disabled at compile time by default: the `agents` cargo feature must be enabled at build time. At runtime it is enabled by default, but no agent subprocess runs until at least one `[agents.servers.<id>]` entry is configured; set `agents.enabled = false` to opt out entirely. Agent and MCP subprocesses start lazily only after the agents pane opens or an agents command runs. Agent file writes route through existing buffer/edit/save semantics, and agent terminal executions and file writes require an approval path before execution.
+Agents mode is an optional ACP agent chat plus MCP integration. It is disabled at compile time by default: the `agents` cargo feature must be enabled at build time. At runtime it is enabled by default, but no agent subprocess runs until at least one `[agents.servers.<id>]` entry is configured; set `agents.enabled = false` to opt out entirely. Agent and MCP subprocesses start lazily only after the agents pane opens or an agents command runs. Agent file writes route through existing buffer/edit/save semantics, and agent terminal executions and file writes require an approval path before execution.
 
-ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict v1-only version negotiation, absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
+ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict version negotiation (v1 plus the v2 Preview surface), absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
 
-Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, and `cwd` are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
+ACP v1 is the host default. Set `protocol = "v2"` on one `[agents.servers.<id>]` entry to opt that agent into the v2 Preview surface. ACP v2 removed the client filesystem and `terminal/*` methods, so the ee MCP server supplies the replacement tools (`ee_read_text_file`, `ee_write_text_file`, `ee_terminal_*`): the session must carry an ACP-native `session.mcp.acp` server or the stdio `ee --mcp-proxy` fallback from `[mcp.proxy]`, and v2 session setup fails closed when the ee proxy is armed but no MCP route can be advertised. On v2 the agent executes commands itself, so workspace safe-read approval is advisory: ee auto-answers only curated simple commands and otherwise prompts or rejects, and a malicious agent that ignores the answer is outside ee's enforcement boundary.
+
+| ACP v1 method (removed in v2) | ee MCP tool on v2 |
+|---|---|
+| `fs/read_text_file` | `ee_read_text_file` |
+| `fs/write_text_file` | `ee_write_text_file` |
+| `terminal/create` | `ee_terminal_create` |
+| `terminal/output` | `ee_terminal_output` / `ee_terminal_output_since` |
+| `terminal/wait_for_exit` | `ee_terminal_wait` / `ee_terminal_wait_long` |
+| `terminal/kill` | `ee_terminal_kill` |
+| `terminal/release` | `ee_terminal_release` |
+
+The MCP tools route through the same host handlers as the v1 client methods, so workspace containment, write policy, command approval, and safeguards stay shared.
+
+Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, `cwd`, and `protocol` (`"v1"` default or `"v2"`) are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
 
 ```toml
 [agents]

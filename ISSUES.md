@@ -116,7 +116,7 @@ Ordered by dependency; R1–R2 are foundations, R3–R6 the headless bridge, R7�
   - [x] **Problem:** without a single registry, the MCP wrapper, ws transport, and web client each invent request/notification names and drift; also no wire-level conformance fixtures exist for the remote surface.
   - [x] **Fix:** registry module in `ee-agent-remote` with method-name constants and typed params/results: `initialize`/`initialized` handshake; `session/list|new|resume|close|set_mode`; `turn/start|interrupt` (deliberately **no steer** — ACP has none; the mid-turn inbox is Part 9 I15); `permissions/pending|respond`; `history/tail`. Notifications: `session/update` passthrough, `turn/completed`, `status/changed`. Server→client request: `permission/requestApproval`. Documented error codes including `-32001` overload. JSON fixture files under `tests/fixtures/` parsed by round-trip tests, one per method, exactly like `ee-agent-protocol`'s fixture discipline.
   - [x] **Acceptance criteria:** every dispatcher route resolves through the registry (no string literals at call sites); each fixture parses into the typed params and serializes back byte-stable; unknown methods return the typed `method_not_found` error; the registry unit test asserts no name collides with an ACP wire name (avoids confusion when both surfaces are debugged together).
-  - [x] **Edge cases:** JSON-RPC batch arrays (ACP v2 stdio allows them) — pick one behavior (reject with typed error in v1) and fixture it; protocol version field on `initialize` with a documented compat policy (bump only on breaking change); request ids must be echoed exactly, including string ids.
+  - [x] **Edge cases:** JSON-RPC batch arrays (ACP v2 forbids them; v1 rejects them with a typed error) — pick one behavior (reject with typed error in v1) and fixture it; protocol version field on `initialize` with a documented compat policy (bump only on breaking change); request ids must be echoed exactly, including string ids.
 
 - [x] **R3 — Headless `ClientRequestHandler`.** Implement the agent→client fs/terminal/elicitation surface without the editor so agents keep file and shell tools in headless mode.
   - [x] **Problem:** inbound agent requests (`fs/read_text_file`, `fs/write_text_file`, terminal family, elicitation) are currently answered only by ee-cli's bridge handler; a headless host fails closed on all of them, so remote-driven agents could talk but not act.
@@ -399,3 +399,66 @@ Acceptance:
 - [x] `cargo test --quiet -p ee-cli --features agents mcp_server_trust` passes.
 - [x] Existing trust, always-allow, command, and permission-matrix suites still pass.
 - [x] No general grant authorizes execute, external-network, or unpinned tools; terminal execution requires its own validated-command opt-in; every pinned read or write tool covered by a grant dispatches without a per-tool prompt.
+
+## ACP v2 Client Tool Continuity (2026-11-25)
+
+Goal: keep ACP v1 as the host default while making ACP v2 sessions functionally complete. ACP v2 removes `fs/read_text_file`, `fs/write_text_file`, and the `terminal/*` client methods; the replacement is the application-owned `ee` MCP server over `session.mcp.acp` (or the stdio `ee --mcp-proxy` fallback). v2 sessions must never silently lose client tools, and agent-owned v2 command approvals must reuse the same workspace safe-read policy as v1 terminal requests.
+
+Scope and non-goals:
+
+- ACP v1 remains the host default (`AgentConnectionOptions::default()` stays `ProtocolVersion::V1`) until v2 leaves Preview and every shipped agent passes the v2 gate below.
+- Removed ACP v1 client methods are never re-served on a v2 connection. No protocol method-to-MCP translation shim; agents call MCP tools.
+- ACP v2 agent-owned execution is advisory: the agent runs the command. The host auto-allows only curated safe-read commands and otherwise prompts or answers deny; it never claims enforcement it does not have.
+- MCP terminal tools keep the existing `CreateTerminalRequest` approval, safeguards, workspace trust, and MCP server-trust path.
+
+### Phase V0 — Baseline invariants
+
+- [x] **Problem:** the v1/v2 split, default version, and removed-method behavior are spread across crates without a single pinned contract, so later phases could regress them silently.
+- [x] **Fix:** add focused tests that pin: host connection default is `V1`; v2 negotiates v2 and rejects removed client methods before sending; v1 still advertises `fs.readTextFile`/`writeTextFile`/terminal; `ee-agent-protocol` accepts v1+v2 and rejects unknown versions.
+- [x] **Acceptance:** the baseline tests pass unchanged before and after the migration phases; no production caller selects v2 until Phase V3.
+- [x] **File-size guard:** if a touched file is at or near 1,000 LOC (for example `ee-agent-host/src/connection/driver.rs`), extract the new logic into a child module instead of growing it.
+
+### Phase V1 — ACP-native MCP server survives v2 conversion
+
+- [x] **Problem:** `mcp_servers_to_v2` drops `McpServer::Acp` with a warning (`ee-agent-host/src/connection/driver.rs`). The SDK supports it behind `unstable_mcp_over_acp`, which the workspace already enables, so an armed ACP-native `ee` server silently disappears on v2.
+- [x] **Fix:** move the v1→v2 MCP server conversion into a dedicated `ee-agent-host/src/connection/session_servers.rs` helper; map `Stdio`, `Http`, and `Acp` (preserving `name`, `serverId`, and `_meta`); keep unknown transports dropped with a warning; have `driver.rs` delegate.
+- [x] **Fix:** unit-test `Acp` conversion field-for-field, plus stdio/http conversion and unknown-transport dropping. Assert the ACP entry is not duplicated and keeps the `ee` server identity.
+- [x] **Acceptance:** a v2 `session/new` request built from an armed ACP-native `ee` entry carries `McpServer::Acp`; v1 behavior is unchanged; targeted host tests pass.
+
+### Phase V2 — v2 session continuity and fallback guarantee
+
+- [x] **Problem:** `new_session` can return `EeProxyMode::Disabled` on v2 when the agent lacks `session.mcp.acp` and no stdio fallback exists, silently leaving the agent without client tools. `resume_session` never appends the `ee` proxy entry and always reports `Disabled`.
+- [x] **Fix:** share one session-setup helper for `new_session` and `resume_session`: append the ACP-native `ee` entry when the agent advertises ACP MCP, else the stdio fallback when provided, else `Disabled`; return the resolved mode on both paths.
+- [x] **Fix:** when the connection is v2 and the ee proxy is armed but no `ee` entry could be advertised, fail closed with a typed `invalid_params` error naming `[mcp.proxy] enabled = true` or `session.mcp.acp` support. Do not fail when the user explicitly disabled the proxy.
+- [x] **Fix:** thread `ee_proxy_stdio_fallback` through `AgentManager::resume_session`, the CLI host command, and the reconnect call site; keep v1 resume behavior otherwise unchanged.
+- [x] **Fix:** tests for: v2 + armed + ACP support → `Acp`; v2 + armed + no ACP + fallback → `Stdio`; v2 + armed + neither → typed error; v2 + disarmed → no entry and no error; resume advertises the same entry and reports its mode; v1 new/resume unchanged.
+- [x] **Acceptance:** a v2 session can never be created or resumed with an armed proxy and no MCP route for client tools; error text is actionable; targeted host and CLI reconnect tests pass.
+
+### Phase V3 — Per-agent v2 opt-in
+
+- [x] **Problem:** the host always connects with `ProtocolVersion::V1`; there is no supported way to test v2 per agent, and flipping the global default is premature while v2 is Preview.
+- [x] **Fix:** add `protocol = "v1" | "v2"` to `[agents.servers.<id>]` with default `v1`; parse, validate, merge, serialize, and document it; reject unknown values with a config error that names the server id.
+- [x] **Fix:** carry the resolved per-agent version in `AgentManagerConfig` and apply it in `AgentConnection` options; unknown/missing entries keep `V1`; the global default stays `V1`.
+- [x] **Fix:** tests: default is v1; `protocol = "v2"` makes that agent's `initialize` use `protocolVersion: 2`; a second agent without the field stays v1; invalid values fail config validation; schema/docs updated.
+- [x] **Acceptance:** v2 is opt-in per agent only; no production default changes; v1 agents are unaffected; config round-trips.
+
+### Phase V4 — v2 command permissions reuse workspace safe-read
+
+- [x] **Problem:** v2 `session/request_permission` command subjects are flattened into a title plus `rawInput` and always prompt; they never consult the workspace-trust safe-read allowlist, so trusted `mk lf`-style commands still ask on v2 while v1 auto-allows them.
+- [x] **Fix:** carry a typed `PermissionCommand { command, cwd }` alongside the v1-shaped tool call in `PermissionRequestInfo` (host); v1 requests set `None`, v2 command subjects set `Some`, and tool-call/unknown subjects stay `None`.
+- [x] **Fix:** add a conservative simple-command parser (ASCII spaces only; reject quotes, escapes, expansions, redirections, pipes, separators, globs, control characters, empty tokens) and evaluate the parsed executable+argv through the existing `safe_read` profile with the canonical primary-workspace cwd.
+- [x] **Fix:** in the editor permission path, auto-answer `AllowOnce` only for a trusted workspace with a `safe_read` match; answer a reject option for a safeguard or persistent/session deny; prompt for everything else (unknown parse, untrusted workspace, non-safe-read profiles, missing allow/reject options, pre-thread arrival).
+- [x] **Fix:** never auto-select `AllowAlways` or mint a rule/use for a v2 agent-owned command; record a system notice naming the built-in safe-read decision.
+- [x] **Tests:** trusted workspace `mk lf` auto-allows; untrusted workspace prompts; `mk run`, forwarded args, quotes/pipes/`$()`/redirections prompt; `/dev/null` safeguard denies when a reject option exists; cwd escape prompts; persistent deny denies; missing AllowOnce prompts; v1 permission behavior unchanged.
+- [x] **Acceptance:** v2 safe-read commands match v1 auto-allow on trusted workspaces without weakening deny/safeguard/mandatory-confirm precedence; advisory nature is documented.
+
+### Phase V5 — Documentation, gates, and default policy
+
+- [x] **Fix:** update `README.md` and `wiki/config.md`: v1 default, per-agent v2 opt-in, the v1→MCP tool mapping table, the armed-proxy fallback requirement, and the advisory nature of v2 agent-owned command approvals.
+- [x] **Fix:** correct the stale ACP batch claim in Part 10 (`ACP v2 stdio allows them` → v2 forbids batches) and record this migration.
+- [x] **Validation:** per phase run `cargo fmt --all --check`, `cargo clippy -q -p <crate> --all-targets -- -D warnings`, and the narrowest targeted `cargo test --quiet` filters; final manual gate is the touched host/CLI suites, not an unprompted full workspace run.
+- [x] **Acceptance:** every phase's tests and docs are in place; `AgentConnectionOptions::default()` is still `V1`; no removed v1 method is served on v2; every touched code file is under 1,000 LOC.
+
+### v2 default-flip gate (not part of this work)
+
+Do not flip the global host default to v2 in these phases. Reopen only when ACP v2 leaves Preview, every shipped agent passes v2 with either `session.mcp.acp` or the stdio fallback, and V0–V5 acceptance holds.

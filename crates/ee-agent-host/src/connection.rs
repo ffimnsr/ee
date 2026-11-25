@@ -332,6 +332,7 @@ mod driver;
 mod inbound_dispatch;
 mod introspect;
 mod protocol;
+mod session_servers;
 mod sessions;
 mod threads;
 
@@ -345,6 +346,13 @@ mod tests {
         let options = AgentConnectionOptions::default();
         assert_eq!(options.handshake_timeout, DEFAULT_HANDSHAKE_TIMEOUT);
         assert_eq!(options.request_timeout, DEFAULT_REQUEST_TIMEOUT);
+    }
+
+    /// ACP v2 stays Preview: the global default must remain v1 until the
+    /// per-agent opt-in and the full v2 gate are proven.
+    #[test]
+    fn default_protocol_version_is_v1() {
+        assert_eq!(AgentConnectionOptions::default().protocol_version, ProtocolVersion::V1);
     }
 
     #[test]

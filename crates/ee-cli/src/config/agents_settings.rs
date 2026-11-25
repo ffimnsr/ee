@@ -253,6 +253,38 @@ pub(crate) struct AgentServerSettings {
     pub args: Vec<String>,
     pub env: BTreeMap<String, AgentEnvValue>,
     pub cwd: Option<PathBuf>,
+    /// ACP protocol version for this agent. Defaults to v1; v2 is opt-in
+    /// while the spec is Preview.
+    pub protocol: AgentProtocol,
+}
+
+/// Selected ACP protocol version for one configured agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum AgentProtocol {
+    /// Stable ACP v1 (default).
+    #[default]
+    V1,
+    /// ACP v2 Preview; needs an MCP route for client tools.
+    V2,
+}
+
+impl AgentProtocol {
+    /// Parses the config value; only exact `v1`/`v2` are accepted.
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "v1" => Ok(Self::V1),
+            "v2" => Ok(Self::V2),
+            other => Err(format!("protocol must be \"v1\" or \"v2\", got {other:?}")),
+        }
+    }
+
+    /// Stable config label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+        }
+    }
 }
 
 pub(super) fn validate_agent_server(id: &str, server: &AgentServerToml) -> Result<(), String> {
@@ -269,6 +301,10 @@ pub(super) fn validate_agent_server(id: &str, server: &AgentServerToml) -> Resul
         crate::secrets::resolve::validate_secret_value(value, false).map_err(|err| {
             format!("invalid secret reference in agents.servers.{id}.env.{key}: {err}")
         })?;
+    }
+    if let Some(protocol) = &server.protocol {
+        AgentProtocol::parse(protocol)
+            .map_err(|error| format!("invalid agents.servers.{id}.protocol: {error}"))?;
     }
     Ok(())
 }
@@ -316,6 +352,10 @@ pub(super) fn merge_agent_server(
         args,
         env,
         cwd: server.cwd.clone().or_else(|| existing.and_then(|server| server.cwd.clone())),
+        protocol: match &server.protocol {
+            Some(protocol) => AgentProtocol::parse(protocol)?,
+            None => existing.map_or(AgentProtocol::V1, |server| server.protocol),
+        },
     })
 }
 
@@ -417,6 +457,8 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
                             .map(|(key, value)| (key.clone(), value.raw.clone()))
                             .collect(),
                         cwd: server.cwd.clone(),
+                        protocol: (server.protocol == AgentProtocol::V2)
+                            .then(|| server.protocol.label().to_string()),
                     },
                 )
             })

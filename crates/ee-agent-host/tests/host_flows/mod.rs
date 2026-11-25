@@ -247,3 +247,4 @@ mod request_tests;
 mod session_tests;
 mod snapshot_tests;
 mod v2_flows;
+mod v2_session_continuity;

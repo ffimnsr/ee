@@ -73,7 +73,8 @@ pub(crate) use clock::PolicyClock;
 #[allow(unused_imports)]
 pub(crate) use command::{
     CommandInvocation, SHELL_WRAPPERS, generate_command_rule_id, is_shell_wrapper,
-    resolve_command_cwd, validate_argv_tokens, validate_command_tokens, validate_executable,
+    resolve_command_cwd, split_simple_shell_command, validate_argv_tokens, validate_command_tokens,
+    validate_executable,
 };
 #[allow(unused_imports)]
 pub(crate) use evaluator::{

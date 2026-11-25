@@ -45,6 +45,7 @@ mod tests {
             args: Vec::new(),
             env: BTreeMap::new(),
             cwd: None::<PathBuf>,
+            protocol: crate::config::AgentProtocol::V1,
         }
     }
 

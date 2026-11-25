@@ -12,6 +12,7 @@ mod gate {
     use std::path::{Path, PathBuf};
 
     use crate::app::App;
+    use crate::app::V2CommandPermission;
     use crate::policy::profiles::{
         PROFILE_REGISTRY_VERSION, PROFILES, ProfileArgPolicy, SAFE_READ_PROFILE,
         match_profile_candidates,
@@ -386,5 +387,94 @@ mod gate {
         let error = reply.try_recv().expect("denied reply").expect_err("denied");
         let message = format!("{error:?}");
         assert!(message.contains("deny_git_status"), "deny rule id surfaced: {message}");
+    }
+
+    #[test]
+    fn v2_command_permission_auto_allows_only_safe_read() {
+        let (app, temp, state_dir) = app_with_store();
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        set_decision(&state_dir, temp.path(), WorkspaceTrustDecision::Trusted);
+
+        assert_eq!(
+            app.v2_command_permission("mk lf", temp.path()),
+            V2CommandPermission::Allow,
+            "trusted workspaces auto-allow the curated mk lf task"
+        );
+        for command in [
+            "mk run",
+            "mk secrets",
+            "mk lf extra",
+            "mk lf | cat",
+            "mk lf > /tmp/out",
+            "echo $HOME",
+            "echo 'quoted'",
+            "pwd; id",
+        ] {
+            assert_eq!(
+                app.v2_command_permission(command, temp.path()),
+                V2CommandPermission::Ask,
+                "{command:?} must stay on the explicit prompt path"
+            );
+        }
+        assert_eq!(
+            app.v2_command_permission("mk lf", Path::new("/")),
+            V2CommandPermission::Ask,
+            "cwd outside the primary workspace must not auto-allow"
+        );
+    }
+
+    #[test]
+    fn v2_command_permission_prompts_on_untrusted_workspace() {
+        let (app, temp, state_dir) = app_with_store();
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        set_decision(&state_dir, temp.path(), WorkspaceTrustDecision::Untrusted);
+
+        assert_eq!(
+            app.v2_command_permission("mk lf", temp.path()),
+            V2CommandPermission::Ask,
+            "untrusted workspaces never auto-allow"
+        );
+    }
+
+    #[test]
+    fn v2_command_permission_denies_safeguards_and_persistent_deny() {
+        let (app, temp, state_dir) = app_with_store();
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let _cwd_restore = CurrentDirGuard::capture();
+        std::env::set_current_dir(temp.path()).unwrap();
+        set_decision(&state_dir, temp.path(), WorkspaceTrustDecision::Trusted);
+
+        assert_eq!(
+            app.v2_command_permission("tee /dev/null", temp.path()),
+            V2CommandPermission::Deny,
+            "special-file mutation hides behind a simple argv and must deny"
+        );
+
+        let store = TrustStore::at(&state_dir, temp.path()).expect("trust store");
+        store
+            .add_rule(TrustRule::Command(CommandRule {
+                id: String::from("deny_mk_lf"),
+                effect: TrustEffect::Deny,
+                scope: TrustRuleScope {
+                    workspace: app.primary_workspace_identity(),
+                    agent: None,
+                    expires_at: None,
+                    max_uses: None,
+                },
+                executable: String::from("mk"),
+                match_mode: MatchMode::ArgvExact,
+                argv: vec![String::from("lf")],
+            }))
+            .expect("deny rule persisted");
+        app.reload_workspace_trust_store().expect("reload deny rule");
+        assert_eq!(
+            app.v2_command_permission("mk lf", temp.path()),
+            V2CommandPermission::Deny,
+            "persistent deny outranks the built-in safe-read allow"
+        );
     }
 }

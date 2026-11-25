@@ -55,6 +55,9 @@ pub trait FakeTransportFactory: Send + Sync + 'static {
 pub struct AgentManagerConfig {
     /// Agent id → launch config.
     pub agents: BTreeMap<String, AgentProcessConfig>,
+    /// Agent id → ACP protocol version override. Missing entries use the
+    /// caller's/default version (v1).
+    pub protocols: BTreeMap<String, ee_agent_protocol::ProtocolVersion>,
     /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
     /// hosting on every connection; the agent still has to advertise
     /// `mcp_capabilities.acp`). Enabled by default.
@@ -76,6 +79,7 @@ impl Default for AgentManagerConfig {
     fn default() -> Self {
         Self {
             agents: BTreeMap::new(),
+            protocols: BTreeMap::new(),
             ee_proxy_enabled: true,
             workspace_memory: WorkspaceMemoryHostConfig::default(),
             permission_rules: Arc::new(PermissionRules::default()),
@@ -355,6 +359,16 @@ impl AgentManager {
         }
     }
 
+    /// Resolves the per-agent ACP protocol version, falling back to the
+    /// caller default when the agent has no explicit override.
+    fn protocol_version_for(
+        &self,
+        agent_id: &str,
+        fallback: ee_agent_protocol::ProtocolVersion,
+    ) -> ee_agent_protocol::ProtocolVersion {
+        self.config.protocols.get(agent_id).copied().unwrap_or(fallback)
+    }
+
     /// Returns the live connection for `agent_id`, starting it lazily when
     /// needed.
     ///
@@ -377,6 +391,7 @@ impl AgentManager {
     ) -> Result<AgentConnection, AgentError> {
         let mut options = options;
         options.ee_proxy_enabled = self.config.ee_proxy_enabled;
+        options.protocol_version = self.protocol_version_for(agent_id, options.protocol_version);
         if let Some(connection) =
             self.connections.lock().expect("connections poisoned").get(agent_id)
         {
@@ -501,10 +516,17 @@ impl AgentManager {
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
         mcp_servers: Vec<ee_agent_protocol::McpServer>,
+        ee_proxy_stdio_fallback: Option<ee_agent_protocol::McpServerStdio>,
     ) -> Result<AgentThread, AgentError> {
         self.connection(agent_id)
             .await?
-            .resume_session(session_id, cwd, additional_directories, mcp_servers)
+            .resume_session(
+                session_id,
+                cwd,
+                additional_directories,
+                mcp_servers,
+                ee_proxy_stdio_fallback,
+            )
             .await
     }
 
@@ -564,6 +586,12 @@ impl AgentManager {
             .ok_or_else(|| AgentError::UnknownAgent(agent_id.to_string()))?;
         let config = AgentManagerConfig {
             agents: BTreeMap::from([(agent_id.to_string(), process)]),
+            protocols: self
+                .config
+                .protocols
+                .get(agent_id)
+                .map(|version| BTreeMap::from([(agent_id.to_string(), *version)]))
+                .unwrap_or_default(),
             ee_proxy_enabled: self.config.ee_proxy_enabled,
             workspace_memory: self.config.workspace_memory.clone(),
             permission_rules: self.config.permission_rules.clone(),
@@ -738,6 +766,29 @@ mod tests {
         config.agents.insert("secondary".into(), AgentProcessConfig::new("cat"));
         let (events, _rx) = mpsc::unbounded_channel();
         AgentManager::new(config, Arc::new(DenyAllHandler), events)
+    }
+
+    #[test]
+    fn per_agent_protocol_override_defaults_to_the_caller_version() {
+        let mut config = AgentManagerConfig::default();
+        config.agents.insert("primary".into(), AgentProcessConfig::new("echo"));
+        config.agents.insert("secondary".into(), AgentProcessConfig::new("cat"));
+        config.protocols.insert("primary".into(), ee_agent_protocol::ProtocolVersion::V2);
+        let (events, _rx) = mpsc::unbounded_channel();
+        let manager = AgentManager::new(config, Arc::new(DenyAllHandler), events);
+
+        assert_eq!(
+            manager.protocol_version_for("primary", ee_agent_protocol::ProtocolVersion::V1),
+            ee_agent_protocol::ProtocolVersion::V2
+        );
+        assert_eq!(
+            manager.protocol_version_for("secondary", ee_agent_protocol::ProtocolVersion::V1),
+            ee_agent_protocol::ProtocolVersion::V1
+        );
+        assert_eq!(
+            manager.protocol_version_for("unknown", ee_agent_protocol::ProtocolVersion::V1),
+            ee_agent_protocol::ProtocolVersion::V1
+        );
     }
 
     #[test]

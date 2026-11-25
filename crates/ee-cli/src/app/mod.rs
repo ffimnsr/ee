@@ -91,7 +91,8 @@ pub(crate) use crate::policy::AlwaysRulePreview;
 #[allow(unused_imports)]
 pub(crate) use agent_bridge::{
     ALWAYS_ALLOW_LABEL, ActionLogEntry, AgentTerminals, ApprovalChoice, OwnedTerminalStop,
-    PreparedWrite, TerminalOwner, ToolApprovalMode, WriteExpectation, WriteReplyKind,
+    PreparedWrite, TerminalOwner, ToolApprovalMode, V2CommandPermission, WriteExpectation,
+    WriteReplyKind,
 };
 
 #[cfg(feature = "agents")]

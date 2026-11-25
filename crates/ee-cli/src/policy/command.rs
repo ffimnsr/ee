@@ -83,6 +83,33 @@ pub(crate) fn resolve_command_cwd(
     Ok(canonical)
 }
 
+/// Splits an agent-owned ACP v2 command string into an executable and argv
+/// only when it is a single simple command with no shell syntax.
+///
+/// The host never parses this text for execution; it only classifies the
+/// command against the curated registry. Anything that could change meaning
+/// under a shell (quotes, escapes, expansions, redirections, pipes,
+/// separators, globs, comments, control characters) is rejected so the
+/// request falls back to an explicit prompt.
+pub(crate) fn split_simple_shell_command(command: &str) -> Result<(String, Vec<String>), String> {
+    const FORBIDDEN: &str = "'\"\\$`|&;<>(){}[]*?!#~";
+    if command.is_empty() {
+        return Err("command must not be empty".to_string());
+    }
+    if let Some(character) =
+        command.chars().find(|character| character.is_control() || FORBIDDEN.contains(*character))
+    {
+        return Err(format!("command contains shell syntax: {character:?}"));
+    }
+    let tokens =
+        command.split(' ').filter(|token| !token.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let Some((executable, argv)) = tokens.split_first() else {
+        return Err("command must not be empty".to_string());
+    };
+    validate_command_tokens(executable, argv)?;
+    Ok((executable.clone(), argv.to_vec()))
+}
+
 /// Validated command invocation: structured executable + argv tokens and the
 /// canonical in-workspace cwd.  Built only after request validation; never
 /// derived from display text.
@@ -99,4 +126,54 @@ pub(crate) struct CommandInvocation {
 /// Stable rule id for a newly created command grant (`cmd_…`).
 pub(crate) fn generate_command_rule_id() -> String {
     format!("cmd_{:016x}", rand::random::<u64>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_commands_split_into_executable_and_argv() {
+        assert_eq!(
+            split_simple_shell_command("mk lf").unwrap(),
+            (String::from("mk"), vec![String::from("lf")])
+        );
+        assert_eq!(
+            split_simple_shell_command("  cargo   test --quiet  ").unwrap(),
+            (String::from("cargo"), vec![String::from("test"), String::from("--quiet")])
+        );
+        assert_eq!(split_simple_shell_command("pwd").unwrap(), (String::from("pwd"), Vec::new()));
+    }
+
+    #[test]
+    fn shell_syntax_is_rejected() {
+        for command in [
+            "mk lf | cat",
+            "mk lf > out.txt",
+            "mk lf && rm -rf /",
+            "echo $HOME",
+            "echo `id`",
+            "echo 'quoted'",
+            "echo \"quoted\"",
+            "echo *.rs",
+            "echo #comment",
+            "mk lf;",
+            "echo $(id)",
+            "echo \\n",
+            "echo\tvalue",
+        ] {
+            assert!(
+                split_simple_shell_command(command).is_err(),
+                "{command:?} must not parse as a simple command"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_control_input_is_rejected() {
+        assert!(split_simple_shell_command("").is_err());
+        assert!(split_simple_shell_command("   ").is_err());
+        assert!(split_simple_shell_command("mk\nlf").is_err());
+        assert!(split_simple_shell_command("mk\0lf").is_err());
+    }
 }

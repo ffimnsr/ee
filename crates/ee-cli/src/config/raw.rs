@@ -451,6 +451,9 @@ pub(crate) struct AgentServerToml {
     pub env: BTreeMap<String, String>,
     /// Working directory for the agent subprocess; inherits `ee` when unset.
     pub cwd: Option<PathBuf>,
+    /// ACP protocol version for this agent: `v1` (default) or `v2`.
+    /// ACP v2 is Preview and requires an MCP route for client tools.
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

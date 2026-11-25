@@ -233,6 +233,7 @@ async fn spawn_manager_host_with_memory_at(
     let factory = Arc::new(OneTransportFactory(Mutex::new(Some(transport))));
     let config = AgentManagerConfig {
         agents: BTreeMap::from([(agent_id.to_string(), AgentProcessConfig::new("unused"))]),
+        protocols: BTreeMap::new(),
         ee_proxy_enabled: true,
         workspace_memory: WorkspaceMemoryHostConfig {
             enabled: true,
