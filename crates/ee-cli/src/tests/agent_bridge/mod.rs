@@ -104,6 +104,11 @@ pub(crate) fn agents_app_in(
     // Keep saved agent permissions out of the developer config tree and out
     // of sibling tests: `allow_always` persists `agent-permissions.json`.
     app.agents.test_config_home = Some(temp.path().join(".ee-test-config"));
+    // Isolate host-local workspace trust too. With no active buffer the
+    // bridge resolves the workspace root from the process cwd, so a trusted
+    // developer checkout would otherwise auto-allow the built-in safe_read
+    // commands and skip prompts these tests expect.
+    app.agents.test_trust_store_base = Some(temp.path().join(".ee-test-state"));
     let fake = ScriptedFake::new(script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, fake)
