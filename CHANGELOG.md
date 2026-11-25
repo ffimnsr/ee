@@ -45,6 +45,64 @@
 - add `scripts/language-catalog/sync.sh` + `generate.py` pipeline emitting `references/language-catalog.json` and checked-in Rust catalogs
 - add runtime catalog validation tests for git-pinned grammar sources and detection data
 
+## 0.11.17 - 2026-11-25
+
+### Features
+
+- recursive harness improvement loop (`041f896`)
+- improve harness hardening (`12a4e02`)
+- ship core runtime grammars and prebuilt language packs (`95716fa`)
+- close part 11.2 parity gaps (`f0bb0ec`)
+- add fuzzy picker to agent setup and openrouter model selection (`aaa2967`)
+- add tool approval classifier (`fedc709`)
+- add runtime model picker to agents pane (`f8c335a`)
+- update workspace memory and removed docs/upgrade (`8392c85`)
+- derive reasoning effort from model catalogs (`1524c53`)
+- add pinned MCP server trust grants (`a4336c3`)
+- add explicit MCP terminal execution trust (`c120b97`)
+- allow agent notes and facts in read-only session modes (`7626604`)
+
+
+### Fixes
+
+- make mk install use only default grammars (`9ea28d8`)
+- unblock docs and macOS tempdir test (`636c1a0`)
+- improve setup UX and fix workspace trust warning (`47fcf58`)
+- scope setup model choices per surface and add fuzzy picker (`489a514`)
+- resolve real ee cli for /harness child process (`79ac73a`)
+- close adopt test and reflect library-root gaps (`29f2be2`)
+- on bugs on keymap and toast (`8cb4945`)
+- collapse restored transcript response groups, including late replay chunks (`ac2d7c4`)
+- complete advertised config aliases in slash completion (`dc65464`)
+- complete MCP server trust coverage (`0580f52`)
+
+
+### Documentation
+
+- add plan harness for evolving harness (`3f8f57e`)
+- add parity docs for harness (`899ba5a`)
+- add MCP tool inventory with drift coverage (`08f22db`)
+- update and tick finished items (`72033da`)
+
+
+### Tests
+
+- isolate host workspace trust from local state (`953693b`)
+- isolate render tests from checkout workspace config (`0e32958`)
+- give backend syntax renders a test-only time budget (`32c28d4`)
+- widen custom LSP startup wait under suite load (`1a3e64c`)
+
+
+### CI
+
+- pin toolchains and reduce cache duplication (`f1f232b`)
+
+
+### Other Changes
+
+- add skill for improving the agent mode on ee (`a0b6261`)
+
+
 ## 0.11.16 - 2026-11-25
 
 ### Features
