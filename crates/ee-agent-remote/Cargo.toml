@@ -1,6 +1,6 @@
 [package]
 name = "ee-agent-remote"
-version = "0.11.14"
+version = "0.11.15"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Headless remote-control host for ee agent mode: JSON-RPC, MCP, and web surfaces."

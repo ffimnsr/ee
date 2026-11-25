@@ -56,14 +56,32 @@ impl Drop for EditorProcess {
     }
 }
 
-fn spawn_ee(path: Option<&Path>, slave: File, home: &Path) -> EditorProcess {
+/// Repository-identity variables a git hook can export. Every command here
+/// pins its own `--current-dir`/`-C`, so inherited values must not redirect
+/// discovery. Git hooks run with `GIT_DIR` and a relative `GIT_INDEX_FILE`.
+const INHERITED_GIT_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+fn spawn_ee(path: Option<&Path>, cwd: &Path, slave: File, home: &Path) -> EditorProcess {
     use std::os::unix::process::CommandExt;
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ee"));
     if let Some(path) = path {
         cmd.arg(path);
     }
-    cmd.stdin(Stdio::from(slave.try_clone().expect("clone slave stdin")))
+    // Run inside a throwaway workspace so the developer's untracked
+    // workspace `.ee.toml` (optionally carrying `secret://` references)
+    // cannot inject startup prompts or rendering settings into these tests.
+    cmd.current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::from(slave.try_clone().expect("clone slave stdin")))
         .stdout(Stdio::from(slave.try_clone().expect("clone slave stdout")))
         .stderr(Stdio::null())
         .env("HOME", home)
@@ -72,6 +90,9 @@ fn spawn_ee(path: Option<&Path>, slave: File, home: &Path) -> EditorProcess {
         .env("XDG_CACHE_HOME", home.join("cache"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("TERM", "xterm-256color");
+    for name in INHERITED_GIT_ENV {
+        cmd.env_remove(name);
+    }
     unsafe {
         cmd.pre_exec(|| {
             // Adopt the pty slave as the controlling terminal.  Without this
@@ -225,11 +246,54 @@ fn hello_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("test_assets/hello.txt")
 }
 
+/// Copy a checkout fixture into an isolated, non-git workspace directory.
+fn isolated_workspace(home: &Path, source: &Path, name: &str) -> PathBuf {
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let target = workspace.join(name);
+    std::fs::copy(source, &target).expect("copy fixture");
+    target
+}
+
+/// Copy a fixture into an isolated workspace and commit it, so the editor
+/// still sees a tracked-and-clean file without inheriting the checkout's own
+/// `.ee.toml`, git index, or branch state.
+fn isolated_git_workspace(home: &Path, source: &Path, name: &str) -> PathBuf {
+    let target = isolated_workspace(home, source, name);
+    let workspace = home.join("workspace");
+    for args in [
+        &["init", "-q"][..],
+        &["-c", "user.name=ee-test", "-c", "user.email=ee-test@example.invalid", "add", "--", name],
+        &[
+            "-c",
+            "user.name=ee-test",
+            "-c",
+            "user.email=ee-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let mut git = Command::new("git");
+        git.args(args).current_dir(&workspace).env("GIT_OPTIONAL_LOCKS", "0");
+        for name in INHERITED_GIT_ENV {
+            git.env_remove(name);
+        }
+        let status = git.status().expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    target
+}
+
 fn setup()
 -> (EditorProcess, File, mpsc::Receiver<Option<Vec<u8>>>, vt100::Parser, tempfile::TempDir) {
     let temp = tempfile::tempdir().expect("temp dir");
+    let file = isolated_workspace(temp.path(), &hello_path(), "hello.txt");
     let (master, slave) = open_pty(ROWS, COLS);
-    let proc = spawn_ee(Some(&hello_path()), slave, temp.path());
+    let proc = spawn_ee(Some(&file), temp.path().join("workspace").as_path(), slave, temp.path());
     let rx = spawn_reader(master.try_clone().expect("clone master reader"));
     let parser = vt100::Parser::new(ROWS, COLS, 0);
     (proc, master, rx, parser, temp)
@@ -348,16 +412,20 @@ fn pty_wrap_blanks_continuation_rows_and_stays_aligned() {
 
 #[test]
 fn pty_git_sign_absent_for_tracked_clean_file() {
-    // `test_assets/hello.txt` is gitignored (`*.txt`), so it has no HEAD
-    // baseline: the app must show no git signs in its gutter. The unrelated
-    // sample-program.rs fixture is tracked and clean; capture it through the
-    // same PTY path for review.
+    // Isolated copy of sample-program.rs committed in a throwaway repo: the
+    // editor sees a tracked-and-clean file but never the checkout's own
+    // workspace config or git state. A clean file has no gutter signs, and the
+    // large fixture is never fully cached, so no `git:` status is cached.
     let temp = tempfile::tempdir().expect("temp dir");
+    let path = isolated_git_workspace(
+        temp.path(),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("test_assets/sample-program.rs"),
+        "sample-program.rs",
+    );
     let (master, slave) = open_pty(ROWS, COLS);
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("test_assets/sample-program.rs");
-    let _proc = spawn_ee(Some(&path), slave, temp.path());
+    let _proc = spawn_ee(Some(&path), temp.path().join("workspace").as_path(), slave, temp.path());
     let rx = spawn_reader(master.try_clone().expect("clone master reader"));
     let mut parser = vt100::Parser::new(ROWS, COLS, 0);
 
@@ -424,7 +492,7 @@ fn setup_with_config(
     std::fs::write(&file, format!("{}\n", fixture.join("\n"))).expect("write fixture");
 
     let (master, slave) = open_pty(ROWS, COLS);
-    let proc = spawn_ee(Some(&file), slave, temp.path());
+    let proc = spawn_ee(Some(&file), temp.path(), slave, temp.path());
     let rx = spawn_reader(master.try_clone().expect("clone master reader"));
     let parser = vt100::Parser::new(ROWS, COLS, 0);
     (proc, master, rx, parser, temp)
