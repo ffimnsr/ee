@@ -657,9 +657,13 @@ fn validate_script_references(
         }
     }
     for (source, text) in sources {
+        let skill_root = skill_dir_name(&source).map(|name| format!("skills/{name}/"));
         for reference in script_references(&text) {
-            let exists =
-                tree.files.contains_key(&reference) || external_scripts.contains(&reference);
+            let exists = tree.files.contains_key(&reference)
+                || external_scripts.contains(&reference)
+                || skill_root
+                    .as_ref()
+                    .is_some_and(|root| tree.files.contains_key(&format!("{root}{reference}")));
             if !exists {
                 verdict.errors.push(error(
                     &source,
@@ -696,7 +700,12 @@ pub fn external_scripts(workspace: &Path) -> BTreeSet<String> {
     scripts
 }
 
-/// Extracts normalized `scripts/<name>.<ext>` references from prose.
+/// Extracts script references from prose as component-relative paths.
+///
+/// A workspace-qualified reference such as
+/// `.agents/skills/foo/scripts/check.sh` is normalized to
+/// `skills/foo/scripts/check.sh`. Bare `scripts/check.sh` references are kept
+/// so root and skill-relative resolution can both be attempted.
 fn script_references(text: &str) -> BTreeSet<String> {
     let mut references = BTreeSet::new();
     let bytes = text.as_bytes();
@@ -704,20 +713,13 @@ fn script_references(text: &str) -> BTreeSet<String> {
     let mut index = 0usize;
     while index + needle.len() <= bytes.len() {
         if &bytes[index..index + needle.len()] == needle {
-            let start = index;
+            let start = reference_token_start(bytes, index);
             let mut end = index + needle.len();
-            while end < bytes.len()
-                && !bytes[end].is_ascii_whitespace()
-                && !matches!(bytes[end], b'`' | b')' | b'"' | b'\'' | b',' | b';' | b':')
-            {
+            while end < bytes.len() && !is_reference_delimiter(bytes[end]) {
                 end += 1;
             }
-            let candidate = &text[start..end];
-            if let Some(name) = candidate.strip_prefix("scripts/")
-                && let Some((_, extension)) = name.rsplit_once('.')
-                && SCRIPT_EXTENSIONS.contains(&extension)
-            {
-                references.insert(candidate.to_string());
+            if let Some(reference) = normalize_script_reference(&text[start..end]) {
+                references.insert(reference);
             }
             index = end;
         } else {
@@ -725,6 +727,46 @@ fn script_references(text: &str) -> BTreeSet<String> {
         }
     }
     references
+}
+
+fn reference_token_start(bytes: &[u8], index: usize) -> usize {
+    let mut start = index;
+    while start > 0 && !is_reference_delimiter(bytes[start - 1]) {
+        start -= 1;
+    }
+    start
+}
+
+fn is_reference_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || matches!(
+            byte,
+            b'`' | b'('
+                | b')'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'<'
+                | b'>'
+                | b'"'
+                | b'\''
+                | b','
+                | b';'
+                | b':'
+        )
+}
+
+fn normalize_script_reference(candidate: &str) -> Option<String> {
+    let reference = candidate.strip_prefix("./").unwrap_or(candidate);
+    let reference = reference.strip_prefix(".agents/").unwrap_or(reference);
+    if !reference.starts_with("scripts/")
+        && !reference.split('/').any(|segment| segment == "scripts")
+    {
+        return None;
+    }
+    let (_, extension) = reference.rsplit_once('.')?;
+    SCRIPT_EXTENSIONS.contains(&extension).then(|| reference.to_string())
 }
 
 fn repair_trigger_lines(tree: &mut HarnessTree, verdict: &mut Verdict) {

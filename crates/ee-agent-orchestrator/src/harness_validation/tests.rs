@@ -64,6 +64,34 @@ fn missing_script_reference_is_rejected_by_name() {
 }
 
 #[test]
+fn workspace_qualified_skill_script_reference_resolves_inside_the_tree() {
+    let candidate = tree(&[
+        ("guardrails.md", "Load skill split-large-files before splitting.\n"),
+        (
+            "skills/split-large-files/SKILL.md",
+            &skill(
+                "split-large-files",
+                "bash .agents/skills/split-large-files/scripts/verify-pure-move.sh",
+            ),
+        ),
+        ("skills/split-large-files/scripts/verify-pure-move.sh", "#!/bin/sh\nexit 0\n"),
+    ]);
+    let verdict = validate(&candidate, None);
+    assert!(verdict.ok, "{:?}", verdict.errors);
+}
+
+#[test]
+fn skill_relative_script_reference_resolves_inside_the_skill() {
+    let candidate = tree(&[
+        ("guardrails.md", "Load skill helper before using it.\n"),
+        ("skills/helper/SKILL.md", &skill("helper", "Run scripts/check.sh.")),
+        ("skills/helper/scripts/check.sh", "#!/bin/sh\nexit 0\n"),
+    ]);
+    let verdict = validate(&candidate, None);
+    assert!(verdict.ok, "{:?}", verdict.errors);
+}
+
+#[test]
 fn workspace_script_reference_is_allowed_when_declared_external() {
     let candidate = tree(&[("guardrails.md", "Run scripts/run-affected-tests.sh first.\n")]);
     let external = BTreeSet::from([String::from("scripts/run-affected-tests.sh")]);
