@@ -272,6 +272,35 @@ impl RemoteApprovals {
         )
     }
 
+    /// Answers a pending ACP permission request by the agent's request id.
+    ///
+    /// The agent-side [`PermissionBroker`] numbers its own requests from zero,
+    /// while this registry keys entries by a separate internal id exposed to
+    /// remote clients in approval notifications. An answer that carries the
+    /// ACP id must be translated through the `acp_index`; passing it straight
+    /// to [`Self::respond`] misses the entry and lets it expire.
+    ///
+    /// [`PermissionBroker`]: ee_agent_host::PermissionBroker
+    ///
+    /// # Errors
+    ///
+    /// `already_resolved` when the request is unknown, already answered, or
+    /// expired.
+    pub fn respond_acp(
+        &self,
+        request_id: PermissionRequestId,
+        decision: PermissionDecision,
+        option_id: Option<&str>,
+        actor: &str,
+    ) -> Result<(), RemoteError> {
+        let internal_id = {
+            let state = self.inner.state.lock().expect("approvals poisoned");
+            state.acp_index.get(&request_id.0).copied()
+        };
+        let internal_id = internal_id.ok_or_else(|| RemoteError::already_resolved(request_id.0))?;
+        self.respond(internal_id, decision, option_id, actor)
+    }
+
     /// Resolves a server→client approval response frame.
     ///
     /// `result` is `None` when the client answered with a JSON-RPC error. That

@@ -519,7 +519,6 @@ impl HostChannel {
                 "cannot apply improver model {model_id:?}: {error}"
             )));
         }
-        self.collector.active.lock().expect("active sessions").insert(session.session_id.clone());
         let started = self
             .host
             .dispatch(
@@ -540,7 +539,6 @@ impl HostChannel {
         };
         let updates = self.collector.take(&session.session_id);
         self.close_session(&session.session_id).await;
-        self.collector.active.lock().expect("active sessions").remove(&session.session_id);
         result?;
         let text = assistant_text(&updates);
         Ok(SessionOutcome { session_id: session.session_id, stop_reason, text, updates })
@@ -627,7 +625,6 @@ struct EventCollector {
     updates: Mutex<BTreeMap<String, Vec<SessionUpdate>>>,
     done: Mutex<BTreeMap<String, String>>,
     failed: Mutex<BTreeMap<String, String>>,
-    active: Mutex<BTreeSet<String>>,
     notify: Notify,
 }
 
@@ -678,19 +675,20 @@ fn spawn_collector(
                         .insert(session_id.to_string(), String::from("turn cancelled"));
                     collector.notify.notify_waiters();
                 }
-                AgentEvent::PermissionRequested { session_id, request, .. } => {
+                AgentEvent::PermissionRequested { request, .. } => {
                     // Rollouts and improver sessions run against isolated copies
                     // under the run root and the run is explicitly invoked, so
-                    // this host answers its own child sessions' approvals.
-                    if collector.active.lock().expect("active").contains(&session_id.to_string())
-                        && let Err(error) = host.approvals().respond(
-                            request.request_id.0,
-                            PermissionDecision::AllowAlways,
-                            None,
-                            "harness",
-                        )
-                    {
-                        tracing::warn!(%error, "harness approval could not be answered");
+                    // this host answers every child session's approvals. Host
+                    // brokers number ACP requests from zero; the registry keys
+                    // entries by an internal id, so translate through
+                    // `respond_acp` instead of passing the raw id.
+                    if let Err(error) = host.approvals().respond_acp(
+                        request.request_id,
+                        PermissionDecision::AllowAlways,
+                        None,
+                        "harness",
+                    ) {
+                        eprintln!("ee: warning: harness approval could not be answered: {error}");
                     }
                 }
                 _ => {}

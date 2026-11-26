@@ -315,6 +315,58 @@ async fn an_unanswered_approval_expires_to_deny() {
 }
 
 #[tokio::test]
+async fn acp_request_id_answers_the_pending_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s-1" }))
+        .wait_for("session/prompt")
+        .emit(acp_permission(json!({ "case": "harness" })))
+        .wait_for_response(100)
+        .respond(json!({ "stopReason": "end_turn" }));
+    let mut harness =
+        harness(script, dir.path(), TEST_TIMEOUT, PermissionRules::new(PermissionRuleset::empty()))
+            .await;
+    let session_id = initialize(&harness.host).await;
+    harness
+        .host
+        .dispatch(Method::TurnStart, Some(json!({ "sessionId": session_id, "text": "run" })))
+        .await
+        .expect("turn/start");
+
+    let approval = next_approval(&mut harness.notifications.receiver).await;
+    assert_eq!(approval["params"]["requestId"], 1, "remote clients see the registry's internal id");
+
+    // The agent broker numbers ACP requests from zero, one below the internal
+    // id. Answering with the raw ACP id used to miss the entry and expire.
+    harness
+        .host
+        .approvals()
+        .respond_acp(
+            ee_agent_host::PermissionRequestId(0),
+            ee_agent_remote::protocol::PermissionDecision::Allow,
+            None,
+            "harness",
+        )
+        .expect("ACP id must resolve the pending entry");
+
+    let completed = collect_turn_completed(&mut harness.notifications.receiver).await;
+    assert_eq!(completed["params"]["status"], "completed");
+    let response = harness.fake.agent().response_with_id(100).expect("permission response");
+    assert_eq!(response["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(response["result"]["outcome"]["optionId"], "allow_once");
+
+    let audit = std::fs::read_to_string(&harness.audit_path).expect("audit log");
+    assert!(audit.contains("\"actor\":\"harness\""), "{audit}");
+    assert!(audit.contains("\"decision\":\"allow\""), "{audit}");
+
+    harness.host.shutdown().await;
+    harness.fake.agent().join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn declarative_rules_answer_without_a_remote_request_and_are_audited() {
     let dir = tempfile::tempdir().expect("tempdir");
     let rules = PermissionRules::new(PermissionRuleset::new(vec![PermissionRule::new(
