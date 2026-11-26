@@ -445,6 +445,12 @@ pub(crate) enum WorkspaceTrustCommands {
         /// Also grant prompt-free native terminal execution for this workspace
         #[arg(long)]
         execute: bool,
+        /// Grant unrestricted native terminal execution: any command text,
+        /// including pipes, redirects, and globs. Requires the workspace to be
+        /// trusted; commands still respect read-only agent modes, explicit
+        /// denies, mandatory confirms, safeguards, and the terminal sandbox
+        #[arg(long)]
+        yolo: bool,
     },
     /// Record the current workspace as untrusted and block its secret references
     Revoke {

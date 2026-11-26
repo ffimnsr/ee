@@ -65,6 +65,21 @@ impl App {
                 return false;
             }
         }
+        if self.workspace_terminal_unrestricted_granted() {
+            // Unrestricted grant: any command text, but keep the workspace cwd
+            // scope so the grant never turns an explicit outside cwd into
+            // prompt-free execution.
+            let Some(primary) = self.primary_workspace_root() else {
+                return false;
+            };
+            let raw_cwd = request.cwd.as_deref().unwrap_or(&self.working_dir);
+            let Ok(canonical_cwd) =
+                crate::policy::resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())
+            else {
+                return false;
+            };
+            return canonical_cwd.starts_with(&primary);
+        }
         self.terminal_trust_invocation(request).is_some()
     }
 
@@ -175,18 +190,25 @@ impl App {
     /// Host-local terminal execution opt-in for the primary workspace. Any
     /// missing, malformed, or untrusted decision fails closed.
     pub(crate) fn workspace_terminal_execution_granted(&self) -> bool {
+        self.workspace_terminal_trust_store()
+            .and_then(|store| store.terminal_execution().ok())
+            .unwrap_or(false)
+    }
+
+    /// Whether the terminal grant covers unrestricted command text.
+    pub(crate) fn workspace_terminal_unrestricted_granted(&self) -> bool {
+        self.workspace_terminal_trust_store()
+            .and_then(|store| store.terminal_execution_unrestricted().ok())
+            .unwrap_or(false)
+    }
+
+    fn workspace_terminal_trust_store(&self) -> Option<WorkspaceTrustStore> {
         let root = self.current_workspace_root();
         #[cfg(test)]
         if let Some(base) = self.agents.test_trust_store_base.as_deref() {
-            return WorkspaceTrustStore::at(base, &root)
-                .ok()
-                .and_then(|store| store.terminal_execution().ok())
-                .unwrap_or(false);
+            return WorkspaceTrustStore::at(base, &root).ok();
         }
-        WorkspaceTrustStore::default_for(&root)
-            .ok()
-            .and_then(|store| store.terminal_execution().ok())
-            .unwrap_or(false)
+        WorkspaceTrustStore::default_for(&root).ok()
     }
 }
 

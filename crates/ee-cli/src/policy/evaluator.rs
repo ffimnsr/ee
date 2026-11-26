@@ -54,6 +54,11 @@ pub(crate) struct PolicyInput<'a> {
     /// workspace cwd, no shell syntax or wrapper, and no execution-affecting
     /// environment overrides.
     pub(crate) workspace_execute_enabled: bool,
+    /// Injected host-local unrestricted terminal grant (`--yolo`). The caller
+    /// sets this only for a trusted, explicitly granted, non-read-only native
+    /// terminal request; explicit denies, mandatory confirms, and safeguards
+    /// still run before this allowance.
+    pub(crate) workspace_execute_unrestricted: bool,
     /// Effective pinned MCP server grants for this workspace. The caller
     /// supplies this only while the host-local workspace decision is
     /// `trusted`; a stale or malformed grant set is represented as `None` and
@@ -162,6 +167,20 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
     no_match!("session_deny");
     if input.operation.is_unknown() {
         no_match!("mandatory_confirm");
+        // An unrestricted native-terminal grant deliberately covers command
+        // text the strict parser cannot normalize (pipes, redirects, globs).
+        // The caller only sets this for a trusted, explicitly granted,
+        // non-read-only native terminal prompt, so it cannot widen other
+        // unknown operations.
+        if input.workspace_execute_unrestricted
+            && input.operation.category == TrustCategory::Execute
+        {
+            finish!(
+                "built_in_allow",
+                None,
+                TrustDecision::allow(DecisionReason::BuiltInAllow, None)
+            );
+        }
         no_match!("built_in_allow");
         no_match!("workspace_gate");
         no_match!("mcp_server_allow");
@@ -221,6 +240,10 @@ pub(crate) fn evaluate_with_trace(input: &PolicyInput<'_>) -> EvaluationResult {
         && input.operation.category == TrustCategory::Execute
         && matches!(input.operation.identity, OperationIdentity::Command { .. })
     {
+        finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
+    }
+    no_match!("built_in_allow");
+    if input.workspace_execute_unrestricted && input.operation.category == TrustCategory::Execute {
         finish!("built_in_allow", None, TrustDecision::allow(DecisionReason::BuiltInAllow, None));
     }
     no_match!("built_in_allow");

@@ -533,7 +533,17 @@ fn cli_utility_commands_live_under_do() {
         cli.command,
         Some(crate::Commands::Do {
             command: crate::DoCommands::Trust {
-                command: crate::WorkspaceTrustCommands::Grant { execute: true }
+                command: crate::WorkspaceTrustCommands::Grant { execute: true, yolo: false }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "trust", "grant", "--yolo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Trust {
+                command: crate::WorkspaceTrustCommands::Grant { execute: false, yolo: true }
             }
         })
     ));

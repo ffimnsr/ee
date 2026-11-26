@@ -44,6 +44,30 @@ pub(super) fn spawn_terminal_process(
     Ok((output, readers, child))
 }
 
+/// Sandbox HOME is a fresh writable temp dir, so toolchains that resolve their
+/// installation from HOME (rustup, cargo) would lose the host toolchain and try
+/// to reinstall it. Point those well-known homes at the host-owned directories
+/// instead; the sandbox still mounts them read-only, so this adds no write
+/// authority. Explicit request env always wins.
+fn sandbox_toolchain_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    if let Some(home) = std::env::var_os("HOME") {
+        apply_sandbox_toolchain_homes(&mut env, Path::new(&home));
+    }
+    env
+}
+
+fn apply_sandbox_toolchain_homes(env: &mut Vec<(String, String)>, home: &Path) {
+    for (name, relative) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+        if env.iter().any(|(key, _)| key == name) {
+            continue;
+        }
+        let candidate = home.join(relative);
+        if candidate.is_dir() {
+            env.push((name.to_string(), candidate.to_string_lossy().into_owned()));
+        }
+    }
+}
+
 pub(super) fn spawn_sandboxed_terminal_process(
     request: &CreateTerminalRequest,
     command_line: &str,
@@ -59,6 +83,7 @@ pub(super) fn spawn_sandboxed_terminal_process(
         .clone()
         .ok_or_else(|| AgentError::Io(String::from("terminal sandbox backend path is missing")))?;
     let env = terminal_child_env(request);
+    let env = sandbox_toolchain_env(env);
 
     #[cfg(target_os = "linux")]
     let sandbox = ee_sandbox::bwrap_command(&program, spec, command_line, &env)
@@ -225,4 +250,47 @@ fn spawn_output_reader(
             })
             .expect("spawn terminal output reader"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolchain_homes_preserve_existing_request_env() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".cargo")).unwrap();
+        std::fs::create_dir(home.path().join(".rustup")).unwrap();
+
+        let mut env = vec![(String::from("CARGO_HOME"), String::from("/custom/cargo"))];
+        apply_sandbox_toolchain_homes(&mut env, home.path());
+
+        assert_eq!(
+            env,
+            vec![
+                (String::from("CARGO_HOME"), String::from("/custom/cargo")),
+                (
+                    String::from("RUSTUP_HOME"),
+                    home.path().join(".rustup").to_string_lossy().into_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn toolchain_homes_skip_missing_host_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".cargo")).unwrap();
+
+        let mut env = Vec::new();
+        apply_sandbox_toolchain_homes(&mut env, home.path());
+
+        assert_eq!(
+            env,
+            vec![(
+                String::from("CARGO_HOME"),
+                home.path().join(".cargo").to_string_lossy().into_owned()
+            )]
+        );
+    }
 }

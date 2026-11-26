@@ -41,6 +41,7 @@ pub(crate) enum V2CommandPermission {
 pub(super) struct TrustEvaluationFlags {
     pub(super) trusted_write: bool,
     pub(super) workspace_execute: bool,
+    pub(super) workspace_execute_unrestricted: bool,
     pub(super) mcp_server_trust: bool,
 }
 
@@ -690,6 +691,7 @@ impl App {
             safe_read_enabled: self.workspace_trusted(),
             trusted_write_enabled: flags.trusted_write,
             workspace_execute_enabled: flags.workspace_execute,
+            workspace_execute_unrestricted: flags.workspace_execute_unrestricted,
             mcp_server_trust: mcp_server_trust.as_ref(),
             built_in_deny,
             tool_default,

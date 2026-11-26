@@ -301,8 +301,8 @@ pub fn run_cli() -> io::Result<()> {
                     }
                 }
                 DoCommands::Trust { command } => match command {
-                    WorkspaceTrustCommands::Grant { execute } => {
-                        workspace_trust::cmd_trust_grant(execute)?
+                    WorkspaceTrustCommands::Grant { execute, yolo } => {
+                        workspace_trust::cmd_trust_grant(execute, yolo)?
                     }
                     WorkspaceTrustCommands::Revoke { execute } => {
                         workspace_trust::cmd_trust_revoke(execute)?

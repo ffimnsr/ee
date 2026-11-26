@@ -33,6 +33,15 @@ fn trust_workspace(app: &mut App, temp: &tempfile::TempDir, execute: bool) {
     }
 }
 
+fn trust_workspace_yolo(app: &mut App, temp: &tempfile::TempDir) {
+    let state = temp.path().join("terminal-trust-state");
+    fs::create_dir_all(&state).unwrap();
+    app.agents.test_trust_store_base = Some(state.clone());
+    let store = WorkspaceTrustStore::at(&state, temp.path()).unwrap();
+    store.set_decision(WorkspaceTrustDecision::Trusted).unwrap();
+    store.grant_terminal_execution_unrestricted().unwrap();
+}
+
 fn native_app(temp: &tempfile::TempDir) -> App {
     let (mut app, _fake) = agents_app_in(temp, base_script());
     open_pane_and_wait_ready(&mut app);
@@ -110,6 +119,53 @@ fn granted_workspace_accepts_cd_prefixed_simple_command() {
             && child.join("cd-marker").exists()
     });
     assert!(reply.try_recv().expect("auto reply").is_ok());
+}
+
+#[test]
+fn simple_grant_keeps_shell_redirect_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let mut reply = queue_terminal(&mut app, "echo hi > redirect-marker", &[], None);
+    wait_until(&mut app, "redirect prompts without yolo", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!temp.path().join("redirect-marker").exists());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn yolo_grant_auto_spawns_shell_syntax() {
+    let temp = tempfile::tempdir().unwrap();
+    let child = temp.path().join("src");
+    fs::create_dir_all(&child).unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace_yolo(&mut app, &temp);
+    app.config.agents.read_only_modes.clear();
+
+    let command = format!("cd {} && printf yolo | tee yolo-marker > yolo-copy", child.display());
+    let mut reply = queue_terminal(&mut app, &command, &[], None);
+    wait_until(&mut app, "yolo shell command spawned", |app| {
+        app.agents.terminals.tracked_count() == 1
+            && app.agents.approvals.is_empty()
+            && child.join("yolo-marker").exists()
+            && child.join("yolo-copy").exists()
+    });
+    assert!(reply.try_recv().expect("auto reply").is_ok());
+}
+
+#[test]
+fn yolo_grant_still_prompts_in_read_only_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace_yolo(&mut app, &temp);
+
+    let mut reply = queue_terminal(&mut app, "echo hi > read-only-marker", &[], None);
+    wait_until(&mut app, "yolo respects read-only mode", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!temp.path().join("read-only-marker").exists());
+    app.agents.approvals.clear();
 }
 
 #[test]
@@ -422,7 +478,7 @@ fn workspace_execution_grant_does_not_cross_into_mcp_terminal() {
     let (mut app, temp, _fake) = mcp_app(crate::tests::agent_mcp::base_agent_script(), false, true);
     open_mcp_pane(&mut app);
     pin_workspace_root(&mut app, &temp);
-    trust_workspace(&mut app, &temp, true);
+    trust_workspace_yolo(&mut app, &temp);
     app.config.agents.read_only_modes.clear();
 
     let mut stream = connect_proxy(&app);

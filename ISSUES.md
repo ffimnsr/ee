@@ -547,8 +547,20 @@ Context: real `ee agent shell` sessions showed approval fatigue because common `
 - [x] Set `auto_sandboxed` on every auto-dispatch path (workspace grant, built-in allowlist, approval mode, and classifier) so auto-run terminal commands go through the OS sandbox; an unavailable sandbox backend keeps the prompt.
 - [x] Add the shared `_meta` classifier marker in `ee-agent-protocol`; mark native write/terminal bridge tools classifier-eligible without changing host-approval policy semantics, and forward the marker on ACP write and terminal requests.
 - [x] Honor classifier auto-approval only for built-in orchestrator binaries (`ee-agent-opencode`, `ee-agent-openrouter`) on a trusted workspace in a non-read-only mode; mandatory confirms, safeguards, persistent denies, and other agents still prompt.
-- [x] Tests: `cd`-prefix acceptance and out-of-workspace rejection, classifier agent gating and metadata forwarding, native gated-tool eligibility, plus unchanged terminal trust, mandatory-confirm, and always-allow suites.
+- [x] Preserve host `CARGO_HOME`/`RUSTUP_HOME` as read-only toolchain homes for sandboxed spawns, because the sandbox replaces `HOME` with a fresh temp dir and would otherwise make rustup reinstall (network-denied) on every command.
+- [x] Tests: `cd`-prefix acceptance and out-of-workspace rejection, classifier agent gating and metadata forwarding, native gated-tool eligibility, toolchain-home passthrough, plus unchanged terminal trust, mandatory-confirm, and always-allow suites.
 - [x] `cargo fmt --all -- --check`, targeted `clippy -D warnings`, and terminal/policy/orchestrator tool filters pass.
+
+### Phase T5 — Unrestricted terminal execution grant (`--yolo`, 2026-11-26)
+
+Context: real agent turns routinely emit pipes, redirects, globs, and shell wrappers. The simple-command grant rejects all of them, so users still approve most commands. `--yolo` adds an explicit, host-local stronger grant without weakening the default layers.
+
+- [x] Bump the workspace trust document to schema v3 with `terminal_execution = "none" | "simple" | "unrestricted"`; v1 and v2 documents stay readable, with a v2 boolean `true` mapping to `simple`.
+- [x] Add `ee do trust grant --yolo` (implies terminal execution), preserve an existing unrestricted grant across plain `--execute` and trust re-grants, and clear either grant with `ee do trust revoke --execute`; status prints simple/unrestricted.
+- [x] Add `workspace_execute_unrestricted` to the policy evaluator and honor it for `Execute` operations even when the shell text has no normalizable command identity; explicit/session denies, mandatory confirms, and safeguards still run before it.
+- [x] Keep the yolo path limited to native ACP v1 terminal, a workspace-contained cwd, a trusted workspace, and non-read-only agent modes; MCP terminal tools and ACP v2 command permissions stay on their own routes.
+- [x] Force yolo auto-runs through the terminal sandbox when `mode != off`; `mode = off` is called out as an explicit unsandboxed combination in the grant output and docs.
+- [x] Tests: unrestricted storage round trip and v2 compatibility, CLI `--yolo` parsing, shell-syntax auto-run, read-only prompt fallback, and no MCP route crossing.
 
 ## Durable Agent Session Transcripts and Archive (2026-11-26)
 

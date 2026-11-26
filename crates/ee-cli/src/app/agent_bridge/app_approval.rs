@@ -515,6 +515,8 @@ impl App {
         self.attach_persistent_deny(&mut prompt, &operation);
         let trusted_write = self.trusted_write_eligible(&prompt);
         let workspace_execute = self.terminal_execution_trust_eligible(&prompt);
+        let workspace_execute_unrestricted =
+            workspace_execute && self.workspace_terminal_unrestricted_granted();
         let server_trust_allowed = self.server_trust_prompt_eligible(&prompt);
         let mut decision = self.evaluate_operation_with_safeguard(
             &operation,
@@ -524,6 +526,7 @@ impl App {
             TrustEvaluationFlags {
                 trusted_write,
                 workspace_execute,
+                workspace_execute_unrestricted,
                 mcp_server_trust: server_trust_allowed,
             },
         );
