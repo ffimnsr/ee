@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ee_agent_acp_server::{ClientBridge, ProviderError};
+use ee_agent_protocol::approval_meta::mark_classifier_auto_approved;
 use ee_agent_protocol::{
     CreateElicitationRequest, CreateTerminalRequest, ElicitationAction, ElicitationFormMode,
     ElicitationMode, ElicitationSchema, ElicitationScope, ElicitationSessionScope,
@@ -213,6 +214,7 @@ impl ClientBridgeTool {
         arguments: serde_json::Value,
         client: &ClientBridge,
         terminal_wait: TerminalWaitLimits,
+        auto_approved: bool,
     ) -> Result<ToolResult, ToolResult> {
         let outcome = match call {
             BridgeCall::ReadTextFile => {
@@ -228,13 +230,12 @@ impl ClientBridgeTool {
             BridgeCall::WriteTextFile => {
                 let path = string_arg(&arguments, "path")?;
                 let content = string_arg(&arguments, "content")?;
-                let response = client
-                    .write_text_file(WriteTextFileRequest::new(
-                        session_id,
-                        PathBuf::from(path),
-                        content,
-                    ))
-                    .await;
+                let mut request =
+                    WriteTextFileRequest::new(session_id, PathBuf::from(path), content);
+                if auto_approved {
+                    request.meta = Some(mark_classifier_auto_approved(request.meta.take()));
+                }
+                let response = client.write_text_file(request).await;
                 match response {
                     Ok(_) => ToolResult::success("file written"),
                     Err(error) => bridge_error(error),
@@ -243,6 +244,9 @@ impl ClientBridgeTool {
             BridgeCall::CreateTerminal => {
                 let command = string_arg(&arguments, "command")?;
                 let mut request = CreateTerminalRequest::new(session_id, command);
+                if auto_approved {
+                    request.meta = Some(mark_classifier_auto_approved(request.meta.take()));
+                }
                 if let Some(cwd) = optional_string_arg(&arguments, "cwd") {
                     request = request.cwd(PathBuf::from(cwd));
                 }
@@ -380,9 +384,16 @@ impl ServerTool for ClientBridgeTool {
         let call = self.call;
         let session_id = self.session_id.clone();
         Box::pin(async move {
-            Self::run(call, session_id, arguments, &client, context.terminal_wait)
-                .await
-                .unwrap_or_else(|result| result)
+            Self::run(
+                call,
+                session_id,
+                arguments,
+                &client,
+                context.terminal_wait,
+                context.auto_approved,
+            )
+            .await
+            .unwrap_or_else(|result| result)
         })
     }
 }
@@ -398,6 +409,7 @@ impl ServerTool for CargoCheckTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("cargo_check", "Runs focused cargo check through editor terminal")
             .side_effect_class(SideEffectClass::Execute)
+            .classifier_eligible()
             .input_schema(serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -414,11 +426,15 @@ impl ServerTool for CargoCheckTool {
     ) -> ToolFuture<ToolResult> {
         let session_id = self.session_id.clone();
         let wait_timeout = context.terminal_wait.default;
+        let auto_approved = context.auto_approved;
         Box::pin(async move {
             if *cancel.borrow() {
                 return ToolResult::failure(ToolErrorKind::Cancelled, "validation cancelled");
             }
             let mut request = CreateTerminalRequest::new(session_id.clone(), "cargo check --quiet");
+            if auto_approved {
+                request.meta = Some(mark_classifier_auto_approved(request.meta.take()));
+            }
             if let Some(path) = optional_string_arg(&arguments, "path")
                 && let Some(parent) =
                     Path::new(&path).parent().filter(|parent| parent.is_absolute())
@@ -1110,6 +1126,12 @@ pub(crate) fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> 
                 side_effect_class: class,
                 side_effect_subclass: subclass,
                 host_approval: false,
+                // Native write/terminal bridge calls are eligible for the opt-in
+                // risk classifier; policy semantics stay unchanged.
+                classifier_eligible: matches!(
+                    call,
+                    BridgeCall::WriteTextFile | BridgeCall::CreateTerminal
+                ),
                 required_capabilities: Vec::new(),
                 strict: false,
                 format: None,

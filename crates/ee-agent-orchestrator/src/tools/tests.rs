@@ -258,6 +258,7 @@ async fn todo_tool_replaces_plan_and_reports_statuses() {
         scope: None,
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
 
     let result = tool
@@ -316,6 +317,7 @@ async fn load_skill_reads_a_scoped_manifest_and_rejects_traversal() {
         scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
 
     let loaded = tool
@@ -364,6 +366,7 @@ async fn load_memory_loads_by_name_and_searches_by_tag() {
         scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
 
     let loaded = tool
@@ -424,6 +427,7 @@ async fn load_experience_loads_by_domain_and_sequence() {
         scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
 
     let loaded = tool
@@ -466,6 +470,7 @@ async fn save_memory_requires_confirmation_and_writes_the_entry() {
         scope: Some(WorkspaceScope::new(vec![temp.path().to_path_buf()], Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
     let task_bridge = bridge.clone();
     let task = tokio::spawn(async move {
@@ -530,6 +535,7 @@ async fn delete_memory_requires_confirmation_and_removes_the_entry() {
         scope: Some(WorkspaceScope::new(roots, Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
     let task_bridge = bridge.clone();
     let task = tokio::spawn(async move {
@@ -580,6 +586,7 @@ async fn delete_memory_declined_keeps_the_entry() {
         scope: Some(WorkspaceScope::new(roots, Vec::new())),
         model_id: None,
         terminal_wait: TerminalWaitLimits::default(),
+        auto_approved: false,
     };
     let task_bridge = bridge.clone();
     let task = tokio::spawn(async move {
@@ -695,6 +702,73 @@ async fn tool_executor_builtin_ask_user_uses_elicitation() {
     assert_eq!(result.text_output, "elicitation created");
 }
 
+#[test]
+fn native_gated_tools_are_classifier_eligible() {
+    let tools = super::registry::builtin_tools(&SessionId::new("s-1"));
+    let definition = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .unwrap_or_else(|| panic!("{name} registered"))
+            .definition()
+    };
+    for name in ["create_terminal", "write_file", "cargo_check"] {
+        assert!(definition(name).classifier_eligible, "{name} must reach the classifier");
+        assert!(!definition(name).host_approval, "{name} keeps native policy semantics");
+    }
+    assert!(!definition("read_file").classifier_eligible);
+}
+
+#[tokio::test]
+async fn bridge_tool_forwards_classifier_auto_approval_meta() {
+    let (_sink, bridge, mut rx) = plumbing();
+
+    let task_bridge = bridge.clone();
+    let terminal = tokio::spawn(async move {
+        ClientBridgeTool::run(
+            BridgeCall::CreateTerminal,
+            SessionId::new("s-1"),
+            json!({ "command": "cargo test 2>&1 | tail" }),
+            &task_bridge,
+            TerminalWaitLimits::default(),
+            true,
+        )
+        .await
+    });
+    let RawJsonRpcMessage::Request(request) = next_client_request(&mut rx).await else {
+        panic!("expected terminal create request");
+    };
+    assert_eq!(request.method.as_ref(), "terminal/create");
+    let params = request.params.clone().expect("params").into_value();
+    assert_eq!(params["_meta"]["ee/approval_classifier"]["auto_approved"], json!(true));
+    bridge.handle_response(Response::Result {
+        id: request.id,
+        result: json!({ "terminalId": "term-1" }),
+    });
+    terminal.await.expect("task joins").expect("terminal created");
+
+    let task_bridge = bridge.clone();
+    let write = tokio::spawn(async move {
+        ClientBridgeTool::run(
+            BridgeCall::WriteTextFile,
+            SessionId::new("s-1"),
+            json!({ "path": "/work/src/lib.rs", "content": "fn main() {}\n" }),
+            &task_bridge,
+            TerminalWaitLimits::default(),
+            true,
+        )
+        .await
+    });
+    let RawJsonRpcMessage::Request(request) = next_client_request(&mut rx).await else {
+        panic!("expected write request");
+    };
+    assert_eq!(request.method.as_ref(), "fs/write_text_file");
+    let params = request.params.clone().expect("params").into_value();
+    assert_eq!(params["_meta"]["ee/approval_classifier"]["auto_approved"], json!(true));
+    bridge.handle_response(Response::Result { id: request.id, result: json!({}) });
+    write.await.expect("task joins").expect("file written");
+}
+
 #[tokio::test(start_paused = true)]
 async fn terminal_wait_timeout_kills_captures_output_and_releases() {
     let (_sink, bridge, mut rx) = plumbing();
@@ -706,6 +780,7 @@ async fn terminal_wait_timeout_kills_captures_output_and_releases() {
             json!({ "terminal_id": "term-1", "timeout_ms": 1 }),
             &task_bridge,
             TerminalWaitLimits::default(),
+            false,
         )
         .await
     });

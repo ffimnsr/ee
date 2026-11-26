@@ -38,6 +38,12 @@ pub struct ToolCallContext {
     pub model_id: Option<String>,
     /// Per-call terminal wait bounds derived from the timeout policy.
     pub terminal_wait: TerminalWaitLimits,
+    /// Whether the approval classifier auto-approved this host-gated call.
+    ///
+    /// The bridge forwards this as an ACP `_meta` marker so a frontend that
+    /// owns the approving agent binary can skip its interactive prompt; the
+    /// frontend still applies its own safeguards and mandatory-confirm rules.
+    pub auto_approved: bool,
 }
 
 /// Default and maximum terminal wait for the built-in terminal lifecycle.
@@ -105,6 +111,11 @@ pub struct ToolDefinition {
     /// class remains write or execute for scheduling and audit purposes.
     #[serde(default)]
     pub host_approval: bool,
+    /// Whether the opt-in approval classifier may evaluate this tool before its
+    /// host request leaves the agent. Native write/terminal bridge tools set
+    /// this without changing host-approval policy semantics.
+    #[serde(default)]
+    pub classifier_eligible: bool,
     /// Capability flags the client must advertise for this tool.
     pub required_capabilities: Vec<String>,
     /// Whether the argument schema is enforced strictly by the provider.
@@ -163,6 +174,7 @@ impl ToolDefinition {
             side_effect_class: SideEffectClass::Read,
             side_effect_subclass: None,
             host_approval: false,
+            classifier_eligible: false,
             required_capabilities: Vec::new(),
             strict: false,
             format: None,
@@ -231,6 +243,14 @@ impl ToolDefinition {
     #[must_use]
     pub fn side_effect_subclass(mut self, subclass: SideEffectSubclass) -> Self {
         self.side_effect_subclass = Some(subclass);
+        self
+    }
+
+    /// Marks this tool as eligible for opt-in risk classification without
+    /// changing host-approval policy semantics.
+    #[must_use]
+    pub fn classifier_eligible(mut self) -> Self {
+        self.classifier_eligible = true;
         self
     }
 

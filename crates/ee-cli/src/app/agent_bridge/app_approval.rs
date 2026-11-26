@@ -651,6 +651,7 @@ impl App {
                         thread.push_system(summary.clone());
                     }
                     self.backend.status_message = Some(summary);
+                    prompt.auto_sandboxed = self.auto_sandbox_ready(&prompt);
                     self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
                     return;
                 }
@@ -671,6 +672,7 @@ impl App {
                         thread.push_system(summary.clone());
                     }
                     self.backend.status_message = Some(summary);
+                    prompt.auto_sandboxed = self.auto_sandbox_ready(&prompt);
                     self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
                     return;
                 }
@@ -710,6 +712,26 @@ impl App {
                 thread.push_system(summary.clone());
             }
             self.backend.status_message = Some(summary);
+            prompt.auto_sandboxed = self.auto_sandbox_ready(&prompt);
+            self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
+            return;
+        }
+        // Orchestrator approval-classifier auto-approval. Only prompts from a
+        // built-in orchestrator binary carry this marker; host safeguards and
+        // mandatory-confirm rules above still win, and the terminal dispatch
+        // stays sandboxed.
+        if prompt.classifier_auto
+            && decision.reason != DecisionReason::MandatoryConfirm
+            && self.auto_sandbox_ready(&prompt)
+        {
+            let summary = String::from("auto-approved by approval classifier");
+            if let Some(thread_index) = thread_index
+                && let Some(thread) = self.agents.threads.get_mut(thread_index)
+            {
+                thread.push_system(summary.clone());
+            }
+            self.backend.status_message = Some(summary);
+            prompt.auto_sandboxed = true;
             self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
             return;
         }

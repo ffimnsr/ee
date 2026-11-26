@@ -486,6 +486,7 @@ async fn background_delegate_returns_immediately_and_reports_completion() {
         scope: None,
         model_id: None,
         terminal_wait: Default::default(),
+        auto_approved: false,
     };
 
     let result = tool

@@ -52,6 +52,10 @@ pub(crate) struct ApprovalPrompt {
     pub(super) deny_candidate: Option<PersistentDenyCandidate>,
     pub(super) confirming_deny: bool,
     pub(super) mandatory_confirmation: Option<MandatoryConfirmation>,
+    /// The owning orchestrator agent's risk classifier auto-approved this call.
+    pub(super) classifier_auto: bool,
+    /// Auto-dispatched terminals run inside the OS sandbox when available.
+    pub(super) auto_sandboxed: bool,
     pub(crate) reply: oneshot::Sender<ClientRequestResult>,
 }
 
@@ -139,6 +143,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -176,6 +182,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -236,6 +244,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -267,6 +277,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -325,6 +337,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -363,6 +377,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -409,6 +425,8 @@ impl ApprovalPrompt {
             deny_candidate: None,
             confirming_deny: false,
             mandatory_confirmation: None,
+            classifier_auto: false,
+            auto_sandboxed: false,
             reply,
         }
     }
@@ -439,6 +457,12 @@ impl ApprovalPrompt {
 
     pub(crate) fn mandatory_confirmation(&self) -> Option<&MandatoryConfirmation> {
         self.mandatory_confirmation.as_ref()
+    }
+
+    /// Marks a prompt as eligible for classifier auto-approval.
+    pub(super) fn with_classifier_auto(mut self, auto: bool) -> Self {
+        self.classifier_auto = auto;
+        self
     }
 }
 

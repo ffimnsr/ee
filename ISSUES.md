@@ -539,6 +539,17 @@ Deferred boundaries:
 - MCP `ee_terminal_create` keeps its own pinned `ee do mcp trust grant --execute` grant; the native workspace grant never auto-allows proxy-originated terminal calls, and the MCP grant never auto-allows ACP v1 `terminal/create`.
 - ACP v2 agent-owned command permissions keep the curated `safe_read` reply path. Widening them would be advisory only because the agent, not ee, runs the command; revisit only with an explicit v2 execution contract.
 
+### Phase T4 — Sandboxed trusted auto-run and classifier hand-off (2026-11-26)
+
+Context: real `ee agent shell` sessions showed approval fatigue because common `cd <dir> && <command>` lines fell back to the prompt, and the opt-in approval classifier never reached the host. Native bridge tools did not carry the classifier marker, and `AutoApprove` only skipped a telemetry event.
+
+- [x] Accept `cd <absolute workspace directory> && <simple command>` for terminal trust eligibility by normalizing only the prefix; the remainder must still pass the strict simple-command parser, the `cd` target must canonicalize inside the primary workspace, and any other shape stays on the approval path.
+- [x] Set `auto_sandboxed` on every auto-dispatch path (workspace grant, built-in allowlist, approval mode, and classifier) so auto-run terminal commands go through the OS sandbox; an unavailable sandbox backend keeps the prompt.
+- [x] Add the shared `_meta` classifier marker in `ee-agent-protocol`; mark native write/terminal bridge tools classifier-eligible without changing host-approval policy semantics, and forward the marker on ACP write and terminal requests.
+- [x] Honor classifier auto-approval only for built-in orchestrator binaries (`ee-agent-opencode`, `ee-agent-openrouter`) on a trusted workspace in a non-read-only mode; mandatory confirms, safeguards, persistent denies, and other agents still prompt.
+- [x] Tests: `cd`-prefix acceptance and out-of-workspace rejection, classifier agent gating and metadata forwarding, native gated-tool eligibility, plus unchanged terminal trust, mandatory-confirm, and always-allow suites.
+- [x] `cargo fmt --all -- --check`, targeted `clippy -D warnings`, and terminal/policy/orchestrator tool filters pass.
+
 ## Durable Agent Session Transcripts and Archive (2026-11-26)
 
 Goal: keep the full local transcript for every agent session — live and archived — in the user data directory, rotate large transcript journals like logrotate, make the provider durable session log on by default with an explicit opt-out, and add a safe prune command. Large tool results stay inline-bounded (2,000 lines / 50 KiB) with the overflow retained by the session log, matching the upstream OpenCode `ToolOutput` behavior.

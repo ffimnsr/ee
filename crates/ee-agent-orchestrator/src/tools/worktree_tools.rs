@@ -273,6 +273,7 @@ mod tests {
             scope: Some(WorkspaceScope::new(vec![root.to_path_buf()], Vec::new())),
             model_id: None,
             terminal_wait: TerminalWaitLimits::default(),
+            auto_approved: false,
         }
     }
 

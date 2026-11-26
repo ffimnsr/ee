@@ -98,7 +98,10 @@ impl App {
         &self,
         request: &CreateTerminalRequest,
     ) -> Option<CommandInvocation> {
-        let invocation = self.command_invocation_for_request(request).ok()?;
+        let invocation = self
+            .command_invocation_for_request(request)
+            .ok()
+            .or_else(|| self.cd_prefixed_trust_invocation(request))?;
         let primary = self.primary_workspace_root()?;
         if !invocation.canonical_cwd.starts_with(&primary) {
             return None;
@@ -118,6 +121,55 @@ impl App {
             return None;
         }
         Some(invocation)
+    }
+
+    /// Accepts the common `cd <workspace-dir> && <simple command>` shape the
+    /// agent uses to pick a subdirectory. The prefix is normalized only for
+    /// eligibility: the host still executes the original command line, and the
+    /// remainder must pass the same strict simple-command parser. A leading
+    /// `cd` may not leave the primary workspace.
+    fn cd_prefixed_trust_invocation(
+        &self,
+        request: &CreateTerminalRequest,
+    ) -> Option<CommandInvocation> {
+        if !request.args.is_empty() {
+            return None;
+        }
+        let command = request.command.trim();
+        let after_cd = command.strip_prefix("cd ")?.trim_start();
+        let (directory, rest) = after_cd.split_once(" && ")?;
+        let directory = std::path::Path::new(directory.trim());
+        if !directory.is_absolute() {
+            return None;
+        }
+        let canonical = std::fs::canonicalize(directory).ok()?;
+        if !canonical.is_dir() {
+            return None;
+        }
+        let primary = self.primary_workspace_root()?;
+        if !canonical.starts_with(&primary) {
+            return None;
+        }
+        let (executable, argv) = crate::policy::parse_terminal_command(rest.trim(), &[]).ok()?;
+        Some(CommandInvocation {
+            workspace: crate::policy::WorkspaceIdentity::from_canonical_root_bytes(
+                primary.as_os_str().as_encoded_bytes(),
+            ),
+            executable,
+            argv,
+            canonical_cwd: canonical,
+        })
+    }
+
+    /// Whether an auto-approved terminal can run under the configured sandbox.
+    /// Non-terminal operations have no sandbox requirement.
+    pub(super) fn auto_sandbox_ready(&self, prompt: &ApprovalPrompt) -> bool {
+        let ApprovalKind::TerminalCreate { request } = &prompt.kind else {
+            return true;
+        };
+        let mode = self.config.agents.terminal_sandbox.mode;
+        mode == crate::config::TerminalSandboxMode::Off
+            || (ee_sandbox::cached_probe().available && self.terminal_sandbox_spec(request).is_ok())
     }
 
     /// Host-local terminal execution opt-in for the primary workspace. Any

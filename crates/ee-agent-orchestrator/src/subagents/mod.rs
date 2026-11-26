@@ -756,6 +756,7 @@ impl ServerTool for DelegateTool {
             side_effect_class: SideEffectClass::Delegate,
             side_effect_subclass: None,
             host_approval: false,
+            classifier_eligible: false,
             required_capabilities: Vec::new(),
             strict: false,
             format: None,

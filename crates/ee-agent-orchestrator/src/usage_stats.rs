@@ -642,6 +642,7 @@ mod tests {
                     scope: None,
                     model_id: None,
                     terminal_wait: crate::tools::TerminalWaitLimits::default(),
+                    auto_approved: false,
                 },
             )
             .await;
@@ -674,6 +675,7 @@ mod tests {
                     scope: None,
                     model_id: None,
                     terminal_wait: crate::tools::TerminalWaitLimits::default(),
+                    auto_approved: false,
                 },
             )
             .await;

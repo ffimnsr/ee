@@ -31,6 +31,7 @@
 //!
 //! [`agent-client-protocol`]: https://docs.rs/agent-client-protocol
 
+pub mod approval_meta;
 pub mod capabilities;
 pub mod mcp_over_acp;
 pub mod ordering;

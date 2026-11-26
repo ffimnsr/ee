@@ -308,7 +308,7 @@ impl App {
                     prompt.agent_id.as_deref(),
                     None,
                     prompt.reply,
-                    false,
+                    prompt.auto_sandboxed,
                 );
             }
             ApprovalKind::Filesystem { operation } => {

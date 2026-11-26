@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ee_agent_protocol::approval_meta::classifier_auto_approved;
 use ee_agent_protocol::{CreateTerminalRequest, ReadTextFileRequest};
 
 use super::super::*;
@@ -44,6 +45,34 @@ pub(super) struct TrustEvaluationFlags {
 }
 
 impl App {
+    /// Whether one host-gated request carries a classifier verdict this host
+    /// may honor. Only orchestrator-backed binaries ship the classifier; a
+    /// generic ACP agent must never self-approve through `_meta`.
+    pub(super) fn classifier_auto_approval(
+        &self,
+        agent_id: Option<&str>,
+        session_id: &str,
+        meta: Option<&ee_agent_protocol::Meta>,
+    ) -> bool {
+        if !classifier_auto_approved(meta) || !self.workspace_trusted() {
+            return false;
+        }
+        if !self.trusted_mode_allows(session_id) {
+            return false;
+        }
+        let Some(agent_id) = agent_id else {
+            return false;
+        };
+        let Some(server) = self.config.agents.servers.get(agent_id) else {
+            return false;
+        };
+        let name = std::path::Path::new(server.command.trim())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        matches!(name, "ee-agent-opencode" | "ee-agent-openrouter")
+    }
+
     /// Outcome of classifying one ACP v2 agent-owned command permission.
     pub(crate) fn v2_command_permission(&self, command: &str, cwd: &Path) -> V2CommandPermission {
         let primary =
@@ -245,6 +274,14 @@ impl App {
             ApprovalKind::TerminalCreate { request } => {
                 let identity = self
                     .command_identity_for_policy_request(request)
+                    .or_else(|_| {
+                        self.terminal_trust_invocation(request)
+                            .map(|invocation| OperationIdentity::Command {
+                                executable: invocation.executable,
+                                argv: invocation.argv,
+                            })
+                            .ok_or_else(|| String::from("unrecognized terminal invocation"))
+                    })
                     .unwrap_or(OperationIdentity::Unknown);
                 (TrustCategory::Execute, identity)
             }

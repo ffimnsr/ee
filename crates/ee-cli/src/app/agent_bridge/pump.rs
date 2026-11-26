@@ -61,18 +61,29 @@ impl App {
                         continue;
                     }
                     let thread = self.session_thread(&request.session_id);
+                    let agent_id = thread
+                        .and_then(|index| self.agents.threads.get(index))
+                        .map(|thread| thread.agent_id.clone());
+                    let classifier_auto = self.classifier_auto_approval(
+                        agent_id.as_deref(),
+                        request.session_id.0.as_ref(),
+                        request.meta.as_ref(),
+                    );
                     let always_allowed = self.native_write_always_allowed(
                         &request.path,
                         &request.content,
                         &WriteExpectation::Blind,
                     );
-                    self.request_bridge_approval(ApprovalPrompt::write(
+                    let mut prompt = ApprovalPrompt::write(
                         thread,
                         &request.session_id,
                         &request,
                         always_allowed,
                         reply,
-                    ));
+                    )
+                    .with_classifier_auto(classifier_auto);
+                    prompt.agent_id = agent_id;
+                    self.request_bridge_approval(prompt);
                 }
                 BridgeUiMessage::TerminalCreate { request, reply } => {
                     let thread = self.session_thread(&request.session_id);
@@ -82,15 +93,23 @@ impl App {
                     // Normalize after request validation and before approval
                     // queue insertion: only validated invocations may offer
                     // persistent command trust (Phase 2).
-                    let always_allowed = self.command_invocation_for_request(&request).is_ok();
-                    self.request_bridge_approval(ApprovalPrompt::terminal(
-                        thread,
-                        agent_id,
-                        &request.session_id,
-                        &request,
-                        reply,
-                        always_allowed,
-                    ));
+                    let always_allowed = self.terminal_trust_invocation(&request).is_some();
+                    let classifier_auto = self.classifier_auto_approval(
+                        agent_id.as_deref(),
+                        request.session_id.0.as_ref(),
+                        request.meta.as_ref(),
+                    );
+                    self.request_bridge_approval(
+                        ApprovalPrompt::terminal(
+                            thread,
+                            agent_id,
+                            &request.session_id,
+                            &request,
+                            reply,
+                            always_allowed,
+                        )
+                        .with_classifier_auto(classifier_auto),
+                    );
                 }
                 BridgeUiMessage::Elicitation { session_id, request, reply } => {
                     self.present_elicitation(session_id, request, reply);

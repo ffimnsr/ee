@@ -300,6 +300,7 @@ mod tests {
             )),
             model_id: None,
             terminal_wait: TerminalWaitLimits::default(),
+            auto_approved: false,
         };
         (tool_context, call_context, temp)
     }

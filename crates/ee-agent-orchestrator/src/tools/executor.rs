@@ -183,7 +183,8 @@ impl ToolExecutor {
             emit_failed_tool(sink, intent, &result)?;
             return Ok(result);
         }
-        if definition.host_approval {
+        let mut auto_approved = false;
+        if definition.host_approval || definition.classifier_eligible {
             if let Some(classifier) = &self.approval_classifier {
                 let candidate = crate::approval_classifier::ApprovalCandidate::new(
                     &definition.name,
@@ -221,7 +222,9 @@ impl ToolExecutor {
                             tool_name: definition.name.clone(),
                         });
                     }
-                    crate::approval_classifier::ApprovalClassification::AutoApprove { .. } => {}
+                    crate::approval_classifier::ApprovalClassification::AutoApprove { .. } => {
+                        auto_approved = true;
+                    }
                 }
             } else {
                 self.events.record(OrchestratorEvent::ApprovalRequested {
@@ -295,6 +298,7 @@ impl ToolExecutor {
             scope: self.policy.policy().scope.clone(),
             model_id: self.model_id.clone(),
             terminal_wait,
+            auto_approved,
         };
         let requested_ms = intent.arguments.get("timeout_ms").and_then(serde_json::Value::as_u64);
         let tool_timeout = self.config.tool_timeouts.effective_timeout(

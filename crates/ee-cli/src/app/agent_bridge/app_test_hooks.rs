@@ -39,6 +39,33 @@ impl App {
     }
 
     #[cfg(test)]
+    pub(crate) fn queue_terminal_request_for_test(
+        &mut self,
+        agent_id: Option<&str>,
+        request: CreateTerminalRequest,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let always_allowed = self.command_invocation_for_request(&request).is_ok();
+        let classifier_auto = self.classifier_auto_approval(
+            agent_id,
+            request.session_id.0.as_ref(),
+            request.meta.as_ref(),
+        );
+        let (reply, receiver) = oneshot::channel();
+        self.request_bridge_approval(
+            ApprovalPrompt::terminal(
+                None,
+                agent_id.map(str::to_string),
+                &request.session_id,
+                &request,
+                reply,
+                always_allowed,
+            )
+            .with_classifier_auto(classifier_auto),
+        );
+        receiver
+    }
+
+    #[cfg(test)]
     pub(crate) fn queue_write_approval_for_test(
         &mut self,
         path: PathBuf,

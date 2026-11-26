@@ -85,6 +85,98 @@ fn granted_workspace_accepts_primary_workspace_subdirectory() {
 }
 
 #[test]
+fn granted_workspace_accepts_cd_prefixed_simple_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let child = temp.path().join("src");
+    fs::create_dir_all(&child).unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let command = format!("cd {} && touch cd-marker", child.display());
+    let request = ee_agent_protocol::CreateTerminalRequest::new(
+        ee_agent_protocol::SessionId::new("s1"),
+        command.as_str(),
+    );
+    assert!(
+        app.terminal_trust_invocation(&request).is_some(),
+        "cd prefix must normalize; primary={:?} command={command:?}",
+        app.primary_workspace_root()
+    );
+    let mut reply = queue_terminal(&mut app, &command, &[], None);
+    wait_until(&mut app, "cd-prefixed terminal spawned", |app| {
+        app.agents.terminals.tracked_count() == 1
+            && app.agents.approvals.is_empty()
+            && child.join("cd-marker").exists()
+    });
+    assert!(reply.try_recv().expect("auto reply").is_ok());
+}
+
+#[test]
+fn cd_prefix_outside_the_workspace_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let command = format!("cd {} && touch outside-cd-marker", outside.path().display());
+    let mut reply = queue_terminal(&mut app, &command, &[], None);
+    wait_until(&mut app, "escape cd prefix prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!outside.path().join("outside-cd-marker").exists());
+    assert_eq!(app.agents.terminals.tracked_count(), 0);
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn classifier_meta_auto_approves_only_for_builtin_orchestrator_agents() {
+    use ee_agent_protocol::approval_meta::mark_classifier_auto_approved;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+    app.config.agents.servers.insert(
+        String::from("builtin"),
+        crate::config::AgentServerSettings {
+            label: None,
+            command: String::from("/opt/ee/ee-agent-opencode"),
+            args: Vec::new(),
+            env: Default::default(),
+            cwd: None,
+            protocol: crate::config::AgentProtocol::V1,
+        },
+    );
+
+    // Shell syntax keeps classifier opt-in distinct from workspace trust.
+    let mut request = ee_agent_protocol::CreateTerminalRequest::new(
+        ee_agent_protocol::SessionId::new("s1"),
+        "echo classifier > classifier-marker",
+    );
+    request.meta = Some(mark_classifier_auto_approved(None));
+    let mut reply = app.queue_terminal_request_for_test(Some("builtin"), request);
+    wait_until(&mut app, "classifier auto-approval spawns", |app| {
+        app.agents.terminals.tracked_count() == 1
+            && app.agents.approvals.is_empty()
+            && temp.path().join("classifier-marker").exists()
+    });
+    assert!(reply.try_recv().expect("auto reply").is_ok());
+
+    // A generic ACP agent cannot self-approve through `_meta`.
+    let mut request = ee_agent_protocol::CreateTerminalRequest::new(
+        ee_agent_protocol::SessionId::new("s1"),
+        "echo hi > ignored-marker",
+    );
+    request.meta = Some(mark_classifier_auto_approved(None));
+    let mut reply = app.queue_terminal_request_for_test(Some("fake"), request);
+    wait_until(&mut app, "non-builtin meta prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!temp.path().join("ignored-marker").exists());
+    app.agents.approvals.clear();
+}
+
+#[test]
 fn plain_workspace_trust_does_not_grant_terminal_execution() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = native_app(&temp);
