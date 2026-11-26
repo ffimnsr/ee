@@ -109,23 +109,47 @@ fn builtin_tool_safeguards_do_not_match_similar_names_or_quoted_text() {
         .set_decision(crate::workspace_trust::WorkspaceTrustDecision::Trusted)
         .expect("trusted decision");
 
-    for command in ["echo 'rm -rf /'", "remove-all /", "rm -r /workspace-copy"] {
+    // Text with shell quoting is not a simple command: it prompts, and it can
+    // never become an always-allow rule or produce a candidate-backed preview.
+    let mut reply = queue_terminal(&mut app, temp.path(), "echo 'rm -rf /'");
+    assert_eq!(app.agents.approvals.len(), 1, "quoted text should prompt");
+    let prompt = app.agents.approvals.front().expect("approval");
+    assert!(
+        !prompt.options.iter().any(|(_, choice)| matches!(
+            choice,
+            ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
+        )),
+        "quoted shell text must never offer always-allow"
+    );
+    app.confirm_bridge_approval_for_test(ApprovalChoice::AllowAlways);
+    assert!(
+        app.agents.approvals.front().expect("approval").allow_confirmation_preview().is_none(),
+        "quoted shell text must have no always-allow preview"
+    );
+    app.cancel_rule_confirmation_for_test();
+    assert!(reply.try_recv().is_err());
+    app.confirm_bridge_approval_for_test(ApprovalChoice::DenyOnce);
+    assert!(matches!(
+        reply.try_recv().expect("user denial resolves"),
+        Err(AgentError::PermissionDenied { .. })
+    ));
+
+    // These merely look like destructive commands; they are not safeguard
+    // denials. Simple command text normalizes to executable + argv, so the
+    // candidate-backed persistent allow is intentionally offered (the same
+    // path that makes `mk lf` eligible).
+    for command in ["remove-all /", "rm -r /workspace-copy"] {
         let mut reply = queue_terminal(&mut app, temp.path(), command);
         assert_eq!(app.agents.approvals.len(), 1, "command should prompt: {command}");
         let prompt = app.agents.approvals.front().expect("approval");
         assert!(
-            !prompt.options.iter().any(|(_, choice)| matches!(
-                choice,
-                ApprovalChoice::AllowAlways | ApprovalChoice::AllowAlwaysPrefix(_)
-            )),
-            "shell text must never offer always-allow: {command}"
+            prompt.options.iter().any(|(_, choice)| *choice == ApprovalChoice::AllowAlways),
+            "simple command text should be persistent-trust eligible: {command}"
         );
-        // The confirmation preview is candidate-backed: forcing the
-        // always-allow confirmation must not find a preview for shell text.
         app.confirm_bridge_approval_for_test(ApprovalChoice::AllowAlways);
         assert!(
-            app.agents.approvals.front().expect("approval").allow_confirmation_preview().is_none(),
-            "shell text must have no always-allow preview: {command}"
+            app.agents.approvals.front().expect("approval").allow_confirmation_preview().is_some(),
+            "simple command text should have a candidate-backed preview: {command}"
         );
         app.cancel_rule_confirmation_for_test();
         assert!(reply.try_recv().is_err());

@@ -1,4 +1,4 @@
-//! Protected-path classification for persistent read trust.
+//! Protected-path classification and lexical path resolution.
 //!
 //! Read rules require canonical in-workspace paths; this classifier marks
 //! path classes that persistent trust must never cover: hidden entries
@@ -7,6 +7,8 @@
 //! before trust matching and before any persistent-option display — so a
 //! protected path normalizes to an unknown operation and can never match a
 //! rule.
+
+use std::path::{Component, Path, PathBuf};
 
 /// Private-key suffixes that persistent read trust never covers.
 const PRIVATE_KEY_SUFFIXES: [&str; 6] = [".pem", ".key", ".p12", ".pfx", ".p8", ".der"];
@@ -31,4 +33,47 @@ pub(crate) fn is_protected_segment(segment: &str) -> bool {
 /// class.  Protected reads never match a persistent read rule.
 pub(crate) fn is_protected_relative_path(relative: &str) -> bool {
     !relative.is_empty() && relative.split('/').any(is_protected_segment)
+}
+
+/// Canonicalizes `path` when it exists; otherwise canonicalizes the nearest
+/// existing ancestor and appends the missing suffix lexically. Symlink
+/// escapes are therefore resolved for existing targets, and nonexistent
+/// targets are normalized without requiring their parents to exist.
+pub(crate) fn canonical_or_lexical(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            return lexical_normalize(path);
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            return lexical_normalize(path);
+        };
+        ancestor = parent;
+    }
+    let mut resolved =
+        std::fs::canonicalize(ancestor).unwrap_or_else(|_| lexical_normalize(ancestor));
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    lexical_normalize(&resolved)
+}
+
+/// Resolves `.` and `..` components without touching the filesystem.
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }

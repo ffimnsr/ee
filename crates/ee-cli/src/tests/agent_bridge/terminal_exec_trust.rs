@@ -129,6 +129,95 @@ fn shell_wrappers_stay_on_the_approval_path() {
 }
 
 #[test]
+fn external_operand_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let marker = outside.path().join("outside-operand-marker");
+    let mut reply = queue_terminal(&mut app, "touch", &[marker.to_str().unwrap()], None);
+    wait_until(&mut app, "external operand prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!marker.exists());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn traversal_operand_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let mut reply = queue_terminal(&mut app, "touch", &[".."], None);
+    wait_until(&mut app, "traversal operand prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn absolute_executable_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let tool = outside.path().join("outside-tool");
+    fs::write(&tool, b"#!/bin/sh\n").unwrap();
+    let mut reply = queue_terminal(&mut app, tool.to_str().unwrap(), &[], None);
+    wait_until(&mut app, "absolute executable prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn option_embedded_path_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let mut reply = queue_terminal(&mut app, "touch", &["--out=/tmp/ee-outside-marker"], None);
+    wait_until(&mut app, "option path prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn shell_wrapper_operand_stays_on_the_approval_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let mut reply = queue_terminal(&mut app, "env", &["bash", "-c", "touch marker"], None);
+    wait_until(&mut app, "wrapper operand prompts", |app| !app.agents.approvals.is_empty());
+    assert!(reply.try_recv().is_err());
+    assert!(!temp.path().join("marker").exists());
+    app.agents.approvals.clear();
+}
+
+#[test]
+fn in_workspace_absolute_operand_auto_spawns() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = native_app(&temp);
+    trust_workspace(&mut app, &temp, true);
+    app.config.agents.read_only_modes.clear();
+
+    let marker = std::fs::canonicalize(temp.path()).unwrap().join("absolute-marker");
+    let mut reply = queue_terminal(&mut app, "touch", &[marker.to_str().unwrap()], None);
+    wait_until(&mut app, "in-workspace absolute operand spawned", |app| {
+        app.agents.terminals.tracked_count() == 1
+            && app.agents.approvals.is_empty()
+            && marker.exists()
+    });
+    assert!(reply.try_recv().expect("auto reply").is_ok());
+}
+
+#[test]
 fn external_cwd_stays_on_the_approval_path() {
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

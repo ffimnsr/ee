@@ -7,9 +7,10 @@
 //! to a canonical workspace root (relative, external, traversal, and
 //! symlink-escape cwds prompt instead).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::WorkspaceIdentity;
+use super::paths::canonical_or_lexical;
 
 /// Shell wrappers that never qualify for persistent command trust: shell
 /// interpretation would bypass the structured argv contract.
@@ -95,6 +96,83 @@ pub(crate) fn is_env_assignment(token: &str) -> bool {
             character == '_'
                 || character.is_ascii_alphanumeric() && (index > 0 || !character.is_ascii_digit())
         })
+}
+
+/// Whether an executable token resolves through `PATH` instead of naming an
+/// explicit filesystem path. Prompt-free execution must not auto-run a binary
+/// outside the workspace by path, so the terminal execution grant requires a
+/// bare program name.
+pub(crate) fn is_bare_executable(executable: &str) -> bool {
+    !executable.is_empty()
+        && !executable.chars().any(|character| matches!(character, '/' | '\\' | '~'))
+        && !has_windows_drive_prefix(executable)
+}
+
+/// Best-effort workspace containment for one argv token of a command that may
+/// auto-run under the workspace terminal execution grant.
+///
+/// Tokens that cannot name a filesystem target are inert. Path-like tokens
+/// (absolute paths, `.`/`..`, separators) must resolve inside
+/// `workspace_root`, with `cwd` as the base for relative values. Ambiguous
+/// option-embedded paths (`-I/usr/include`, `-C..`, `--out=/tmp/x`) and
+/// `~`-prefixed values are rejected so the request falls back to approval
+/// instead of guessing. This is not a sandbox: accepted executables can still
+/// reach outside the workspace themselves.
+pub(crate) fn terminal_operand_stays_in_workspace(
+    token: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+) -> bool {
+    if token == "--" || token.contains("://") {
+        return true;
+    }
+    if token.starts_with('-') {
+        if let Some((_, value)) = token.split_once('=') {
+            return value.is_empty()
+                || terminal_operand_stays_in_workspace(value, cwd, workspace_root);
+        }
+        // Attached option values (`-I/usr/include`, `-C..`) are not
+        // separable from the flag without command-specific knowledge.
+        return !token.chars().any(|character| matches!(character, '/' | '\\' | '~'))
+            && !token.contains("..");
+    }
+    if let Some((_, value)) = token.split_once('=') {
+        return value.is_empty() || terminal_operand_stays_in_workspace(value, cwd, workspace_root);
+    }
+    if token.starts_with('~') {
+        return false;
+    }
+    // Values such as `key:/tmp/x` can hide an absolute path after the colon.
+    if token.contains(':') && token.chars().any(|character| character == '/' || character == '\\') {
+        return false;
+    }
+    if !looks_like_filesystem_path(token) {
+        return true;
+    }
+    let path = Path::new(token);
+    let resolved = if path.is_absolute() {
+        canonical_or_lexical(path)
+    } else {
+        canonical_or_lexical(&cwd.join(path))
+    };
+    resolved.starts_with(workspace_root)
+}
+
+fn looks_like_filesystem_path(token: &str) -> bool {
+    if token == "." || token == ".." {
+        return true;
+    }
+    let path = Path::new(token);
+    path.is_absolute()
+        || path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        })
+        || token.contains(std::path::MAIN_SEPARATOR)
+}
+
+fn has_windows_drive_prefix(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// Splits one ACP v1 `terminal/create` request into the structured command

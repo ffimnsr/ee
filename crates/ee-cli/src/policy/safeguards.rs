@@ -4,9 +4,10 @@
 //! typed paths and a bounded POSIX-shell subset; no raw substring grants or
 //! denies authority.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::command::{SHELL_WRAPPERS, is_env_assignment};
+use super::paths::{canonical_or_lexical, lexical_normalize};
 
 pub(crate) const SAFEGUARD_REGISTRY_VERSION: u64 = 1;
 
@@ -257,20 +258,6 @@ fn lexical_absolute(path: &Path, cwd: &Path) -> PathBuf {
     if path.is_absolute() { lexical_normalize(path) } else { lexical_normalize(&cwd.join(path)) }
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
 fn nested_shell_commands(
     shell: &str,
     argv: &[String],
@@ -328,30 +315,6 @@ pub(crate) fn inspect_path_escape(path: &Path, roots: &[PathBuf]) -> Option<Safe
     let resolved = canonical_or_lexical(path);
     (!roots.iter().any(|root| resolved.starts_with(canonical_or_lexical(root))))
         .then_some(SafeguardMatch::new(PATH_ESCAPE_RULE_ID, SafeguardCategory::CanonicalPathEscape))
-}
-
-fn canonical_or_lexical(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-    let mut ancestor = path;
-    let mut suffix = Vec::new();
-    while !ancestor.exists() {
-        let Some(name) = ancestor.file_name() else {
-            return lexical_normalize(path);
-        };
-        suffix.push(name.to_os_string());
-        let Some(parent) = ancestor.parent() else {
-            return lexical_normalize(path);
-        };
-        ancestor = parent;
-    }
-    let mut resolved =
-        std::fs::canonicalize(ancestor).unwrap_or_else(|_| lexical_normalize(ancestor));
-    for component in suffix.iter().rev() {
-        resolved.push(component);
-    }
-    lexical_normalize(&resolved)
 }
 
 #[derive(Debug)]

@@ -13,7 +13,9 @@ use super::super::*;
 
 use super::approval::ApprovalKind;
 use super::prompt::ApprovalPrompt;
-use crate::policy::CommandInvocation;
+use crate::policy::{
+    CommandInvocation, is_bare_executable, is_shell_wrapper, terminal_operand_stays_in_workspace,
+};
 use crate::workspace_trust::WorkspaceTrustStore;
 
 /// Environment names that would let the agent change which program a
@@ -56,10 +58,12 @@ impl App {
         self.terminal_trust_invocation(request).is_some()
     }
 
-    /// Validated invocation eligible for the terminal execution grant:
-    /// simple command text, no shell wrapper or assignment, canonical cwd
-    /// inside the primary workspace root, and no execution-affecting
-    /// environment overrides.
+    /// Validated invocation eligible for the terminal execution grant: simple
+    /// command text, no shell wrapper or assignment, a bare PATH-resolved
+    /// executable, a canonical cwd inside the primary workspace root, no
+    /// execution-affecting environment overrides, and path-like argv operands
+    /// that resolve inside the primary workspace root. Ambiguous or external
+    /// paths fall back to approval.
     pub(crate) fn terminal_trust_invocation(
         &self,
         request: &CreateTerminalRequest,
@@ -69,7 +73,18 @@ impl App {
         if !invocation.canonical_cwd.starts_with(&primary) {
             return None;
         }
+        if !is_bare_executable(&invocation.executable) {
+            return None;
+        }
         if !terminal_env_allows_trust(request) {
+            return None;
+        }
+        if invocation.argv.iter().any(|token| is_shell_wrapper(token)) {
+            return None;
+        }
+        if !invocation.argv.iter().all(|token| {
+            terminal_operand_stays_in_workspace(token, &invocation.canonical_cwd, &primary)
+        }) {
             return None;
         }
         Some(invocation)

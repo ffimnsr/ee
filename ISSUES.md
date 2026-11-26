@@ -497,7 +497,7 @@ Rules:
 - Workspace trust alone is not enough. The grant is a separate explicit opt-in on the same owner-only, host-local workspace trust document; repository configuration cannot create it.
 - Revoking workspace trust clears and inerts the terminal grant. `ee do trust revoke --execute` removes only the terminal grant and keeps the workspace trust decision.
 - Applies only to native ACP v1 `terminal/create`. MCP `ee_terminal_create` keeps its separate `ee do mcp trust grant --execute` opt-in; neither grant crosses into the other route.
-- Auto-allow requires a validated simple command: shell syntax and shell wrappers are rejected, the command text/args normalize to structured executable + argv, and the canonical cwd must stay inside the primary workspace root. Extra workspace roots and external directories still prompt.
+- Auto-allow requires a validated simple command: shell syntax and shell wrappers are rejected, the command text/args normalize to structured executable + argv, the executable must be a bare `PATH` name, every path-like argv operand must resolve inside the primary workspace root, and the canonical cwd must stay inside that root. Explicit-path executables, external/traversal operands, ambiguous option-embedded paths, extra workspace roots, and external directories still prompt.
 - A leading environment assignment, loader/path environment overrides, an invalid request, a read-only agent mode (`agents.read_only_modes`, default `ask`/`plan`), a safeguard, a persistent deny, or a mandatory-confirm rule still wins; the grant is implicit consent for routine commands, not for unbounded ones.
 - ACP v2 agent-owned command permissions stay on the existing curated `safe_read` reply path: the agent runs those commands itself, so the host cannot enforce workspace containment. MCP terminal tools remain covered by the MCP execute grant.
 
@@ -515,9 +515,10 @@ Work items:
 - [x] Add `parse_terminal_command` so simple ACP v1 command text (`"mk lf"`) and structured `command` + `args` normalize identically; reject shell syntax, shell wrappers, and leading environment assignments.
 - [x] Use the shared parser for command policy identity, persistent command trust, and the new terminal execution gate; keep shell wrappers and invalid cwd ineligible.
 - [x] Add `workspace_execute_enabled` to the policy evaluator as a built-in allow after safeguards, persistent/session denies, and mandatory confirms; only `Execute` + validated `Command` identities match.
-- [x] Add `app_terminal_trust.rs`: require workspace trust, the host-local terminal grant, a non-read-only agent mode, a canonical primary-workspace cwd, and no execution-affecting environment overrides; reject MCP-originated prompts so the routes stay separate.
+- [x] Add `app_terminal_trust.rs`: require workspace trust, the host-local terminal grant, a non-read-only agent mode, a canonical primary-workspace cwd, a bare PATH executable, and no execution-affecting environment overrides; reject MCP-originated prompts so the routes stay separate.
+- [x] Confine path-like argv operands to the primary workspace root for auto-allow (canonical/lexical resolution, `..` traversal, absolute paths, flag-embedded paths, and shell-wrapper operands); ambiguous cases fall back to approval.
 - [x] Wire `request_bridge_approval` and summarize the automatic decision as `trusted workspace terminal`.
-- [x] Tests: native `touch` auto-spawns in the workspace root and subdirectory; untrusted, no-grant, shell-wrapper, external-cwd, env-override, read-only-mode, persistent-deny, and MCP-route requests still prompt or deny; simple shell-text safe-read still auto-allows.
+- [x] Tests: native `touch` auto-spawns in the workspace root and subdirectory; untrusted, no-grant, shell-wrapper, external-cwd, env-override, read-only-mode, persistent-deny, external/traversal operand, explicit-path executable, option-embedded path, wrapper-operand, and MCP-route requests still prompt or deny; simple shell-text safe-read still auto-allows.
 
 ### Phase T3 — Boundaries and documentation
 
@@ -595,3 +596,107 @@ Acceptance:
 - A 100 KiB tool result keeps only the bounded inline preview plus the retained overflow path.
 - `ee do agent sessions prune --dry-run` lists the same entries as a real run and deletes nothing; live sessions are never removed.
 - `cargo fmt --all -- --check`, targeted `cargo clippy`, and the phase test filters pass.
+
+## Workspace Terminal Sandbox (2026-11-26)
+
+Goal: run prompt-free native ACP v1 `terminal/create` commands inside an OS sandbox on Linux and macOS, so the workspace terminal execution grant is no longer only an argv inspection layer. This narrows the existing caveat in [Workspace Terminal Execution Trust](#workspace-terminal-execution-trust-2026-11-26): operands are validated, but accepted commands can still reach anything the user account can reach.
+
+Inputs: the Zed sandboxing documentation (`https://zed.dev/docs/ai/sandboxing`, Linux and macOS sections), the current terminal spawn path (`app/agent_bridge/terminal.rs`, `persistent_shell.rs`), and the existing `ee-plugin-runtime` seccomp/resource code (not reusable as-is; its filter denies `fork`).
+
+Rules:
+
+- Applies only to native ACP v1 `terminal/create`. Default: sandbox commands auto-allowed by the workspace terminal execution grant. User-approved commands keep their explicit consent path; a later `all` mode may sandbox those too. MCP `ee_terminal_create` and ACP v2 command permissions stay on their existing routes.
+- Linux uses a runnable **non-setuid** `bwrap` only. Probe with `bwrap --ro-bind / / -- echo working`; reject any setuid-root binary because sandbox setup would run root-privileged with model-influenced arguments. If `bwrap` is missing, blocked by user namespaces, or fails the probe, fall back to an approval prompt; never silently run unsandboxed unless an explicit config opt-in says so.
+- Ubuntu 23.10+ blocks unprivileged user namespaces through AppArmor. Document the `bwrap-userns-restrict` profile install (Ubuntu 25.04+ ships it) and surface the probe result in `ee do doctor`.
+- macOS uses Apple Seatbelt through `sandbox-exec`. Probe at startup; treat the deprecated backend as unavailable if it disappears. No clean supported alternative exists for wrapping arbitrary host toolchains.
+- Default access model matches the Zed baseline: broad filesystem reads; writes only inside the primary workspace plus a fresh temporary directory exposed through `TMPDIR`/`TMP`/`TEMP`; `.git` metadata readable but never writable; outbound network denied; Unix-domain IPC sockets and runtime dirs unavailable by default.
+- `sandboxed` auto-runs use the per-command process path (`sh -c`), not the reusable persistent shell. bwrap mounts and `.git` protection are fixed at sandbox creation, and `/tmp` must be fresh per command. The persistent shell remains for the unsandboxed approved path; sandboxing a persistent shell would freeze mounts and leak temp state across commands.
+- Resolve all bind paths to canonical, absolute paths first; prefer fd-pinned binds (`--bind-fd`/`--ro-bind-fd`) where supported to close rename/symlink TOCTOU. bwrap policy is creation-time: a `.git` directory created after sandbox start cannot be retroactively protected.
+- `.git` protection covers the workspace Git directory, the linked-worktree gitdir pointer file, and common worktree metadata. Blocking `.git` must survive broader write approvals.
+- Network starts at deny (`--unshare-net`). All-or-nothing network can be granted later; a host-specific allowlist requires an HTTP/HTTPS proxy plus accepting that SSH/raw socket clients may not work. Never present proxy env vars as enforcement when direct sockets are still reachable.
+- Sandboxing is terminal-tool scoped, not an account boundary. It does not cover language servers, proc macros, tasks, plugins, the regular terminal, or commands the user runs later. Document the side-channel examples from the Zed doc.
+- Do not claim sandboxing is unbreakable. Kernel/OS bugs, bwrap/Seatbelt bugs, and over-broad write/network grants remain.
+
+Proposed config:
+
+```toml
+[agents.terminal_sandbox]
+mode = "granted"   # off | granted | all
+read = "broad"     # broad | workspace
+network = "deny"   # deny | allow (S3)
+on_unavailable = "prompt" # prompt | deny
+write_paths = []   # additional host write paths, canonicalized (S3)
+```
+
+Work items:
+
+### Phase S1 — Linux bubblewrap backend
+
+- [ ] Add shared `crates/ee-sandbox` (files kept under 1,000 LOC): `SandboxSpec`, backend probe, and deterministic Linux bwrap argv builder. `ee-cli` terminal spawn and `ee-agent-host` agent launch consume the same crate; no sandbox logic in either caller.
+- [ ] Probe `bwrap`, reject setuid-root binaries, run the `--ro-bind / /` smoke test, and cache capability plus probe error for doctor/status output.
+- [ ] bwrap profile: `--ro-bind / /`, rw bind the canonical primary workspace, ro-bind the workspace Git directory/pointer after the rw bind, private `--tmpfs /tmp` with `TMPDIR` set, `--proc /proc`, `--dev /dev`, `--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup --unshare-net`, `--die-with-parent --new-session`, no `/run` or `$XDG_RUNTIME_DIR`, sanitized env, and the validated command as the final argv.
+- [ ] Add `env -u`/`--clearenv` style env scrubbing with the existing secret-name filter; set `PATH`, `HOME`, and temp vars explicitly; keep request env only when the terminal trust gate already allows it.
+- [ ] Route auto-granted terminal spawns through the sandboxed per-command path; keep the persistent shell for user-approved unsandboxed commands. Extend `AgentTerminals::spawn`/`PersistentShellPool` plumbing with an optional sandbox spec instead of reading process globals.
+- [ ] Fail closed to the approval path when the probe, spawn, or bwrap setup fails; expose the reason in the status line, and allow `on_unavailable = "deny"`.
+- [ ] `ee do doctor` reports bwrap path, setuid state, userns probe, and Ubuntu AppArmor guidance.
+- [ ] Tests: argv/profile snapshots; setuid rejection; Linux integration tests gated on a working non-setuid bwrap (write inside succeeds; outside write denied; `.git` write denied; symlink/rename escape denied; temporary dir fresh per command; network denied; Unix socket connect denied; env secret absent; sandbox-unavailable falls back to prompt).
+
+### Phase S2 — macOS Seatbelt backend
+
+- [ ] Add the `sandbox-exec` probe and generated Seatbelt profile backend behind the same `SandboxSpec` interface.
+- [ ] Profile: `(deny default)`, allow the baseline process and sysctl operations, broad `file-read*`, writes only under the workspace and the per-command temp directory, explicit `.git` write denial, network denied, and a minimal `mach-lookup` allowlist for developer tooling. Exclude launchd/LaunchServices, pasteboard, and audio services.
+- [ ] Set `TMPDIR`/`TMP`/`TEMP` to the per-command temp path; sanitize env like S1.
+- [ ] Fail closed to approval when `sandbox-exec` is missing or the profile fails to apply.
+- [ ] Tests: profile generation snapshots; probe gating; macOS integration tests gated on `sandbox-exec` (workspace write succeeds; outside write denied; `.git` write denied; network denied; Mach service outside the allowlist denied; unavailable backend prompts).
+
+### Phase S3 — Sandbox grants and status
+
+- [ ] Add `network = "deny" | "allow"` enforcement. Start with all-or-nothing; defer host allowlists to a proxy phase and document SSH/raw socket limitations.
+- [ ] Add canonical `write_paths` grants with fd-pinned validation where supported; reject non-canonical, symlinked, or escaping paths.
+- [ ] Show sandbox mode, backend, effective network, writable paths, and probe failures in `ee do trust status` and `ee do doctor`.
+- [ ] Decide whether AI-triggered sandbox escalation is representable. ACP v1 has no sandbox request; start with static grants/config and approved-command fallback, not fabricated host/path requests.
+- [ ] Tests: network deny vs allow, write-path grant accepted/escape rejected, status output, config parsing and defaults.
+
+### Phase S4 — ACP v2 agent-process containment
+
+- [ ] Add an opt-in agent-process sandbox profile to `ee-agent-host` (`AgentProcessConfig`/`process.rs`): same backend as S1/S2, broad reads, rw workspace plus explicit agent state/cache dirs and a private temp dir, `.git` read-only, and network allowed for model API calls.
+- [ ] Keep ACP v2 `session/request_permission` safe-read policy unchanged. The sandbox enforces filesystem containment for commands the agent executes itself; do not auto-allow broader v2 commands because a sandbox exists.
+- [ ] Pass the resolved sandbox spec through the agent launch config and expose `[agents.sandbox] mode = "off" | "workspace-write"` (opt-in initially) plus a status/doctor line.
+- [ ] Avoid nested sandboxes: client `terminal/create` spawns its own sandbox sibling, and MCP terminal tools stay on the MCP grant route.
+- [ ] Document that the agent process keeps network access for model calls, so ACP v2 command containment is filesystem-only until a proxy/network phase; no host-specific enforcement is claimed.
+- [ ] Tests: agent launch argv/profile snapshots; gated integration spawning a shell under the agent profile (outside write denied, workspace write allowed, `.git` write denied, network behavior documented); unavailable backend leaves v2 commands on safe-read/ask without claiming containment.
+
+### Phase S5 — Shared resource limits
+
+- [ ] Extend shared `ee-sandbox` with `ProcessLimits` and a generic `ProcessTreeMonitor` extracted from `ee-plugin-runtime`; the plugin runtime keeps its `Limits` adapter and termination reasons compatible.
+- [ ] Add `ProcessLimits` for sandboxed terminal commands: wall time, aggregate RSS, CPU seconds, open files, file size, and process count; zero/absent means unlimited. Apply kernel rlimits before exec (bwrap `--rlimit-*` where supported, Unix `setrlimit` in `pre_exec` otherwise) and kill the whole process group on wall-time or aggregate breach.
+- [ ] Sample the entire process tree, not just the shell pid: Linux `/proc` descendants and macOS child enumeration plus process accounting. Surface the breach reason in terminal output/status; never silently truncate or kill without a reason.
+- [ ] Optional Linux cgroup v2 backend (`systemd --user` scope or a delegated cgroup) for aggregate memory/CPU/PID limits where available; fall back to rlimits plus sampling. macOS uses rlimits plus sampling.
+- [ ] Add `[agents.terminal_sandbox.limits]` config with unlimited defaults and a `strict` preset; document that builds may need raised limits. Keep the existing output-byte cap independent.
+- [ ] Tests: process-tree sampling, wall-time kill, rlimit application, plugin monitor compatibility, sandboxed command breaches, and no regression with limits disabled.
+
+### Phase S6 — Docs, boundaries, and final validation
+
+- [ ] Document modes, defaults, failure behavior, Ubuntu setup, macOS deprecation, `.git` protection, temp behavior, ACP v2 agent-process containment, resource-limit presets, and the exact scope boundary in `README.md`, `CHANGELOG.md`, and doctor text.
+- [ ] Document that sandboxing is not applied to language servers, proc macros, tasks, plugins, the regular terminal, later user-run builds, or non-terminal agent routes; include the Zed side-channel examples.
+- [ ] Record the persistent-shell vs per-command tradeoff, bwrap creation-time `.git` caveat, ACP v2 filesystem-only guarantee, and network/proxy limitations in the docs and config reference.
+- [ ] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, sandbox unit tests, Linux/macOS gated integration tests, terminal/trust suites, plugin-runtime tests, and verify every touched file stays below 1,000 LOC.
+
+Acceptance:
+
+- A prompt-free granted command can write only inside the workspace and its per-command temp directory; outside writes, `.git` writes, network, and Unix-socket IPC are blocked.
+- With the ACP v2 agent-process sandbox enabled, commands the agent runs itself cannot write outside the workspace or `.git`; network stays available for model calls and this limitation is documented.
+- Missing, setuid, or unusable bwrap and missing `sandbox-exec` produce an approval prompt (or denial under `on_unavailable = "deny"`), never a silent unsandboxed run.
+- Workspace, Git metadata, and agent state/cache paths are canonicalized before sandbox creation; the creation-time caveat is documented.
+- Sandboxed commands do not reuse the persistent shell; each command gets fresh temp state and a fresh mount policy.
+- Resource limits default to unlimited, and a configured wall-time or aggregate breach terminates the whole process group with a visible reason.
+- `ee do doctor` and `ee do trust status` report backend capability and effective policy.
+- Full targeted test gates and file-size checks pass.
+
+Deferred boundaries:
+
+- Host-specific network allowlists and HTTP/HTTPS proxy enforcement (include raw-socket/SSH caveats when added); ACP v2 agent network stays all-or-nothing.
+- Windows/WSL sandboxing; native Windows out of scope.
+- ACP v2 per-command interception without an agent-process sandbox: ACP v2 has no client terminal methods, so the host cannot wrap an agent-owned command directly.
+- MCP terminal tools keep their own `ee do mcp trust grant --execute` route; no cross-route nesting.
+- Resource limits for plugins and terminal commands share the monitor, but plugin seccomp policy remains separate and is not applied to build tools.
