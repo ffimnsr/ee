@@ -22,6 +22,9 @@ pub(crate) struct McpServerToolGrant {
     pub(crate) tool: String,
     pub(crate) category: TrustCategory,
     pub(crate) tool_schema_version: u64,
+    /// Execute pins only: accept any `ee_terminal_create` command text instead
+    /// of requiring a validated simple argv.
+    pub(crate) unrestricted: bool,
 }
 
 impl McpServerToolGrant {
@@ -34,6 +37,9 @@ impl McpServerToolGrant {
         }
         if self.tool_schema_version == 0 {
             return Err("mcp server tool schema version must be at least 1".to_string());
+        }
+        if self.unrestricted && self.category != TrustCategory::Execute {
+            return Err("unrestricted pins are allowed only for execute tools".to_string());
         }
         match self.category {
             TrustCategory::Read
@@ -134,16 +140,25 @@ impl McpServerGrant {
         self.tools.iter().any(|tool| tool.category == TrustCategory::Execute)
     }
 
+    /// Whether terminal execution accepts arbitrary shell command text.
+    pub(crate) fn includes_unrestricted_execution(&self) -> bool {
+        self.tools.iter().any(|tool| tool.category == TrustCategory::Execute && tool.unrestricted)
+    }
+
     /// Preserves execute pins from a replaced grant. Re-trusting a server from
-    /// a non-execution prompt must never silently drop terminal trust; a full
-    /// revoke remains the explicit way to remove it.
+    /// a non-execution prompt must never silently drop terminal trust; an
+    /// existing unrestricted pin stays unrestricted, and a full revoke remains
+    /// the explicit way to remove it.
     pub(crate) fn preserve_execute_pins(&mut self, existing: &Self) {
         for pin in &existing.tools {
-            if pin.category == TrustCategory::Execute
-                && !self.tools.iter().any(|tool| tool.tool == pin.tool)
-            {
-                self.tools.push(pin.clone());
+            if pin.category != TrustCategory::Execute {
+                continue;
             }
+            if let Some(current) = self.tools.iter_mut().find(|tool| tool.tool == pin.tool) {
+                current.unrestricted |= pin.unrestricted;
+                continue;
+            }
+            self.tools.push(pin.clone());
         }
         self.tools.sort_by(|left, right| left.tool.cmp(&right.tool));
     }
@@ -362,7 +377,12 @@ pub(crate) fn pinned_server_tools(transport: ee_mcp::ToolTransport) -> Vec<McpSe
                 }
                 _ => return None,
             };
-            Some(McpServerToolGrant { tool: tool.to_string(), category, tool_schema_version })
+            Some(McpServerToolGrant {
+                tool: tool.to_string(),
+                category,
+                tool_schema_version,
+                unrestricted: false,
+            })
         })
         .collect::<Vec<_>>();
     tools.sort_by(|left, right| left.tool.cmp(&right.tool));
@@ -397,10 +417,26 @@ pub(crate) fn pinned_execution_tools(transport: ee_mcp::ToolTransport) -> Vec<Mc
                 tool: tool.to_string(),
                 category: TrustCategory::Execute,
                 tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+                unrestricted: false,
             }]
         }
         _ => Vec::new(),
     }
+}
+
+/// Pinned terminal-execution tools that accept arbitrary shell command text.
+/// Only `ee_terminal_create` qualifies; the host still requires an explicit
+/// workspace-local grant, a non-read-only mode, and the terminal sandbox.
+pub(crate) fn pinned_unrestricted_execution_tools(
+    transport: ee_mcp::ToolTransport,
+) -> Vec<McpServerToolGrant> {
+    pinned_execution_tools(transport)
+        .into_iter()
+        .map(|mut tool| {
+            tool.unrestricted = true;
+            tool
+        })
+        .collect()
 }
 
 /// Stable rule id for a newly created server grant (`mcp_server_…`).
@@ -689,6 +725,7 @@ mod tests {
                 tool: "ee_delete_path".to_string(),
                 category,
                 tool_schema_version: 1,
+                unrestricted: false,
             };
             assert!(tool.validate().is_err(), "{category:?} must be rejected");
         }
@@ -696,18 +733,21 @@ mod tests {
             tool: "ee_delete_path".to_string(),
             category: TrustCategory::Delete,
             tool_schema_version: 1,
+            unrestricted: false,
         };
         assert!(delete.validate().is_ok(), "application-owned delete pins are allowed");
         let terminal = McpServerToolGrant {
             tool: "ee_terminal_create".to_string(),
             category: TrustCategory::Execute,
             tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            unrestricted: true,
         };
         assert!(terminal.validate().is_ok(), "terminal execution opt-in is allowed");
         let wrong_execute = McpServerToolGrant {
             tool: "ee_format_file".to_string(),
             category: TrustCategory::Execute,
             tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            unrestricted: false,
         };
         assert!(wrong_execute.validate().is_err(), "other execute pins are rejected");
         assert!(
@@ -725,6 +765,7 @@ mod tests {
             tool: "ee_read_text_file".to_string(),
             category: TrustCategory::Read,
             tool_schema_version: 1,
+            unrestricted: false,
         };
         assert!(
             McpServerGrant::new(

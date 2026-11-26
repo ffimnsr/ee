@@ -473,8 +473,8 @@ fn run_workspace_trust(command: WorkspaceTrustCommands) -> io::Result<()> {
 
 fn run_mcp_trust(command: McpTrustCommands) -> io::Result<()> {
     match command {
-        McpTrustCommands::Grant { server, transport, execute } => {
-            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport, execute)
+        McpTrustCommands::Grant { server, transport, execute, yolo } => {
+            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport, execute, yolo)
         }
         McpTrustCommands::Revoke { server, transport, execute } => {
             crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport, execute)

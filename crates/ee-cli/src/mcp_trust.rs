@@ -26,7 +26,7 @@ use crate::policy::{
 use crate::workspace_trust::{WorkspaceTrustDecision, WorkspaceTrustStore};
 
 /// Schema version of the MCP server trust document.
-pub(crate) const MCP_TRUST_SCHEMA_VERSION: u64 = 1;
+pub(crate) const MCP_TRUST_SCHEMA_VERSION: u64 = 2;
 
 const MCP_TRUST_DIR: &str = "mcp-trust";
 
@@ -61,6 +61,8 @@ struct RawTool {
     tool: String,
     category: TrustCategory,
     tool_schema_version: u64,
+    #[serde(default)]
+    unrestricted: bool,
 }
 
 /// Owner-only MCP server trust store for one canonical workspace.
@@ -243,6 +245,7 @@ fn serialize_document(
                         tool: tool.tool.clone(),
                         category: tool.category,
                         tool_schema_version: tool.tool_schema_version,
+                        unrestricted: tool.unrestricted,
                     })
                     .collect(),
             })
@@ -262,7 +265,7 @@ fn parse_document(
     let document = toml::from_str::<RawDocument>(text).map_err(|error| {
         TrustStoreError::ParseFailure(format!("invalid mcp trust TOML: {error}"))
     })?;
-    if document.schema_version != MCP_TRUST_SCHEMA_VERSION {
+    if !(1..=MCP_TRUST_SCHEMA_VERSION).contains(&document.schema_version) {
         return Err(TrustStoreError::UnsupportedSchemaVersion(document.schema_version));
     }
     let workspace = WorkspaceIdentity::parse(&document.workspace.identity).map_err(|error| {
@@ -291,6 +294,7 @@ fn parse_document(
                 tool: tool.tool,
                 category: tool.category,
                 tool_schema_version: tool.tool_schema_version,
+                unrestricted: tool.unrestricted,
             })
             .collect::<Vec<_>>();
         grants.push(
@@ -314,6 +318,7 @@ pub(crate) fn cmd_mcp_trust_grant(
     server: &str,
     transport: McpTrustTransport,
     execute: bool,
+    yolo: bool,
 ) -> io::Result<()> {
     let workspace = crate::workspace_trust::workspace_root_for_cli()?;
     require_trusted_workspace(&workspace)?;
@@ -331,15 +336,24 @@ pub(crate) fn cmd_mcp_trust_grant(
             .map(|grant| grant.id.clone())
             .unwrap_or_else(generate_mcp_server_grant_id);
         let mut tools = pinned_server_tools(tool_transport);
-        if execute {
-            tools.extend(pinned_execution_tools(tool_transport));
-            tools.sort_by(|left, right| left.tool.cmp(&right.tool));
-            tools.dedup_by(|left, right| left.tool == right.tool);
-        }
-        let execute_granted = execute
+        let execution_tools = if yolo {
+            crate::policy::pinned_unrestricted_execution_tools(tool_transport)
+        } else if execute {
+            pinned_execution_tools(tool_transport)
+        } else {
+            Vec::new()
+        };
+        tools.extend(execution_tools.iter().cloned());
+        tools.sort_by(|left, right| left.tool.cmp(&right.tool));
+        tools.dedup_by(|left, right| left.tool == right.tool);
+        let execute_granted = !execution_tools.is_empty()
             || existing
                 .find(server, identity)
                 .is_some_and(crate::policy::McpServerGrant::includes_execution);
+        let unrestricted_granted = yolo
+            || existing
+                .find(server, identity)
+                .is_some_and(crate::policy::McpServerGrant::includes_unrestricted_execution);
         let grant = McpServerGrant::new(
             id,
             *store.workspace(),
@@ -351,12 +365,23 @@ pub(crate) fn cmd_mcp_trust_grant(
         .map_err(io::Error::other)?;
         store.add_grant(grant).map_err(io::Error::other)?;
         println!(
-            "mcp server trust granted: server={server} transport={identity} tools={} execute={execute_granted}",
+            "mcp server trust granted: server={server} transport={identity} tools={} execute={execute_granted} unrestricted={unrestricted_granted}",
             pinned_server_tools(tool_transport).len()
                 + usize::from(execute_granted) * pinned_execution_tools(tool_transport).len()
         );
     }
     println!("host-local store: {}", store.path().display());
+    if yolo {
+        let settings = crate::config::load_config(None);
+        if settings.agents.terminal_sandbox.mode == crate::config::TerminalSandboxMode::Off {
+            println!(
+                "warning: --yolo is active while terminal sandbox mode is off; accepted MCP terminal commands run unsandboxed"
+            );
+        }
+        println!(
+            "--yolo covers native ee_terminal_create only; MCP writes and other execute tools keep their pinned trust categories"
+        );
+    }
     Ok(())
 }
 
@@ -405,12 +430,13 @@ pub(crate) fn cmd_mcp_trust_status(server: Option<&str>) -> io::Result<()> {
             continue;
         }
         println!(
-            "  {} server={} transport={} tools={} execute={} granted_at={}",
+            "  {} server={} transport={} tools={} execute={} unrestricted={} granted_at={}",
             grant.id,
             grant.server,
             grant.transport_identity,
             grant.tool_count(),
             grant.includes_execution(),
+            grant.includes_unrestricted_execution(),
             grant.granted_at
         );
         println!(
@@ -602,6 +628,7 @@ fn sync_parent_dir(_dir: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::pinned_unrestricted_execution_tools;
 
     fn workspace_root(base: &Path, name: &str) -> PathBuf {
         let root = base.join(name);
@@ -723,6 +750,40 @@ mod tests {
         assert_eq!(loaded.grants().len(), 1);
         assert!(!loaded.grants()[0].includes_execution());
         assert!(!loaded.grants()[0].tools.is_empty());
+    }
+
+    #[test]
+    fn unrestricted_execution_round_trips_and_survives_simple_retrust() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = workspace_root(temp.path(), "repo");
+        let base = temp.path().join("state");
+        let store = McpTrustStore::at(&base, &root).unwrap();
+        let workspace = *store.workspace();
+        let mut tools = pinned_server_tools(ee_mcp::ToolTransport::Stdio);
+        tools.extend(pinned_unrestricted_execution_tools(ee_mcp::ToolTransport::Stdio));
+        let unrestricted = McpServerGrant::new(
+            String::from("mcp_server_yolo"),
+            workspace,
+            String::from("ee"),
+            String::from("stdio:ee --mcp-proxy"),
+            crate::policy::mcp_server_trust::granted_at_now(),
+            tools,
+        )
+        .unwrap();
+        store.add_grant(unrestricted).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(loaded.grants()[0].includes_execution());
+        assert!(loaded.grants()[0].includes_unrestricted_execution());
+        assert!(fs::read_to_string(store.path()).unwrap().contains("unrestricted = true"));
+
+        // Plain re-trust keeps the yolo pin rather than downgrading it.
+        store.add_grant(grant(workspace, "stdio:ee --mcp-proxy")).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(loaded.grants()[0].includes_execution());
+        assert!(loaded.grants()[0].includes_unrestricted_execution());
+
+        assert_eq!(store.revoke_execute("ee", "stdio:ee --mcp-proxy").unwrap(), 1);
+        assert!(!store.load().unwrap().grants()[0].includes_unrestricted_execution());
     }
 
     #[test]

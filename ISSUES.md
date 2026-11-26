@@ -745,4 +745,5 @@ Work items:
 - [x] Remove the implicit `--server ee` default from MCP grant and revoke; require the id explicitly and update help text.
 - [x] Keep `--transport` scoped to the selected server and document that `all` is transport-wide, not server-wide.
 - [x] Add CLI parse tests for both canonical paths, the missing-server rejection, and preserved aliases.
+- [x] Add MCP terminal `--yolo` parity: `ee do agent trust mcp grant --server ee --yolo` stores an unrestricted execute pin, auto-runs arbitrary `ee_terminal_create` text only in a non-read-only mode with a workspace cwd and a ready sandbox, and preserves the pin across simple re-trust until `revoke --execute`.
 - [x] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, and the CLI/trust/MCP test filters.

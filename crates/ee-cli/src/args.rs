@@ -479,6 +479,12 @@ pub(crate) enum McpTrustCommands {
         /// Also grant terminal execution (`ee_terminal_create`) for this server
         #[arg(long)]
         execute: bool,
+        /// Grant unrestricted terminal execution: any `ee_terminal_create`
+        /// command text, including pipes and redirects. Implies --execute;
+        /// runs in the terminal sandbox when its mode is not off, and still
+        /// respects read-only modes, explicit denies, and safeguards
+        #[arg(long)]
+        yolo: bool,
     },
     /// Revoke trust for one MCP server
     Revoke {

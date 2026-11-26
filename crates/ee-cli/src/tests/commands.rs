@@ -511,6 +511,23 @@ fn cli_utility_commands_live_under_do() {
     ));
 
     let cli = crate::Cli::try_parse_from([
+        "ee", "do", "agent", "trust", "mcp", "grant", "--server", "ee", "--yolo",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Mcp {
+                        command: crate::McpTrustCommands::Grant { yolo: true, .. }
+                    }
+                }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
         "ee",
         "do",
         "mcp",

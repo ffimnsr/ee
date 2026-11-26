@@ -519,9 +519,40 @@ impl App {
             }
             ApprovalKind::TerminalCreate { request } => {
                 self.command_invocation_for_request(request).is_ok()
+                    || self.mcp_unrestricted_terminal_eligible(prompt)
             }
             _ => true,
         }
+    }
+
+    /// Whether an MCP-originated terminal request carries an unrestricted
+    /// execute pin and may skip command-shape validation. Requires the same
+    /// workspace, read-only-mode, cwd, and sandbox gates as native yolo.
+    fn mcp_unrestricted_terminal_eligible(&self, prompt: &ApprovalPrompt) -> bool {
+        let ApprovalKind::TerminalCreate { request } = &prompt.kind else {
+            return false;
+        };
+        let Some(invocation) = prompt.mcp.as_ref() else {
+            return false;
+        };
+        if invocation.server != "ee"
+            || invocation.tool != "ee_terminal_create"
+            || invocation.category != TrustCategory::Execute
+        {
+            return false;
+        }
+        if !self.trusted_mode_allows(&prompt.session_id) {
+            return false;
+        }
+        let Some(trust) = self.effective_mcp_server_trust() else {
+            return false;
+        };
+        let Some(grant) = trust.find(&invocation.server, &invocation.transport_identity) else {
+            return false;
+        };
+        grant.includes_unrestricted_execution()
+            && self.auto_sandbox_ready(prompt)
+            && self.terminal_cwd_within_primary(request)
     }
 
     /// Whether a pending approval may skip the prompt because the host-local

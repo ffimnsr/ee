@@ -69,18 +69,24 @@ impl App {
             // Unrestricted grant: any command text, but keep the workspace cwd
             // scope so the grant never turns an explicit outside cwd into
             // prompt-free execution.
-            let Some(primary) = self.primary_workspace_root() else {
-                return false;
-            };
-            let raw_cwd = request.cwd.as_deref().unwrap_or(&self.working_dir);
-            let Ok(canonical_cwd) =
-                crate::policy::resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())
-            else {
-                return false;
-            };
-            return canonical_cwd.starts_with(&primary);
+            return self.terminal_cwd_within_primary(request);
         }
         self.terminal_trust_invocation(request).is_some()
+    }
+
+    /// Whether a terminal request's cwd stays inside the primary workspace.
+    /// Used by unrestricted grants that skip command-shape validation.
+    pub(super) fn terminal_cwd_within_primary(&self, request: &CreateTerminalRequest) -> bool {
+        let Some(primary) = self.primary_workspace_root() else {
+            return false;
+        };
+        let raw_cwd = request.cwd.as_deref().unwrap_or(&self.working_dir);
+        let Ok(canonical_cwd) =
+            crate::policy::resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())
+        else {
+            return false;
+        };
+        canonical_cwd.starts_with(&primary)
     }
 
     /// Builds the sandbox spec for one native terminal request.

@@ -566,6 +566,7 @@ impl App {
             && matches!(
                 decision.reason,
                 DecisionReason::NoMatchingRule
+                    | DecisionReason::UnknownOperation
                     | DecisionReason::ToolDefaultConfirm
                     | DecisionReason::CategoryDefaultConfirm
                     | DecisionReason::GlobalDefaultConfirm

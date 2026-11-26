@@ -100,6 +100,47 @@ fn terminal_execution_opt_in_is_separate_and_persists() {
 }
 
 #[test]
+fn unrestricted_mcp_execution_auto_runs_shell_command_text() {
+    let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let state_dir = temp.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    app.agents.test_trust_store_base = Some(state_dir.clone());
+    app.config.agents.read_only_modes.clear();
+    WorkspaceTrustStore::at(&state_dir, temp.path())
+        .unwrap()
+        .set_decision(WorkspaceTrustDecision::Trusted)
+        .unwrap();
+
+    let store = McpTrustStore::at(&state_dir, temp.path()).unwrap();
+    let mut tools = crate::policy::pinned_server_tools(ee_mcp::ToolTransport::Stdio);
+    tools.extend(crate::policy::pinned_unrestricted_execution_tools(ee_mcp::ToolTransport::Stdio));
+    let grant = crate::policy::McpServerGrant::new(
+        String::from("mcp_server_yolo"),
+        *store.workspace(),
+        String::from("ee"),
+        String::from("stdio:ee --mcp-proxy"),
+        crate::policy::mcp_server_trust::granted_at_now(),
+        tools,
+    )
+    .unwrap();
+    store.add_grant(grant).unwrap();
+    app.reload_mcp_server_trust();
+
+    let mut stream = connect_proxy(&app);
+    proxy_send(&mut stream, 1, terminal_frame("printf yolo > mcp-yolo-marker", json!([])));
+    wait_until(&mut app, "unrestricted MCP terminal auto-spawned", |app| {
+        app.agents.terminals.tracked_count() == 1
+            && app.agents.approvals.is_empty()
+            && temp.path().join("mcp-yolo-marker").exists()
+    });
+    let _ = proxy_recv(&mut stream);
+}
+
+#[test]
 fn general_server_trust_does_not_auto_allow_terminal_execution() {
     let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
     open_pane_and_wait_ready(&mut app);
