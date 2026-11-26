@@ -17,6 +17,7 @@ vendored = ["ee-agent-memory/vendored"]
 
 [dependencies]
 ee-agent-protocol.workspace = true
+ee-sandbox = { path = "../ee-sandbox" }
 ee-agent-orchestrator.workspace = true
 ee-agent-memory.workspace = true
 ee-mcp.workspace = true

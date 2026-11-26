@@ -56,11 +56,38 @@ pub(crate) fn doctor_report(config_path: Option<&PathBuf>) -> String {
 
     report
 }
+pub(crate) fn terminal_sandbox_report() -> String {
+    let probe = ee_sandbox::cached_probe();
+    let mut report = format!("  terminal sandbox: {}\n", probe.summary());
+    if cfg!(target_os = "linux") && !probe.available {
+        report.push_str(
+            "    Ubuntu 23.10+: install bubblewrap and the bwrap-userns-restrict AppArmor profile\n",
+        );
+    }
+    if probe.setuid {
+        report
+            .push_str("    setuid bwrap is rejected; install the non-setuid bubblewrap package\n");
+    }
+    report
+}
 
 pub(crate) fn cmd_doctor(config_path: Option<&PathBuf>) {
     print!("{}", doctor_report(config_path));
+    print!("{}", terminal_sandbox_report());
     println!();
     print_language_query_diagnostics();
     println!();
     println!("No problems detected.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_sandbox_report_names_the_backend() {
+        let report = terminal_sandbox_report();
+        assert!(report.contains("terminal sandbox:"));
+        assert!(report.contains("bubblewrap") || report.contains("seatbelt"));
+    }
 }

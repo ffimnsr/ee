@@ -14,7 +14,8 @@ use super::discovery::ConfigLayerKind;
 #[cfg(feature = "agents")]
 use super::discovery::{ConfigEnvironment, ConfigScope};
 use super::raw::{
-    AgentApprovalToml, AgentServerToml, AgentsToml, RubberDuckToml, WorkspaceMemoryToml,
+    AgentApprovalToml, AgentProcessSandboxToml, AgentServerToml, AgentsToml, RubberDuckToml,
+    TerminalSandboxLimitsToml, TerminalSandboxToml, WorkspaceMemoryToml,
 };
 use super::rubber_duck::{RubberDuckModeSetting, RubberDuckSettings};
 use super::secret_value::ConfigSecretValue;
@@ -83,6 +84,226 @@ impl AgentAlignmentMode {
     }
 }
 
+/// Resolved `[agents.sandbox]` policy for the agent subprocess.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AgentProcessSandboxMode {
+    /// Run the agent process without an OS sandbox.
+    #[default]
+    Off,
+    /// Confine writes to the workspace and explicit grants while keeping
+    /// network access for model calls.
+    WorkspaceWrite,
+}
+
+impl AgentProcessSandboxMode {
+    /// Parses a config value.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "off" => Ok(Self::Off),
+            "workspace-write" => Ok(Self::WorkspaceWrite),
+            other => Err(format!(
+                "agents.sandbox.mode must be \"off\" or \"workspace-write\", got {other:?}"
+            )),
+        }
+    }
+
+    /// Config label.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::WorkspaceWrite => "workspace-write",
+        }
+    }
+}
+
+/// Resolved `[agents.sandbox]` policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentProcessSandboxSettings {
+    pub mode: AgentProcessSandboxMode,
+    pub write_paths: Vec<PathBuf>,
+}
+
+/// Merges `[agents.sandbox]`; host-global only because it controls containment.
+pub(super) fn merge_agent_process_sandbox(
+    settings: &mut AgentProcessSandboxSettings,
+    patch: &AgentProcessSandboxToml,
+    kind: ConfigLayerKind,
+) {
+    if !kind.is_host_global() {
+        eprintln!(
+            "ee: warning: {kind} agents.sandbox is host-global only; ignoring layer",
+            kind = kind.label()
+        );
+        return;
+    }
+    if let Some(mode) = patch.mode.as_deref() {
+        match AgentProcessSandboxMode::parse(mode) {
+            Ok(mode) => settings.mode = mode,
+            Err(error) => eprintln!("ee: warning: invalid agents.sandbox.mode: {error}"),
+        }
+    }
+    if let Some(paths) = &patch.write_paths {
+        settings.write_paths =
+            paths.iter().filter(|path| !path.trim().is_empty()).map(PathBuf::from).collect();
+    }
+}
+
+/// When the OS sandbox is applied to terminal commands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TerminalSandboxMode {
+    /// Never sandbox terminal commands.
+    Off,
+    /// Sandbox commands auto-allowed by workspace terminal execution trust.
+    #[default]
+    Granted,
+    /// Sandbox every native terminal command.
+    All,
+}
+
+impl TerminalSandboxMode {
+    /// Parses a config value.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "off" => Ok(Self::Off),
+            "granted" => Ok(Self::Granted),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "terminal_sandbox.mode must be \"off\", \"granted\", or \"all\", got {other:?}"
+            )),
+        }
+    }
+
+    /// Config label.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Granted => "granted",
+            Self::All => "all",
+        }
+    }
+}
+
+/// Behavior when the sandbox backend is unavailable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TerminalSandboxUnavailable {
+    /// Fall back to the explicit approval prompt.
+    #[default]
+    Prompt,
+    /// Deny the request instead of prompting.
+    Deny,
+}
+
+impl TerminalSandboxUnavailable {
+    /// Parses a config value.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "prompt" => Ok(Self::Prompt),
+            "deny" => Ok(Self::Deny),
+            other => Err(format!(
+                "terminal_sandbox.on_unavailable must be \"prompt\" or \"deny\", got {other:?}"
+            )),
+        }
+    }
+
+    /// Config label.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// Resolved `[agents.terminal_sandbox]` policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalSandboxSettings {
+    pub mode: TerminalSandboxMode,
+    pub read: ee_sandbox::ReadAccess,
+    pub network: ee_sandbox::NetworkAccess,
+    pub on_unavailable: TerminalSandboxUnavailable,
+    pub write_paths: Vec<PathBuf>,
+    pub limits: ee_sandbox::ProcessLimits,
+}
+
+impl Default for TerminalSandboxSettings {
+    fn default() -> Self {
+        Self {
+            mode: TerminalSandboxMode::Granted,
+            read: ee_sandbox::ReadAccess::Broad,
+            network: ee_sandbox::NetworkAccess::Deny,
+            on_unavailable: TerminalSandboxUnavailable::Prompt,
+            write_paths: Vec::new(),
+            limits: ee_sandbox::ProcessLimits::default(),
+        }
+    }
+}
+
+/// Merges one `[agents.terminal_sandbox]` patch. Only host-global config may
+/// change sandbox policy: a checked-in workspace file must not disable it.
+pub(super) fn merge_terminal_sandbox(
+    settings: &mut TerminalSandboxSettings,
+    patch: &TerminalSandboxToml,
+    kind: ConfigLayerKind,
+) {
+    if !kind.is_host_global() {
+        eprintln!(
+            "ee: warning: {kind} agents.terminal_sandbox is host-global only; ignoring layer",
+            kind = kind.label()
+        );
+        return;
+    }
+    if let Some(mode) = patch.mode.as_deref() {
+        match TerminalSandboxMode::parse(mode) {
+            Ok(mode) => settings.mode = mode,
+            Err(error) => eprintln!("ee: warning: invalid agents.terminal_sandbox.mode: {error}"),
+        }
+    }
+    if let Some(read) = patch.read.as_deref() {
+        match ee_sandbox::ReadAccess::parse(read) {
+            Ok(read) => settings.read = read,
+            Err(error) => eprintln!("ee: warning: invalid agents.terminal_sandbox.read: {error}"),
+        }
+    }
+    if let Some(network) = patch.network.as_deref() {
+        match ee_sandbox::NetworkAccess::parse(network) {
+            Ok(network) => settings.network = network,
+            Err(error) => {
+                eprintln!("ee: warning: invalid agents.terminal_sandbox.network: {error}")
+            }
+        }
+    }
+    if let Some(value) = patch.on_unavailable.as_deref() {
+        match TerminalSandboxUnavailable::parse(value) {
+            Ok(value) => settings.on_unavailable = value,
+            Err(error) => {
+                eprintln!("ee: warning: invalid agents.terminal_sandbox.on_unavailable: {error}")
+            }
+        }
+    }
+    if let Some(paths) = &patch.write_paths {
+        settings.write_paths =
+            paths.iter().filter(|path| !path.trim().is_empty()).map(PathBuf::from).collect();
+    }
+    if let Some(limits) = &patch.limits {
+        settings.limits = parse_terminal_limits(limits);
+    }
+}
+
+fn parse_terminal_limits(limits: &TerminalSandboxLimitsToml) -> ee_sandbox::ProcessLimits {
+    let positive = |value: Option<u64>| value.filter(|value| *value > 0);
+    ee_sandbox::ProcessLimits {
+        wall_seconds: positive(limits.wall_seconds),
+        max_rss_bytes: positive(limits.max_rss_bytes),
+        max_cpu_seconds: positive(limits.max_cpu_seconds),
+        max_open_files: positive(limits.max_open_files),
+        max_file_bytes: positive(limits.max_file_bytes),
+        max_processes: positive(limits.max_processes),
+    }
+}
+
 /// Resolved `[agents.approval]` policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AgentApprovalSettings {
@@ -139,6 +360,10 @@ pub(crate) struct AgentsSettings {
     pub remote_permission_mode: Option<String>,
     /// Frontend-resolved critic policy; translated to backend policy on use.
     pub rubber_duck: RubberDuckSettings,
+    /// OS sandbox policy for prompt-free terminal commands.
+    pub terminal_sandbox: TerminalSandboxSettings,
+    /// OS sandbox policy for the agent subprocess.
+    pub sandbox: AgentProcessSandboxSettings,
     /// Durable workspace memory with persistence. Enabled by default when
     /// agents mode is on; set `enabled = false` to opt out.
     pub workspace_memory: WorkspaceMemorySettings,
@@ -164,6 +389,8 @@ impl Default for AgentsSettings {
             permissions: None,
             remote_permission_mode: None,
             rubber_duck: RubberDuckSettings::default(),
+            terminal_sandbox: TerminalSandboxSettings::default(),
+            sandbox: AgentProcessSandboxSettings::default(),
             workspace_memory: WorkspaceMemorySettings::default(),
             #[cfg(any(feature = "agents", test))]
             web_context: AgentWebContextConfig::default(),
@@ -420,7 +647,7 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
                     RubberDuckModeSetting::Manual => "manual",
                     RubberDuckModeSetting::Automatic => "automatic",
                 }
-                .into(),
+                .to_string(),
             ),
             internal_model_id: agents.rubber_duck.internal_model_id.clone(),
             external_agent_id: agents.rubber_duck.external_agent_id.clone(),
@@ -428,6 +655,34 @@ pub(super) fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsT
             max_context_bytes: Some(agents.rubber_duck.max_context_bytes),
             max_output_bytes: Some(agents.rubber_duck.max_output_bytes),
             timeout_ms: Some(agents.rubber_duck.timeout_ms),
+        }),
+        terminal_sandbox: Some(TerminalSandboxToml {
+            mode: Some(agents.terminal_sandbox.mode.label().to_string()),
+            read: Some(agents.terminal_sandbox.read.label().to_string()),
+            network: Some(agents.terminal_sandbox.network.label().to_string()),
+            on_unavailable: Some(agents.terminal_sandbox.on_unavailable.label().to_string()),
+            write_paths: Some(
+                agents
+                    .terminal_sandbox
+                    .write_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            ),
+            limits: Some(TerminalSandboxLimitsToml {
+                wall_seconds: agents.terminal_sandbox.limits.wall_seconds,
+                max_rss_bytes: agents.terminal_sandbox.limits.max_rss_bytes,
+                max_cpu_seconds: agents.terminal_sandbox.limits.max_cpu_seconds,
+                max_open_files: agents.terminal_sandbox.limits.max_open_files,
+                max_file_bytes: agents.terminal_sandbox.limits.max_file_bytes,
+                max_processes: agents.terminal_sandbox.limits.max_processes,
+            }),
+        }),
+        sandbox: Some(AgentProcessSandboxToml {
+            mode: Some(agents.sandbox.mode.label().to_string()),
+            write_paths: Some(
+                agents.sandbox.write_paths.iter().map(|path| path.display().to_string()).collect(),
+            ),
         }),
         web_context: {
             #[cfg(any(feature = "agents", test))]

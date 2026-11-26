@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
+use ee_sandbox::{SandboxSpec, cached_probe};
 
 /// Maximum number of stderr lines retained per agent process.
 pub const STDERR_MAX_LINES: usize = 256;
@@ -36,6 +37,8 @@ pub struct AgentProcessConfig {
     pub env: std::collections::BTreeMap<String, String>,
     /// Working directory; defaults to the host's current directory.
     pub cwd: Option<PathBuf>,
+    /// Optional OS sandbox applied to the agent process and its descendants.
+    pub sandbox: Option<SandboxSpec>,
 }
 
 impl AgentProcessConfig {
@@ -47,6 +50,7 @@ impl AgentProcessConfig {
             args: Vec::new(),
             env: std::collections::BTreeMap::new(),
             cwd: None,
+            sandbox: None,
         }
     }
 
@@ -142,10 +146,82 @@ impl AgentProcess {
     /// started.
     pub async fn spawn(config: &AgentProcessConfig) -> Result<Self, AgentError> {
         config.validate()?;
-        let mut command = tokio::process::Command::new(&config.command);
+        let requested_sandbox = config.sandbox.as_ref();
+        let probe = requested_sandbox.map(|_| cached_probe());
+        let sandbox = match (requested_sandbox, probe) {
+            (Some(spec), Some(probe)) if probe.available => Some(spec),
+            (Some(_), Some(probe)) => {
+                tracing::warn!(
+                    agent = %config.command,
+                    reason = %probe.summary(),
+                    "agent process sandbox unavailable; starting without containment"
+                );
+                None
+            }
+            _ => None,
+        };
+        if sandbox.is_none() && requested_sandbox.is_some() {
+            tracing::warn!(agent = %config.command, "ACP v2 command containment is not active");
+        }
+        let mut command = if let Some(spec @ SandboxSpec { .. }) = sandbox {
+            let probe = probe.expect("checked above");
+            let program = probe.program.clone().ok_or_else(|| AgentError::SpawnFailed {
+                agent_id: config.command.clone(),
+                message: String::from("agent sandbox backend path is missing"),
+            })?;
+            let mut env: Vec<(String, String)> = std::env::vars().collect();
+            env.extend(config.env.iter().map(|(key, value)| (key.clone(), value.clone())));
+            #[cfg(target_os = "linux")]
+            let wrapped = ee_sandbox::bwrap_direct_command(
+                &program,
+                spec,
+                &config.command,
+                &config.args,
+                &env,
+            )
+            .map_err(|error| AgentError::SpawnFailed {
+                agent_id: config.command.clone(),
+                message: format!("agent sandbox setup failed: {error}"),
+            })?;
+            #[cfg(target_os = "macos")]
+            let wrapped = {
+                let temp =
+                    std::env::temp_dir().join(format!("ee-agent-sandbox-{}", std::process::id()));
+                std::fs::create_dir_all(&temp).map_err(|error| AgentError::SpawnFailed {
+                    agent_id: config.command.clone(),
+                    message: format!("agent sandbox temp dir failed: {error}"),
+                })?;
+                ee_sandbox::seatbelt_direct_command(
+                    &program,
+                    spec,
+                    &config.command,
+                    &config.args,
+                    &env,
+                    &temp,
+                )
+                .map_err(|error| AgentError::SpawnFailed {
+                    agent_id: config.command.clone(),
+                    message: format!("agent sandbox setup failed: {error}"),
+                })?
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let wrapped = return Err(AgentError::SpawnFailed {
+                agent_id: config.command.clone(),
+                message: String::from("agent sandbox is supported only on Linux and macOS"),
+            });
+            let mut command = tokio::process::Command::new(wrapped.program);
+            command.args(&wrapped.args);
+            command.env_clear();
+            if !wrapped.env.is_empty() {
+                command.envs(wrapped.env.iter().map(|(key, value)| (key, value)));
+            }
+            command
+        } else {
+            let mut command = tokio::process::Command::new(&config.command);
+            command.args(&config.args).envs(&config.env);
+            command
+        };
         command
-            .args(&config.args)
-            .envs(&config.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -268,6 +344,39 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot[0].len() <= STDERR_MAX_LINE_BYTES);
         assert!(snapshot[0].ends_with('…'));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_agent_process_cannot_write_outside_workspace() {
+        use ee_sandbox::{NetworkAccess, SandboxSpec};
+        if !ee_sandbox::cached_probe().available {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let spec = SandboxSpec::new(workspace.path(), workspace.path())
+            .unwrap()
+            .with_network(NetworkAccess::Allow);
+
+        let inside = workspace.path().join("inside-marker");
+        let mut config = AgentProcessConfig::new("sh");
+        config.args = vec![String::from("-c"), format!("printf ok > '{}'", inside.display())];
+        config.sandbox = Some(spec.clone());
+        let mut process = AgentProcess::spawn(&config).await.expect("sandboxed agent spawns");
+        let status = process.child().wait().await.expect("agent exits");
+        assert!(status.success());
+        assert!(inside.exists());
+
+        let outside_marker = outside.path().join("outside-marker");
+        let mut config = AgentProcessConfig::new("sh");
+        config.args =
+            vec![String::from("-c"), format!("printf bad > '{}'", outside_marker.display())];
+        config.sandbox = Some(spec);
+        let mut process = AgentProcess::spawn(&config).await.expect("sandboxed agent spawns");
+        let status = process.child().wait().await.expect("agent exits");
+        assert!(!status.success(), "outside write must fail inside the agent sandbox");
+        assert!(!outside_marker.exists());
     }
 
     #[test]

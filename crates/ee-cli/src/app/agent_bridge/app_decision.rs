@@ -308,6 +308,7 @@ impl App {
                     prompt.agent_id.as_deref(),
                     None,
                     prompt.reply,
+                    false,
                 );
             }
             ApprovalKind::Filesystem { operation } => {
@@ -353,6 +354,7 @@ impl App {
                     prompt.agent_id.as_deref(),
                     Some(rule_id),
                     prompt.reply,
+                    true,
                 ),
                 _ => unreachable!(),
             },
@@ -485,7 +487,7 @@ impl App {
     /// decision is resolved from the active workspace, so the trusted-write
     /// built-in allow must be scoped to that same root; extra workspace roots
     /// stay out of scope.
-    pub(super) fn primary_workspace_root(&self) -> Option<PathBuf> {
+    pub(crate) fn primary_workspace_root(&self) -> Option<PathBuf> {
         std::fs::canonicalize(self.current_workspace_root()).ok()
     }
 
@@ -750,6 +752,7 @@ impl App {
         agent_id: Option<&str>,
         rule_id: Option<String>,
         reply: oneshot::Sender<ClientRequestResult>,
+        sandboxed: bool,
     ) {
         // A request without a cwd runs in the active workspace, matching the
         // safeguard inspection above. Inheriting the process-global cwd is not
@@ -762,7 +765,23 @@ impl App {
             );
         }
         let validation = self.validation_run_for_terminal(session_id, &request);
-        let result = self.agents.terminals.spawn(&request, agent_id);
+        let sandbox_mode = self.config.agents.terminal_sandbox.mode;
+        let sandboxed =
+            sandboxed || matches!(sandbox_mode, crate::config::TerminalSandboxMode::All);
+        let sandbox = if sandboxed && sandbox_mode != crate::config::TerminalSandboxMode::Off {
+            match self.terminal_sandbox_spec(&request) {
+                Ok(spec) => Some(spec),
+                Err(error) => {
+                    let message = format!("terminal sandbox unavailable: {error}");
+                    self.backend.status_message = Some(message.clone());
+                    let _ = reply.send(Err(AgentError::Io(message)));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let result = self.agents.terminals.spawn_with_sandbox(&request, agent_id, sandbox.as_ref());
         match (&result, validation) {
             (Ok(response), Some(validation)) => {
                 if let Err(error) = self.agents.terminals.register_validation_run(

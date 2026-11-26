@@ -18,6 +18,55 @@ fn agents_settings_enabled_by_default() {
     );
     assert!(settings.agents.servers.is_empty());
     assert!(settings.mcp.servers.is_empty());
+    assert_eq!(settings.agents.terminal_sandbox.mode, TerminalSandboxMode::Granted);
+    assert_eq!(settings.agents.terminal_sandbox.read, ee_sandbox::ReadAccess::Broad);
+    assert_eq!(settings.agents.terminal_sandbox.network, ee_sandbox::NetworkAccess::Deny);
+    assert_eq!(settings.agents.terminal_sandbox.on_unavailable, TerminalSandboxUnavailable::Prompt);
+    assert!(!settings.agents.terminal_sandbox.limits.is_enabled());
+    assert_eq!(settings.agents.sandbox.mode, AgentProcessSandboxMode::Off);
+}
+
+#[test]
+fn terminal_sandbox_config_is_host_global_only() {
+    let raw: EeToml = toml::from_str(
+        r#"
+[agents.terminal_sandbox]
+mode = "all"
+read = "workspace"
+network = "allow"
+on_unavailable = "deny"
+write_paths = ["/tmp/cache"]
+
+[agents.terminal_sandbox.limits]
+wall_seconds = 5
+max_rss_bytes = 1024
+"#,
+    )
+    .unwrap();
+    let mut settings = EditorSettings::default();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.agents.terminal_sandbox.mode, TerminalSandboxMode::All);
+    assert_eq!(settings.agents.terminal_sandbox.read, ee_sandbox::ReadAccess::Workspace);
+    assert_eq!(settings.agents.terminal_sandbox.network, ee_sandbox::NetworkAccess::Allow);
+    assert_eq!(settings.agents.terminal_sandbox.on_unavailable, TerminalSandboxUnavailable::Deny);
+    assert_eq!(
+        settings.agents.terminal_sandbox.write_paths,
+        vec![Path::new("/tmp/cache").to_path_buf()]
+    );
+    assert_eq!(settings.agents.terminal_sandbox.limits.wall_seconds, Some(5));
+    assert_eq!(settings.agents.terminal_sandbox.limits.max_rss_bytes, Some(1024));
+
+    let raw: EeToml = toml::from_str("[agents.terminal_sandbox]\nmode = \"off\"\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::Ancestor);
+    assert_eq!(
+        settings.agents.terminal_sandbox.mode,
+        TerminalSandboxMode::All,
+        "repository config cannot disable the sandbox"
+    );
+
+    let raw: EeToml = toml::from_str("[agents.sandbox]\nmode = \"workspace-write\"\n").unwrap();
+    settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
+    assert_eq!(settings.agents.sandbox.mode, AgentProcessSandboxMode::WorkspaceWrite);
 }
 #[test]
 fn ee_toml_parses_agents_settings() {

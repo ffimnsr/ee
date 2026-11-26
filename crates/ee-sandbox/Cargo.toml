@@ -1,0 +1,15 @@
+[package]
+name = "ee-sandbox"
+version = "0.11.19"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "OS sandbox command construction and capability probes for ee terminal and agent processes."
+categories = ["development-tools"]
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true

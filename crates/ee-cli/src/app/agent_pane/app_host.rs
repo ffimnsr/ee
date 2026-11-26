@@ -214,10 +214,18 @@ impl App {
         // resolve only for an explicitly trusted workspace (fail closed for
         // undecided, unreadable, or revoked decisions).
         let workspace_ref_policy = self.workspace_secret_ref_policy();
+        let agent_sandbox = self.primary_workspace_root().and_then(|root| {
+            crate::agent_launch::agent_sandbox_template(&root, &self.config.agents.sandbox)
+        });
         self.agents.launch_failures.clear();
         let launches = {
             let store = self.agents.secret_store();
-            crate::agent_launch::resolve_agent_launches(&servers, store, workspace_ref_policy)
+            crate::agent_launch::resolve_agent_launches(
+                &servers,
+                store,
+                workspace_ref_policy,
+                agent_sandbox.as_ref(),
+            )
         };
         for (id, message) in launches.failures {
             eprintln!("ee: warning: agent `{id}` launch aborted: {message}");

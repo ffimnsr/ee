@@ -492,6 +492,20 @@ impl App {
     /// unless the shared policy (session state first, then persistent
     /// rules) already resolves it without UI.
     pub(super) fn request_bridge_approval(&mut self, mut prompt: ApprovalPrompt) {
+        if matches!(prompt.kind, ApprovalKind::TerminalCreate { .. })
+            && self.config.agents.terminal_sandbox.mode != crate::config::TerminalSandboxMode::Off
+            && self.config.agents.terminal_sandbox.on_unavailable
+                == crate::config::TerminalSandboxUnavailable::Deny
+            && !ee_sandbox::cached_probe().available
+        {
+            let reason =
+                format!("terminal sandbox unavailable: {}", ee_sandbox::cached_probe().summary());
+            let _ = prompt
+                .reply
+                .send(Err(ee_agent_host::AgentError::PermissionDenied { reason: reason.clone() }));
+            self.backend.status_message = Some(reason);
+            return;
+        }
         let thread_index = prompt.thread_index;
         let session_id = prompt.session_id.clone();
         let fingerprint = approval_fingerprint(&prompt.kind);

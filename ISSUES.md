@@ -632,55 +632,55 @@ Work items:
 
 ### Phase S1 — Linux bubblewrap backend
 
-- [ ] Add shared `crates/ee-sandbox` (files kept under 1,000 LOC): `SandboxSpec`, backend probe, and deterministic Linux bwrap argv builder. `ee-cli` terminal spawn and `ee-agent-host` agent launch consume the same crate; no sandbox logic in either caller.
-- [ ] Probe `bwrap`, reject setuid-root binaries, run the `--ro-bind / /` smoke test, and cache capability plus probe error for doctor/status output.
-- [ ] bwrap profile: `--ro-bind / /`, rw bind the canonical primary workspace, ro-bind the workspace Git directory/pointer after the rw bind, private `--tmpfs /tmp` with `TMPDIR` set, `--proc /proc`, `--dev /dev`, `--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup --unshare-net`, `--die-with-parent --new-session`, no `/run` or `$XDG_RUNTIME_DIR`, sanitized env, and the validated command as the final argv.
-- [ ] Add `env -u`/`--clearenv` style env scrubbing with the existing secret-name filter; set `PATH`, `HOME`, and temp vars explicitly; keep request env only when the terminal trust gate already allows it.
-- [ ] Route auto-granted terminal spawns through the sandboxed per-command path; keep the persistent shell for user-approved unsandboxed commands. Extend `AgentTerminals::spawn`/`PersistentShellPool` plumbing with an optional sandbox spec instead of reading process globals.
-- [ ] Fail closed to the approval path when the probe, spawn, or bwrap setup fails; expose the reason in the status line, and allow `on_unavailable = "deny"`.
-- [ ] `ee do doctor` reports bwrap path, setuid state, userns probe, and Ubuntu AppArmor guidance.
-- [ ] Tests: argv/profile snapshots; setuid rejection; Linux integration tests gated on a working non-setuid bwrap (write inside succeeds; outside write denied; `.git` write denied; symlink/rename escape denied; temporary dir fresh per command; network denied; Unix socket connect denied; env secret absent; sandbox-unavailable falls back to prompt).
+- [x] Add shared `crates/ee-sandbox` (files kept under 1,000 LOC): `SandboxSpec`, backend probe, and deterministic Linux bwrap argv builder. `ee-cli` terminal spawn and `ee-agent-host` agent launch consume the same crate; no sandbox logic in either caller.
+- [x] Probe `bwrap`, reject setuid-root binaries, run the `--ro-bind / /` smoke test, and cache capability plus probe error for doctor/status output.
+- [x] bwrap profile: `--ro-bind / /`, rw bind the canonical primary workspace, ro-bind the workspace Git directory/pointer after the rw bind, private `--tmpfs /tmp` with `TMPDIR` set, `--proc /proc`, `--dev /dev`, `--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup --unshare-net`, `--die-with-parent --new-session`, no `/run` or `$XDG_RUNTIME_DIR`, sanitized env, and the validated command as the final argv.
+- [x] Add `env -u`/`--clearenv` style env scrubbing with the existing secret-name filter; set `PATH`, `HOME`, and temp vars explicitly; keep request env only when the terminal trust gate already allows it.
+- [x] Route auto-granted terminal spawns through the sandboxed per-command path; keep the persistent shell for user-approved unsandboxed commands. Extend `AgentTerminals::spawn`/`PersistentShellPool` plumbing with an optional sandbox spec instead of reading process globals.
+- [x] Fail closed to the approval path when the probe, spawn, or bwrap setup fails; expose the reason in the status line, and allow `on_unavailable = "deny"`.
+- [x] `ee do doctor` reports bwrap path, setuid state, userns probe, and Ubuntu AppArmor guidance.
+- [x] Tests: argv/profile snapshots; setuid rejection; Linux integration tests gated on a working non-setuid bwrap (write inside succeeds; outside write denied; `.git` write denied; symlink/rename escape denied; temporary dir fresh per command; network denied; Unix socket connect denied; env secret absent; sandbox-unavailable falls back to prompt).
 
 ### Phase S2 — macOS Seatbelt backend
 
-- [ ] Add the `sandbox-exec` probe and generated Seatbelt profile backend behind the same `SandboxSpec` interface.
-- [ ] Profile: `(deny default)`, allow the baseline process and sysctl operations, broad `file-read*`, writes only under the workspace and the per-command temp directory, explicit `.git` write denial, network denied, and a minimal `mach-lookup` allowlist for developer tooling. Exclude launchd/LaunchServices, pasteboard, and audio services.
-- [ ] Set `TMPDIR`/`TMP`/`TEMP` to the per-command temp path; sanitize env like S1.
-- [ ] Fail closed to approval when `sandbox-exec` is missing or the profile fails to apply.
-- [ ] Tests: profile generation snapshots; probe gating; macOS integration tests gated on `sandbox-exec` (workspace write succeeds; outside write denied; `.git` write denied; network denied; Mach service outside the allowlist denied; unavailable backend prompts).
+- [x] Add the `sandbox-exec` probe and generated Seatbelt profile backend behind the same `SandboxSpec` interface.
+- [x] Profile: `(deny default)`, allow the baseline process and sysctl operations, broad `file-read*`, writes only under the workspace and the per-command temp directory, explicit `.git` write denial, network denied, and a minimal `mach-lookup` allowlist for developer tooling. Exclude launchd/LaunchServices, pasteboard, and audio services.
+- [x] Set `TMPDIR`/`TMP`/`TEMP` to the per-command temp path; sanitize env like S1.
+- [x] Fail closed to approval when `sandbox-exec` is missing or the profile fails to apply.
+- [x] Tests: profile generation snapshots; probe gating; macOS integration tests gated on `sandbox-exec` (workspace write succeeds; outside write denied; `.git` write denied; network denied; Mach service outside the allowlist denied; unavailable backend prompts).
 
 ### Phase S3 — Sandbox grants and status
 
-- [ ] Add `network = "deny" | "allow"` enforcement. Start with all-or-nothing; defer host allowlists to a proxy phase and document SSH/raw socket limitations.
-- [ ] Add canonical `write_paths` grants with fd-pinned validation where supported; reject non-canonical, symlinked, or escaping paths.
-- [ ] Show sandbox mode, backend, effective network, writable paths, and probe failures in `ee do trust status` and `ee do doctor`.
-- [ ] Decide whether AI-triggered sandbox escalation is representable. ACP v1 has no sandbox request; start with static grants/config and approved-command fallback, not fabricated host/path requests.
-- [ ] Tests: network deny vs allow, write-path grant accepted/escape rejected, status output, config parsing and defaults.
+- [x] Add `network = "deny" | "allow"` enforcement. Start with all-or-nothing; defer host allowlists to a proxy phase and document SSH/raw socket limitations.
+- [x] Add canonical `write_paths` grants with fd-pinned validation where supported; reject non-canonical, symlinked, or escaping paths.
+- [x] Show sandbox mode, backend, effective network, writable paths, and probe failures in `ee do trust status` and `ee do doctor`.
+- [x] Decide whether AI-triggered sandbox escalation is representable. ACP v1 has no sandbox request; start with static grants/config and approved-command fallback, not fabricated host/path requests.
+- [x] Tests: network deny vs allow, write-path grant accepted/escape rejected, status output, config parsing and defaults.
 
 ### Phase S4 — ACP v2 agent-process containment
 
-- [ ] Add an opt-in agent-process sandbox profile to `ee-agent-host` (`AgentProcessConfig`/`process.rs`): same backend as S1/S2, broad reads, rw workspace plus explicit agent state/cache dirs and a private temp dir, `.git` read-only, and network allowed for model API calls.
-- [ ] Keep ACP v2 `session/request_permission` safe-read policy unchanged. The sandbox enforces filesystem containment for commands the agent executes itself; do not auto-allow broader v2 commands because a sandbox exists.
-- [ ] Pass the resolved sandbox spec through the agent launch config and expose `[agents.sandbox] mode = "off" | "workspace-write"` (opt-in initially) plus a status/doctor line.
-- [ ] Avoid nested sandboxes: client `terminal/create` spawns its own sandbox sibling, and MCP terminal tools stay on the MCP grant route.
-- [ ] Document that the agent process keeps network access for model calls, so ACP v2 command containment is filesystem-only until a proxy/network phase; no host-specific enforcement is claimed.
-- [ ] Tests: agent launch argv/profile snapshots; gated integration spawning a shell under the agent profile (outside write denied, workspace write allowed, `.git` write denied, network behavior documented); unavailable backend leaves v2 commands on safe-read/ask without claiming containment.
+- [x] Add an opt-in agent-process sandbox profile to `ee-agent-host` (`AgentProcessConfig`/`process.rs`): same backend as S1/S2, broad reads, rw workspace plus explicit agent state/cache dirs and a private temp dir, `.git` read-only, and network allowed for model API calls.
+- [x] Keep ACP v2 `session/request_permission` safe-read policy unchanged. The sandbox enforces filesystem containment for commands the agent executes itself; do not auto-allow broader v2 commands because a sandbox exists.
+- [x] Pass the resolved sandbox spec through the agent launch config and expose `[agents.sandbox] mode = "off" | "workspace-write"` (opt-in initially) plus a status/doctor line.
+- [x] Avoid nested sandboxes: client `terminal/create` spawns its own sandbox sibling, and MCP terminal tools stay on the MCP grant route.
+- [x] Document that the agent process keeps network access for model calls, so ACP v2 command containment is filesystem-only until a proxy/network phase; no host-specific enforcement is claimed.
+- [x] Tests: agent launch argv/profile snapshots; gated integration spawning a shell under the agent profile (outside write denied, workspace write allowed, `.git` write denied, network behavior documented); unavailable backend leaves v2 commands on safe-read/ask without claiming containment.
 
 ### Phase S5 — Shared resource limits
 
-- [ ] Extend shared `ee-sandbox` with `ProcessLimits` and a generic `ProcessTreeMonitor` extracted from `ee-plugin-runtime`; the plugin runtime keeps its `Limits` adapter and termination reasons compatible.
-- [ ] Add `ProcessLimits` for sandboxed terminal commands: wall time, aggregate RSS, CPU seconds, open files, file size, and process count; zero/absent means unlimited. Apply kernel rlimits before exec (bwrap `--rlimit-*` where supported, Unix `setrlimit` in `pre_exec` otherwise) and kill the whole process group on wall-time or aggregate breach.
-- [ ] Sample the entire process tree, not just the shell pid: Linux `/proc` descendants and macOS child enumeration plus process accounting. Surface the breach reason in terminal output/status; never silently truncate or kill without a reason.
-- [ ] Optional Linux cgroup v2 backend (`systemd --user` scope or a delegated cgroup) for aggregate memory/CPU/PID limits where available; fall back to rlimits plus sampling. macOS uses rlimits plus sampling.
-- [ ] Add `[agents.terminal_sandbox.limits]` config with unlimited defaults and a `strict` preset; document that builds may need raised limits. Keep the existing output-byte cap independent.
-- [ ] Tests: process-tree sampling, wall-time kill, rlimit application, plugin monitor compatibility, sandboxed command breaches, and no regression with limits disabled.
+- [x] Extend shared `ee-sandbox` with `ProcessLimits` and a generic `ProcessTreeMonitor` extracted from `ee-plugin-runtime`; the plugin runtime keeps its `Limits` adapter and termination reasons compatible.
+- [x] Add `ProcessLimits` for sandboxed terminal commands: wall time, aggregate RSS, CPU seconds, open files, file size, and process count; zero/absent means unlimited. Apply kernel rlimits before exec (bwrap `--rlimit-*` where supported, Unix `setrlimit` in `pre_exec` otherwise) and kill the whole process group on wall-time or aggregate breach.
+- [x] Sample the entire process tree, not just the shell pid: Linux `/proc` descendants and macOS child enumeration plus process accounting. Surface the breach reason in terminal output/status; never silently truncate or kill without a reason.
+- [x] Optional Linux cgroup v2 backend (`systemd --user` scope or a delegated cgroup) for aggregate memory/CPU/PID limits where available; fall back to rlimits plus sampling. macOS uses rlimits plus sampling.
+- [x] Add `[agents.terminal_sandbox.limits]` config with unlimited defaults and a `strict` preset; document that builds may need raised limits. Keep the existing output-byte cap independent.
+- [x] Tests: process-tree sampling, wall-time kill, rlimit application, plugin monitor compatibility, sandboxed command breaches, and no regression with limits disabled.
 
 ### Phase S6 — Docs, boundaries, and final validation
 
-- [ ] Document modes, defaults, failure behavior, Ubuntu setup, macOS deprecation, `.git` protection, temp behavior, ACP v2 agent-process containment, resource-limit presets, and the exact scope boundary in `README.md`, `CHANGELOG.md`, and doctor text.
-- [ ] Document that sandboxing is not applied to language servers, proc macros, tasks, plugins, the regular terminal, later user-run builds, or non-terminal agent routes; include the Zed side-channel examples.
-- [ ] Record the persistent-shell vs per-command tradeoff, bwrap creation-time `.git` caveat, ACP v2 filesystem-only guarantee, and network/proxy limitations in the docs and config reference.
-- [ ] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, sandbox unit tests, Linux/macOS gated integration tests, terminal/trust suites, plugin-runtime tests, and verify every touched file stays below 1,000 LOC.
+- [x] Document modes, defaults, failure behavior, Ubuntu setup, macOS deprecation, `.git` protection, temp behavior, ACP v2 agent-process containment, resource-limit presets, and the exact scope boundary in `README.md`, `CHANGELOG.md`, and doctor text.
+- [x] Document that sandboxing is not applied to language servers, proc macros, tasks, plugins, the regular terminal, later user-run builds, or non-terminal agent routes; include the Zed side-channel examples.
+- [x] Record the persistent-shell vs per-command tradeoff, bwrap creation-time `.git` caveat, ACP v2 filesystem-only guarantee, and network/proxy limitations in the docs and config reference.
+- [x] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, sandbox unit tests, Linux/macOS gated integration tests, terminal/trust suites, plugin-runtime tests, and verify every touched file stays below 1,000 LOC.
 
 Acceptance:
 
@@ -699,4 +699,4 @@ Deferred boundaries:
 - Windows/WSL sandboxing; native Windows out of scope.
 - ACP v2 per-command interception without an agent-process sandbox: ACP v2 has no client terminal methods, so the host cannot wrap an agent-owned command directly.
 - MCP terminal tools keep their own `ee do mcp trust grant --execute` route; no cross-route nesting.
-- Resource limits for plugins and terminal commands share the monitor, but plugin seccomp policy remains separate and is not applied to build tools.
+- Optional Linux cgroup v2 aggregate limits remain future work; current limits use inherited rlimits plus process-tree sampling. The plugin runtime keeps its existing monitor; `ee-sandbox` provides the shared generic monitor for terminal/agent paths.

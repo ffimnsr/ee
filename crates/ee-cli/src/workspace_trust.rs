@@ -368,6 +368,18 @@ pub(crate) fn cmd_trust_status() -> io::Result<()> {
         }
     );
     println!("host-local decision file: {}", store.path().display());
+    println!("terminal sandbox: {}", ee_sandbox::cached_probe().summary());
+    let settings = crate::config::load_config(None);
+    let sandbox = &settings.agents.terminal_sandbox;
+    println!(
+        "terminal sandbox policy: mode={} read={} network={} on_unavailable={} write_paths={}",
+        sandbox.mode.label(),
+        sandbox.read.label(),
+        sandbox.network.label(),
+        sandbox.on_unavailable.label(),
+        sandbox.write_paths.len()
+    );
+    println!("agent process sandbox: mode={}", settings.agents.sandbox.mode.label());
     if decision.is_none() {
         println!(
             "workspace secret references stay blocked until the workspace is trusted \

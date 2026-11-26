@@ -64,6 +64,7 @@ mod prompt;
 mod pump;
 mod read;
 mod terminal;
+mod terminal_spawn;
 mod write;
 
 #[cfg(test)]

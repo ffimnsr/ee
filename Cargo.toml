@@ -18,6 +18,7 @@ members = [
   "crates/ee-plugin-example-wasm",
   "crates/ee-plugin-runtime",
   "crates/ee-plugin-sdk",
+  "crates/ee-sandbox",
   "crates/ee-ts-test-grammars",
   "crates/ee-web-frontend",
   "crates/xi-core-lib",

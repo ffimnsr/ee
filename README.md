@@ -654,6 +654,28 @@ The opt-in is stored on the same owner-only, host-local workspace trust document
 
 This grant is not a sandbox: accepted commands run with your user account and can reach anything that account can reach. Operand containment is best-effort lexical/canonical validation of path-like argv tokens; it cannot constrain what an accepted program (an interpreter, build tool, or network client) does internally. It does not cover MCP `ee_terminal_create` (use `ee do mcp trust grant --execute` for that route) or ACP v2 agent-owned command permissions (the agent runs those itself, so ee keeps the curated `safe_read` reply there).
 
+### Workspace terminal sandbox
+
+Prompt-free terminal commands can additionally run inside an OS sandbox. Linux uses a non-setuid `bwrap`; macOS uses Seatbelt through `sandbox-exec`. The default mode is `granted`: commands auto-allowed by the workspace terminal execution grant are sandboxed, user-approved commands stay on their explicit path, and `mode = "all"` sandboxes every native terminal request.
+
+```toml
+[agents.terminal_sandbox]
+mode = "granted"          # off | granted | all
+read = "broad"            # broad | workspace
+network = "deny"          # deny | allow
+on_unavailable = "prompt" # prompt | deny
+write_paths = []
+
+[agents.terminal_sandbox.limits]
+wall_seconds = 1800
+```
+
+The baseline profile reads broadly, writes only inside the workspace plus granted paths and a per-command temp directory, keeps workspace `.git` read-only, masks host `/run` and IPC sockets, and denies network unless `network = "allow"`. Sandboxed commands use a fresh per-command process (not the reusable persistent shell) so mounts and temp state cannot leak across calls. Missing, setuid, or unusable bwrap and missing `sandbox-exec` fall back to the approval prompt, or deny with `on_unavailable = "deny"`; there is no silent unsandboxed run. `ee do trust status` and `ee do doctor` report backend capability and effective policy.
+
+For ACP v2, enable `[agents.sandbox] mode = "workspace-write"` to confine the agent subprocess itself: writes are limited to the workspace, granted agent state/cache directories, and its temp directory, while network remains available for model calls. ACP v2 commands the agent runs itself inherit that filesystem containment, but they are not network-contained. Without this opt-in, ACP v2 command permissions remain on the curated `safe_read`/ask path with no OS containment claim.
+
+The sandbox is terminal/agent-process scoped, not an account boundary. It does not cover language servers, proc macros, tasks, plugins, the regular terminal, or commands you run later. Kernel/OS bugs and over-broad grants remain; use narrow write paths and deny network by default. See `ee do doctor` for Ubuntu 23.10+ AppArmor guidance when unprivileged user namespaces are blocked.
+
 ### MCP server trust
 
 One explicit trust decision can cover the pinned tool surface of the built-in `ee` MCP server instead of approving each MCP write prompt:

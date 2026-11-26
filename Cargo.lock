@@ -1470,6 +1470,7 @@ dependencies = [
  "ee-agent-protocol",
  "ee-chat-completions",
  "ee-mcp",
+ "ee-sandbox",
  "futures",
  "reqwest 0.12.28",
  "rmcp",
@@ -1633,6 +1634,7 @@ dependencies = [
  "ee-mcp",
  "ee-plugin-api",
  "ee-plugin-runtime",
+ "ee-sandbox",
  "ee-xi-core-lib",
  "ee-xi-lsp-lib",
  "ee-xi-rpc",
@@ -1747,6 +1749,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "ee-sandbox"
+version = "0.11.19"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

@@ -123,6 +123,7 @@ pub(crate) fn build_host_inputs(
         &settings.agents.servers,
         store.as_ref(),
         workspace_policy,
+        crate::agent_launch::agent_sandbox_template(&roots[0], &settings.agents.sandbox).as_ref(),
     );
     for (id, message) in &launches.failures {
         eprintln!("ee: warning: agent `{id}` launch aborted: {message}");

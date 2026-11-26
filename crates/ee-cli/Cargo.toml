@@ -61,6 +61,7 @@ ee-agent-remote = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
 ee-plugin-api.workspace = true
 ee-plugin-runtime.workspace = true
+ee-sandbox = { path = "../ee-sandbox" }
 flate2 = { workspace = true, optional = true }
 rmcp = { workspace = true, features = ["server"], optional = true }
 git2.workspace = true

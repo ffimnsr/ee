@@ -1,8 +1,8 @@
 //! Bounded terminal registry, output capture, environment and command rules.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::path::PathBuf;
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -17,12 +17,14 @@ use ee_agent_protocol::{
 
 #[cfg(unix)]
 use super::persistent_shell::{PersistentCommandHandle, PersistentShellPool};
+use super::terminal_spawn::{spawn_sandboxed_terminal_process, spawn_terminal_process};
 use crate::policy::match_profile_entry;
+use ee_sandbox::SandboxSpec;
 
 /// Editor-side hard cap on retained terminal output bytes.
 pub(crate) const BRIDGE_TERMINAL_OUTPUT_CAP: usize = 1024 * 1024;
 /// How many bytes each terminal output reader flushes per read.
-const TERMINAL_READER_CHUNK: usize = 4096;
+pub(super) const TERMINAL_READER_CHUNK: usize = 4096;
 
 static NEXT_TERMINAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -58,7 +60,7 @@ fn is_git_readonly_profile_request(request: &CreateTerminalRequest) -> bool {
 /// Child environment: the parent environment minus secret-like keys, overlaid
 /// with explicitly configured request values. Curated Git reads cannot take an
 /// optional index lock, even when a caller supplied a conflicting environment.
-fn terminal_child_env(request: &CreateTerminalRequest) -> Vec<(String, String)> {
+pub(super) fn terminal_child_env(request: &CreateTerminalRequest) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> =
         std::env::vars().filter(|(name, _)| !is_secret_env_key(name)).collect();
     for variable in &request.env {
@@ -350,6 +352,16 @@ impl AgentTerminals {
         request: &CreateTerminalRequest,
         owner_agent_id: Option<&str>,
     ) -> Result<CreateTerminalResponse, AgentError> {
+        self.spawn_with_sandbox(request, owner_agent_id, None)
+    }
+
+    /// Spawns and registers a terminal, optionally inside an OS sandbox.
+    pub(crate) fn spawn_with_sandbox(
+        &self,
+        request: &CreateTerminalRequest,
+        owner_agent_id: Option<&str>,
+        sandbox: Option<&SandboxSpec>,
+    ) -> Result<CreateTerminalResponse, AgentError> {
         if request.command.trim().is_empty() {
             return Err(AgentError::invalid_params("terminal command must not be empty"));
         }
@@ -368,6 +380,22 @@ impl AgentTerminals {
         let terminal_id = self.allocate_terminal_id();
 
         let command_line = terminal_command_line(request);
+        // Sandboxed auto-runs use a fresh per-command process: mounts and the
+        // private temp must not leak across commands or a persistent shell.
+        if let Some(spec) = sandbox {
+            let (output, readers, child) =
+                spawn_sandboxed_terminal_process(request, &command_line, cap, spec)?;
+            return self.register_terminal(
+                request,
+                owner_agent_id,
+                terminal_id,
+                cap,
+                output,
+                readers,
+                Some(child),
+                None,
+            );
+        }
         // Reuse a persistent shell for this `(session, cwd)` when one is idle;
         // fall back to a per-command process when the key already has the
         // maximum busy shells.
@@ -384,6 +412,40 @@ impl AgentTerminals {
         #[cfg(not(unix))]
         let (output, output_readers, child) = spawn_terminal_process(request, &command_line, cap)?;
 
+        self.register_terminal(
+            request,
+            owner_agent_id,
+            terminal_id,
+            cap,
+            output,
+            output_readers,
+            child,
+            {
+                #[cfg(unix)]
+                {
+                    persistent
+                }
+                #[cfg(not(unix))]
+                {
+                    None
+                }
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_terminal(
+        &self,
+        request: &CreateTerminalRequest,
+        owner_agent_id: Option<&str>,
+        terminal_id: String,
+        cap: usize,
+        output: Arc<Mutex<BoundedOutput>>,
+        output_readers: Vec<thread::JoinHandle<()>>,
+        child: Option<Child>,
+        persistent: Option<PersistentCommandHandle>,
+    ) -> Result<CreateTerminalResponse, AgentError> {
+        let _ = cap;
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
             owner: TerminalOwner {
@@ -790,56 +852,6 @@ fn tail_at_char_boundary(text: &str, max_bytes: usize) -> String {
         start += 1;
     }
     format!("[tail]\n{}", &text[start..])
-}
-
-/// One per-command process plus its bounded output and reader threads.
-type TerminalProcessSpawn = (Arc<Mutex<BoundedOutput>>, Vec<thread::JoinHandle<()>>, Child);
-
-fn spawn_terminal_process(
-    request: &CreateTerminalRequest,
-    command_line: &str,
-    cap: usize,
-) -> Result<TerminalProcessSpawn, AgentError> {
-    let cwd = request.cwd.as_deref().unwrap_or_else(|| Path::new("."));
-    let mut command = crate::terminal::shell_command(command_line, cwd);
-    command.envs(terminal_child_env(request));
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| AgentError::Io(format!("terminal spawn failed: {error}")))?;
-    let output = Arc::new(Mutex::new(BoundedOutput::new(cap)));
-    let readers = [
-        spawn_output_reader(child.stdout.take(), Arc::clone(&output), TerminalOutputStream::Stdout),
-        spawn_output_reader(child.stderr.take(), Arc::clone(&output), TerminalOutputStream::Stderr),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    Ok((output, readers, child))
-}
-
-fn spawn_output_reader(
-    stream: Option<impl std::io::Read + Send + 'static>,
-    output: Arc<Mutex<BoundedOutput>>,
-    stream_kind: TerminalOutputStream,
-) -> Option<thread::JoinHandle<()>> {
-    let mut stream = stream?;
-    Some(
-        std::thread::Builder::new()
-            .name(String::from("ee-agent-terminal-output"))
-            .spawn(move || {
-                let mut buffer = [0u8; TERMINAL_READER_CHUNK];
-                loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            output.lock().expect("output poisoned").push(stream_kind, &buffer[..n])
-                        }
-                    }
-                }
-            })
-            .expect("spawn terminal output reader"),
-    )
 }
 
 #[cfg(test)]

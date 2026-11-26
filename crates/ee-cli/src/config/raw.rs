@@ -181,6 +181,50 @@ pub(crate) struct AgentsToml {
     /// default; only user-global config can grant search-provider access. Workspace
     /// files can only disable or restrict web context.
     pub web_context: Option<AgentWebContextToml>,
+    /// OS sandbox policy for prompt-free terminal commands.
+    pub terminal_sandbox: Option<TerminalSandboxToml>,
+    /// OS sandbox policy for the agent subprocess itself (ACP v2 containment).
+    pub sandbox: Option<AgentProcessSandboxToml>,
+}
+
+/// Raw `[agents.sandbox]` table.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentProcessSandboxToml {
+    /// `off` (default) or `workspace-write`.
+    pub mode: Option<String>,
+    /// Additional canonical writable paths for the agent process.
+    pub write_paths: Option<Vec<String>>,
+}
+
+/// Raw `[agents.terminal_sandbox]` table.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalSandboxToml {
+    /// `off`, `granted` (default), or `all`.
+    pub mode: Option<String>,
+    /// `broad` (default) or `workspace`.
+    pub read: Option<String>,
+    /// `deny` (default) or `allow`.
+    pub network: Option<String>,
+    /// `prompt` (default) or `deny` when the backend is unavailable.
+    pub on_unavailable: Option<String>,
+    /// Additional host write paths; validated to stay inside the workspace.
+    pub write_paths: Option<Vec<String>>,
+    /// Resource ceilings for sandboxed commands.
+    pub limits: Option<TerminalSandboxLimitsToml>,
+}
+
+/// Raw `[agents.terminal_sandbox.limits]` table.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalSandboxLimitsToml {
+    pub wall_seconds: Option<u64>,
+    pub max_rss_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    pub max_open_files: Option<u64>,
+    pub max_file_bytes: Option<u64>,
+    pub max_processes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

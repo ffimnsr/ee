@@ -17,6 +17,7 @@ use crate::policy::{
     CommandInvocation, is_bare_executable, is_shell_wrapper, terminal_operand_stays_in_workspace,
 };
 use crate::workspace_trust::WorkspaceTrustStore;
+use ee_sandbox::{SandboxError, SandboxSpec};
 
 /// Environment names that would let the agent change which program a
 /// validated command line actually executes. The grant authorizes the visible
@@ -55,7 +56,36 @@ impl App {
         {
             return false;
         }
+        let mode = self.config.agents.terminal_sandbox.mode;
+        if mode != crate::config::TerminalSandboxMode::Off {
+            if !ee_sandbox::cached_probe().available {
+                return false;
+            }
+            if self.terminal_sandbox_spec(request).is_err() {
+                return false;
+            }
+        }
         self.terminal_trust_invocation(request).is_some()
+    }
+
+    /// Builds the sandbox spec for one native terminal request.
+    pub(crate) fn terminal_sandbox_spec(
+        &self,
+        request: &CreateTerminalRequest,
+    ) -> Result<SandboxSpec, SandboxError> {
+        let policy = &self.config.agents.terminal_sandbox;
+        let workspace = self.primary_workspace_root().ok_or_else(|| {
+            SandboxError::Invalid(String::from("primary workspace root is unavailable"))
+        })?;
+        let cwd = request.cwd.clone().unwrap_or_else(|| self.working_dir.clone());
+        let mut spec = SandboxSpec::new(&workspace, &cwd)?
+            .with_network(policy.network)
+            .with_read(policy.read)
+            .with_limits(policy.limits);
+        for path in &policy.write_paths {
+            spec = spec.with_write_path(path)?;
+        }
+        Ok(spec)
     }
 
     /// Validated invocation eligible for the terminal execution grant: simple

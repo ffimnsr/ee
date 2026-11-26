@@ -13,7 +13,7 @@
 use super::agents;
 use super::agents_settings::{
     AgentsSettings, MAX_AGENT_MAX_CONCURRENT_PROMPTS, MAX_AGENT_REFERENCES, merge_agent_approval,
-    merge_agent_server, parse_agent_reference,
+    merge_agent_process_sandbox, merge_agent_server, merge_terminal_sandbox, parse_agent_reference,
 };
 use super::discovery::ConfigLayerKind;
 use super::init::load_config;
@@ -501,6 +501,12 @@ impl EditorSettings {
         }
         if let Some(workspace_memory) = &patch.workspace_memory {
             merge_workspace_memory(&mut self.agents.workspace_memory, workspace_memory);
+        }
+        if let Some(sandbox) = &patch.terminal_sandbox {
+            merge_terminal_sandbox(&mut self.agents.terminal_sandbox, sandbox, kind);
+        }
+        if let Some(sandbox) = &patch.sandbox {
+            merge_agent_process_sandbox(&mut self.agents.sandbox, sandbox, kind);
         }
         if let Some(approval) = &patch.approval {
             merge_agent_approval(&mut self.agents.approval, approval, kind);
