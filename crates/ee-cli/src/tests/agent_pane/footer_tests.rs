@@ -107,6 +107,110 @@ fn footer_renders_current_agent_mode() {
 }
 
 #[test]
+fn footer_renders_model_and_effort_when_space_allows() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "model-b",
+                    "options": [
+                        { "value": "model-a", "name": "Model A" },
+                        { "value": "model-b", "name": "Model B" }
+                    ]
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "high", "name": "High" }
+                    ]
+                }
+            ]
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    let backend = TestBackend::new(200, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..200).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    let footer_row = &rendered[composer_row - 1];
+    assert!(footer_row.contains("model:model-b"), "footer carries model: {footer_row}");
+    assert!(footer_row.contains("effort:high"), "footer carries effort: {footer_row}");
+
+    type_text(&mut app, "/status");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let status = app.backend.status_message.as_deref().expect("status output");
+    assert!(status.contains("model:model-b"), "{status}");
+    assert!(status.contains("effort:high"), "{status}");
+}
+
+#[test]
+fn narrow_footer_omits_model_and_effort() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "model-b",
+                    "options": [{ "value": "model-b", "name": "Model B" }]
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [{ "value": "high", "name": "High" }]
+                }
+            ]
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    let backend = TestBackend::new(40, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..40).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    let footer_row = &rendered[composer_row - 1];
+    assert!(!footer_row.contains("model:"), "narrow footer drops model: {footer_row}");
+    assert!(!footer_row.contains("effort:"), "narrow footer drops effort: {footer_row}");
+}
+
+#[test]
 fn turn_completed_records_metrics_and_renders_tokens() {
     let script = base_script()
         .wait_for("session/prompt")

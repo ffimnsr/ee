@@ -1,6 +1,8 @@
 //! UI: render_agents rendering.
 use super::*;
 
+use crate::app::agent_pane::{current_effort, current_model_id};
+
 pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     use crate::app::ThreadUiState;
 
@@ -71,11 +73,17 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
             ThreadUiState::Closed => "closed".into(),
             ThreadUiState::Failed => "failed".into(),
         };
-        let current_mode = thread
-            .host
-            .snapshot()
-            .current_mode
-            .map_or_else(|| String::from("unset"), |mode| mode.0.to_string());
+        let snapshot = thread.host.snapshot();
+        let current_mode =
+            snapshot.current_mode.map_or_else(|| String::from("unset"), |mode| mode.0.to_string());
+        let agent_config =
+            app.agents.host.as_ref().and_then(|host| host.manager.agent_config(&thread.agent_id));
+        let model = current_model_id(
+            &snapshot.config_options,
+            thread.current_model.as_deref(),
+            agent_config.as_ref(),
+        );
+        let effort = current_effort(&snapshot.config_options, agent_config.as_ref());
         let connection_active = app
             .agents
             .threads
@@ -107,23 +115,11 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
                 app.config.agents.max_concurrent_prompts
             )
         };
-        let footer_text = format!(
-            "{} [{}] | agent:{} | conn:{} | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
-            thread.nick,
-            state_label,
-            crate::app::agent_pane::AGENT_DISPLAY_NAME,
-            connection,
-            current_mode,
-            active_index + 1,
-            app.agents.threads.len(),
-            if app.agents.show_thoughts { "on" } else { "off" },
-            thread.unread,
-            thread
-                .last_turn_metrics
-                .as_ref()
-                .map(crate::app::turn_metrics_label)
-                .unwrap_or_else(|| String::from("—")),
-        );
+        let last_label = thread
+            .last_turn_metrics
+            .as_ref()
+            .map(crate::app::turn_metrics_label)
+            .unwrap_or_else(|| String::from("—"));
         let footer_style = if matches!(
             thread.state,
             ThreadUiState::Queued
@@ -138,6 +134,46 @@ pub(super) fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app
         };
         let usage_label = thread.usage.as_deref().unwrap_or_default();
         let usage_width = usage_label.width().min(footer_area.width as usize) as u16;
+        let footer_available = footer_area.width.saturating_sub(usage_width) as usize;
+        let make_footer = |model: Option<&str>, effort: Option<&str>| {
+            let extra = match (model, effort) {
+                (Some(model), Some(effort)) => {
+                    format!(" model:{model} | effort:{effort} |")
+                }
+                (Some(model), None) => format!(" model:{model} |"),
+                (None, Some(effort)) => format!(" effort:{effort} |"),
+                (None, None) => String::new(),
+            };
+            format!(
+                "{} [{}] | agent:{} | conn:{} | mode:{} |{} session:{} / {} | thoughts:{} | unread:{} | last:{}",
+                thread.nick,
+                state_label,
+                crate::app::agent_pane::AGENT_DISPLAY_NAME,
+                connection,
+                current_mode,
+                extra,
+                active_index + 1,
+                app.agents.threads.len(),
+                if app.agents.show_thoughts { "on" } else { "off" },
+                thread.unread,
+                last_label,
+            )
+        };
+        let mut candidates = vec![(model.as_deref(), effort.as_deref())];
+        if effort.is_some() {
+            candidates.push((None, effort.as_deref()));
+        }
+        if model.is_some() {
+            candidates.push((model.as_deref(), None));
+        }
+        candidates.push((None, None));
+        // Keep the existing footer when the pane is narrow; otherwise add
+        // model/effort, preferring effort when only one extra fits.
+        let footer_text = candidates
+            .into_iter()
+            .map(|(model, effort)| make_footer(model, effort))
+            .find(|text| text.width() <= footer_available)
+            .unwrap_or_else(|| make_footer(None, None));
         let footer_line = Line::from(Span::styled(footer_text, footer_style));
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::BG_AGENT_STATUS)),

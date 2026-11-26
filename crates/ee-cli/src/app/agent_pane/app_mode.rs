@@ -9,7 +9,7 @@ use super::format::{
     is_agents_quit_full_slash_command, is_agents_quit_slash_command, is_mode_config_option,
     parse_config_option_value, slash_command_draft, split_slash_command,
 };
-use super::state::{ApprovalModeConfirmation, ModeSelectionPrompt};
+use super::state::{ApprovalModeConfirmation, ModeSelectionPrompt, PendingThreadAction};
 impl App {
     fn queue_thread_mode_change(&mut self, thread_index: usize, mode_id: SessionModeId) {
         let Some(host) = &self.agents.host else {
@@ -17,7 +17,8 @@ impl App {
             return;
         };
         let reply = host.set_mode(self.agents.threads[thread_index].host.clone(), mode_id.clone());
-        self.agents.pending_thread_action = Some(reply);
+        self.agents.pending_thread_action =
+            Some(PendingThreadAction { thread_index, session_model: None, reply });
         self.backend.status_message = Some(format!("setting mode: {}", mode_id.0));
     }
 
@@ -36,7 +37,8 @@ impl App {
             config_id.clone(),
             value,
         );
-        self.agents.pending_thread_action = Some(reply);
+        self.agents.pending_thread_action =
+            Some(PendingThreadAction { thread_index, session_model: None, reply });
         self.backend.status_message = Some(format!("setting config: {}", config_id.0));
     }
 

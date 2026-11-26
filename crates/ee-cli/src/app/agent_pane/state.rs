@@ -215,6 +215,17 @@ pub(super) struct WorkspaceRestore {
     pub(super) failed: bool,
 }
 
+/// In-flight thread control command awaiting the host worker reply.
+#[derive(Debug)]
+pub(crate) struct PendingThreadAction {
+    /// Thread the command was issued for.
+    pub(crate) thread_index: usize,
+    /// Session model selected by `/model`. Only the `session/set_model` route
+    /// sets it; ACP config-option switches report the new value themselves.
+    pub(crate) session_model: Option<String>,
+    pub(crate) reply: std_mpsc::Receiver<Result<String, String>>,
+}
+
 /// All agents-pane UI state; `Default` is the closed, inert startup state.
 pub(crate) struct AgentPaneState {
     pub(crate) layout: AgentPaneLayout,
@@ -245,7 +256,7 @@ pub(crate) struct AgentPaneState {
     /// In-flight cancellation replies, keyed by originating session id.
     pub(crate) pending_cancels: BTreeMap<String, std_mpsc::Receiver<Result<(), String>>>,
 
-    pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
+    pub(crate) pending_thread_action: Option<PendingThreadAction>,
     pub(super) pending_external_critic: Option<PendingExternalCritic>,
     pub(super) rubber_duck_calls: BTreeMap<String, usize>,
     /// Pending permission requests, FIFO within each session.

@@ -59,6 +59,8 @@ mod thread_ui;
 // here on purpose: `cargo fix` would otherwise strip names that are only
 // referenced through `crate::app` re-exports or from test code.
 #[allow(unused_imports)]
+pub(crate) use app_models::{current_effort, current_model_id};
+#[allow(unused_imports)]
 pub(crate) use constants::{
     AGENT_DISPLAY_NAME, AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH,
 };

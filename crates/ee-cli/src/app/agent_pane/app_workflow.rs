@@ -19,6 +19,7 @@ use super::format::{
 };
 use super::state::PendingExternalCritic;
 use super::thread_ui::ThreadUiState;
+use super::{current_effort, current_model_id};
 use crate::clipboard::ClipboardSelection;
 impl App {
     pub(super) fn agents_show_help(&mut self) {
@@ -98,13 +99,25 @@ impl App {
             .as_deref()
             .or(thread.session_title.as_deref())
             .unwrap_or("(unnamed)");
+        let agent_config =
+            self.agents.host.as_ref().and_then(|host| host.manager.agent_config(&thread.agent_id));
+        let model = current_model_id(
+            &snapshot.config_options,
+            thread.current_model.as_deref(),
+            agent_config.as_ref(),
+        )
+        .unwrap_or_else(|| String::from("—"));
+        let effort = current_effort(&snapshot.config_options, agent_config.as_ref())
+            .unwrap_or_else(|| String::from("—"));
         let summary = format!(
-            "session:{} name:{} agent:{} connection:{} mode:{} approval:{} context:{}/{} bytes mcp:{} configured provider-commands:{}",
+            "session:{} name:{} agent:{} connection:{} mode:{} model:{} effort:{} approval:{} context:{}/{} bytes mcp:{} configured provider-commands:{}",
             thread.session_id,
             name,
             thread.agent_id,
             thread_state_label(thread.state),
             mode,
+            model,
+            effort,
             approval,
             thread.context_files.len(),
             context_bytes,

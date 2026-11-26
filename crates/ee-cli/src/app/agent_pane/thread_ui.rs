@@ -182,6 +182,10 @@ pub(crate) struct AgentThreadUi {
     pub(crate) stick_to_bottom: bool,
     /// Rendered usage summary (tokens / cost) from the latest update.
     pub(crate) usage: Option<String>,
+    /// Model selected through `session/set_model` on this connection. Agents
+    /// without an advertised model config option never echo the switch back
+    /// over ACP, so the pane remembers it until reconnect.
+    pub(crate) current_model: Option<String>,
     /// Stop reason of the last completed turn.
     pub(crate) stop_reason: Option<String>,
     /// When the current turn started (live elapsed rendering while running).

@@ -428,6 +428,19 @@ fn model_slash_command_falls_back_to_agent_setup_choices() {
     });
     let request = &fake.agent().requests_by_method("session/set_model")[0];
     assert_eq!(request["params"]["modelId"], "model-b");
+
+    // The `session/set_model` route has no ACP echo, so the pane must remember
+    // the accepted switch and surface it in `/status`.
+    wait_until(&mut app, "model switch reply applied", |app| {
+        app.agents.threads[0].current_model.as_deref() == Some("model-b")
+    });
+    type_text(&mut app, "/status");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let status = app.agents.threads[0].system_notices().last().cloned().unwrap_or_default();
+    assert!(
+        status.contains("model:model-b"),
+        "status must show the session model switch: {status}"
+    );
 }
 
 #[test]

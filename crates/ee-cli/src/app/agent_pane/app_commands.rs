@@ -6,7 +6,7 @@ use super::constants::{AGENT_TERMINAL_OUTPUT_TAIL_BYTES, AGENT_TERMINAL_STOP_ALL
 use super::format::{
     owned_terminal_summary_line, parse_config_option_value, prompt_blocks_with_context,
 };
-use super::state::{AgentPaneLayout, TerminalStopConfirmation};
+use super::state::{AgentPaneLayout, PendingThreadAction, TerminalStopConfirmation};
 use super::thread_ui::{ExternalEditorRequest, ThreadUiState};
 impl App {
     /// Full agents command dispatch (feature enabled).  Returns `true` when
@@ -584,7 +584,11 @@ impl App {
             return;
         };
         let reply = host.set_model(self.agents.threads[active].host.clone(), model_id.to_string());
-        self.agents.pending_thread_action = Some(reply);
+        self.agents.pending_thread_action = Some(PendingThreadAction {
+            thread_index: active,
+            session_model: Some(model_id.to_string()),
+            reply,
+        });
         self.backend.status_message = Some(format!("switching model: {model_id}"));
     }
 

@@ -781,6 +781,7 @@ impl App {
             scroll: 0,
             stick_to_bottom: true,
             usage: None,
+            current_model: None,
             stop_reason: None,
             turn_started_at: None,
             turn_metrics: BTreeMap::new(),

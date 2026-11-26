@@ -218,12 +218,17 @@ impl App {
 
     pub(super) fn pump_thread_action_reply(&mut self) {
         let result = match &self.agents.pending_thread_action {
-            Some(reply) => reply.try_recv(),
+            Some(pending) => pending.reply.try_recv(),
             None => return,
         };
         match result {
             Ok(Ok(message)) => {
-                self.agents.pending_thread_action = None;
+                if let Some(pending) = self.agents.pending_thread_action.take()
+                    && let Some(model) = pending.session_model
+                    && let Some(thread) = self.agents.threads.get_mut(pending.thread_index)
+                {
+                    thread.current_model = Some(model);
+                }
                 self.backend.status_message = Some(message);
             }
             Ok(Err(message)) => {
