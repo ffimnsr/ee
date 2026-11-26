@@ -740,6 +740,7 @@ impl App {
             return;
         }
         self.agents.alignment_stats.prompts_queued += 1;
+        self.attach_write_diff_preview(&mut prompt);
         self.agents.approvals.push_back(prompt);
         self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
             String::from("agent approval required (open :agents)")

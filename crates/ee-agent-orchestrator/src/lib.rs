@@ -170,6 +170,7 @@
 //! and fake tools over in-memory framework plumbing.
 
 pub mod approval_classifier;
+mod approval_verdict_cache;
 pub mod attachments;
 pub mod background_jobs;
 pub mod budget;

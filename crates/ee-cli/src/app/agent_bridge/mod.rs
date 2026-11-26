@@ -66,6 +66,7 @@ mod read;
 mod terminal;
 mod terminal_spawn;
 mod write;
+mod write_diff;
 
 #[cfg(test)]
 static WEB_DISPATCH_TEST_COUNT: std::sync::atomic::AtomicUsize =

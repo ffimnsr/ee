@@ -202,6 +202,31 @@ fn top_level_write_leases_reject_overlap_and_allow_disjoint_sessions() {
 }
 
 #[test]
+fn write_approval_queues_a_bounded_diff_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("previewed.txt");
+    fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+    let (mut app, _fake) = agents_app_in(&temp, base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    let _reply =
+        app.queue_session_write_approval_for_test("fake", "s1", path, "alpha\nBETA\ngamma\n");
+    let prompt = app.agents.approvals.front_mut().expect("approval queued");
+    let preview = prompt.diff_preview.as_ref().expect("diff preview attached");
+    assert_eq!(preview.effect, "replaces existing content");
+    assert_eq!((preview.additions, preview.deletions), (1, 1));
+    assert!(preview.lines.iter().any(|line| line == "-beta"));
+    assert!(preview.lines.iter().any(|line| line == "+BETA"));
+    assert!(!prompt.diff_expanded);
+
+    press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert!(
+        app.agents.approvals.front().expect("approval queued").diff_expanded,
+        "ctrl-o expands the preview"
+    );
+}
+
+#[test]
 fn cancelled_write_request_releases_only_its_lease() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("cancelled.txt");

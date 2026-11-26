@@ -338,6 +338,19 @@ impl App {
                     self.move_approval_selection(1);
                     return;
                 }
+                KeyCode::Char('o')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self
+                            .agents
+                            .approvals
+                            .front()
+                            .is_some_and(|prompt| prompt.diff_preview.is_some()) =>
+                {
+                    if let Some(prompt) = self.agents.approvals.front_mut() {
+                        prompt.toggle_diff_expanded();
+                    }
+                    return;
+                }
                 KeyCode::Enter => {
                     let choice = self
                         .agents

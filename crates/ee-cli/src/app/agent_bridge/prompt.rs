@@ -23,6 +23,7 @@ use super::approval::{
     WriteReplyKind,
 };
 use super::terminal::redact_env_display;
+use super::write_diff::WriteDiffPreview;
 
 /// A pending file-write or terminal-create approval.
 #[derive(Debug)]
@@ -36,6 +37,10 @@ pub(crate) struct ApprovalPrompt {
     pub(super) write_lease_owner: Option<WriteLeaseOwner>,
     pub(crate) title: String,
     pub(crate) detail: String,
+    /// Bounded unified diff preview for write prompts.
+    pub(crate) diff_preview: Option<WriteDiffPreview>,
+    /// The user expanded the diff preview with ctrl-o.
+    pub(crate) diff_expanded: bool,
     /// `(label, choice)` option list; the user picks one with Enter.
     pub(crate) options: Vec<(String, ApprovalChoice)>,
     pub(crate) selected: usize,
@@ -144,6 +149,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -183,6 +190,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -245,6 +254,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -278,6 +289,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -338,6 +351,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -378,6 +393,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }
@@ -426,6 +443,8 @@ impl ApprovalPrompt {
             confirming_deny: false,
             mandatory_confirmation: None,
             classifier_auto: false,
+            diff_preview: None,
+            diff_expanded: false,
             auto_sandboxed: false,
             reply,
         }

@@ -311,6 +311,58 @@ pub(super) fn approval_composer_lines(
             Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
         ]));
     }
+    if let Some(preview) = approval.diff_preview.as_ref() {
+        let stats = match (preview.additions, preview.deletions) {
+            (0, 0) => String::new(),
+            (added, 0) => format!(" (+{added})"),
+            (0, removed) => format!(" (-{removed})"),
+            (added, removed) => format!(" (+{added} -{removed})"),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_by_width(&format!("diff: {}{stats}", preview.effect), detail_width)
+                    .to_string(),
+                Style::default().fg(theme::FG_MUTED),
+            ),
+        ]));
+        if preview.too_large {
+            lines.push(Line::from(Span::styled(
+                "  diff skipped: file too large",
+                theme_style(theme::FG_DIM),
+            )));
+        }
+        for line in preview.visible_lines(approval.diff_expanded) {
+            let color = match line.as_bytes().first() {
+                Some(b'+') => theme::FG_SUCCESS,
+                Some(b'-') => theme::FG_ERROR,
+                Some(b'@') => theme::FG_INFO,
+                _ => theme::FG_DIM,
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", truncate_by_width(line, detail_width)),
+                Style::default().fg(color),
+            )));
+        }
+        let hidden = preview.hidden_by_collapse(approval.diff_expanded);
+        if hidden > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  … {hidden} more diff lines · ctrl-o expand"),
+                theme_style(theme::FG_DIM),
+            )));
+        } else if approval.diff_expanded && preview.is_expandable() {
+            lines.push(Line::from(Span::styled(
+                "  ctrl-o collapse diff",
+                theme_style(theme::FG_DIM),
+            )));
+        }
+        if approval.diff_expanded && preview.omitted > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  diff truncated: {} more lines", preview.omitted),
+                theme_style(theme::FG_DIM),
+            )));
+        }
+    }
     if let Some(mandatory) = approval.mandatory_confirmation() {
         let source = mandatory
             .template_id
@@ -341,7 +393,11 @@ pub(super) fn approval_composer_lines(
         ]));
     }
     lines.push(Line::from(Span::styled(
-        "  ↑/↓ select · Enter confirm · Esc deny",
+        if approval.diff_preview.as_ref().is_some_and(|preview| preview.is_expandable()) {
+            "  ↑/↓ select · Enter confirm · Esc deny · ctrl-o diff"
+        } else {
+            "  ↑/↓ select · Enter confirm · Esc deny"
+        },
         theme_style(theme::FG_DIM),
     )));
 

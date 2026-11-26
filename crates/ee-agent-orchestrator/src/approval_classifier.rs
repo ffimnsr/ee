@@ -26,6 +26,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::approval_verdict_cache::{
+    VERDICT_CACHE_CAPACITY, VERDICT_CACHE_SCHEMA_VERSION, VERDICT_CACHE_TTL, VerdictCache,
+    VerdictCacheKey,
+};
 use crate::budget::BudgetTracker;
 use crate::config::OrchestratorConfig;
 use crate::decision_log::DecisionLog;
@@ -258,13 +262,18 @@ impl ApprovalClassification {
 pub struct ApprovalClassifier {
     backend: Arc<dyn ApprovalRiskClassifier>,
     timeout: Duration,
+    cache: Arc<VerdictCache>,
 }
 
 impl ApprovalClassifier {
     /// Creates a classifier with a bounded call timeout.
     #[must_use]
     pub fn new(backend: Arc<dyn ApprovalRiskClassifier>, timeout: Duration) -> Self {
-        Self { backend, timeout: timeout.max(Duration::from_millis(1)) }
+        Self {
+            backend,
+            timeout: timeout.max(Duration::from_millis(1)),
+            cache: Arc::new(VerdictCache::new(VERDICT_CACHE_CAPACITY, VERDICT_CACHE_TTL)),
+        }
     }
 
     /// Model id used for audit records.
@@ -273,14 +282,25 @@ impl ApprovalClassifier {
         self.backend.model_id()
     }
 
-    /// Classifies one candidate. Hard blocks bypass the model entirely.
+    /// Classifies one candidate. Hard blocks bypass the model entirely and the
+    /// cache; repeat `Low` verdicts for the same identity are served from the
+    /// bounded TTL cache.
     pub async fn classify(&self, candidate: &ApprovalCandidate) -> ApprovalClassification {
         if let Some(block) = hard_block(candidate) {
             return block;
         }
+        let key = self.cache_key(candidate);
+        if let Some(verdict) = self.cache.get(&key) {
+            return ApprovalClassification::AutoApprove {
+                risk: verdict.risk,
+                reason: bounded(&verdict.reason, 200),
+                model_id: self.model_id().to_string(),
+            };
+        }
         let verdict = tokio::time::timeout(self.timeout, self.backend.classify(candidate)).await;
         match verdict {
             Ok(Ok(verdict)) if verdict.risk == RiskLevel::Low => {
+                self.cache.insert(key, verdict.clone());
                 ApprovalClassification::AutoApprove {
                     risk: verdict.risk,
                     reason: bounded(&verdict.reason, 200),
@@ -299,6 +319,17 @@ impl ApprovalClassifier {
                 risk: None,
                 reason: format!("classifier timed out after {:?}", self.timeout),
             },
+        }
+    }
+
+    fn cache_key(&self, candidate: &ApprovalCandidate) -> VerdictCacheKey {
+        VerdictCacheKey {
+            schema: VERDICT_CACHE_SCHEMA_VERSION,
+            model_id: self.model_id().to_string(),
+            tool_name: candidate.tool_name.clone(),
+            side_effect_class: candidate.side_effect_class,
+            side_effect_subclass: candidate.side_effect_subclass,
+            arguments: candidate.arguments.to_string(),
         }
     }
 
@@ -656,6 +687,123 @@ mod tests {
 
     fn classifier(risk: RiskLevel) -> ApprovalClassifier {
         ApprovalClassifier::new(Arc::new(FixedRisk(risk)), DEFAULT_APPROVAL_CLASSIFIER_TIMEOUT)
+    }
+
+    #[derive(Debug)]
+    struct CountingRisk {
+        risk: RiskLevel,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingRisk {
+        fn new(risk: RiskLevel) -> Arc<Self> {
+            Arc::new(Self { risk, calls: std::sync::atomic::AtomicUsize::new(0) })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ApprovalRiskClassifier for CountingRisk {
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+
+        fn classify(
+            &self,
+            _candidate: &ApprovalCandidate,
+        ) -> ModelFuture<Result<ClassifierVerdict, ApprovalClassifierError>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let risk = self.risk;
+            Box::pin(async move { Ok(ClassifierVerdict { risk, reason: String::from("counted") }) })
+        }
+    }
+
+    fn counting_classifier(risk: RiskLevel) -> (Arc<CountingRisk>, ApprovalClassifier) {
+        let backend = CountingRisk::new(risk);
+        let classifier =
+            ApprovalClassifier::new(backend.clone(), DEFAULT_APPROVAL_CLASSIFIER_TIMEOUT);
+        (backend, classifier)
+    }
+
+    #[tokio::test]
+    async fn repeated_low_risk_candidate_is_served_from_the_verdict_cache() {
+        let (backend, classifier) = counting_classifier(RiskLevel::Low);
+        let candidate = write_candidate("/work/src/lib.rs");
+        assert!(classifier.classify(&candidate).await.auto_approved());
+        assert!(classifier.classify(&candidate).await.auto_approved());
+        assert_eq!(backend.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cloned_classifiers_share_one_verdict_cache() {
+        let (backend, classifier) = counting_classifier(RiskLevel::Low);
+        let clone = classifier.clone();
+        let candidate = write_candidate("/work/src/lib.rs");
+        classifier.classify(&candidate).await;
+        clone.classify(&candidate).await;
+        assert_eq!(backend.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn verdict_cache_key_covers_tool_class_and_arguments() {
+        let (backend, classifier) = counting_classifier(RiskLevel::Low);
+        let first = write_candidate("/work/src/a.rs");
+        let second = write_candidate("/work/src/b.rs");
+        let terminal = terminal_candidate("ls");
+        for candidate in [&first, &first, &second, &terminal] {
+            assert!(classifier.classify(candidate).await.auto_approved());
+        }
+        assert_eq!(backend.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn medium_and_high_verdicts_are_never_cached() {
+        for risk in [RiskLevel::Medium, RiskLevel::High] {
+            let (backend, classifier) = counting_classifier(risk);
+            let candidate = write_candidate("/work/src/lib.rs");
+            classifier.classify(&candidate).await;
+            classifier.classify(&candidate).await;
+            assert_eq!(backend.calls(), 2, "{risk:?} must re-evaluate");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_classification_is_never_cached() {
+        #[derive(Debug)]
+        struct CountingFailure(std::sync::atomic::AtomicUsize);
+        impl ApprovalRiskClassifier for CountingFailure {
+            fn model_id(&self) -> &str {
+                "failing"
+            }
+            fn classify(
+                &self,
+                _candidate: &ApprovalCandidate,
+            ) -> ModelFuture<Result<ClassifierVerdict, ApprovalClassifierError>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(
+                    async move { Err(ApprovalClassifierError::Unavailable(String::from("down"))) },
+                )
+            }
+        }
+        let backend = Arc::new(CountingFailure(std::sync::atomic::AtomicUsize::new(0)));
+        let classifier =
+            ApprovalClassifier::new(backend.clone(), DEFAULT_APPROVAL_CLASSIFIER_TIMEOUT);
+        let candidate = write_candidate("/work/src/lib.rs");
+        classifier.classify(&candidate).await;
+        classifier.classify(&candidate).await;
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn hard_blocked_candidates_bypass_the_cache_and_backend() {
+        let (backend, classifier) = counting_classifier(RiskLevel::Low);
+        for _ in 0..2 {
+            let outcome = classifier.classify(&write_candidate("/work/.env")).await;
+            assert!(matches!(outcome, ApprovalClassification::Deny { .. }));
+        }
+        assert_eq!(backend.calls(), 0);
     }
 
     #[tokio::test]
