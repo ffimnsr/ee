@@ -105,6 +105,34 @@ fn ctrl_w_deletes_word_backward_in_bar_and_editor() {
 }
 
 #[test]
+fn failed_turn_returns_to_ready_and_accepts_next_prompt() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .respond_error(-32602, "invalid request: cannot resolve attachment")
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "first");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "failed turn unlocks the composer", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].last_error.is_some()
+    });
+
+    // Regression: the thread used to stay `Failed`, so this second prompt was
+    // refused locally and never reached the agent.
+    type_text(&mut app, "second");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "retry prompt reaches the agent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+
+    app.shutdown_agents();
+}
+
+#[test]
 fn ctrl_u_clears_draft_and_resets_caret() {
     let (mut app, _temp) = composer_app();
     type_text(&mut app, "hello draft");

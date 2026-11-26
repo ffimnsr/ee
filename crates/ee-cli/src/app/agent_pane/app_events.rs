@@ -307,13 +307,24 @@ impl App {
             }
             AgentEvent::TurnFailed { session_id, error, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    self.agents.threads[index].state = ThreadUiState::Failed;
+                    // A rejected request is not a dead session: the agent can
+                    // still accept the next turn. Stay `Failed` only when the
+                    // connection itself is gone, otherwise return to `Ready`
+                    // so the composer is usable again.
+                    let agent_id = self.agents.threads[index].agent_id.clone();
+                    let connection_ready = self
+                        .agents
+                        .host
+                        .as_ref()
+                        .and_then(|host| host.manager.connection_state(&agent_id))
+                        .is_some_and(|state| matches!(state, AgentConnectionState::Ready { .. }));
+                    self.agents.threads[index].state =
+                        if connection_ready { ThreadUiState::Ready } else { ThreadUiState::Failed };
                     self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].last_error = Some(error.to_string());
                     self.agents.threads[index].pending_recovery = None;
-                    let agent_id = self.agents.threads[index].agent_id.clone();
                     self.agents.threads[index]
                         .push_system(format!("agent `{agent_id}` turn failed: {error}"));
                     self.notify_unread(index);
