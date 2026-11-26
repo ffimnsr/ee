@@ -272,10 +272,12 @@ struct ChildProgress {
 fn progress_update(line: &str) -> Option<String> {
     let json = line.strip_prefix("ee: harness-progress ")?;
     let progress: ChildProgress = serde_json::from_str(json).ok()?;
+    // Trailing newline keeps consecutive updates on separate transcript lines;
+    // chunks sharing one message id are concatenated verbatim by the pane.
     Some(format!(
-        "`/{HARNESS_COMMAND_NAME}` {} stage={} rollouts={} sessions={} selection={} retries={} reflection={} dead={} base_failed={}",
-        progress.state,
+        "`/{HARNESS_COMMAND_NAME}` stage={} state={} · rollouts={} · sessions={} · selection={} · retries={} · reflection={} · dead={} · base_failed={}\n",
         progress.stage,
+        progress.state,
         progress.rollouts,
         progress.sessions,
         progress.selection_sessions,
@@ -667,6 +669,60 @@ mod tests {
         assert!(sink_rx.try_recv().is_ok(), "progress must reach the chat sink");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_progress_streams_before_the_child_exits() {
+        use std::process::Stdio;
+
+        use ee_agent_acp_server::server::OutboundEvent;
+        use ee_agent_protocol::{ContentBlock, SessionUpdate};
+        use tokio::sync::mpsc;
+
+        // The child prints one progress line, then blocks on a marker file so
+        // the test observes the update while the process is still alive. That
+        // distinguishes live streaming from a single report emitted at exit.
+        let release_dir = tempfile::tempdir().expect("release dir");
+        let release = release_dir.path().join("release");
+        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel();
+        let sink = UpdateSink::new_for_test(SessionId::new("session-1"), sink_tx);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(
+                "printf '%s\\n' 'ee: harness-progress {\"stage\":\"reference\",\"state\":\"completed\",\"rollouts\":1,\"sessions\":0,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}'; while [ ! -f \"$1\" ]; do sleep 0.05; done; printf '%s\\n' 'ee: harness-report {\"task_id\":\"t\",\"rollouts\":1,\"sessions\":0,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}'",
+            )
+            .arg("sh")
+            .arg(&release)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let task =
+            tokio::spawn(async move { run_child_streaming(&mut command, &sink, &cancel_rx).await });
+
+        let event = tokio::time::timeout(Duration::from_secs(5), sink_rx.recv())
+            .await
+            .expect("progress must arrive while the child is still running")
+            .expect("sink open");
+        let OutboundEvent::Update { update, .. } = event else {
+            panic!("expected one session update, got {event:?}");
+        };
+        let SessionUpdate::AgentMessageChunk(chunk) = *update else {
+            panic!("expected an agent message chunk");
+        };
+        let ContentBlock::Text(text) = chunk.content else {
+            panic!("expected a text chunk");
+        };
+        assert!(text.text.contains("stage=reference"), "{}", text.text);
+
+        std::fs::write(&release, b"go").expect("release child");
+        let outcome = task.await.expect("stream task").expect("child outcome");
+        let ChildOutcome::Finished { status, .. } = outcome else {
+            panic!("child must finish");
+        };
+        assert!(status.success());
+    }
+
     #[test]
     fn progress_lines_become_compact_chat_updates() {
         let line = "ee: harness-progress {\"stage\":\"step-0-probe\",\"state\":\"completed\",\"rollouts\":3,\"sessions\":3,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}";
@@ -674,6 +730,9 @@ mod tests {
         assert!(update.contains("stage=step-0-probe"), "{update}");
         assert!(update.contains("rollouts=3"), "{update}");
         assert!(!update.contains("stdout"), "{update}");
+        assert!(update.ends_with('\n'), "updates must not run together on one line: {update:?}");
+        let combined = format!("{update}{}", progress_update(line).expect("progress"));
+        assert_eq!(combined.lines().count(), 2, "{combined}");
         assert!(progress_update("ordinary output").is_none());
     }
 
