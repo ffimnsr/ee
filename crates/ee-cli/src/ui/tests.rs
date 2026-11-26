@@ -10,6 +10,7 @@ fn agents_system_notices_wrap_inside_transcript_width() {
         text: String::from(
             "commands: /compact — Summarize session history, /discard — Discard paused work",
         ),
+        response_group: None,
         at: std::time::SystemTime::UNIX_EPOCH,
     };
 

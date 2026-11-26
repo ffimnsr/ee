@@ -597,7 +597,7 @@ impl App {
         if let Some(thread_index) = prompt.thread_index
             && let Some(thread) = self.agents.threads.get_mut(thread_index)
         {
-            thread.push_system(summary.clone());
+            thread.push_turn_notice(summary.clone());
         }
         self.backend.status_message = Some(summary);
         self.resolve_approval(prompt, ApprovalChoice::AllowOnce);

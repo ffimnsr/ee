@@ -369,7 +369,7 @@ impl App {
                     _ => String::from("permission resolved"),
                 };
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    self.agents.threads[index].push_system(notice);
+                    self.agents.threads[index].push_turn_notice(notice);
                 }
                 self.agents.remove_permission(session_id.0.as_ref(), request_id);
                 self.refresh_thread_runtime_state(session_id.0.as_ref());
@@ -386,12 +386,12 @@ impl App {
                 match session_id {
                     Some(session_id) => {
                         if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                            self.agents.threads[index].push_system(notice);
+                            self.agents.threads[index].push_turn_notice(notice);
                         }
                     }
                     None => {
                         if let Some(active) = self.agents.active_thread_index() {
-                            self.agents.threads[active].push_system(notice);
+                            self.agents.threads[active].push_turn_notice(notice);
                         }
                     }
                 }
@@ -579,7 +579,7 @@ impl App {
                     ),
                     V2CommandPermission::Ask => unreachable!("auto outcome only for allow/deny"),
                 };
-                self.agents.threads[thread_index].push_system(notice.clone());
+                self.agents.threads[thread_index].push_turn_notice(notice.clone());
                 self.backend.status_message = Some(notice);
                 return;
             }

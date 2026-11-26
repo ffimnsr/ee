@@ -362,7 +362,7 @@ impl App {
                 }
                 if let Some(thread) = self.session_thread_by_id(session_id) {
                     self.agents.threads[thread]
-                        .push_system(format!("agent wrote: {}", path.display()));
+                        .push_turn_notice(format!("agent wrote: {}", path.display()));
                 }
                 let _ = reply.send(Ok(response));
             }

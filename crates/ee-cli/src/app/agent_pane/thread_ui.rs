@@ -80,8 +80,16 @@ pub(crate) enum TranscriptItem {
         url_host: Option<String>,
         at: SystemTime,
     },
-    /// `-!-` system notice.
-    System { text: String, at: SystemTime },
+    /// `-!-` system notice. Automatic turn chatter (trust decisions, client
+    /// requests, native file dispatch) carries the active response group so it
+    /// hides with the rest of the turn; lifecycle notices stay global.
+    System {
+        text: String,
+        /// Defaulted for journals written before grouped notices existed.
+        #[serde(default)]
+        response_group: Option<ResponseGroupId>,
+        at: SystemTime,
+    },
     /// `-!-` stderr/debug line.
     Stderr { text: String, at: SystemTime },
 }
@@ -479,6 +487,7 @@ impl AgentThreadUi {
                     ..
                 } => *response_group,
                 TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+                TranscriptItem::System { response_group, .. } => *response_group,
                 _ => None,
             })
             .collect::<BTreeSet<_>>()
@@ -533,6 +542,7 @@ impl AgentThreadUi {
                 *item_group == group
             }
             TranscriptItem::ToolCall { response_group: item_group, .. } => *item_group == group,
+            TranscriptItem::System { response_group: Some(item_group), .. } => *item_group == group,
             _ => false,
         })
     }
@@ -592,6 +602,7 @@ impl AgentThreadUi {
                 kind: MessageRenderKind::Thought, response_group, ..
             } => *response_group,
             TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+            TranscriptItem::System { response_group, .. } => *response_group,
             _ => None,
         }
     }
@@ -601,9 +612,26 @@ impl AgentThreadUi {
         self.current_plan = entries;
     }
 
-    /// Appends a system notice.
+    /// Appends a global system notice.
     pub(crate) fn push_system(&mut self, text: impl Into<String>) {
-        self.transcript.push(TranscriptItem::System { text: text.into(), at: SystemTime::now() });
+        self.transcript.push(TranscriptItem::System {
+            text: text.into(),
+            response_group: None,
+            at: SystemTime::now(),
+        });
+    }
+
+    /// Appends an automatic turn notice inside the active response group.
+    ///
+    /// Trust decisions, client requests, and native dispatch are turn detail:
+    /// collapsing the group hides them with the reasoning and tool rows. Falls
+    /// back to a global notice outside a turn.
+    pub(crate) fn push_turn_notice(&mut self, text: impl Into<String>) {
+        self.transcript.push(TranscriptItem::System {
+            text: text.into(),
+            response_group: self.active_response_group,
+            at: SystemTime::now(),
+        });
     }
 }
 

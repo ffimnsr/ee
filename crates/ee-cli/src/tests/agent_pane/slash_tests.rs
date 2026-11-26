@@ -187,6 +187,7 @@ fn phase_two_session_lifecycle_commands_keep_local_and_provider_state_distinct()
 
     app.agents.threads[0].transcript.push(TranscriptItem::System {
         text: String::from("first transcript"),
+        response_group: None,
         at: SystemTime::now(),
     });
     type_text(&mut app, "/clear");
@@ -209,6 +210,7 @@ fn phase_two_session_lifecycle_commands_keep_local_and_provider_state_distinct()
 
     app.agents.threads[1].transcript.push(TranscriptItem::System {
         text: String::from("archived transcript"),
+        response_group: None,
         at: SystemTime::now(),
     });
     type_text(&mut app, "/archive");

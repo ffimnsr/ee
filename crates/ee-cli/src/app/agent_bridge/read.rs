@@ -67,7 +67,7 @@ impl App {
                     });
                     if let Some(thread) = self.session_thread(&request.session_id) {
                         self.agents.threads[thread]
-                            .push_system(format!("agent read: {}", request.path.display()));
+                            .push_turn_notice(format!("agent read: {}", request.path.display()));
                     }
                     let _ = reply.send(Ok(ClientRequestResponse::ReadTextFile(
                         ReadTextFileResponse::new(content),

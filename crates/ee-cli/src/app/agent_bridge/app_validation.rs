@@ -426,7 +426,7 @@ impl App {
             WriteTransactionStage::Validation,
             outcome,
         );
-        self.agents.threads[index].push_system(format!(
+        self.agents.threads[index].push_turn_notice(format!(
             "validation terminal completed (exit: {}; {}ms; output truncated: {})",
             completion.exit_code.map_or_else(|| String::from("unknown"), |code| code.to_string()),
             completion.elapsed_ms,

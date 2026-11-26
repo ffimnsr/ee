@@ -50,13 +50,17 @@ fn live_transcript_is_not_trimmed_and_restores_from_the_journal() {
 
     let thread = &mut first_app.agents.threads[0];
     for index in 0..1_600 {
-        thread
-            .transcript
-            .push(TranscriptItem::System { text: format!("line {index}"), at: SystemTime::now() });
+        thread.transcript.push(TranscriptItem::System {
+            text: format!("line {index}"),
+            response_group: None,
+            at: SystemTime::now(),
+        });
     }
-    thread
-        .transcript
-        .push(TranscriptItem::System { text: String::from("last line"), at: SystemTime::now() });
+    thread.transcript.push(TranscriptItem::System {
+        text: String::from("last line"),
+        response_group: None,
+        at: SystemTime::now(),
+    });
     assert!(first_app.agents.threads[0].transcript.len() >= 1_601);
     first_app.shutdown_agents();
     drop(first_app);
@@ -101,6 +105,7 @@ fn archived_session_survives_restart_and_can_be_restored() {
     open_pane_and_wait_ready(&mut first_app);
     first_app.agents.threads[0].transcript.push(TranscriptItem::System {
         text: String::from("archived marker"),
+        response_group: None,
         at: SystemTime::now(),
     });
     type_text(&mut first_app, "/archive");
@@ -223,6 +228,7 @@ fn live_turn_after_restore_is_not_mistaken_for_load_replay() {
     open_pane_and_wait_ready(&mut first_app);
     first_app.agents.threads[0].transcript.push(TranscriptItem::System {
         text: String::from("durable marker"),
+        response_group: None,
         at: SystemTime::now(),
     });
     first_app.shutdown_agents();

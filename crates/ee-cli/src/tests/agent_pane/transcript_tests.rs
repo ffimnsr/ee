@@ -376,6 +376,61 @@ fn mouse_click_collapses_one_tool_inside_group_wide_expansion() {
 }
 
 #[test]
+fn collapsed_response_group_hides_turn_notices_but_keeps_global_notices() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    let thread = &mut app.agents.threads[0];
+    thread.transcript.push(TranscriptItem::ToolCall {
+        id: String::from("call_1"),
+        title: String::from("Run command"),
+        status: String::from("completed"),
+        detail: String::new(),
+        response_group: 1,
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::System {
+        text: String::from("trusted workspace terminal"),
+        response_group: Some(1),
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::System {
+        text: String::from("global lifecycle notice"),
+        response_group: None,
+        at: SystemTime::now(),
+    });
+    thread.transcript.push(TranscriptItem::Message {
+        nick: String::from("agent"),
+        text: String::from("turn answer"),
+        kind: MessageRenderKind::Assistant,
+        message_id: None,
+        response_group: Some(1),
+        at: SystemTime::now(),
+    });
+    thread.collapsed_response_groups.insert(1);
+
+    let rows = render_agents_rows(&app);
+    assert!(
+        rows.iter().any(|row| row.contains("[+]") && row.contains("response:")),
+        "collapsed group header must render: {rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("trusted workspace terminal")),
+        "turn notice leaked from a collapsed response group: {rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("global lifecycle notice")),
+        "global system notice must stay visible: {rows:#?}"
+    );
+
+    app.agents.threads[0].collapsed_response_groups.clear();
+    let rows = render_agents_rows(&app);
+    assert!(
+        rows.iter().any(|row| row.contains("trusted workspace terminal")),
+        "expanded response group must show its turn notice: {rows:#?}"
+    );
+}
+
+#[test]
 fn response_anchors_follow_rendered_group_order() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
@@ -474,6 +529,7 @@ fn transcript_rows_stay_unhighlighted_without_a_selected_final_response() {
     let thread = &mut app.agents.threads[0];
     thread.transcript.push(TranscriptItem::System {
         text: String::from("Agents keys:\nCtrl-K toggle pane"),
+        response_group: None,
         at: SystemTime::now(),
     });
     thread.transcript.push(TranscriptItem::Message {
@@ -530,6 +586,7 @@ fn selected_final_response_highlights_only_that_answer() {
     thread.selected_final_response = Some(2);
     thread.transcript.push(TranscriptItem::System {
         text: String::from("Agents keys:\nCtrl-K toggle pane"),
+        response_group: None,
         at: SystemTime::now(),
     });
 

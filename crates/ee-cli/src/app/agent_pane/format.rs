@@ -582,11 +582,13 @@ pub(super) fn thread_state_label(state: ThreadUiState) -> &'static str {
 }
 
 /// Response group a transcript item belongs to, if any. User messages and
-/// notices carry no group; assistant/thought messages and tool calls do.
+/// lifecycle notices carry no group; assistant/thought messages, tool calls,
+/// and turn notices do.
 fn transcript_item_response_group(item: &TranscriptItem) -> Option<ResponseGroupId> {
     match item {
         TranscriptItem::Message { response_group, .. } => *response_group,
         TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+        TranscriptItem::System { response_group, .. } => *response_group,
         _ => None,
     }
 }
