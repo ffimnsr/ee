@@ -10,7 +10,7 @@ use ee_agent_orchestrator::harness_validation::HarnessTree;
 use ee_agent_orchestrator::user_experience::ExperienceEntry;
 use serde::{Deserialize, Serialize};
 
-use crate::channel::{Channel, ImproverModel, RunRecord};
+use crate::channel::{Channel, ImproverModel, ImproverRole, RunRecord};
 use crate::context::StageEvidence;
 use crate::error::HarnessError;
 use crate::ledger::{Ledger, LedgerReport, MAX_K};
@@ -182,7 +182,8 @@ pub struct HarnessConfig {
     pub reflection_source: ReflectionSource,
     /// Improver policy.
     pub improver: ImproverModel,
-    /// Domain concurrency for stream mode.
+    /// Domain concurrency for stream mode; task-level recursion uses it as the
+    /// phase width, capped at two independent stages (INV/DOM or their probes).
     pub max_workers: usize,
     /// Reuse a matching completed summary.
     pub resume: bool,
@@ -327,6 +328,12 @@ pub fn dry_run_plan(task: &HarnessTask, config: &HarnessConfig) -> DryRunPlan {
         selection: !trivial_selection(k),
         reflection: config.reflect,
     }
+}
+
+/// Two proposers and two probe rollouts per step are independent. Cap the
+/// phase at two regardless of `max_workers`, matching harness2's PHASE_WIDTH.
+fn phase_width(config: &HarnessConfig) -> usize {
+    config.max_workers.clamp(1, 2)
 }
 
 /// Runs one improvement task end to end.
@@ -477,43 +484,119 @@ pub async fn run_task(
         };
         let step_base_dir =
             materialize_harness(&step_base, &run_root.join(format!("harness/step-{step}/base")))?;
-        let mut accepted = Vec::new();
-        for role in [crate::channel::ImproverRole::Inv, crate::channel::ImproverRole::Dom] {
-            let mission =
-                if role == crate::channel::ImproverRole::Inv { MISSION_INV } else { MISSION_DOM };
-            let stage = format!("step-{step}-{}", role.as_str());
-            let evidence = stage_evidence(
-                &stage,
-                mission,
-                task,
-                &step_base,
-                &references,
-                &library,
-                decisions.clone(),
+        // Two proposers and two probe rollouts per step. Run each pair concurrently
+        // when the worker budget allows: the stages are independent, write to
+        // distinct candidate/scratch directories, and the ledger merges by label.
+        let phase_width = phase_width(config);
+        let inv_stage = format!("step-{step}-inv");
+        let dom_stage = format!("step-{step}-dom");
+        let inv_evidence = stage_evidence(
+            &inv_stage,
+            MISSION_INV,
+            task,
+            &step_base,
+            &references,
+            &library,
+            decisions.clone(),
+        );
+        let dom_evidence = stage_evidence(
+            &dom_stage,
+            MISSION_DOM,
+            task,
+            &step_base,
+            &references,
+            &library,
+            decisions.clone(),
+        );
+        let (inv_reply, dom_reply) = if phase_width >= 2 {
+            let mut inv_ledger = Ledger::new();
+            let mut dom_ledger = Ledger::new();
+            let (inv, dom) = tokio::join!(
+                runtime.improve(
+                    ImproveRequest {
+                        role: ImproverRole::Inv,
+                        stage: inv_stage,
+                        evidence: inv_evidence,
+                        base: step_base.clone(),
+                        base_dir: step_base_dir.clone(),
+                    },
+                    &mut inv_ledger,
+                ),
+                runtime.improve(
+                    ImproveRequest {
+                        role: ImproverRole::Dom,
+                        stage: dom_stage,
+                        evidence: dom_evidence,
+                        base: step_base.clone(),
+                        base_dir: step_base_dir.clone(),
+                    },
+                    &mut dom_ledger,
+                ),
             );
-            let reply = runtime
+            let inv = inv?;
+            let dom = dom?;
+            ledger.merge(inv_ledger)?;
+            ledger.merge(dom_ledger)?;
+            (inv, dom)
+        } else {
+            let inv = runtime
                 .improve(
                     ImproveRequest {
-                        role,
-                        stage,
-                        evidence,
+                        role: ImproverRole::Inv,
+                        stage: inv_stage,
+                        evidence: inv_evidence,
                         base: step_base.clone(),
                         base_dir: step_base_dir.clone(),
                     },
                     &mut ledger,
                 )
                 .await?;
-            accepted.push((role, reply));
-        }
-        let mut probes: Vec<(String, HarnessTree, RunRecord)> = Vec::new();
-        for (role, reply) in accepted {
+            let dom = runtime
+                .improve(
+                    ImproveRequest {
+                        role: ImproverRole::Dom,
+                        stage: dom_stage,
+                        evidence: dom_evidence,
+                        base: step_base.clone(),
+                        base_dir: step_base_dir.clone(),
+                    },
+                    &mut ledger,
+                )
+                .await?;
+            (inv, dom)
+        };
+
+        let mut prepared = Vec::new();
+        for (role, reply) in [(ImproverRole::Inv, inv_reply), (ImproverRole::Dom, dom_reply)] {
             let label = format!("probe-{step}-{}", role.as_str());
             let tree = reply.tree;
             let harness_dir = materialize_harness(
                 &tree,
                 &run_root.join(format!("harness/step-{step}/probe-{}", role.as_str())),
             )?;
-            let record = runtime.run_rollout(&label, &harness_dir, &mut ledger).await?;
+            prepared.push((label, tree, harness_dir));
+        }
+        let records = if phase_width >= 2 {
+            let mut inv_ledger = Ledger::new();
+            let mut dom_ledger = Ledger::new();
+            let (inv, dom) = tokio::join!(
+                runtime.run_rollout(&prepared[0].0, &prepared[0].2, &mut inv_ledger),
+                runtime.run_rollout(&prepared[1].0, &prepared[1].2, &mut dom_ledger),
+            );
+            let inv = inv?;
+            let dom = dom?;
+            ledger.merge(inv_ledger)?;
+            ledger.merge(dom_ledger)?;
+            vec![inv, dom]
+        } else {
+            let mut serial = Vec::new();
+            for (label, _, harness_dir) in &prepared {
+                serial.push(runtime.run_rollout(label, harness_dir, &mut ledger).await?);
+            }
+            serial
+        };
+        let mut probes: Vec<(String, HarnessTree, RunRecord)> = Vec::new();
+        for ((label, tree, _), record) in prepared.into_iter().zip(records) {
             probe_records.push((label.clone(), tree.clone(), record.clone()));
             probes.push((label, tree, record));
         }

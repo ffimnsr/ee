@@ -112,6 +112,23 @@ impl Ledger {
         Ok(())
     }
 
+    /// Merges the events of one concurrently-run phase ledger.
+    ///
+    /// Labels are stable and unique per stage, so a concurrent phase records
+    /// exactly the events a serial run would. Dead rollouts are kept in label
+    /// order so the report stays deterministic regardless of completion order.
+    pub(crate) fn merge(&mut self, other: Ledger) -> HarnessResult<()> {
+        for (label, event) in other.events {
+            if self.events.insert(label.clone(), event).is_some() {
+                return Err(HarnessError::Budget(format!("duplicate ledger label `{label}`")));
+            }
+        }
+        self.base_failed |= other.base_failed;
+        self.dead_rollouts.extend(other.dead_rollouts);
+        self.dead_rollouts.sort_by(|a, b| a.label.cmp(&b.label));
+        self.enforce_caps()
+    }
+
     /// Marks the base task failed before any candidate could be probed.
     pub fn record_base_failed(&mut self) {
         self.base_failed = true;
@@ -293,6 +310,30 @@ mod tests {
 
         ledger.record(LedgerKind::Rollout, "dup", "first").expect("records");
         assert!(ledger.record(LedgerKind::Rollout, "dup", "second").is_err());
+    }
+
+    #[test]
+    fn merged_phase_ledgers_keep_the_identity_and_reject_duplicates() {
+        let mut left = Ledger::new();
+        let mut right = Ledger::new();
+        left.record(LedgerKind::Rollout, "probe-0-inv", "delivered").expect("left");
+        left.record(LedgerKind::ImprovementSession, "step-0-inv", "improved").expect("left");
+        right.record(LedgerKind::Rollout, "probe-0-dom", "delivered").expect("right");
+        right.record(LedgerKind::ImprovementSession, "step-0-dom", "improved").expect("right");
+        right.dead_rollout("composed-0", "no deliverable").expect("dead");
+
+        let mut merged = Ledger::new();
+        merged.merge(left).expect("merge left");
+        merged.merge(right).expect("merge right");
+        assert_eq!(merged.rollouts(), 3);
+        assert_eq!(merged.sessions(), 2);
+        assert_eq!(merged.report().dead_rollouts[0].label, "composed-0");
+
+        let mut duplicate = Ledger::new();
+        duplicate
+            .record(LedgerKind::Rollout, "probe-0-inv", "delivered")
+            .expect("duplicate source");
+        assert!(merged.merge(duplicate).is_err(), "labels stay unique across phases");
     }
 
     #[test]

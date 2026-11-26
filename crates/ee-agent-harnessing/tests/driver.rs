@@ -109,24 +109,25 @@ fn record(label: &str, text: &str) -> RunRecord {
     }
 }
 
+fn standard_reply(request: &ImproverRequest) -> ImproverReply {
+    match request.role {
+        ImproverRole::Inv => ImproverReply { tree: inv_tree(), notes: "kept".into() },
+        ImproverRole::Dom => ImproverReply { tree: dom_tree(), notes: "kept".into() },
+        ImproverRole::Composer => ImproverReply {
+            tree: composed_tree(),
+            notes: "kept -> guardrails.md -> probe-0-inv delivered".into(),
+        },
+        ImproverRole::Selector => panic!("k=1 must bypass the selector session"),
+        ImproverRole::Reflector => {
+            ImproverReply { tree: HarnessTree::default(), notes: reflection_notes() }
+        }
+    }
+}
+
 fn standard_improver(calls: Arc<Mutex<Vec<ImproverRequest>>>) -> ImproveFn {
     Arc::new(move |request| {
         calls.lock().expect("calls").push(request.clone());
-        let reply = match request.role {
-            ImproverRole::Inv => ImproverReply { tree: inv_tree(), notes: "kept".into() },
-            ImproverRole::Dom => ImproverReply { tree: dom_tree(), notes: "kept".into() },
-            ImproverRole::Composer => ImproverReply {
-                tree: composed_tree(),
-                notes: "kept -> guardrails.md -> probe-0-inv delivered".into(),
-            },
-            ImproverRole::Selector => {
-                panic!("k=1 must bypass the selector session")
-            }
-            ImproverRole::Reflector => {
-                ImproverReply { tree: HarnessTree::default(), notes: reflection_notes() }
-            }
-        };
-        Ok(reply)
+        Ok(standard_reply(request))
     })
 }
 
@@ -201,6 +202,59 @@ fn selector_choice(context: &Path, needle: &str) -> Result<String, HarnessError>
         }
     }
     Err(HarnessError::State(format!("no selector candidate contains {needle:?}")))
+}
+
+#[tokio::test]
+async fn inv_dom_and_probe_phases_run_concurrently() {
+    // Both phases are pairs of independent stages. A serial driver can never
+    // satisfy these barriers, so the timeout is the regression signal.
+    struct PhaseBarrierChannel {
+        improve: Arc<Barrier>,
+        probe: Arc<Barrier>,
+    }
+
+    impl Channel for PhaseBarrierChannel {
+        fn run_task(&self, request: RunRequest) -> ChannelFuture<RunRecord> {
+            let barrier = self.probe.clone();
+            Box::pin(async move {
+                let response = record(&request.label, "delivered");
+                if request.label.starts_with("probe-") {
+                    barrier.wait().await;
+                }
+                Ok(response)
+            })
+        }
+
+        fn improve(&self, request: ImproverRequest) -> ChannelFuture<ImproverReply> {
+            let barrier = self.improve.clone();
+            Box::pin(async move {
+                let reply = standard_reply(&request);
+                if matches!(request.role, ImproverRole::Inv | ImproverRole::Dom) {
+                    barrier.wait().await;
+                }
+                Ok(reply)
+            })
+        }
+    }
+
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let channel = PhaseBarrierChannel {
+        improve: Arc::new(Barrier::new(2)),
+        probe: Arc::new(Barrier::new(2)),
+    };
+    let mut settings = config(1);
+    settings.reflect = false;
+    settings.max_workers = 2;
+    let run = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_task(&channel, &task(&workspace), &settings, &root.path().join("run"), None),
+    )
+    .await
+    .expect("phase pairs must complete concurrently")
+    .expect("run");
+    assert_eq!(run.ledger.rollouts, 4, "R = 4k");
+    assert_eq!(run.ledger.sessions, 3, "P = 3k");
 }
 
 #[tokio::test]
@@ -799,15 +853,19 @@ async fn stream_runs_domains_concurrently_and_keeps_one_domain_sequential() {
             let label = request.label.clone();
             let domain = request.task.domain.clone();
             Box::pin(async move {
-                let first = this.seen.lock().expect("seen").insert(domain.clone());
-                if !this.active.lock().expect("active").insert(domain.clone()) {
-                    this.overlap.store(true, Ordering::Relaxed);
+                // Track only base rollouts: they mark the top-level task boundary.
+                // Probe rollouts within one task legitimately run as a pair.
+                if label.starts_with("ref-") {
+                    let first = this.seen.lock().expect("seen").insert(domain.clone());
+                    if !this.active.lock().expect("active").insert(domain.clone()) {
+                        this.overlap.store(true, Ordering::Relaxed);
+                    }
+                    if first {
+                        this.barrier.wait().await;
+                    }
+                    tokio::task::yield_now().await;
+                    this.active.lock().expect("active").remove(&domain);
                 }
-                if first {
-                    this.barrier.wait().await;
-                }
-                tokio::task::yield_now().await;
-                this.active.lock().expect("active").remove(&domain);
                 Ok(record(&label, "delivered"))
             })
         }
