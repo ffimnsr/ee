@@ -230,7 +230,7 @@ pub(super) fn validate_mcp_url(raw_url: &str) -> Result<String, String> {
 /// may carry only a patch that a higher-priority layer completes.
 /// `secret://` grammar IS validated for env values (exact references) and
 /// header values (exact references or templates embedding one token).
-pub(super) fn validate_mcp_server_shape(id: &str, server: &McpServerToml) -> Result<(), String> {
+pub(crate) fn validate_mcp_server_shape(id: &str, server: &McpServerToml) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err(String::from("mcp server id must not be empty"));
     }

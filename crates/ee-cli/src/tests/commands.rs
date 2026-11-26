@@ -444,7 +444,8 @@ fn cli_utility_commands_live_under_do() {
     ));
     assert!(crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "revoke"]).is_err());
 
-    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant"]).unwrap();
+    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant", "--server", "ee"])
+        .unwrap();
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
@@ -459,10 +460,20 @@ fn cli_utility_commands_live_under_do() {
             }
         }) if server == "ee"
     ));
+    assert!(crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant"]).is_err());
 
-    let cli =
-        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant", "--transport", "acp"])
-            .unwrap();
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "mcp",
+        "trust",
+        "grant",
+        "--server",
+        "ee",
+        "--transport",
+        "acp",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
@@ -477,8 +488,17 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
-    let cli =
-        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "grant", "--execute"]).unwrap();
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "mcp",
+        "trust",
+        "grant",
+        "--server",
+        "ee",
+        "--execute",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
@@ -490,8 +510,17 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
-    let cli =
-        crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke", "--execute"]).unwrap();
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "mcp",
+        "trust",
+        "revoke",
+        "--server",
+        "ee",
+        "--execute",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
@@ -502,8 +531,10 @@ fn cli_utility_commands_live_under_do() {
             }
         })
     ));
+    assert!(crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke"]).is_err());
 
-    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke"]).unwrap();
+    let cli = crate::Cli::try_parse_from(["ee", "do", "mcp", "trust", "revoke", "--server", "ee"])
+        .unwrap();
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
@@ -563,6 +594,121 @@ fn cli_utility_commands_live_under_do() {
         cli.command,
         Some(crate::Commands::Do {
             command: crate::DoCommands::Trust { command: crate::WorkspaceTrustCommands::Status }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "trust",
+        "workspace",
+        "grant",
+        "--execute",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Workspace {
+                        command: crate::WorkspaceTrustCommands::Grant {
+                            execute: true,
+                            yolo: false,
+                        }
+                    }
+                }
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "workspace", "status"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Workspace {
+                        command: crate::WorkspaceTrustCommands::Status
+                    }
+                }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee", "do", "agent", "trust", "mcp", "grant", "--server", "ee",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Mcp {
+                        command: crate::McpTrustCommands::Grant { server, .. }
+                    }
+                }
+            }
+        }) if server == "ee"
+    ));
+    assert!(crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "mcp", "grant"]).is_err());
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "mcp",
+        "add",
+        "--id",
+        "demo",
+        "--command",
+        "demo-server",
+        "--arg",
+        "serve",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Mcp {
+                    command: crate::AgentMcpCommands::Add(args)
+                }
+            }
+        }) if args.id == "demo" && args.command.as_deref() == Some("demo-server")
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "mcp", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Mcp { command: crate::AgentMcpCommands::List(_) }
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "agent", "mcp", "rm", "--id", "demo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Mcp {
+                    command: crate::AgentMcpCommands::Rm(args)
+                }
+            }
+        }) if args.id == "demo"
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "serve-mcp"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent { command: crate::AgentCommands::ServeMcp { .. } }
         })
     ));
 

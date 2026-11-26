@@ -82,6 +82,8 @@ mod logs;
 #[allow(dead_code)]
 mod mcp_cmd;
 #[cfg(feature = "agents")]
+mod mcp_manage_cmd;
+#[cfg(feature = "agents")]
 mod mcp_setup;
 #[allow(dead_code)]
 mod mcp_trust;
@@ -135,10 +137,10 @@ pub use entry::run_cli as run;
 
 #[cfg(test)]
 pub(crate) use args::{
-    ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentSessionsCommands, AgentTrustCommands,
-    AgentTrustProfile, Cli, Commands, ConfigCommands, DoCommands, FileCommands, HarnessCommands,
-    HarnessModeArg, LanguageCommands, McpCommands, McpTrustCommands, McpTrustTransport,
-    PluginCommands, RuntimeCommands, SecretsCommands, WorkspaceTrustCommands,
+    ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentMcpCommands, AgentSessionsCommands,
+    AgentTrustCommands, AgentTrustProfile, Cli, Commands, ConfigCommands, DoCommands, FileCommands,
+    HarnessCommands, HarnessModeArg, LanguageCommands, McpCommands, McpTrustCommands,
+    McpTrustTransport, PluginCommands, RuntimeCommands, SecretsCommands, WorkspaceTrustCommands,
 };
 #[cfg(test)]
 pub(crate) use doctor::doctor_report;

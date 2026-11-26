@@ -645,10 +645,13 @@ Plain workspace trust never authorizes arbitrary command execution. To let an ag
 
 ```sh
 cd /path/to/workspace
-ee do trust grant --execute   # trust the workspace and grant simple terminal execution
-ee do trust grant --yolo      # trust the workspace and grant unrestricted terminal execution
-ee do trust revoke --execute  # remove either terminal opt-in
+ee do agent trust workspace grant --execute   # simple terminal execution
+ee do agent trust workspace grant --yolo      # unrestricted terminal execution
+ee do agent trust workspace revoke --execute  # remove either terminal opt-in
+ee do agent trust workspace status
 ```
+
+`ee do trust grant|revoke|status` remains as an alias for these commands.
 
 The opt-in is stored on the same owner-only, host-local workspace trust document (`$XDG_STATE_HOME/ee/workspace-trust/`) and is inert unless the workspace decision is `trusted`. Revoking workspace trust clears it. It applies only to native ACP v1 `terminal/create`: a command is auto-spawned without `--yolo` only when it normalizes to a simple executable + argv (no shell syntax, shell wrappers, or leading environment assignments), the executable is a bare `PATH` name, the canonical cwd stays inside the primary workspace root, every path-like argv operand resolves inside the primary workspace root, the agent mode is not in `agents.read_only_modes` (default `ask`/`plan`), and no loader/path environment override is requested. Extra workspace roots, external directories, external or traversal operands, explicit-path executables, ambiguous option-embedded paths (`--out=/tmp/x`, `-I/usr/include`), protected paths, built-in safeguards, persistent command denies, and mandatory-confirm rules still prompt or deny.
 
@@ -656,7 +659,7 @@ A leading `cd <absolute workspace directory> &&` is normalized for eligibility, 
 
 `--yolo` relaxes the command-shape checks: any native ACP v1 terminal command text, including pipes, redirects, globs, and shell wrappers, auto-runs when the workspace is trusted, the agent mode is not in `agents.read_only_modes`, and the request does not originate from MCP. This is a substantial authority increase. Built-in safeguards, persistent/session denies, and mandatory confirms still run first, and auto-run commands still go through the OS terminal sandbox whenever `[agents.terminal_sandbox].mode` is not `off`. With `mode = "off"`, `--yolo` commands run unsandboxed; do not combine the two unless you accept arbitrary command execution with your account. `--yolo` never covers MCP `ee_terminal_create` or ACP v2 agent-owned command permissions.
 
-Neither grant is a sandbox by itself: accepted commands run with your user account and can reach anything that account can reach. Operand containment is best-effort lexical/canonical validation of path-like argv tokens; it cannot constrain what an accepted program (an interpreter, build tool, or network client) does internally. It does not cover MCP `ee_terminal_create` (use `ee do mcp trust grant --execute` for that route) or ACP v2 agent-owned command permissions (the agent runs those itself, so ee keeps the curated `safe_read` reply there).
+Neither grant is a sandbox by itself: accepted commands run with your user account and can reach anything that account can reach. Operand containment is best-effort lexical/canonical validation of path-like argv tokens; it cannot constrain what an accepted program (an interpreter, build tool, or network client) does internally. It does not cover MCP `ee_terminal_create` (use `ee do agent trust mcp grant --server ee --execute` for that route) or ACP v2 agent-owned command permissions (the agent runs those itself, so ee keeps the curated `safe_read` reply there).
 
 Built-in orchestrator agents (`ee-agent-opencode` and `ee-agent-openrouter`) can also use the opt-in approval classifier (`EE_APPROVAL_CLASSIFIER=auto`). When the classifier returns `low` risk, ee auto-dispatches the call without a prompt only if the workspace is trusted, the agent mode is not read-only, the request is not a mandatory confirm, and the request is not from another agent. Classifier-approved terminal commands are forced through the OS sandbox; a missing sandbox backend falls back to the prompt. The classifier never overrides safeguards, persistent denies, or `ask`/`plan` modes.
 
@@ -676,7 +679,7 @@ write_paths = []
 wall_seconds = 1800
 ```
 
-The baseline profile reads broadly, writes only inside the workspace plus granted paths and a per-command temp directory, keeps workspace `.git` read-only, masks host `/run` and IPC sockets, and denies network unless `network = "allow"`. Sandbox `HOME` points at the per-command temp directory so tools cannot write host config; host `CARGO_HOME` and `RUSTUP_HOME` are forwarded read-only when present so Rust toolchains stay usable. Sandboxed commands use a fresh per-command process (not the reusable persistent shell) so mounts and temp state cannot leak across calls. Missing, setuid, or unusable bwrap and missing `sandbox-exec` fall back to the approval prompt, or deny with `on_unavailable = "deny"`; there is no silent unsandboxed run. `ee do trust status` and `ee do doctor` report backend capability and effective policy.
+The baseline profile reads broadly, writes only inside the workspace plus granted paths and a per-command temp directory, keeps workspace `.git` read-only, masks host `/run` and IPC sockets, and denies network unless `network = "allow"`. Sandbox `HOME` points at the per-command temp directory so tools cannot write host config; host `CARGO_HOME` and `RUSTUP_HOME` are forwarded read-only when present so Rust toolchains stay usable. Sandboxed commands use a fresh per-command process (not the reusable persistent shell) so mounts and temp state cannot leak across calls. Missing, setuid, or unusable bwrap and missing `sandbox-exec` fall back to the approval prompt, or deny with `on_unavailable = "deny"`; there is no silent unsandboxed run. `ee do agent trust workspace status` and `ee do doctor` report backend capability and effective policy.
 
 For ACP v2, enable `[agents.sandbox] mode = "workspace-write"` to confine the agent subprocess itself: writes are limited to the workspace, granted agent state/cache directories, and its temp directory, while network remains available for model calls. ACP v2 commands the agent runs itself inherit that filesystem containment, but they are not network-contained. If the backend probe fails, the agent starts without containment with a warning and v2 permissions remain on the curated `safe_read`/ask path; no containment claim is made. Without this opt-in, ACP v2 command permissions remain on the curated `safe_read`/ask path with no OS containment claim.
 
@@ -687,17 +690,19 @@ The sandbox is terminal/agent-process scoped, not an account boundary. It does n
 One explicit trust decision can cover the pinned tool surface of the built-in `ee` MCP server instead of approving each MCP write prompt:
 
 ```sh
-ee do mcp trust grant
-ee do mcp trust grant --transport stdio
-ee do mcp trust grant --execute
-ee do mcp trust status
-ee do mcp trust revoke
-ee do mcp trust revoke --execute
+ee do agent trust mcp grant --server ee
+ee do agent trust mcp grant --server ee --transport stdio
+ee do agent trust mcp grant --server ee --execute
+ee do agent trust mcp status
+ee do agent trust mcp revoke --server ee
+ee do agent trust mcp revoke --server ee --execute
 ```
+
+`--server` is required for both grant and revoke: the command never infers a server or trusts every configured MCP server. `--transport all` (the default) means both stdio and ACP for the selected server. Only the built-in `ee` server has an application-owned pinned tool manifest; other server ids are rejected until they gain one. `ee do mcp trust ...` remains as an alias for these commands. MCP server entries themselves are managed with `ee do agent mcp add|list|rm`.
 
 The grant is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), bound to the canonical workspace identity, and inert unless the workspace trust decision is `trusted`. It covers every pinned read tool plus every workspace write tool in the stable `ee` manifest on the selected transport: edit tools, content-bearing file writes, filesystem create/copy/move/delete, and workspace-memory mutations. Content writes still obey the workspace write safety maxima, and built-in safeguards still deny protected paths, path escapes, secret-store writes, and catastrophic deletion. External-network tools are never included; outbound network access keeps its dedicated approval path. New tools or schema changes require a new grant; cross-transport and cross-workspace calls still prompt. Approval prompts for eligible MCP operations offer `Trust MCP server (pinned tools)` with the same preview/confirmation step as `Allow always`. After the grant persists, covered tools dispatch without a per-tool prompt (the status names the workspace or server grant that authorized it) until the grant is revoked or workspace trust is withdrawn.
 
-Terminal execution is a separate opt-in, never part of the general grant: use `ee do mcp trust grant --execute` or the `Trust MCP server + terminal (run commands)` approval option. It extends the server grant with `ee_terminal_create` and covers validated argv commands. Shell wrappers, external cwd, built-in command safeguards, persistent command denies, mandatory confirms, and workspace gating still apply. Remove just that opt-in with `ee do mcp trust revoke --execute`; a full revoke drops the whole grant.
+Terminal execution is a separate opt-in, never part of the general grant: use `ee do agent trust mcp grant --server ee --execute` or the `Trust MCP server + terminal (run commands)` approval option. It extends the server grant with `ee_terminal_create` and covers validated argv commands. Shell wrappers, external cwd, built-in command safeguards, persistent command denies, mandatory confirms, and workspace gating still apply. Remove just that opt-in with `ee do agent trust mcp revoke --server ee --execute`; a full revoke drops the whole grant.
 
 This surface covers the built-in `ee` MCP server that ee hosts (stdio proxy and ACP-native routes). External `[mcp.servers]` entries are forwarded to agents and remain agent-owned; ee does not mediate their tool calls.
 

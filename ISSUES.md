@@ -142,7 +142,7 @@ Ordered by dependency; R1–R2 are foundations, R3–R6 the headless bridge, R7�
   - [x] **Acceptance criteria:** `ee do agent serve --stdio` runs the R3/R4/R5 bridge against configured agents from a clean shell with no editor running; `--help` documents transport flags; a config with no `[agents]` servers produces a clear typed error, not a panic; clippy/fmt clean; the new command file stays well under the 1k LOC rule.
   - [x] **Edge cases:** `secret://` references must resolve headless or fail with the same typed secret errors as the editor path (never prompt interactively in serve mode); registry download on first headless run needs bounded timeouts and a no-network failure mode; concurrent `ee do agent serve` and editor session on the same config must not corrupt state_dir (both are separate ACP clients of separate agent processes — verify no shared mutable files beyond the documented stores).
 
-- [x] **R7 — MCP server for agent drivers (`ee do agent mcp`).** rmcp 3.x `ServerHandler` exposing the host core to MCP clients like hermes.
+- [x] **R7 — MCP server for agent drivers (`ee do agent serve-mcp`).** rmcp 3.x `ServerHandler` exposing the host core to MCP clients like hermes.
   - [x] **Problem:** agent drivers speak MCP, not the raw remote protocol; today ee's MCP server surface is the editor proxy (`ee --mcp-proxy`), which is not standalone and exposes editor tools, not agent-control tools.
   - [x] **Fix:** new MCP stdio server as a second thin surface over the same `ee-agent-remote` host core (one process per driver connection, embedding the bridge); follow the `ee_mcp::EeMcpProxy`/`tool_governance` rmcp 3.x pattern for handler structure, tool metadata, argument validation, and result mapping; hermes config: `[mcp_servers.ee-agent] command = "ee" args = ["do", "agent", "mcp"]`.
   - [x] **Acceptance criteria:** an MCP client test harness (reuse `ee-mcp/tests/manager_flows.rs` patterns) completes initialize → tools/list → tools/call round-trips; every tool schema validates its args and fails closed on malformed input; tool results bounded (byte-capped, truncated with a marker); a driver can drive a full fake-agent turn end-to-end (send task, poll updates, get completion).
@@ -723,3 +723,26 @@ Deferred boundaries:
 - ACP v2 per-command interception without an agent-process sandbox: ACP v2 has no client terminal methods, so the host cannot wrap an agent-owned command directly.
 - MCP terminal tools keep their own `ee do mcp trust grant --execute` route; no cross-route nesting.
 - Optional Linux cgroup v2 aggregate limits remain future work; current limits use inherited rlimits plus process-tree sampling. The plugin runtime now delegates breach policy and process-tree sampling to the shared `ee-sandbox` monitor while retaining its platform-specific raw samplers and Windows job objects.
+
+## Unified Agent Trust CLI (2026-11-26)
+
+Goal: put every agent-related trust decision under one command root, and stop MCP trust commands from inferring a server id.
+
+Rules:
+
+- Canonical commands are `ee do agent trust workspace grant|revoke|status` and `ee do agent trust mcp grant|revoke|status`.
+- Top-level `ee do trust ...` and `ee do mcp trust ...` remain aliases for the workspace and MCP halves respectively; they are not separate policy surfaces.
+- `ee do agent trust mcp grant` and `revoke` require an explicit `--server <id>`. No default server is applied, so a command can never silently trust the built-in server or every configured server.
+- `--transport all` means both stdio and ACP transports for the selected server, never all servers.
+- Only the built-in `ee` server has an application-owned pinned tool manifest; other server ids stay rejected until they gain one.
+- Existing `ee do agent trust grant|revoke --profile` profile grants stay in the same trust namespace.
+
+Work items:
+
+- [x] Add `Workspace` and `Mcp` branches under `AgentTrustCommands` and route both the canonical and alias paths through the same dispatch helpers.
+- [x] Rename the agent-driver MCP server command from `ee do agent mcp` to `ee do agent serve-mcp`, freeing `ee do agent mcp` for server management.
+- [x] Add non-interactive `ee do agent mcp add|list|rm` management over the existing scoped `[mcp.servers]` config helpers; `add` requires `--command` or `--url`, secret-like env/header values require `secret://`, and `list` never prints env/header values or URL queries.
+- [x] Remove the implicit `--server ee` default from MCP grant and revoke; require the id explicitly and update help text.
+- [x] Keep `--transport` scoped to the selected server and document that `all` is transport-wide, not server-wide.
+- [x] Add CLI parse tests for both canonical paths, the missing-server rejection, and preserved aliases.
+- [x] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, and the CLI/trust/MCP test filters.

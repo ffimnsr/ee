@@ -268,7 +268,7 @@ Redaction rules are also grouped:
 
 ## ee agent remote-control tools
 
-Served by `ee do agent mcp` over stdio. Effect and approval values are
+Served by `ee do agent serve-mcp` over stdio. Effect and approval values are
 descriptive only: this server has no governance manifest. Every successful
 result is a structured JSON object, but it has no manifest-versioned result
 contract. The remote server does not put per-tool approval prompts in front of

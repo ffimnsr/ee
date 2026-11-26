@@ -1,4 +1,4 @@
-//! `ee do agent mcp`: MCP stdio server for agent drivers.
+//! `ee do agent serve-mcp`: MCP stdio server for agent drivers.
 //!
 //! One process owns one host and its own agent connections. Shares config and
 //! secret resolution with `ee do agent serve` through
@@ -31,7 +31,7 @@ pub(crate) fn run(
     runtime.block_on(async move {
         let (host, _handler) = RemoteHost::headless_with_options(config, options).map_err(to_io)?;
         eprintln!(
-            "ee: agent mcp ready on stdio ({} agent(s), permission mode {})",
+            "ee: agent serve-mcp ready on stdio ({} agent(s), permission mode {})",
             host.manager().agent_ids().len(),
             host.config().permission_mode.as_str()
         );

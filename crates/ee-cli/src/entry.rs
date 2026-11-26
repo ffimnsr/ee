@@ -199,18 +199,12 @@ pub fn run_cli() -> io::Result<()> {
                     }
                 },
                 DoCommands::Agent { command: AgentCommands::Shell } => {}
-                DoCommands::Agent {
-                    command:
-                        AgentCommands::Trust { command: AgentTrustCommands::Grant { profiles } },
-                } => {
-                    cmd_agent_trust_grant(&profiles)?;
-                }
-                DoCommands::Agent {
-                    command:
-                        AgentCommands::Trust { command: AgentTrustCommands::Revoke { profiles } },
-                } => {
-                    cmd_agent_trust_revoke(&profiles)?;
-                }
+                DoCommands::Agent { command: AgentCommands::Trust { command } } => match command {
+                    AgentTrustCommands::Grant { profiles } => cmd_agent_trust_grant(&profiles)?,
+                    AgentTrustCommands::Revoke { profiles } => cmd_agent_trust_revoke(&profiles)?,
+                    AgentTrustCommands::Workspace { command } => run_workspace_trust(command)?,
+                    AgentTrustCommands::Mcp { command } => run_mcp_trust(command)?,
+                },
                 DoCommands::Agent { command: AgentCommands::Setup { user } } => {
                     cmd_config_setup_agent(user)
                 }
@@ -272,18 +266,35 @@ pub fn run_cli() -> io::Result<()> {
                 },
                 DoCommands::Agent {
                     command:
-                        AgentCommands::Mcp { allow_roots, permission_mode, audit_log, session_log_dir },
+                        AgentCommands::ServeMcp {
+                            allow_roots,
+                            permission_mode,
+                            audit_log,
+                            session_log_dir,
+                        },
                 } => {
                     #[cfg(feature = "agents")]
                     {
                         mcp_cmd::run(allow_roots, permission_mode, audit_log, session_log_dir)
                             .map_err(|error| {
-                                io::Error::new(error.kind(), format!("agent mcp: {error}"))
+                                io::Error::new(error.kind(), format!("agent serve-mcp: {error}"))
                             })?;
                     }
                     #[cfg(not(feature = "agents"))]
                     {
                         let _ = (allow_roots, permission_mode, audit_log, session_log_dir);
+                        eprintln!("ee: agents feature is disabled in this build");
+                        std::process::exit(1);
+                    }
+                }
+                DoCommands::Agent { command: AgentCommands::Mcp { command } } => {
+                    #[cfg(feature = "agents")]
+                    {
+                        crate::mcp_manage_cmd::run(command)?;
+                    }
+                    #[cfg(not(feature = "agents"))]
+                    {
+                        let _ = command;
                         eprintln!("ee: agents feature is disabled in this build");
                         std::process::exit(1);
                     }
@@ -300,28 +311,10 @@ pub fn run_cli() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 }
-                DoCommands::Trust { command } => match command {
-                    WorkspaceTrustCommands::Grant { execute, yolo } => {
-                        workspace_trust::cmd_trust_grant(execute, yolo)?
-                    }
-                    WorkspaceTrustCommands::Revoke { execute } => {
-                        workspace_trust::cmd_trust_revoke(execute)?
-                    }
-                    WorkspaceTrustCommands::Status => workspace_trust::cmd_trust_status()?,
-                },
-                DoCommands::Mcp { command } => match command {
-                    McpCommands::Trust { command } => match command {
-                        McpTrustCommands::Grant { server, transport, execute } => {
-                            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport, execute)?
-                        }
-                        McpTrustCommands::Revoke { server, transport, execute } => {
-                            crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport, execute)?
-                        }
-                        McpTrustCommands::Status { server } => {
-                            crate::mcp_trust::cmd_mcp_trust_status(server.as_deref())?
-                        }
-                    },
-                },
+                DoCommands::Trust { command } => run_workspace_trust(command)?,
+                DoCommands::Mcp { command: McpCommands::Trust { command } } => {
+                    run_mcp_trust(command)?
+                }
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
                     PluginCommands::Validate { path } => cmd_plugins_validate(path.as_deref()),
@@ -466,6 +459,30 @@ pub fn run_cli() -> io::Result<()> {
     }
 
     run(&mut app, shutdown)
+}
+
+fn run_workspace_trust(command: WorkspaceTrustCommands) -> io::Result<()> {
+    match command {
+        WorkspaceTrustCommands::Grant { execute, yolo } => {
+            workspace_trust::cmd_trust_grant(execute, yolo)
+        }
+        WorkspaceTrustCommands::Revoke { execute } => workspace_trust::cmd_trust_revoke(execute),
+        WorkspaceTrustCommands::Status => workspace_trust::cmd_trust_status(),
+    }
+}
+
+fn run_mcp_trust(command: McpTrustCommands) -> io::Result<()> {
+    match command {
+        McpTrustCommands::Grant { server, transport, execute } => {
+            crate::mcp_trust::cmd_mcp_trust_grant(&server, transport, execute)
+        }
+        McpTrustCommands::Revoke { server, transport, execute } => {
+            crate::mcp_trust::cmd_mcp_trust_revoke(&server, transport, execute)
+        }
+        McpTrustCommands::Status { server } => {
+            crate::mcp_trust::cmd_mcp_trust_status(server.as_deref())
+        }
+    }
 }
 
 fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {

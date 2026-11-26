@@ -67,11 +67,13 @@ pub(crate) enum DoCommands {
         command: AgentCommands,
     },
     /// Manage host-local workspace trust for secret references and terminal execution
+    /// (alias for `ee do agent trust workspace`)
     Trust {
         #[command(subcommand)]
         command: WorkspaceTrustCommands,
     },
     /// Manage host-local MCP server trust grants
+    /// (alias for `ee do agent trust mcp`)
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
@@ -137,7 +139,7 @@ pub(crate) enum DoCommands {
 pub(crate) enum AgentCommands {
     /// Launch the editor directly into the agents TUI
     Shell,
-    /// Manage host-local workspace trust grants
+    /// Manage host-local workspace and MCP trust grants
     Trust {
         #[command(subcommand)]
         command: AgentTrustCommands,
@@ -179,7 +181,8 @@ pub(crate) enum AgentCommands {
         session_log_dir: Option<PathBuf>,
     },
     /// Serve agent control tools to an MCP driver over stdio
-    Mcp {
+    #[command(name = "serve-mcp")]
+    ServeMcp {
         /// Workspace root the headless handler may touch; repeat for multiple roots
         #[arg(long = "allow-root", value_name = "DIR")]
         allow_roots: Vec<PathBuf>,
@@ -192,6 +195,11 @@ pub(crate) enum AgentCommands {
         /// Enable durable per-session history under this directory
         #[arg(long = "session-log-dir", value_name = "DIR")]
         session_log_dir: Option<PathBuf>,
+    },
+    /// Manage MCP server entries
+    Mcp {
+        #[command(subcommand)]
+        command: AgentMcpCommands,
     },
     /// Recursive harness improvement loop
     Harness {
@@ -370,8 +378,80 @@ pub(crate) enum HarnessModeArg {
     Sequential,
 }
 
+/// `ee do agent mcp` subcommands for server config management.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AgentMcpCommands {
+    /// Add or replace one MCP server entry
+    Add(AgentMcpAddArgs),
+    /// List configured MCP servers
+    List(AgentMcpListArgs),
+    /// Remove one MCP server entry
+    Rm(AgentMcpRemoveArgs),
+}
+
+/// `ee do agent mcp add` options.
+#[derive(Debug, Args)]
+pub(crate) struct AgentMcpAddArgs {
+    /// MCP server id
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: String,
+    /// stdio executable to launch
+    #[arg(long, value_name = "COMMAND", conflicts_with = "url")]
+    pub(crate) command: Option<String>,
+    /// stdio argument; repeat as needed
+    #[arg(long = "arg", value_name = "ARG")]
+    pub(crate) args: Vec<String>,
+    /// stdio environment variable as KEY=VALUE; repeat. Secret values must be secret:// references
+    #[arg(long = "env", value_name = "KEY=VALUE")]
+    pub(crate) env: Vec<String>,
+    /// stdio working directory
+    #[arg(long, value_name = "DIR", conflicts_with = "url")]
+    pub(crate) cwd: Option<PathBuf>,
+    /// Streamable HTTP endpoint URL
+    #[arg(long, value_name = "URL", conflicts_with = "command")]
+    pub(crate) url: Option<String>,
+    /// Streamable HTTP header as KEY=VALUE; repeat. Secret values must be secret:// references
+    #[arg(long = "header", value_name = "KEY=VALUE")]
+    pub(crate) headers: Vec<String>,
+    /// Streamable HTTP request timeout in milliseconds
+    #[arg(long = "timeout-ms", value_name = "MS")]
+    pub(crate) timeout_ms: Option<u64>,
+    /// Write to the user config layer instead of the workspace layer
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) user: bool,
+}
+
+/// `ee do agent mcp list` options.
+#[derive(Debug, Args)]
+pub(crate) struct AgentMcpListArgs {
+    /// List only the user config layer instead of the merged effective config
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) user: bool,
+}
+
+/// `ee do agent mcp rm` options.
+#[derive(Debug, Args)]
+pub(crate) struct AgentMcpRemoveArgs {
+    /// MCP server id to remove
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: String,
+    /// Remove from the user config layer instead of the workspace layer
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) user: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum AgentTrustCommands {
+    /// Manage workspace trust and terminal execution grants
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceTrustCommands,
+    },
+    /// Manage host-local MCP server trust grants
+    Mcp {
+        #[command(subcommand)]
+        command: McpTrustCommands,
+    },
     /// Grant all built-in trust profiles, or only profiles named with --profile
     Grant {
         /// Built-in host-local profile to grant; repeat to grant multiple profiles
@@ -390,10 +470,10 @@ pub(crate) enum AgentTrustCommands {
 pub(crate) enum McpTrustCommands {
     /// Grant trust for one MCP server's pinned tools
     Grant {
-        /// MCP server id; only the built-in ee manifest is supported
-        #[arg(long, default_value = "ee", value_name = "SERVER")]
+        /// MCP server id to trust; required, no implicit default
+        #[arg(long, value_name = "SERVER")]
         server: String,
-        /// Transport to grant; defaults to both stdio and ACP
+        /// Transport to grant; defaults to both stdio and ACP for this server
         #[arg(long, value_enum, default_value = "all")]
         transport: McpTrustTransport,
         /// Also grant terminal execution (`ee_terminal_create`) for this server
@@ -402,10 +482,10 @@ pub(crate) enum McpTrustCommands {
     },
     /// Revoke trust for one MCP server
     Revoke {
-        /// MCP server id
-        #[arg(long, default_value = "ee", value_name = "SERVER")]
+        /// MCP server id to revoke; required, no implicit default
+        #[arg(long, value_name = "SERVER")]
         server: String,
-        /// Transport to revoke; defaults to both stdio and ACP
+        /// Transport to revoke; defaults to both stdio and ACP for this server
         #[arg(long, value_enum, default_value = "all")]
         transport: McpTrustTransport,
         /// Revoke only the terminal-execution opt-in, keeping the other tools
