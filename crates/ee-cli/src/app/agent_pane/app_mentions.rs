@@ -120,13 +120,19 @@ impl App {
     }
 
     /// Replaces the composer's trailing `@...` token with an accepted mention.
+    /// The bare `@ref:` template keeps the picker flow going: accepting it
+    /// opens the reference file picker instead of leaving a dangling prefix.
     pub(crate) fn agents_insert_mention(&mut self, mention: &str) {
-        if self.agents_replace_trailing_mention(mention) {
-            self.backend.status_message = Some(format!("mention inserted: {mention}"));
-        } else {
+        if !self.agents_replace_trailing_mention(mention) {
             self.backend.status_message =
                 Some(String::from("mention picker closed: composer has no trailing @ token"));
+            return;
         }
+        if mention.strip_prefix('@') == Some(REFERENCE_MENTION_PREFIX) {
+            self.agents_open_reference_picker("");
+            return;
+        }
+        self.backend.status_message = Some(format!("mention inserted: {mention}"));
     }
 
     fn agents_replace_trailing_mention(&mut self, mention: &str) -> bool {
@@ -193,7 +199,10 @@ impl App {
             &workspace_roots,
             config_root.as_deref(),
         );
-        let mut items = Vec::with_capacity(names.skills.len() + names.memories.len());
+        let mut items = Vec::with_capacity(names.skills.len() + names.memories.len() + 1);
+        // First entry is the reference template; selecting it opens the
+        // reference file picker so `@ref:` is discoverable from bare `@`.
+        items.push(mention_item(format!("@{REFERENCE_MENTION_PREFIX}"), "reference file"));
         for name in names.skills {
             items.push(mention_item(format!("@skill:{name}"), "skill"));
         }

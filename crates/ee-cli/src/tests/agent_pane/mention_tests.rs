@@ -30,6 +30,7 @@ fn bare_at_tab_opens_the_mention_picker_and_inserts_the_selected_file() {
     assert_eq!(picker.kind, crate::picker::PickerKind::AgentMentions);
     assert_eq!(picker.title, "Insert Mention");
     let labels = picker.visible_items_range(0, picker.visible_count());
+    assert!(labels.contains(&String::from("@ref:")), "{labels:?}");
     assert!(labels.contains(&String::from("@skill:atlas")), "{labels:?}");
     assert!(labels.contains(&String::from("@memory:testing")), "{labels:?}");
     assert!(labels.contains(&String::from("@mention-target.txt")), "{labels:?}");
@@ -80,6 +81,27 @@ fn ambiguous_path_prefix_opens_a_prefiltered_mention_picker() {
     type_text(&mut app, "one");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.agents.threads[0].draft, "read @alpha-one.txt");
+}
+
+#[test]
+fn bare_at_picker_offers_ref_template_that_opens_the_reference_picker() {
+    let (mut app, temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    mention_fixture(&temp);
+
+    type_text(&mut app, "@");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    type_text(&mut app, "ref:");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let picker =
+        app.picker.as_ref().expect("accepting the @ref: template opens the reference picker");
+    assert_eq!(picker.title, "Reference File");
+    assert_eq!(app.agents.threads[0].draft, "@ref:");
+
+    type_text(&mut app, "mention-target");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "@ref:mention-target.txt");
 }
 
 #[test]
