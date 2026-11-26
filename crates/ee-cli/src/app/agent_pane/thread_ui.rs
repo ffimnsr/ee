@@ -216,6 +216,10 @@ pub(crate) struct AgentThreadUi {
     pub(crate) collapse_incoming_response_groups: bool,
     /// Response groups whose tool input/output detail is expanded.
     pub(crate) expanded_tool_details: BTreeSet<ResponseGroupId>,
+    /// Per-tool detail overrides: response group -> tool-call id -> expanded.
+    /// Mouse clicks set these so one row can be toggled without affecting its
+    /// siblings; group-wide Ctrl-E clears them.
+    pub(crate) tool_detail_overrides: BTreeMap<ResponseGroupId, BTreeMap<String, bool>>,
     /// Latest agent plan snapshot, rendered in a modal instead of scrollback.
     pub(crate) current_plan: Vec<(String, char)>,
     /// Whether the user has opened the current plan modal.
@@ -482,6 +486,36 @@ impl AgentThreadUi {
             .collect()
     }
 
+    /// Whether one tool call's input/output detail is visible. Raw transcript
+    /// and detail modes always show it; otherwise a per-tool override wins over
+    /// the group-wide expansion flag.
+    pub(crate) fn tool_call_detail_visible(
+        &self,
+        group: ResponseGroupId,
+        tool_call_id: &str,
+    ) -> bool {
+        if self.transcript_raw || self.transcript_detail {
+            return true;
+        }
+        self.tool_detail_overrides
+            .get(&group)
+            .and_then(|overrides| overrides.get(tool_call_id))
+            .copied()
+            .unwrap_or_else(|| self.expanded_tool_details.contains(&group))
+    }
+
+    /// Toggles detail for one tool call without changing its siblings.
+    pub(crate) fn toggle_tool_call_detail(&mut self, group: ResponseGroupId, tool_call_id: &str) {
+        if !self.response_group_ids().contains(&group) {
+            return;
+        }
+        let expanded = !self.tool_call_detail_visible(group, tool_call_id);
+        self.tool_detail_overrides
+            .entry(group)
+            .or_default()
+            .insert(tool_call_id.to_string(), expanded);
+    }
+
     /// Collapses every response group currently in the transcript and keeps
     /// groups created by late load-replay chunks collapsed as well. Restored
     /// sessions start compact instead of replaying all reasoning and tool
@@ -737,6 +771,7 @@ impl AgentThreadUi {
         self.selected_final_response = None;
         self.collapsed_response_groups.clear();
         self.expanded_tool_details.clear();
+        self.tool_detail_overrides.clear();
         self.turn_metrics.clear();
         self.last_turn_metrics = None;
     }

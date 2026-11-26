@@ -796,6 +796,7 @@ impl App {
             collapsed_response_groups: BTreeSet::new(),
             collapse_incoming_response_groups: restored,
             expanded_tool_details: BTreeSet::new(),
+            tool_detail_overrides: BTreeMap::new(),
             current_plan: Vec::new(),
             plan_modal_open: false,
             prompt_editor_snapshot: None,

@@ -104,8 +104,8 @@ impl App {
         self.handle_mouse_event_in_area(m, Rect { x: 0, y: 0, width, height });
     }
     /// Applies the mouse action for the transcript row the click lands on:
-    /// header rows toggle collapse (Ctrl-R), tool-call rows toggle tool
-    /// detail (Ctrl-E). Clicks on plain content rows and clicks outside the
+    /// header rows toggle collapse (Ctrl-R), tool-call rows toggle only that
+    /// tool's detail. Clicks on plain content rows and clicks outside the
     /// transcript area are ignored.
     #[cfg(feature = "agents")]
     fn agents_mouse_click_transcript_row(&mut self, pane: Rect, row: u16) {
@@ -133,7 +133,7 @@ impl App {
             return;
         }
         let line_index = content_row - padding + top;
-        let Some(action) = row_action_at.get(line_index).copied().flatten() else {
+        let Some(action) = row_action_at.get(line_index).cloned().flatten() else {
             return;
         };
         match action {
@@ -142,7 +142,10 @@ impl App {
                 self.agents.threads[active].selected_final_response = None;
                 self.agents_toggle_selected_response_group();
             }
-            crate::ui::agents_pane::TranscriptRowAction::ToggleToolDetail(group) => {
+            crate::ui::agents_pane::TranscriptRowAction::ToggleToolDetail {
+                group,
+                tool_call_id,
+            } => {
                 let thread = &self.agents.threads[active];
                 if thread.transcript_raw || thread.transcript_detail {
                     // Detail is always shown in these modes; nothing to toggle.
@@ -150,7 +153,7 @@ impl App {
                 }
                 self.agents.threads[active].selected_response_group = Some(group);
                 self.agents.threads[active].selected_final_response = None;
-                self.agents_toggle_selected_tool_details();
+                self.agents.threads[active].toggle_tool_call_detail(group, &tool_call_id);
             }
         }
     }

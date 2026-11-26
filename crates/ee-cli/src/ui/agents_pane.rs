@@ -202,12 +202,12 @@ pub(crate) fn agent_transcript_lines(
 
 /// Mouse action a rendered transcript row maps to, if any.
 #[cfg(feature = "agents")]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum TranscriptRowAction {
     /// Response-group header row: toggle reasoning and tool collapse (Ctrl-R).
     ToggleCollapse(crate::app::ResponseGroupId),
-    /// Tool-call row: toggle tool input/output detail (Ctrl-E).
-    ToggleToolDetail(crate::app::ResponseGroupId),
+    /// Tool-call row: toggle this tool's input/output detail only.
+    ToggleToolDetail { group: crate::app::ResponseGroupId, tool_call_id: String },
 }
 
 /// Rendered transcript plus, for every line, the mouse action it maps to
@@ -290,9 +290,12 @@ fn render_agent_transcript(
             } => Some(*group),
             _ => None,
         };
-        let show_tool_detail = thread.transcript_raw
-            || thread.transcript_detail
-            || response_group.is_some_and(|group| thread.expanded_tool_details.contains(&group));
+        let show_tool_detail = match item {
+            crate::app::TranscriptItem::ToolCall { id, response_group, .. } => {
+                thread.tool_call_detail_visible(*response_group, id)
+            }
+            _ => false,
+        };
         if let Some(group) = response_group {
             if !thread.transcript_raw && rendered_response_groups.insert(group) {
                 let (thoughts, tools) = thread.response_group_counts(group);
@@ -336,10 +339,13 @@ fn render_agent_transcript(
         {
             highlight_response_rows(&mut lines[span_start..span_end], width);
         }
-        if let crate::app::TranscriptItem::ToolCall { response_group, .. } = item {
+        if let crate::app::TranscriptItem::ToolCall { id, response_group, .. } = item {
             // Detail continuation rows belong to the same clickable tool entry.
             for slot in &mut row_action_at[span_start..span_end] {
-                *slot = Some(TranscriptRowAction::ToggleToolDetail(*response_group));
+                *slot = Some(TranscriptRowAction::ToggleToolDetail {
+                    group: *response_group,
+                    tool_call_id: id.clone(),
+                });
             }
         }
     }

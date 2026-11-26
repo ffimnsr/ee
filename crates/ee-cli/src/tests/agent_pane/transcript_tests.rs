@@ -257,42 +257,63 @@ fn mouse_click_on_response_header_toggles_collapse() {
 }
 
 #[test]
-fn mouse_click_on_tool_call_row_toggles_group_tool_detail() {
+fn mouse_click_on_tool_call_row_toggles_only_clicked_tool_detail() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
-    app.agents.threads[0].transcript.push(TranscriptItem::ToolCall {
-        id: String::from("call_1"),
-        title: String::from("Run tests"),
-        status: String::from("completed"),
-        detail: String::from("detail: all green"),
-        response_group: 1,
-        at: SystemTime::UNIX_EPOCH,
-    });
-    assert!(!app.agents.threads[0].expanded_tool_details.contains(&1));
+    for (id, title, detail) in [
+        ("call_1", "Run tests", "detail: all green"),
+        ("call_2", "Format code", "detail: formatted"),
+    ] {
+        app.agents.threads[0].transcript.push(TranscriptItem::ToolCall {
+            id: String::from(id),
+            title: String::from(title),
+            status: String::from("completed"),
+            detail: String::from(detail),
+            response_group: 1,
+            at: SystemTime::UNIX_EPOCH,
+        });
+    }
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
 
-    // Click the tool-call row: expands the group's tool detail (same as Ctrl-E).
+    // Click one tool row: only that tool's detail expands.
     let rows = render_agents_rows(&app);
     let tool_y = rows.iter().position(|row| row.contains("Run tests")).unwrap();
     let tool_col = rows[tool_y].find('[').unwrap() as u16;
     mouse_click_cell(&mut app, tool_col, tool_y as u16);
     assert_eq!(app.agents.threads[0].selected_response_group, Some(1));
-    assert!(app.agents.threads[0].expanded_tool_details.contains(&1));
-    let rows = render_agents_rows(&app);
-    assert!(
-        rows.iter().any(|row| row.contains("all green")),
-        "expanded tool detail must render: {rows:#?}"
-    );
-
-    // Click the tool-call row again: collapses the detail.
-    let tool_y = rows.iter().position(|row| row.contains("Run tests")).unwrap();
-    let tool_col = rows[tool_y].find('[').unwrap() as u16;
-    mouse_click_cell(&mut app, tool_col, tool_y as u16);
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
     assert!(!app.agents.threads[0].expanded_tool_details.contains(&1));
     let rows = render_agents_rows(&app);
     assert!(
-        !rows.iter().any(|row| row.contains("all green")),
-        "collapsed tool detail must hide: {rows:#?}"
+        rows.iter().any(|row| row.contains("all green")),
+        "clicked tool detail must render: {rows:#?}"
     );
+    assert!(
+        !rows.iter().any(|row| row.contains("formatted")),
+        "sibling tool detail must stay collapsed: {rows:#?}"
+    );
+
+    // Click the second tool row: it expands independently of the first.
+    let tool_y = rows.iter().position(|row| row.contains("Format code")).unwrap();
+    let tool_col = rows[tool_y].find('[').unwrap() as u16;
+    mouse_click_cell(&mut app, tool_col, tool_y as u16);
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
+    let rows = render_agents_rows(&app);
+    assert!(rows.iter().any(|row| row.contains("all green")), "{rows:#?}");
+    assert!(rows.iter().any(|row| row.contains("formatted")), "{rows:#?}");
+
+    // Click the first tool row again: only the first collapses.
+    let tool_y = rows.iter().position(|row| row.contains("Run tests")).unwrap();
+    let tool_col = rows[tool_y].find('[').unwrap() as u16;
+    mouse_click_cell(&mut app, tool_col, tool_y as u16);
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
+    let rows = render_agents_rows(&app);
+    assert!(!rows.iter().any(|row| row.contains("all green")), "{rows:#?}");
+    assert!(rows.iter().any(|row| row.contains("formatted")), "{rows:#?}");
 
     // Header clicks still toggle collapse, independent of detail state.
     let header_y =
@@ -300,16 +321,58 @@ fn mouse_click_on_tool_call_row_toggles_group_tool_detail() {
     let header_col = rows[header_y].find('[').unwrap() as u16;
     mouse_click_cell(&mut app, header_col, header_y as u16);
     assert!(app.agents.threads[0].collapsed_response_groups.contains(&1));
-    assert!(!app.agents.threads[0].expanded_tool_details.contains(&1));
 
     // Raw transcript mode always shows detail; tool clicks must not mutate state.
     app.agents.threads[0].collapsed_response_groups.clear();
     app.agents.threads[0].transcript_raw = true;
+    let overrides_before = app.agents.threads[0].tool_detail_overrides.clone();
     let rows = render_agents_rows(&app);
     let tool_y = rows.iter().position(|row| row.contains("Run tests")).unwrap();
     let tool_col = rows[tool_y].find('[').unwrap() as u16;
     mouse_click_cell(&mut app, tool_col, tool_y as u16);
+    assert_eq!(app.agents.threads[0].tool_detail_overrides, overrides_before);
     assert!(!app.agents.threads[0].expanded_tool_details.contains(&1));
+}
+
+#[test]
+fn mouse_click_collapses_one_tool_inside_group_wide_expansion() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    for (id, title, detail) in [
+        ("call_1", "Run tests", "detail: all green"),
+        ("call_2", "Format code", "detail: formatted"),
+    ] {
+        app.agents.threads[0].transcript.push(TranscriptItem::ToolCall {
+            id: String::from(id),
+            title: String::from(title),
+            status: String::from("completed"),
+            detail: String::from(detail),
+            response_group: 1,
+            at: SystemTime::UNIX_EPOCH,
+        });
+    }
+    app.agents.threads[0].expanded_tool_details.insert(1);
+
+    // Clicking one expanded tool collapses only that tool; its sibling keeps
+    // the group-wide expansion.
+    let rows = render_agents_rows(&app);
+    let tool_y = rows.iter().position(|row| row.contains("Run tests")).unwrap();
+    let tool_col = rows[tool_y].find('[').unwrap() as u16;
+    mouse_click_cell(&mut app, tool_col, tool_y as u16);
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
+    let rows = render_agents_rows(&app);
+    assert!(!rows.iter().any(|row| row.contains("all green")), "{rows:#?}");
+    assert!(rows.iter().any(|row| row.contains("formatted")), "{rows:#?}");
+
+    // Ctrl-E stays group-wide: it clears the per-tool override so the whole
+    // group collapses, then expands together again.
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].tool_detail_overrides.is_empty());
+    assert!(!app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_1"));
+    assert!(app.agents.threads[0].tool_call_detail_visible(1, "call_2"));
 }
 
 #[test]

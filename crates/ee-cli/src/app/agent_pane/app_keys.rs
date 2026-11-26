@@ -727,8 +727,8 @@ impl App {
         }
     }
 
-    /// Toggles tool input/output detail for the selected response group
-    /// (Ctrl-E, or a mouse click on one of the group's tool-call rows).
+    /// Toggles tool input/output detail for every tool call in the selected
+    /// response group (Ctrl-E). Mouse clicks toggle one tool call instead.
     pub(crate) fn agents_toggle_selected_tool_details(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             return;
@@ -743,6 +743,9 @@ impl App {
         if !thread.expanded_tool_details.insert(group) {
             thread.expanded_tool_details.remove(&group);
         }
+        // A group-wide toggle is authoritative: drop per-tool overrides so the
+        // whole group expands or collapses together.
+        thread.tool_detail_overrides.remove(&group);
     }
 
     /// Returns active transcript's maximum visual-row offset for current terminal layout.
