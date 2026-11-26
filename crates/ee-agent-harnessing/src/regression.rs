@@ -253,6 +253,7 @@ mod tests {
             },
             max_workers: 1,
             resume: false,
+            progress: false,
         };
         let outcomes = run_regression(&config, root.path()).await.expect("suite");
         assert_eq!(outcomes.len(), 3);

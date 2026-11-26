@@ -70,6 +70,7 @@ pub(crate) fn run(args: HarnessSweepArgs) -> io::Result<()> {
         improver: ImproverModel { model_id: None, effort: None, max_steps: 12, timeout_secs: 300 },
         max_workers: args.workers,
         resume: true,
+        progress: true,
     };
     config.validate().map_err(|error| io::Error::other(error.to_string()))?;
     let tasks: Vec<HarnessTask> =

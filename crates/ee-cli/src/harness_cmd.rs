@@ -152,6 +152,7 @@ async fn improve(options: ImproveOptions) -> io::Result<()> {
         },
         max_workers: options.workers,
         resume: true,
+        progress: true,
     };
     config.validate().map_err(to_io)?;
     if options.dry_run {

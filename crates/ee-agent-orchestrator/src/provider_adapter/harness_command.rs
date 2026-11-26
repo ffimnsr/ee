@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use ee_agent_acp_server::{PromptResult, ProviderError, UpdateSink};
 use ee_agent_protocol::{ADOPT_COMMAND_NAME, HARNESS_COMMAND_NAME, SessionId, StopReason};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
 
 use super::{ProviderTelemetryTurn, finish_provider_telemetry};
@@ -30,6 +31,8 @@ use crate::session_log::{HarnessLedgerReport, SessionLog};
 const HARNESS_TIMEOUT: Duration = Duration::from_secs(3_600);
 /// Bound retained from a failure diagnostic.
 const MAX_ERROR_BYTES: usize = 640;
+/// Bound retained from the child streams for the final report.
+const MAX_CHILD_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum recursion depth accepted from the command line.
 const MAX_K: usize = 16;
 /// Maximum cross-domain workers accepted from the command line.
@@ -91,33 +94,21 @@ pub(super) async fn handle_harness_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut cancel = ctx.cancel.clone();
+    let cancel = ctx.cancel.clone();
     if *cancel.borrow() {
         finish_harness_telemetry(&ctx, &[], TelemetryTurnOutcome::Cancelled);
         return Ok(PromptResult::new(StopReason::Cancelled));
     }
-    let output = tokio::select! {
-        changed = cancel.changed() => {
-            let _ = changed;
+    let (status, stdout, stderr) = match run_child_streaming(&mut command, ctx.sink, &cancel).await
+    {
+        Ok(ChildOutcome::Finished { status, stdout, stderr }) => (status, stdout, stderr),
+        Ok(ChildOutcome::Cancelled) => {
             finish_harness_telemetry(&ctx, &[], TelemetryTurnOutcome::Cancelled);
             return Ok(PromptResult::new(StopReason::Cancelled));
         }
-        result = tokio::time::timeout(HARNESS_TIMEOUT, command.output()) => result,
-    };
-    let output = match output {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
+        Err(error) => {
             finish_harness_telemetry(&ctx, &[], TelemetryTurnOutcome::Failed);
-            return Err(ProviderError::BackendFailure(format!(
-                "`/harness` could not start the loop: {error}"
-            )));
-        }
-        Err(_) => {
-            finish_harness_telemetry(&ctx, &[], TelemetryTurnOutcome::Failed);
-            return Err(ProviderError::BackendFailure(format!(
-                "`/harness` exceeded {} seconds and was killed",
-                HARNESS_TIMEOUT.as_secs()
-            )));
+            return Err(error);
         }
     };
     let events = ctx.runtime.event_snapshot();
@@ -126,8 +117,6 @@ pub(super) async fn handle_harness_command(
     } else {
         &[]
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let parsed = parse_child_report(&stdout);
     if let Some(log) = &ctx.session_log
         && let Some(report) = parsed.as_ref()
@@ -148,26 +137,153 @@ pub(super) async fn handle_harness_command(
     let report = status_report(
         &ctx.session_id.to_string(),
         &args,
-        output.status.success(),
-        &output.status.to_string(),
+        status.success(),
+        &status.to_string(),
         parsed.as_ref(),
         &stderr,
     );
     let _ = ctx.sink.agent_message_chunk("harness", report);
-    let outcome = if output.status.success() {
+    let outcome = if status.success() {
         TelemetryTurnOutcome::Succeeded
     } else {
         TelemetryTurnOutcome::Failed
     };
     finish_harness_telemetry(&ctx, events, outcome);
-    if output.status.success() {
+    if status.success() {
         Ok(PromptResult::new(StopReason::EndTurn))
     } else {
         Err(ProviderError::BackendFailure(format!(
-            "`/harness` exited with {}; see status above",
-            output.status
+            "`/harness` exited with {status}; see status above"
         )))
     }
+}
+
+enum ChildOutcome {
+    Finished { status: std::process::ExitStatus, stdout: String, stderr: String },
+    Cancelled,
+}
+
+async fn run_child_streaming(
+    command: &mut tokio::process::Command,
+    sink: &UpdateSink,
+    cancel: &watch::Receiver<bool>,
+) -> Result<ChildOutcome, ProviderError> {
+    let mut child = command.spawn().map_err(|error| {
+        ProviderError::BackendFailure(format!("`/harness` could not start the loop: {error}"))
+    })?;
+    let mut stdout_lines = BufReader::new(child.stdout.take().ok_or_else(|| {
+        ProviderError::BackendFailure(String::from("`/harness` child stdout is not piped"))
+    })?)
+    .lines();
+    let mut stderr_lines = BufReader::new(child.stderr.take().ok_or_else(|| {
+        ProviderError::BackendFailure(String::from("`/harness` child stderr is not piped"))
+    })?)
+    .lines();
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut cancel = cancel.clone();
+    let mut cancel_open = true;
+    let deadline = tokio::time::Instant::now() + HARNESS_TIMEOUT;
+    loop {
+        if stdout_done && stderr_done {
+            break;
+        }
+        tokio::select! {
+            changed = cancel.changed(), if cancel_open => {
+                match changed {
+                    Ok(()) if *cancel.borrow() => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Ok(ChildOutcome::Cancelled);
+                    }
+                    Ok(()) => {}
+                    Err(_) => cancel_open = false,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(ProviderError::BackendFailure(format!(
+                    "`/harness` exceeded {} seconds and was killed",
+                    HARNESS_TIMEOUT.as_secs()
+                )));
+            }
+            line = stdout_lines.next_line(), if !stdout_done => {
+                match line {
+                    Ok(Some(line)) => {
+                        append_capture(&mut stdout, &line);
+                        if let Some(update) = progress_update(&line) {
+                            let _ = sink.agent_message_chunk(HARNESS_COMMAND_NAME, update);
+                        }
+                    }
+                    Ok(None) => stdout_done = true,
+                    Err(error) => {
+                        append_capture(&mut stdout, &format!("stdout read error: {error}"));
+                        stdout_done = true;
+                    }
+                }
+            }
+            line = stderr_lines.next_line(), if !stderr_done => {
+                match line {
+                    Ok(Some(line)) => append_capture(&mut stderr, &line),
+                    Ok(None) => stderr_done = true,
+                    Err(error) => {
+                        append_capture(&mut stderr, &format!("stderr read error: {error}"));
+                        stderr_done = true;
+                    }
+                }
+            }
+        }
+    }
+    let status = child.wait().await.map_err(|error| {
+        ProviderError::BackendFailure(format!("`/harness` child wait failed: {error}"))
+    })?;
+    Ok(ChildOutcome::Finished { status, stdout, stderr })
+}
+
+fn append_capture(buffer: &mut String, line: &str) {
+    if buffer.len() >= MAX_CHILD_CAPTURE_BYTES {
+        return;
+    }
+    let remaining = MAX_CHILD_CAPTURE_BYTES - buffer.len();
+    let mut end = line.len().min(remaining);
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    buffer.push_str(&line[..end]);
+    buffer.push('\n');
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChildProgress {
+    stage: String,
+    state: String,
+    rollouts: u64,
+    sessions: u64,
+    selection_sessions: u64,
+    retry_sessions: u64,
+    reflection_sessions: u64,
+    dead_rollouts: usize,
+    base_failed: bool,
+}
+
+fn progress_update(line: &str) -> Option<String> {
+    let json = line.strip_prefix("ee: harness-progress ")?;
+    let progress: ChildProgress = serde_json::from_str(json).ok()?;
+    Some(format!(
+        "`/{HARNESS_COMMAND_NAME}` {} stage={} rollouts={} sessions={} selection={} retries={} reflection={} dead={} base_failed={}",
+        progress.state,
+        progress.stage,
+        progress.rollouts,
+        progress.sessions,
+        progress.selection_sessions,
+        progress.retry_sessions,
+        progress.reflection_sessions,
+        progress.dead_rollouts,
+        progress.base_failed
+    ))
 }
 
 fn finish_harness_telemetry(
@@ -392,7 +508,9 @@ fn status_report(
     report: Option<&ChildReport>,
     stderr: &str,
 ) -> String {
-    let state = if success { "completed" } else { "failed" };
+    let base_failed = report.is_some_and(|report| report.base_failed);
+    let failed = !success || base_failed;
+    let state = if failed { "failed" } else { "completed" };
     let mut lines = vec![
         format!("`/{HARNESS_COMMAND_NAME}` {state}"),
         format!(
@@ -441,8 +559,13 @@ fn status_report(
             lines.push(String::from("report: missing"));
         }
     }
-    if !success {
-        lines.push(format!("reason: {}", error_excerpt(stderr)));
+    if failed {
+        let reason = if success {
+            String::from("base harness delivered no reference run")
+        } else {
+            error_excerpt(stderr)
+        };
+        lines.push(format!("reason: {reason}"));
         lines.push(format!(
             "next: fix the failure, then rerun `/{HARNESS_COMMAND_NAME}`; do not `/{ADOPT_COMMAND_NAME}` this run"
         ));
@@ -514,6 +637,44 @@ mod tests {
             dead_rollouts: 0,
             base_failed: false,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_stream_posts_progress_and_keeps_final_report() {
+        use std::process::Stdio;
+        use tokio::sync::mpsc;
+
+        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel();
+        let sink = UpdateSink::new_for_test(SessionId::new("session-1"), sink_tx);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' 'ee: harness-progress {\"stage\":\"reference\",\"state\":\"completed\",\"rollouts\":1,\"sessions\":0,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}' 'ee: harness-report {\"task_id\":\"t\",\"rollouts\":1,\"sessions\":0,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}'; printf 'warning\\n' >&2",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let outcome = run_child_streaming(&mut command, &sink, &cancel_rx).await.expect("child");
+        let ChildOutcome::Finished { status, stdout, stderr } = outcome else {
+            panic!("child must finish");
+        };
+        assert!(status.success());
+        assert!(stdout.contains("ee: harness-progress"), "{stdout}");
+        assert!(stdout.contains("ee: harness-report"), "{stdout}");
+        assert_eq!(stderr.trim(), "warning");
+        assert!(sink_rx.try_recv().is_ok(), "progress must reach the chat sink");
+    }
+
+    #[test]
+    fn progress_lines_become_compact_chat_updates() {
+        let line = "ee: harness-progress {\"stage\":\"step-0-probe\",\"state\":\"completed\",\"rollouts\":3,\"sessions\":3,\"selection_sessions\":0,\"retry_sessions\":0,\"reflection_sessions\":0,\"dead_rollouts\":0,\"base_failed\":false}";
+        let update = progress_update(line).expect("progress");
+        assert!(update.contains("stage=step-0-probe"), "{update}");
+        assert!(update.contains("rollouts=3"), "{update}");
+        assert!(!update.contains("stdout"), "{update}");
+        assert!(progress_update("ordinary output").is_none());
     }
 
     #[test]

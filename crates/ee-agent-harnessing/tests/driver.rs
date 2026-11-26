@@ -701,6 +701,27 @@ async fn invocation_consent_writes_the_library_entry_and_leaves_active_agents_un
 }
 
 #[tokio::test]
+async fn progress_writes_status_file_until_completion() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        standard_improver(Arc::new(Mutex::new(Vec::new()))),
+    );
+    let mut settings = config(1);
+    settings.progress = true;
+    let run_root = root.path().join("run");
+    run_task(&channel, &task(&workspace), &settings, &run_root, None).await.expect("run");
+    let text = std::fs::read_to_string(run_root.join("status.json")).expect("status");
+    let status: ee_agent_harnessing::runstate::HarnessStatus =
+        serde_json::from_str(&text).expect("status parses");
+    assert_eq!(status.stage, "complete");
+    assert_eq!(status.state, "completed");
+    assert_eq!(status.rollouts, 4);
+    assert!(!status.base_failed);
+}
+
+#[tokio::test]
 async fn no_change_reflection_is_no_entry_not_failure() {
     let root = tempfile::tempdir().expect("root");
     let workspace = prepare_workspace(root.path());

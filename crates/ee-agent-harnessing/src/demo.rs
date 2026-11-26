@@ -208,6 +208,7 @@ pub async fn run_demo(root: &Path) -> HarnessResult<HarnessRun> {
         },
         max_workers: 1,
         resume: false,
+        progress: false,
     };
     let writer = DemoWriter { workspace };
     run_task(&DemoChannel, &task, &config, &root.join("run"), Some(&writer)).await

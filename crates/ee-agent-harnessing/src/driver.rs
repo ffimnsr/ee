@@ -193,6 +193,9 @@ pub struct HarnessConfig {
     pub max_workers: usize,
     /// Reuse a matching completed summary.
     pub resume: bool,
+    /// Emit incremental `status.json` and `ee: harness-progress` lines.
+    /// CLI runs enable this; library tests and embedding callers leave it off.
+    pub progress: bool,
 }
 
 impl Default for HarnessConfig {
@@ -211,6 +214,7 @@ impl Default for HarnessConfig {
             },
             max_workers: 2,
             resume: true,
+            progress: false,
         }
     }
 }
@@ -342,6 +346,40 @@ fn phase_width(config: &HarnessConfig) -> usize {
     config.max_workers.clamp(1, 2)
 }
 
+fn emit_progress(
+    config: &HarnessConfig,
+    task: &HarnessTask,
+    run_root: &Path,
+    stage: &str,
+    state: &str,
+    ledger: &Ledger,
+) {
+    if !config.progress {
+        return;
+    }
+    let report = ledger.report();
+    let status = runstate::HarnessStatus {
+        schema_version: 1,
+        task_id: task.id.clone(),
+        stage: stage.to_string(),
+        state: state.to_string(),
+        rollouts: report.rollouts,
+        sessions: report.sessions,
+        selection_sessions: report.selection_sessions,
+        retry_sessions: report.retry_sessions,
+        reflection_sessions: report.reflection_sessions,
+        dead_rollouts: report.dead_rollouts.len(),
+        base_failed: report.base_failed,
+    };
+    if let Err(error) = runstate::save_status(run_root, &status) {
+        tracing::warn!(%error, "harness status could not be written");
+    }
+    match serde_json::to_string(&status) {
+        Ok(json) => println!("ee: harness-progress {json}"),
+        Err(error) => tracing::warn!(%error, "harness status could not be serialized"),
+    }
+}
+
 /// Runs one improvement task end to end.
 pub async fn run_task(
     channel: &dyn Channel,
@@ -431,14 +469,17 @@ pub async fn run_task(
     let cache = ImproverCache::new(run_root.join("improver-cache"));
     let runtime = StageRuntime { channel, task, config, run_root, cache: &cache };
     let mut ledger = Ledger::new();
+    emit_progress(config, task, run_root, "starting", "running", &ledger);
     let mut references: Vec<RunRecord> = Vec::new();
     for index in 0..config.k {
         let label = format!("ref-{index}");
         let record = runtime.run_rollout(&label, &base_dir, &mut ledger).await?;
         references.push(record);
     }
+    emit_progress(config, task, run_root, "reference", "completed", &ledger);
     if references.iter().all(|record| !task.delivered(record)) {
         ledger.record_base_failed();
+        emit_progress(config, task, run_root, "base-failed", "failed", &ledger);
         let summary = RunSummary {
             schema_version: 1,
             task_id: task.id.clone(),
@@ -514,6 +555,7 @@ pub async fn run_task(
             &library,
             decisions.clone(),
         );
+        emit_progress(config, task, run_root, &format!("step-{step}-propose"), "running", &ledger);
         let (inv_reply, dom_reply) = if phase_width >= 2 {
             let mut inv_ledger = Ledger::new();
             let mut dom_ledger = Ledger::new();
@@ -572,6 +614,14 @@ pub async fn run_task(
             (inv, dom)
         };
 
+        emit_progress(
+            config,
+            task,
+            run_root,
+            &format!("step-{step}-propose"),
+            "completed",
+            &ledger,
+        );
         let mut prepared = Vec::new();
         for (role, reply) in [(ImproverRole::Inv, inv_reply), (ImproverRole::Dom, dom_reply)] {
             let label = format!("probe-{step}-{}", role.as_str());
@@ -601,11 +651,13 @@ pub async fn run_task(
             }
             serial
         };
+        emit_progress(config, task, run_root, &format!("step-{step}-probe"), "completed", &ledger);
         let mut probes: Vec<(String, HarnessTree, RunRecord)> = Vec::new();
         for ((label, tree, _), record) in prepared.into_iter().zip(records) {
             probe_records.push((label.clone(), tree.clone(), record.clone()));
             probes.push((label, tree, record));
         }
+        emit_progress(config, task, run_root, &format!("step-{step}-compose"), "running", &ledger);
         let compose_stage = format!("step-{step}-compose");
         let mut probe_harnesses: Vec<(String, HarnessTree)> =
             vec![(String::from("base"), step_base.clone())];
@@ -644,6 +696,7 @@ pub async fn run_task(
             )
             .await?;
         decisions.push((compose_stage.clone(), composed.notes.clone()));
+        emit_progress(config, task, run_root, &compose_stage, "completed", &ledger);
         if crate::compose::parse_notes(&composed.notes).is_empty() {
             tracing::warn!(
                 stage = %compose_stage,
@@ -657,6 +710,14 @@ pub async fn run_task(
         )?;
         let composed_record =
             runtime.run_rollout(&composed_label, &composed_dir, &mut ledger).await?;
+        emit_progress(
+            config,
+            task,
+            run_root,
+            &format!("step-{step}-rollout"),
+            "completed",
+            &ledger,
+        );
         let candidate = Candidate {
             label: composed_label,
             delivered: task.delivered(&composed_record),
@@ -722,6 +783,7 @@ pub async fn run_task(
         (outcome.selection, outcome.adoption, outcome.raw_reply)
     };
 
+    emit_progress(config, task, run_root, "selection", "completed", &ledger);
     let chosen_tree = match selection.chosen.as_deref() {
         Some(label) if label.starts_with("ref-") => base_tree.clone(),
         Some(label) => finals
@@ -735,6 +797,7 @@ pub async fn run_task(
 
     let adopted_path = run_root.join("adopted");
     materialize_harness(&chosen_tree, &adopted_path)?;
+    emit_progress(config, task, run_root, "adopted", "completed", &ledger);
 
     let mut reflection = None;
     let mut reflected_path = None;
@@ -743,6 +806,7 @@ pub async fn run_task(
     let reflection_source =
         if config.reflect { config.reflection_source } else { ReflectionSource::None };
     if config.reflect {
+        emit_progress(config, task, run_root, "reflection", "running", &ledger);
         let outcome = runtime
             .reflect(
                 ReflectInputs {
@@ -765,7 +829,9 @@ pub async fn run_task(
         reflection = outcome.output;
         reflected_path = outcome.path;
         reflection_write = outcome.write;
+        emit_progress(config, task, run_root, "reflection", "completed", &ledger);
     }
+    emit_progress(config, task, run_root, "complete", "completed", &ledger);
 
     let summary = RunSummary {
         schema_version: 1,

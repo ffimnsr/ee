@@ -124,6 +124,50 @@ pub fn summary_path(run_root: &Path) -> PathBuf {
     run_root.join("run-summary.json")
 }
 
+/// Incremental status for a running harness task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessStatus {
+    /// Schema version.
+    pub schema_version: u32,
+    /// Task id.
+    pub task_id: String,
+    /// Current stage label.
+    pub stage: String,
+    /// `running`, `completed`, or `failed`.
+    pub state: String,
+    /// Identity rollouts observed so far.
+    pub rollouts: u64,
+    /// Identity improvement sessions observed so far.
+    pub sessions: u64,
+    /// Selection sessions observed so far.
+    pub selection_sessions: u64,
+    /// Validator retries observed so far.
+    pub retry_sessions: u64,
+    /// Reflection sessions observed so far.
+    pub reflection_sessions: u64,
+    /// Dead rollouts observed so far.
+    pub dead_rollouts: usize,
+    /// Whether the base harness failed before improvement.
+    pub base_failed: bool,
+}
+
+/// Path of the incremental status file inside a run root.
+#[must_use]
+pub fn status_path(run_root: &Path) -> PathBuf {
+    run_root.join("status.json")
+}
+
+/// Writes the incremental status atomically.
+pub fn save_status(run_root: &Path, status: &HarnessStatus) -> HarnessResult<()> {
+    std::fs::create_dir_all(run_root)?;
+    let text = serde_json::to_string_pretty(status)
+        .map_err(|error| HarnessError::State(error.to_string()))?;
+    let temporary = run_root.join("status.json.tmp");
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(temporary, status_path(run_root))?;
+    Ok(())
+}
+
 /// Loads a run summary, or `None` when absent or malformed.
 #[must_use]
 pub fn load_summary(run_root: &Path) -> Option<RunSummary> {
