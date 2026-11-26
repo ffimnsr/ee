@@ -37,6 +37,8 @@ pub(crate) enum PickerKind {
     AgentServers,
     #[cfg(feature = "agents")]
     AgentModels,
+    #[cfg(feature = "agents")]
+    AgentMentions,
 }
 
 /// A single entry in a picker list.
@@ -330,6 +332,20 @@ impl PickerState {
             items,
             filtered,
             selected,
+        }
+    }
+
+    #[cfg(feature = "agents")]
+    pub(crate) fn new_agent_mentions(items: Vec<PickerItem>) -> Self {
+        let filtered: Vec<usize> = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::AgentMentions,
+            title: String::from("Insert Mention"),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
         }
     }
 

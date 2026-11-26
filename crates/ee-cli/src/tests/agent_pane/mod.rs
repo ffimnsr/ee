@@ -666,6 +666,7 @@ fn begin_fixture_turn(app: &mut App, fake: &ScriptedFake) -> u64 {
 
 mod composer_tests;
 mod footer_tests;
+mod mention_tests;
 mod mode_config_tests;
 mod pane_tests;
 mod permissions_tests;

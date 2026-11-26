@@ -80,6 +80,8 @@ pub(super) fn picker_kind_badge(kind: PickerKind) -> &'static str {
         PickerKind::AgentServers => " NEW AGENT ",
         #[cfg(feature = "agents")]
         PickerKind::AgentModels => " MODEL ",
+        #[cfg(feature = "agents")]
+        PickerKind::AgentMentions => " MENTION ",
     }
 }
 

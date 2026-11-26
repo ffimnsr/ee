@@ -241,6 +241,15 @@ impl App {
                 };
                 self.agents_model_command(&model_id);
             }
+            #[cfg(feature = "agents")]
+            crate::picker::PickerKind::AgentMentions => {
+                // Mention items use the exact composer token as their label;
+                // `detail` only carries the source kind for display.
+                let mention = item.label.trim();
+                if !mention.is_empty() {
+                    self.agents_insert_mention(mention);
+                }
+            }
             crate::picker::PickerKind::Symbols => {
                 let Some(path) = item.path else { return };
                 match self.backend.open_buffer(Some(path)) {

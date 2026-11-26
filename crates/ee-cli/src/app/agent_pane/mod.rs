@@ -37,7 +37,9 @@ mod app_events;
 mod app_host;
 
 pub(crate) use app_host::host_permission_rules;
+mod app_draft;
 mod app_keys;
+mod app_mentions;
 mod app_mode;
 mod app_models;
 mod app_persist;
@@ -49,6 +51,7 @@ mod constants;
 mod elicitation;
 mod format;
 mod host;
+mod mention_catalog;
 mod pump;
 mod secret_values;
 mod state;
