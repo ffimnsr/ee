@@ -83,6 +83,60 @@ fn ambiguous_path_prefix_opens_a_prefiltered_mention_picker() {
 }
 
 #[test]
+fn reference_picker_inserts_read_on_demand_tokens() {
+    let (mut app, temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    mention_fixture(&temp);
+
+    type_text(&mut app, "check @ref:");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+    let picker = app.picker.as_ref().expect("@ref: should open the reference picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentMentions);
+    assert_eq!(picker.title, "Reference File");
+    let labels = picker.visible_items_range(0, picker.visible_count());
+    assert!(labels.contains(&String::from("@ref:mention-target.txt")), "{labels:?}");
+    assert!(!labels.iter().any(|label| label == "@mention-target.txt"), "{labels:?}");
+    assert!(!labels.iter().any(|label| label.contains(".env")), "{labels:?}");
+
+    type_text(&mut app, "mention-target");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "check @ref:mention-target.txt");
+}
+
+#[test]
+fn reference_prefix_completes_unique_file_without_a_picker() {
+    let (mut app, temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    mention_fixture(&temp);
+
+    type_text(&mut app, "check @ref:mention-t");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+    assert!(app.picker.is_none(), "unique reference must not open the picker");
+    assert_eq!(app.agents.threads[0].draft, "check @ref:mention-target.txt");
+}
+
+#[test]
+fn ambiguous_reference_prefix_opens_a_prefiltered_picker() {
+    let (mut app, temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    mention_fixture(&temp);
+
+    type_text(&mut app, "check @ref:alpha-");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+
+    let picker = app.picker.as_ref().expect("ambiguous reference prefix should open the picker");
+    assert_eq!(picker.title, "Reference File");
+    assert_eq!(picker.query, "alpha-");
+    assert_eq!(picker.visible_count(), 2);
+
+    type_text(&mut app, "one");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "check @ref:alpha-one.txt");
+}
+
+#[test]
 fn unique_path_prefix_still_completes_without_a_picker() {
     let (mut app, temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);

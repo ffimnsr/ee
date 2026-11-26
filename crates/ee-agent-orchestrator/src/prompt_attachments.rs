@@ -5,7 +5,8 @@
 //! base64 `data:` URLs. The same request may reference `@path` files and
 //! `@skill:name` skills in prompt text; those are appended as bounded
 //! workspace-plane instructions so repository content keeps its untrusted
-//! trust label.
+//! trust label. `@ref:path` adds a read-on-demand reference instead of file
+//! content.
 //!
 //! Paths must resolve inside a workspace root. Anything else fails closed with
 //! the external-directory approval message (I21) instead of reading silently.
@@ -41,6 +42,9 @@ pub const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 /// Default maximum bytes inlined from one `@path` or `@skill:` mention.
 pub const DEFAULT_MAX_MENTION_BYTES: usize = 64 * 1024;
+/// Maximum read-on-demand `@ref:` mentions accepted in one prompt. References
+/// carry no content, but each still adds one bounded instruction message.
+pub const MAX_REFERENCE_MENTIONS: usize = 64;
 /// Default maximum attachments accepted in one prompt.
 pub const DEFAULT_MAX_ATTACHMENTS: usize = 16;
 
@@ -305,6 +309,7 @@ fn expand_mentions(
 ) -> Result<Vec<WorkspaceMessage>, String> {
     let mut messages = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut reference_count = 0usize;
     for block in &ctx.prompt {
         let ContentBlock::Text(text) = block else { continue };
         for token in text.text.split_whitespace() {
@@ -325,6 +330,29 @@ fn expand_mentions(
                     continue;
                 }
                 messages.push(memory_message(name, cwd, roots, config_root, max_mention_bytes)?);
+                continue;
+            }
+            if let Some(reference) = mention.strip_prefix("ref:") {
+                if reference.is_empty() {
+                    return Err(String::from("@ref mention requires a workspace path"));
+                }
+                if !seen.insert(format!("ref:{reference}")) {
+                    continue;
+                }
+                reference_count = reference_count.saturating_add(1);
+                if reference_count > MAX_REFERENCE_MENTIONS {
+                    return Err(format!(
+                        "too many @ref mentions; at most {MAX_REFERENCE_MENTIONS} are allowed"
+                    ));
+                }
+                let canonical = resolve_inside_roots(reference, cwd, roots)?;
+                let metadata = fs::metadata(&canonical).map_err(|error| {
+                    format!("cannot stat reference mention {reference:?}: {error}")
+                })?;
+                if !metadata.is_file() {
+                    return Err(format!("reference mention {reference:?} is not a file"));
+                }
+                messages.push(reference_message(&canonical));
                 continue;
             }
             if !mention.contains('/') && !mention.contains('.') {
@@ -415,6 +443,17 @@ fn memory_message(
         ),
         trust,
     ))
+}
+
+fn reference_message(path: &Path) -> WorkspaceMessage {
+    workspace_message(
+        path,
+        format!(
+            "[file reference: {}]\nContent is not inlined. Read this workspace file with the read tool when the task needs it.",
+            path.display()
+        ),
+        TrustLevel::WorkspaceInstructionUntrusted,
+    )
 }
 
 fn workspace_message(path: &Path, text: String, trust: TrustLevel) -> WorkspaceMessage {
@@ -648,6 +687,47 @@ mod tests {
         let text = prepared.instructions[0].message.text_content();
         assert!(text.contains("Run the quiet suite."));
         assert!(text.contains("importance: high"));
+    }
+
+    #[test]
+    fn reference_mention_is_not_inlined_even_when_oversized() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("tables.rs");
+        fs::write(&file, "x".repeat(DEFAULT_MAX_MENTION_BYTES + 1)).expect("write");
+        let mut ctx = context("check @ref:tables.rs");
+        let prepared = prepare_prompt(
+            &mut ctx,
+            workspace.path(),
+            &[workspace.path().to_path_buf()],
+            None,
+            &PromptAttachmentConfig::default(),
+        )
+        .expect("reference mention passes the inline size cap");
+        assert_eq!(prepared.instructions.len(), 1);
+        let message = &prepared.instructions[0].message;
+        assert_eq!(message.trust, TrustLevel::WorkspaceInstructionUntrusted);
+        let text = message.text_content();
+        assert!(text.contains("[file reference:"), "{text}");
+        assert!(text.contains("Content is not inlined"), "{text}");
+        assert!(!text.contains("xxxxxxxx"), "reference must not inline content: {text}");
+    }
+
+    #[test]
+    fn reference_mention_outside_workspace_fails_closed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let file = outside.path().join("secret.txt");
+        fs::write(&file, "secret").expect("write");
+        let mut ctx = context(&format!("read @ref:{}", file.display()));
+        let error = prepare_prompt(
+            &mut ctx,
+            workspace.path(),
+            &[workspace.path().to_path_buf()],
+            None,
+            &PromptAttachmentConfig::default(),
+        )
+        .expect_err("outside reference rejected");
+        assert!(error.contains("I21"), "unexpected error: {error}");
     }
 
     #[test]

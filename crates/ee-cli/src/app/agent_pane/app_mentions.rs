@@ -14,6 +14,8 @@ const MENTION_PICKER_SCAN_MAX: usize = 20_000;
 const MENTION_PICKER_FILE_LIMIT: usize = 2_000;
 /// Files scanned while resolving one path prefix.
 const MENTION_COMPLETION_SCAN_MAX: usize = 1_024;
+/// Read-on-demand file reference token prefix.
+const REFERENCE_MENTION_PREFIX: &str = "ref:";
 
 impl App {
     /// Completes one trailing `@workspace/path` token, or opens the mention
@@ -33,6 +35,9 @@ impl App {
         }
         if partial.is_empty() {
             return self.agents_open_mention_picker("");
+        }
+        if let Some(reference) = partial.strip_prefix(REFERENCE_MENTION_PREFIX) {
+            return self.agents_complete_reference_path(reference);
         }
         let matches = self.mention_path_matches(partial);
         match matches.as_slice() {
@@ -63,8 +68,54 @@ impl App {
             picker.push_char(ch);
         }
         self.open_picker(picker);
-        self.backend.status_message =
-            Some(String::from("insert mention: files, @skill:<name>, @memory:<name>"));
+        self.backend.status_message = Some(String::from(
+            "insert mention: files, @skill:<name>, @memory:<name>, @ref:<path> (no content)",
+        ));
+        true
+    }
+
+    /// Completes a trailing `@ref:<path>` token. `partial` is the path part
+    /// after `ref:`; it never reads file content.
+    fn agents_complete_reference_path(&mut self, partial: &str) -> bool {
+        if partial.is_empty() {
+            return self.agents_open_reference_picker("");
+        }
+        let matches = self.mention_path_matches(partial);
+        match matches.as_slice() {
+            [completed] => {
+                let replacement = format!("@{REFERENCE_MENTION_PREFIX}{completed}");
+                if !self.agents_replace_trailing_mention(&replacement) {
+                    return false;
+                }
+                self.backend.status_message =
+                    Some(format!("reference path completed: {completed}"));
+                true
+            }
+            [] => false,
+            _ => self.agents_open_reference_picker(partial),
+        }
+    }
+
+    /// Opens a file picker that inserts read-on-demand `@ref:<path>` tokens.
+    fn agents_open_reference_picker(&mut self, seed: &str) -> bool {
+        let items = self
+            .mention_picker_file_paths()
+            .into_iter()
+            .map(|path| mention_item(format!("@{REFERENCE_MENTION_PREFIX}{path}"), "reference"))
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            self.backend.status_message = Some(String::from("no workspace files for @ref mention"));
+            return true;
+        }
+        let mut picker = PickerState::new_agent_mentions(items);
+        picker.title = String::from("Reference File");
+        for ch in seed.chars() {
+            picker.push_char(ch);
+        }
+        self.open_picker(picker);
+        self.backend.status_message = Some(String::from(
+            "insert reference: @ref:<path> (agent reads it on demand; content stays out of context)",
+        ));
         true
     }
 
@@ -149,11 +200,15 @@ impl App {
         for name in names.memories {
             items.push(mention_item(format!("@memory:{name}"), "memory"));
         }
-        items.extend(self.mention_picker_file_items());
+        items.extend(
+            self.mention_picker_file_paths()
+                .into_iter()
+                .map(|path| mention_item(format!("@{path}"), "file")),
+        );
         items
     }
 
-    fn mention_picker_file_items(&self) -> Vec<PickerItem> {
+    fn mention_picker_file_paths(&self) -> Vec<String> {
         let Ok(root) = std::fs::canonicalize(&self.working_dir) else {
             return Vec::new();
         };
@@ -184,7 +239,7 @@ impl App {
             files.push(relative);
         }
         files.sort();
-        files.into_iter().map(|relative| mention_item(format!("@{relative}"), "file")).collect()
+        files
     }
 }
 
