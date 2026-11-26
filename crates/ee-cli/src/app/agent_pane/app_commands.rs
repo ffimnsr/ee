@@ -782,6 +782,7 @@ impl App {
   Enter               send, or queue while the turn runs\n\
   Alt-Enter           insert newline\n\
   Ctrl-U              clear draft\n\
+  Ctrl-W              delete previous word (Ctrl/Alt-Backspace, Ctrl-H)\n\
   Ctrl-S / Ctrl-O     stash / restore draft\n\
   Ctrl-Shift-E        external editor\n\
   Ctrl-G              plan modal\n\

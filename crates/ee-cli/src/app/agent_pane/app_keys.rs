@@ -507,6 +507,8 @@ impl App {
                         'g' => self.agents_toggle_plan(),
                         // Terminals that send Ctrl+Backspace as Ctrl+H.
                         'h' => self.agents_draft_delete_word(),
+                        // Readline-style word delete; same action as insert-mode Ctrl-W.
+                        'w' => self.agents_draft_delete_word(),
                         'r' if key.modifiers.contains(KeyModifiers::SHIFT)
                             || self
                                 .agents

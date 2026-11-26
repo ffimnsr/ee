@@ -138,6 +138,9 @@ impl App {
             KeyCode::Right => self.agents_draft_cursor_move(1),
             KeyCode::Home => self.agents_draft_cursor_line_start(),
             KeyCode::End => self.agents_draft_cursor_line_end(),
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_draft_delete_word();
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.agents_clear_draft();
             }

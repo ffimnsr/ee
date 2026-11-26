@@ -87,6 +87,24 @@ fn ctrl_backspace_and_alt_backspace_delete_words() {
 }
 
 #[test]
+fn ctrl_w_deletes_word_backward_in_bar_and_editor() {
+    let (mut app, _temp) = composer_app();
+    type_text(&mut app, "one two three");
+    press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert_eq!(draft(&app), "one two ");
+
+    // Same binding inside the floating prompt editor.
+    press(&mut app, KeyCode::Insert, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert_eq!(draft(&app), "one ");
+
+    // Esc restores the pre-open draft, undoing the word delete.
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(draft(&app), "one two ");
+    app.shutdown_agents();
+}
+
+#[test]
 fn ctrl_u_clears_draft_and_resets_caret() {
     let (mut app, _temp) = composer_app();
     type_text(&mut app, "hello draft");
