@@ -28,6 +28,17 @@ pub fn cwd_test_lock() -> &'static crate::config::TestCwdLock {
     crate::config::test_cwd_lock()
 }
 
+/// Pins the temp workspace through an active buffer so terminal sandbox specs
+/// and workspace-trust gates resolve against the fixture instead of the
+/// developer checkout.
+pub fn pin_workspace_root(app: &mut App, temp: &tempfile::TempDir) {
+    fs::create_dir_all(temp.path().join(".git")).unwrap();
+    let file = temp.path().join("workspace.txt");
+    fs::write(&file, "workspace\n").unwrap();
+    let id = app.backend.open_buffer(Some(file)).unwrap();
+    app.backend.switch_to_id(id).unwrap();
+}
+
 pub fn perf_test_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

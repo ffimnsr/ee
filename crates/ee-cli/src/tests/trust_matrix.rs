@@ -677,6 +677,7 @@ mod e2e {
         acp_connect_script, base_agent_script, connect_proxy, fake_response, mcp_app, mcp_app_in,
         open_pane_and_wait_ready, press, proxy_recv, proxy_send, settle, wait_until,
     };
+    use crate::tests::helpers::pin_workspace_root;
     use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::json;
     use std::fs;
@@ -717,6 +718,7 @@ mod e2e {
         });
         let script = base_script().emit(frame);
         let (mut acp_app, _fake) = crate::tests::agent_bridge::agents_app_in(&temp, script);
+        pin_workspace_root(&mut acp_app, &temp);
         acp_app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_command_rule(&state_dir, temp.path(), "cmd_transport");
         open_pane_and_wait_ready(&mut acp_app);

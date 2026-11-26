@@ -253,10 +253,10 @@ jobs:
     name: Test (all features)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # Manual only for now: a full all-features compile plus run is the most
-    # expensive job in the workflow. Run it from the Actions tab (or
-    # `gh workflow run ci.yml`) when touching feature-gated code paths.
-    if: github.event_name == 'workflow_dispatch'
+    # Runs on every push and pull request. Clippy and rustdoc compile
+    # feature-gated code; this job executes the resulting tests.
+    # Local 4-core measurement: ~5m all-features build + ~6.5m test run warm.
+    # Expect roughly 12-16m on a cold ubuntu-latest cache, 7-10m warm.
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
