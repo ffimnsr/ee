@@ -1,12 +1,10 @@
 //! `impl App`: agent event handling, session updates, thread registration.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::{Instant, SystemTime};
 
 use ee_agent_host::events::{AgentConnectionState, PermissionRequestInfo, ThreadCloseReason};
-use ee_agent_host::{
-    AgentError, AgentEvent, AgentThread, ClientRequestResponse, ClientRequestResult,
-};
+use ee_agent_host::{AgentError, AgentEvent, ClientRequestResponse, ClientRequestResult};
 use ee_agent_protocol::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
     ElicitationAction, ElicitationMode, FINAL_RESPONSE_MESSAGE_ID_PREFIX, PermissionOption,
@@ -20,16 +18,14 @@ use super::pump;
 use crate::app::agent_bridge::{AgentPermissionPreview, V2CommandPermission};
 use crate::config::AgentAlignmentMode;
 
-use super::constants::{AGENT_DISPLAY_NAME, AGENT_PROMPT_HISTORY_MAX};
+use super::constants::AGENT_DISPLAY_NAME;
 use super::elicitation::ElicitationPrompt;
 use super::format::{
     client_request_label, content_block_text, plan_entry_marker, plan_entry_priority_label,
     thread_display_name, tool_call_detail_from_state, tool_call_status_label,
 };
 use super::state::{AgentPaneLayout, AgentPaneState, PermissionPrompt};
-use super::thread_ui::{
-    AgentThreadUi, MessageRenderKind, PendingRecovery, ThreadUiState, TranscriptItem,
-};
+use super::thread_ui::{MessageRenderKind, PendingRecovery, ThreadUiState, TranscriptItem};
 
 // ── App integration ──────────────────────────────────────────────────────────
 
@@ -420,6 +416,13 @@ impl App {
 
     /// Reduces one `session/update` into the thread transcript.
     pub(super) fn apply_session_update(&mut self, thread_index: usize, update: &SessionUpdate) {
+        if self.agents.threads[thread_index].transcript_archive_loaded
+            && session_update_replays_transcript(update)
+        {
+            // A provider load replay is a bounded request view. The durable
+            // journal remains authoritative until the user starts a new turn.
+            return;
+        }
         let nick = self.agents.threads[thread_index].nick.clone();
         match update {
             SessionUpdate::UserMessageChunk(chunk) => {
@@ -781,122 +784,6 @@ impl App {
             &tool_call_detail_from_state(tool_call),
             response_group,
         );
-    }
-
-    /// Registers a fresh session thread from a new-session reply.
-    pub(super) fn register_session_thread(&mut self, agent_id: &str, thread: AgentThread) {
-        let session_id = thread.session_id().0.to_string();
-        let snapshot = thread.snapshot();
-        // Phase 6b user-visible diagnostics: how the ee proxy was exposed.
-        self.agents.mcp.proxy_mode = Some(thread.proxy_mode().to_string());
-        let index = self.agents.next_thread_index;
-        self.agents.next_thread_index += 1;
-        let nick = AGENT_DISPLAY_NAME.to_owned();
-        let ready = self.agents.created_sessions.contains(&session_id);
-        let session_title =
-            snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
-        let session_updated_at =
-            snapshot.session_info.as_ref().and_then(|info| info.updated_at.value().cloned());
-        let persisted = self.load_persisted_agent_workspace().and_then(|workspace| {
-            workspace.sessions.into_iter().find(|record| record.session_id == session_id)
-        });
-        let session_name = persisted.as_ref().and_then(|record| record.session_name.clone());
-        let transcript =
-            persisted.as_ref().map(|record| record.transcript.clone()).unwrap_or_default();
-        let prompt_history = transcript
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::Message { text, kind: MessageRenderKind::User, .. } => {
-                    Some(text.clone())
-                }
-                _ => None,
-            })
-            .rev()
-            .take(AGENT_PROMPT_HISTORY_MAX)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let next_response_group = transcript
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::Message { response_group, .. } => *response_group,
-                TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        let restored = persisted.is_some();
-        self.agents.threads.push(AgentThreadUi {
-            index,
-            agent_id: agent_id.to_string(),
-            session_id: session_id.clone(),
-            fork_parent_session_id: None,
-            nick,
-            display_name: thread_display_name(
-                index,
-                session_name.as_deref(),
-                session_title.as_deref(),
-            ),
-            state: if ready { ThreadUiState::Ready } else { ThreadUiState::Starting },
-            unread: 0,
-            activity: false,
-            host: thread,
-            transcript,
-            optimistic_message: None,
-            draft: std::mem::take(&mut self.agents.pending_draft),
-            draft_cursor: 0,
-            prompt_history,
-            prompt_history_cursor: None,
-            prompt_history_restore_draft: None,
-            queued_prompts: VecDeque::new(),
-            stashed_draft: None,
-            transcript_raw: false,
-            transcript_detail: false,
-            scroll: 0,
-            stick_to_bottom: true,
-            usage: None,
-            stop_reason: None,
-            turn_started_at: None,
-            turn_metrics: BTreeMap::new(),
-            last_turn_metrics: None,
-            terminal_evidence: None,
-            verification_paths: Vec::new(),
-            verification_revision: None,
-            active_response_group: None,
-            next_response_group,
-            selected_response_group: None,
-            selected_final_response: None,
-            collapsed_response_groups: BTreeSet::new(),
-            collapse_incoming_response_groups: restored,
-            expanded_tool_details: BTreeSet::new(),
-            current_plan: Vec::new(),
-            plan_modal_open: false,
-            prompt_editor_snapshot: None,
-            last_error: None,
-            pending_recovery: None,
-            last_prompt: None,
-            context_files: Vec::new(),
-            next_prompt_context_files: Vec::new(),
-            available_commands: snapshot.available_commands,
-            session_name: session_name.clone(),
-            session_title,
-            session_updated_at,
-        });
-        if self.agents.workspace_restore.is_none() {
-            self.agents.active_thread = Some(self.agents.threads.len() - 1);
-        }
-        self.agents.error = None;
-        let restored_thread = self.agents.threads.last_mut().expect("thread pushed");
-        if restored {
-            restored_thread.collapse_restored_response_groups();
-        }
-        restored_thread.push_system(format!(
-            "session {} ({session_id})",
-            if restored { "restored" } else { "started" }
-        ));
-        self.persist_agent_workspace();
     }
 
     /// Bumps unread/activity for a thread unless it is focused.

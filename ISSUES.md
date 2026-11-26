@@ -537,3 +537,61 @@ Deferred boundaries:
 
 - MCP `ee_terminal_create` keeps its own pinned `ee do mcp trust grant --execute` grant; the native workspace grant never auto-allows proxy-originated terminal calls, and the MCP grant never auto-allows ACP v1 `terminal/create`.
 - ACP v2 agent-owned command permissions keep the curated `safe_read` reply path. Widening them would be advisory only because the agent, not ee, runs the command; revisit only with an explicit v2 execution contract.
+
+## Durable Agent Session Transcripts and Archive (2026-11-26)
+
+Goal: keep the full local transcript for every agent session — live and archived — in the user data directory, rotate large transcript journals like logrotate, make the provider durable session log on by default with an explicit opt-out, and add a safe prune command. Large tool results stay inline-bounded (2,000 lines / 50 KiB) with the overflow retained by the session log, matching the upstream OpenCode `ToolOutput` behavior.
+
+Rules:
+
+- Transcript storage is owner-only (`0700` dirs, `0600` files), workspace-scoped by the existing `WorkspaceIdentity` hex digest, and lives under `$XDG_DATA_HOME/ee/agent-sessions/transcripts/<workspace-hex>/`.
+- The live transcript is never trimmed or capped in memory or on disk. The journal rotates at a byte threshold; old segments stay until an explicit prune.
+- `agent-sessions.json` keeps the live/archived session registry only. It may keep a full transcript only as a write-failure fallback; the durable journal is canonical.
+- Archived sessions survive restart and are listed by `/archive list`; restoring one reconnects it through `session/load` while the archived transcript stays authoritative for the restore window (the bounded replay applies only after the user starts a new turn).
+- The provider durable session log defaults to the same user data root. `EE_SESSION_LOG_DISABLE=1` (and `EE_SESSION_LOG_DURABLE=false`) opt out. Full tool output overflow is retained there; only the inline tool result is bounded.
+- `ee do agent sessions prune` never touches a session listed as live in the client registry, never follows symlinks, and defaults to a 30-day cutoff with `--dry-run`.
+
+Work items:
+
+### Phase A1 — Rotating transcript journal store
+
+- [x] Add `crates/ee-cli/src/agent_session_store.rs` with owner-only workspace/session paths, `meta.json`, an append-only JSONL journal (`Snapshot`/`Set`/`Append`/`Truncate` records), and size-based segment rotation that never deletes transcript content.
+- [x] Replay every rotated segment plus the active journal on load; tolerate a torn final line, repair it before the next append, and reject malformed mid-stream records.
+- [x] Persist archived state and timestamps in metadata, and delete one session directory only on explicit request.
+- [x] Tests: append/update/truncate round trip, rotation across segments with >1,500 items restored exactly, archived metadata, owner-only modes, torn tail, malformed mid-stream rejection, and session-id path hardening.
+
+### Phase A2 — Live and archived transcript wiring
+
+- [x] Remove the 1,500-item transcript trim and the 200-line stderr trim; the pane keeps the full transcript in memory.
+- [x] Persist every live thread's full transcript to the journal and store only registry metadata plus a write-failure fallback in `agent-sessions.json`; bump the persisted workspace schema and keep v2 documents readable.
+- [x] Restore transcripts from the journal on reconnect, migrate legacy JSON transcript fields into the journal, and prefer the journal over the fallback.
+- [x] Persist archived threads in the workspace registry with metadata-only records, keep them across restart, list them in `/archive list`, and restore them by reconnecting with the archived transcript; the bounded load replay is ignored until the next user turn.
+- [x] Delete a session's journal on explicit `/delete`; a failed archived restore returns the record to the archived list.
+- [x] Integration tests: restart restores a live transcript from the journal; archive → restart → `/archive list` → restore works; delete removes the journal; legacy JSON transcript migrates; archived restore failure keeps the archive record.
+
+### Phase A3 — Default durable session log and tool-output bounds
+
+- [x] Default the OpenCode and OpenRouter provider session-log root to `$XDG_DATA_HOME/ee/agent-sessions` and add `EE_SESSION_LOG_DISABLE=1` plus `EE_SESSION_LOG_DURABLE=false` opt-outs.
+- [x] Keep the existing 2,000-line / 50 KiB inline tool-result bound; confirm the retained overflow path is the default durable session log and that tool-output metadata still reports truncation and the saved path.
+- [x] Tests: default root is present, both opt-outs disable it, explicit `EE_SESSION_LOG_DIR` wins, and a large tool result is bounded inline while the full body is retained.
+
+### Phase A4 — `ee do agent sessions prune`
+
+- [x] Add `ee do agent sessions prune [--older-than-days N] [--all] [--dry-run]` under the existing `do agent` grammar.
+- [x] Prune stale transcript archive session directories by metadata age and stale provider session-log directories by modification age; protect live session ids from the client registry and skip symlinks.
+- [x] Print a deterministic summary (transcripts, session logs, bytes; `would prune` for dry run) and return nonzero on unsafe path or I/O failure.
+- [x] Tests: CLI parsing, old vs young entries, live-session protection, `--all`, dry run writes nothing, symlink refusal, and idempotent second run.
+
+### Phase A5 — Docs, changelog, and validation
+
+- [x] Document transcript rotation, archive restore, opt-out, and prune in `README.md`, `CHANGELOG.md`, and the relevant config docs.
+- [x] Run `cargo fmt --all -- --check`, targeted clippy, store/prune/agent-pane/reconnect tests, and the provider config tests; verify every touched code file stays below 1,000 LOC.
+
+Acceptance:
+
+- A >1,500-item live transcript restores byte-for-byte after restart; old journal segments remain until prune.
+- Archived transcripts survive restart and can be restored through `/archive list` and `/archive restore`.
+- The durable provider session log is on by default under the user data directory and can be disabled by either opt-out.
+- A 100 KiB tool result keeps only the bounded inline preview plus the retained overflow path.
+- `ee do agent sessions prune --dry-run` lists the same entries as a real run and deletes nothing; live sessions are never removed.
+- `cargo fmt --all -- --check`, targeted `cargo clippy`, and the phase test filters pass.

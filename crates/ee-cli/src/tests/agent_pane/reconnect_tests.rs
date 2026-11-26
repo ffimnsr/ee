@@ -285,12 +285,6 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
     wait_until(&mut restarted_app, "workspace threads restored", |app| {
         app.agents.threads.len() == 2
             && app.agents.threads.iter().all(|thread| thread.state == ThreadUiState::Ready)
-            && app.agents.threads[0].transcript.iter().any(|item| {
-                matches!(item, TranscriptItem::Message { text, .. } if text == "first replay")
-            })
-            && app.agents.threads[1].transcript.iter().any(|item| {
-                matches!(item, TranscriptItem::Message { text, .. } if text == "second replay")
-            })
     });
 
     assert_eq!(
@@ -448,32 +442,22 @@ fn workspace_restart_restores_transcript_whose_permission_items_lack_preview() {
     first_app.shutdown_agents();
     drop(first_app);
 
-    let record_path = state_dir.path().join("agent-sessions.json");
-    let text = fs::read_to_string(&record_path).unwrap();
-    let mut documents: Value = serde_json::from_str(&text).unwrap();
+    let mut journals = Vec::new();
+    collect_journals(&state_dir.path().join("agent-sessions"), &mut journals);
+    assert!(!journals.is_empty(), "transaction journal was written");
     let mut stripped = 0usize;
-    for document in documents.as_object_mut().unwrap().values_mut() {
-        let Some(sessions) = document.get_mut("sessions").and_then(|value| value.as_array_mut())
-        else {
-            continue;
-        };
-        for session in sessions {
-            let Some(items) = session.get_mut("transcript").and_then(|value| value.as_array_mut())
-            else {
-                continue;
-            };
-            for item in items {
-                if let Some(fields) =
-                    item.get_mut("Permission").and_then(|value| value.as_object_mut())
-                    && fields.remove("preview").is_some()
-                {
-                    stripped += 1;
-                }
-            }
+    for path in journals {
+        let text = fs::read_to_string(&path).unwrap();
+        let mut rewritten = String::new();
+        for line in text.lines() {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            stripped += strip_permission_preview(&mut value);
+            rewritten.push_str(&serde_json::to_string(&value).unwrap());
+            rewritten.push('\n');
         }
+        fs::write(&path, rewritten).unwrap();
     }
     assert_eq!(stripped, 1, "fixture rewrites exactly the persisted permission item");
-    fs::write(&record_path, serde_json::to_string(&documents).unwrap()).unwrap();
 
     let restarted_script = FakeAgentScript::new()
         .wait_for("initialize")
@@ -522,4 +506,36 @@ fn agents_reconnect_without_persisted_session_reports_error() {
             .as_deref()
             .is_some_and(|error| error.contains("no persisted agent session"))
     );
+}
+
+fn collect_journals(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_journals(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "transcript.jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+fn strip_permission_preview(value: &mut Value) -> usize {
+    match value {
+        Value::Object(fields) => {
+            let mut stripped = 0;
+            if let Some(permission) = fields.get_mut("Permission").and_then(Value::as_object_mut)
+                && permission.remove("preview").is_some()
+            {
+                stripped += 1;
+            }
+            fields.values_mut().map(strip_permission_preview).fold(stripped, usize::saturating_add)
+        }
+        Value::Array(items) => {
+            items.iter_mut().map(strip_permission_preview).fold(0, usize::saturating_add)
+        }
+        _ => 0,
+    }
 }

@@ -328,17 +328,17 @@ pub struct Args {
     /// checkpoints in memory only.
     #[arg(long, env = "EE_CHECKPOINT_DIR")]
     checkpoint_dir: Option<PathBuf>,
-    /// Opt-in durable session-log root. Records and content-addressed message
-    /// bodies are written under `<dir>/session-log`; unset keeps the log in
-    /// memory for this process only.
+    /// Explicit durable session-log root. Records and content-addressed
+    /// message bodies are written under `<dir>/session-log`.
     #[arg(long, env = "EE_SESSION_LOG_DIR")]
     session_log_dir: Option<PathBuf>,
-    /// Opt-in durable session log under `<session-state-dir>/session-log`.
-    /// Ignored when `EE_SESSION_LOG_DIR` is set.
+    /// Durable session log under `<session-state-dir>/session-log`. Enabled by
+    /// default; set `EE_SESSION_LOG_DURABLE=false` or
+    /// `EE_SESSION_LOG_DISABLE=1` to opt out.
     #[arg(
         long,
         env = "EE_SESSION_LOG_DURABLE",
-        default_value_t = false,
+        default_value_t = true,
         action = ArgAction::Set,
         value_parser = BoolishValueParser::new(),
         num_args = 0..=1,
@@ -409,9 +409,10 @@ pub struct Config {
     pub retry_max_delay: Duration,
     /// Durable checkpoint directory for orchestrator recovery.
     pub checkpoint_dir: Option<PathBuf>,
-    /// Opt-in durable session-log root; `None` keeps the log in memory.
+    /// Explicit durable session-log root; the default root is the normal
+    /// session-state directory when none is set.
     pub session_log_dir: Option<PathBuf>,
-    /// Opt-in durable session log under the normal session-state directory.
+    /// Durable session log under the normal session-state directory.
     pub session_log_durable: bool,
     /// Whether provider session-affinity headers are emitted.
     pub session_headers: bool,
@@ -631,14 +632,18 @@ impl Config {
 
     /// Resolves the durable session-log root for `session_state_dir`.
     ///
-    /// An explicit `EE_SESSION_LOG_DIR` wins; `EE_SESSION_LOG_DURABLE=1`
-    /// defaults under the normal session-state directory. `None` keeps the log
-    /// in memory, so no raw message bodies reach disk implicitly.
+    /// An explicit `EE_SESSION_LOG_DIR` wins; the default root is the normal
+    /// session-state directory. `EE_SESSION_LOG_DURABLE=false` or
+    /// `EE_SESSION_LOG_DISABLE=1` opts out and keeps the log in memory.
     #[must_use]
     pub fn session_log_root(&self, session_state_dir: &std::path::Path) -> Option<PathBuf> {
-        self.session_log_dir
-            .clone()
-            .or_else(|| self.session_log_durable.then(|| session_state_dir.to_path_buf()))
+        if session_log_disabled_by_env() {
+            return None;
+        }
+        if let Some(dir) = &self.session_log_dir {
+            return Some(dir.clone());
+        }
+        self.session_log_durable.then(|| session_state_dir.to_path_buf())
     }
 
     /// Returns the reported input-token threshold for automatic compaction.
@@ -701,6 +706,14 @@ fn default_model_for(file: &crate::config_file::FileConfig) -> String {
         .find(|id| !file.resolve(id).disabled)
         .map(str::to_string)
         .unwrap_or_else(|| String::from(DEFAULT_MODEL))
+}
+
+/// `EE_SESSION_LOG_DISABLE` is an explicit opt-out for deployments that must
+/// not write raw message bodies to disk.
+fn session_log_disabled_by_env() -> bool {
+    std::env::var("EE_SESSION_LOG_DISABLE").ok().is_some_and(|value| {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    })
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use ee_agent_host::events::{RecoverableInfo, TurnMetrics};
 use ee_agent_host::{AgentThread, EvidenceRevision, TurnEvidenceSummary};
 use ee_agent_protocol::{AvailableCommand, ContentBlock};
 
-use super::constants::{AGENT_PROMPT_HISTORY_MAX, AGENTS_STDERR_MAX, AGENTS_TRANSCRIPT_MAX};
+use super::constants::AGENT_PROMPT_HISTORY_MAX;
 
 // ── Transcript model ─────────────────────────────────────────────────────────
 
@@ -150,6 +150,11 @@ pub(crate) struct AgentThreadUi {
     /// Host handle for prompts, cancels, and permission responses.
     pub(crate) host: AgentThread,
     pub(crate) transcript: Vec<TranscriptItem>,
+    /// True while a transcript loaded from the durable journal should ignore
+    /// the bounded ACP `session/load` replay, so the journal stays
+    /// authoritative at restore time. Cleared when a user turn starts, because
+    /// chunks for that turn are live transcript rather than replay.
+    pub(crate) transcript_archive_loaded: bool,
     /// Index of the optimistic `you` message waiting for the agent echo.
     pub(crate) optimistic_message: Option<usize>,
     /// Per-thread composer draft (preserved across switches).
@@ -367,7 +372,6 @@ impl AgentThreadUi {
             response_group,
             at: SystemTime::now(),
         });
-        self.trim_transcript();
     }
 
     /// Upserts a tool call notice by id.
@@ -408,7 +412,6 @@ impl AgentThreadUi {
             response_group,
             at: SystemTime::now(),
         });
-        self.trim_transcript();
     }
 
     pub(super) fn ensure_response_group(&mut self) -> ResponseGroupId {
@@ -563,7 +566,6 @@ impl AgentThreadUi {
     /// Appends a system notice.
     pub(crate) fn push_system(&mut self, text: impl Into<String>) {
         self.transcript.push(TranscriptItem::System { text: text.into(), at: SystemTime::now() });
-        self.trim_transcript();
     }
 }
 
@@ -714,30 +716,10 @@ impl AgentThreadUi {
 }
 
 impl AgentThreadUi {
-    /// Appends a stderr/debug line (bounded).
+    /// Appends a stderr/debug line. The full transcript is retained; the
+    /// durable journal is responsible for bounding disk growth by rotation.
     pub(super) fn push_stderr(&mut self, line: impl Into<String>) {
         self.transcript.push(TranscriptItem::Stderr { text: line.into(), at: SystemTime::now() });
-        let mut stderr_count = self
-            .transcript
-            .iter()
-            .filter(|item| matches!(item, TranscriptItem::Stderr { .. }))
-            .count();
-        let mut index = 0;
-        while stderr_count > AGENTS_STDERR_MAX {
-            if matches!(self.transcript[index], TranscriptItem::Stderr { .. }) {
-                self.transcript.remove(index);
-                stderr_count -= 1;
-            } else {
-                index += 1;
-            }
-        }
-        self.trim_transcript();
-    }
-
-    fn trim_transcript(&mut self) {
-        while self.transcript.len() > AGENTS_TRANSCRIPT_MAX {
-            self.transcript.remove(0);
-        }
     }
 
     pub(super) fn clear_transcript_state(&mut self) {

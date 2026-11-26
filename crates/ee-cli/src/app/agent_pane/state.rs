@@ -140,7 +140,7 @@ pub(super) struct PendingFork {
 
 /// One client-persisted session within a workspace thread list.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(super) struct PersistedAgentSession {
+pub(crate) struct PersistedAgentSession {
     /// Agent server id the session belongs to.
     pub(super) agent_id: String,
     /// Session id as returned by `session/new` (stable across restarts for
@@ -152,8 +152,8 @@ pub(super) struct PersistedAgentSession {
     /// User-selected local session name. Absent in records written before Phase 1.
     #[serde(default)]
     pub(super) session_name: Option<String>,
-    /// Bounded local transcript fallback. `session/load` replay replaces it when
-    /// the agent supplies conversation updates; otherwise reconnect keeps it.
+    /// Full local transcript fallback. The durable session journal is
+    /// canonical; this stays full only when that journal write failed.
     #[serde(default)]
     pub(super) transcript: Vec<TranscriptItem>,
 }
@@ -171,10 +171,15 @@ pub(super) struct PersistedAgentWorkspace {
     /// Open, non-archived session threads in display order.
     #[serde(default)]
     pub(super) sessions: Vec<PersistedAgentSession>,
+    /// Locally archived sessions that must survive a restart. Transcript bodies
+    /// live in the workspace journal; this is metadata and a write-failure
+    /// fallback only.
+    #[serde(default)]
+    pub(super) archived_sessions: Vec<PersistedAgentSession>,
 }
 
 pub(super) const fn persisted_agent_workspace_version() -> u32 {
-    2
+    3
 }
 
 /// Transitional read format for the former one-session-per-workspace record.
@@ -192,6 +197,7 @@ impl PersistedAgentWorkspaceDocument {
                 version: persisted_agent_workspace_version(),
                 active_session_id: Some(session.session_id.clone()),
                 sessions: vec![session],
+                archived_sessions: Vec::new(),
             },
             Self::Workspace(workspace) => workspace,
         }
@@ -215,6 +221,13 @@ pub(crate) struct AgentPaneState {
     pub(crate) threads: Vec<AgentThreadUi>,
     /// Locally hidden threads. Kept in memory so transcript can be restored/exported.
     pub(crate) archived_threads: Vec<AgentThreadUi>,
+    /// Durable archived-session metadata loaded from the workspace registry.
+    /// The full transcript is read from the journal on restore.
+    pub(crate) archived_persisted: Vec<PersistedAgentSession>,
+    /// Lazily opened workspace journal. Disabled in tests unless a test state
+    /// base is set, so tests never touch the developer's real data directory.
+    pub(crate) session_archive:
+        std::cell::OnceCell<Option<crate::agent_session_store::WorkspaceSessionArchive>>,
     pub(crate) active_thread: Option<usize>,
     pub(crate) next_thread_index: usize,
     /// Whether streamed `agent_thought_chunk` messages are shown in transcript.
@@ -345,6 +358,8 @@ impl Default for AgentPaneState {
             layout: AgentPaneLayout::Closed,
             threads: Vec::new(),
             archived_threads: Vec::new(),
+            archived_persisted: Vec::new(),
+            session_archive: std::cell::OnceCell::new(),
             active_thread: None,
             next_thread_index: 0,
             show_thoughts: true,

@@ -34,6 +34,10 @@ mod agent_launch;
 #[cfg(feature = "agents")]
 mod agent_registry;
 #[cfg(feature = "agents")]
+mod agent_session_store;
+#[cfg(feature = "agents")]
+mod agent_sessions_cmd;
+#[cfg(feature = "agents")]
 mod agent_setup;
 #[cfg(feature = "agents")]
 mod agent_setup_prompt;
@@ -131,10 +135,10 @@ pub use entry::run_cli as run;
 
 #[cfg(test)]
 pub(crate) use args::{
-    ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentTrustCommands, AgentTrustProfile, Cli, Commands,
-    ConfigCommands, DoCommands, FileCommands, HarnessCommands, HarnessModeArg, LanguageCommands,
-    McpCommands, McpTrustCommands, McpTrustTransport, PluginCommands, RuntimeCommands,
-    SecretsCommands, WorkspaceTrustCommands,
+    ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentSessionsCommands, AgentTrustCommands,
+    AgentTrustProfile, Cli, Commands, ConfigCommands, DoCommands, FileCommands, HarnessCommands,
+    HarnessModeArg, LanguageCommands, McpCommands, McpTrustCommands, McpTrustTransport,
+    PluginCommands, RuntimeCommands, SecretsCommands, WorkspaceTrustCommands,
 };
 #[cfg(test)]
 pub(crate) use doctor::doctor_report;

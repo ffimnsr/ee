@@ -1,15 +1,24 @@
 //! `impl App`: session lifecycle commands (new/fork/archive/restore/export).
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use ee_agent_host::AgentThread;
+
 use super::super::*;
 use crate::app::agent_export::{format_agent_transcript_markdown, write_agent_transcript_export};
 
-use super::format::{agent_connection_state_label, fork_seed, parse_fork_args};
-use super::state::{AgentPaneLayout, PendingFork, SessionDeletionConfirmation};
-use super::thread_ui::ThreadUiState;
+use super::constants::{AGENT_DISPLAY_NAME, AGENT_PROMPT_HISTORY_MAX};
+use super::format::{
+    agent_connection_state_label, fork_seed, parse_fork_args, thread_display_name,
+};
+use super::state::{
+    AgentPaneLayout, PendingFork, PersistedAgentSession, SessionDeletionConfirmation,
+};
+use super::thread_ui::{MessageRenderKind, ThreadUiState, TranscriptItem};
+use crate::agent_session_store::SessionArchiveRecord;
 impl App {
     /// `:agents_new [agent-id]` — start a fresh session and switch to it.
     pub(super) fn agents_new_session(&mut self, requested_agent_id: &str) {
@@ -432,9 +441,41 @@ impl App {
             .or(thread.session_title.as_deref())
             .unwrap_or(&session_id)
             .to_string();
+        let archive_fallback = match self.workspace_session_archive() {
+            Some(archive) => {
+                let record = SessionArchiveRecord {
+                    agent_id: thread.agent_id.clone(),
+                    session_id: thread.session_id.clone(),
+                    session_name: thread.session_name.clone(),
+                    archived: true,
+                };
+                match archive.save(&record, &thread.transcript) {
+                    Ok(()) => Vec::new(),
+                    Err(error) => {
+                        eprintln!(
+                            "ee: agent transcript archive failed for {}: {error}",
+                            thread.session_id
+                        );
+                        thread.transcript.clone()
+                    }
+                }
+            }
+            None => thread.transcript.clone(),
+        };
+        self.agents.archived_persisted.retain(|record| record.session_id != session_id);
+        self.agents.archived_persisted.push(PersistedAgentSession {
+            agent_id: thread.agent_id.clone(),
+            session_id: session_id.clone(),
+            last_prompt: None,
+            session_name: thread.session_name.clone(),
+            transcript: archive_fallback,
+        });
         self.agents.archived_threads.push(thread);
-        self.agents.active_thread =
-            (!self.agents.threads.is_empty()).then_some(active.min(self.agents.threads.len() - 1));
+        self.agents.active_thread = if self.agents.threads.is_empty() {
+            None
+        } else {
+            Some(active.min(self.agents.threads.len() - 1))
+        };
         self.persist_agent_workspace();
         self.backend.status_message = Some(format!(
             "session archived locally: {label}; restore with /archive restore {}",
@@ -443,25 +484,47 @@ impl App {
     }
 
     fn agents_list_archived_sessions(&mut self) {
-        let listing = if self.agents.archived_threads.is_empty() {
+        let mut labels = self
+            .agents
+            .archived_threads
+            .iter()
+            .map(|thread| {
+                let label = thread
+                    .session_name
+                    .as_deref()
+                    .or(thread.session_title.as_deref())
+                    .unwrap_or(&thread.session_id);
+                format!("{label} ({})", thread.session_id)
+            })
+            .collect::<Vec<_>>();
+        labels.extend(
+            self.agents
+                .archived_persisted
+                .iter()
+                .filter(|record| {
+                    !self
+                        .agents
+                        .archived_threads
+                        .iter()
+                        .any(|thread| thread.session_id == record.session_id)
+                })
+                .map(|record| {
+                    let label = record.session_name.as_deref().unwrap_or(&record.session_id);
+                    format!("{label} ({})", record.session_id)
+                }),
+        );
+        let entries = labels
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| format!("{}: {label}", index + 1))
+            .collect::<Vec<_>>();
+        let listing = if entries.is_empty() {
             String::from("archived sessions: none")
         } else {
-            let entries = self
-                .agents
-                .archived_threads
-                .iter()
-                .enumerate()
-                .map(|(index, thread)| {
-                    let label = thread
-                        .session_name
-                        .as_deref()
-                        .or(thread.session_title.as_deref())
-                        .unwrap_or(&thread.session_id);
-                    format!("{}: {} ({})", index + 1, label, thread.session_id)
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            format!("archived sessions: {entries}; /archive restore <N> restores locally")
+            format!(
+                "archived sessions: {}; /archive restore <N> restores locally",
+                entries.join(" · ")
+            )
         };
         self.backend.status_message = Some(listing);
     }
@@ -472,18 +535,46 @@ impl App {
                 Some(String::from("usage: /archive restore <positive number>"));
             return;
         };
-        let Some(index) =
-            index.checked_sub(1).filter(|index| *index < self.agents.archived_threads.len())
-        else {
+        let Some(index) = index.checked_sub(1) else {
             self.backend.status_message = Some(String::from("archived session not found"));
             return;
         };
-        let thread = self.agents.archived_threads.remove(index);
-        let label = thread.display_name.clone();
-        self.agents.threads.push(thread);
-        self.agents.active_thread = Some(self.agents.threads.len() - 1);
-        self.persist_agent_workspace();
-        self.backend.status_message = Some(format!("session restored locally: {label}"));
+        if index < self.agents.archived_threads.len() {
+            let thread = self.agents.archived_threads.remove(index);
+            let label = thread.display_name.clone();
+            let session_id = thread.session_id.clone();
+            self.agents.archived_persisted.retain(|record| record.session_id != session_id);
+            self.agents.threads.push(thread);
+            self.agents.active_thread = Some(self.agents.threads.len() - 1);
+            self.persist_agent_workspace();
+            self.backend.status_message = Some(format!("session restored locally: {label}"));
+            return;
+        }
+
+        let persisted_index = index - self.agents.archived_threads.len();
+        let visible = self
+            .agents
+            .archived_persisted
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                !self
+                    .agents
+                    .archived_threads
+                    .iter()
+                    .any(|thread| thread.session_id == record.session_id)
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let Some(position) = visible.get(persisted_index).copied() else {
+            self.backend.status_message = Some(String::from("archived session not found"));
+            return;
+        };
+        let record = self.agents.archived_persisted[position].clone();
+        let label = record.session_name.clone().unwrap_or_else(|| record.session_id.clone());
+        self.request_persisted_agent_reconnect(record);
+        self.backend.status_message =
+            Some(format!("reconnecting archived session: {label}; transcript restores on load"));
     }
 
     pub(super) fn agents_archive_command(&mut self, args: &str) {
@@ -559,12 +650,176 @@ impl App {
         }
         self.agents.approval_modes.remove(&removed.session_id);
         self.agents.agent_permissions.invalidate_session(&removed.session_id);
-        self.agents.active_thread = (!self.agents.threads.is_empty())
-            .then_some(confirmation.thread_index.min(self.agents.threads.len() - 1));
+        self.agents.archived_persisted.retain(|record| record.session_id != removed.session_id);
+        if let Some(archive) = self.workspace_session_archive()
+            && let Err(error) = archive.delete_session(&removed.session_id)
+        {
+            eprintln!(
+                "ee: deleting the agent transcript journal for {} failed: {error}",
+                removed.session_id
+            );
+        }
+        self.agents.active_thread = if self.agents.threads.is_empty() {
+            None
+        } else {
+            Some(confirmation.thread_index.min(self.agents.threads.len() - 1))
+        };
         self.persist_agent_workspace();
         self.backend.status_message = Some(format!(
             "local transcript deleted for {} ({}); provider session unchanged",
             confirmation.session_name, confirmation.session_id
         ));
+    }
+    /// Registers a fresh session thread from a new-session reply.
+    pub(super) fn register_session_thread(&mut self, agent_id: &str, thread: AgentThread) {
+        let session_id = thread.session_id().0.to_string();
+        let snapshot = thread.snapshot();
+        // Phase 6b user-visible diagnostics: how the ee proxy was exposed.
+        self.agents.mcp.proxy_mode = Some(thread.proxy_mode().to_string());
+        let index = self.agents.next_thread_index;
+        self.agents.next_thread_index += 1;
+        let nick = AGENT_DISPLAY_NAME.to_owned();
+        let ready = self.agents.created_sessions.contains(&session_id);
+        let session_title =
+            snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
+        let session_updated_at =
+            snapshot.session_info.as_ref().and_then(|info| info.updated_at.value().cloned());
+        let persisted = self.load_persisted_agent_workspace().and_then(|workspace| {
+            workspace.sessions.into_iter().find(|record| record.session_id == session_id)
+        });
+        let archived_record = self
+            .agents
+            .archived_persisted
+            .iter()
+            .find(|record| record.session_id == session_id)
+            .cloned();
+        let archive_transcript = self
+            .workspace_session_archive()
+            .and_then(|archive| archive.load_transcript(&session_id).ok().flatten());
+        let fallback = persisted.as_ref().or(archived_record.as_ref());
+        let session_name = fallback.and_then(|record| record.session_name.clone());
+        let transcript = match archive_transcript {
+            Some(transcript) => transcript,
+            None => {
+                let legacy = fallback.map(|record| record.transcript.clone()).unwrap_or_default();
+                if !legacy.is_empty()
+                    && let Some(archive) = self.workspace_session_archive()
+                {
+                    let archive_record = SessionArchiveRecord {
+                        agent_id: agent_id.to_string(),
+                        session_id: session_id.clone(),
+                        session_name: session_name.clone(),
+                        archived: archived_record.is_some(),
+                    };
+                    if let Err(error) = archive.save(&archive_record, &legacy) {
+                        eprintln!(
+                            "ee: agent transcript migration failed for {session_id}: {error}"
+                        );
+                    }
+                }
+                legacy
+            }
+        };
+        if let Some(position) =
+            self.agents.archived_persisted.iter().position(|record| record.session_id == session_id)
+        {
+            self.agents.archived_persisted.remove(position);
+        }
+        let transcript_archive_loaded = !transcript.is_empty();
+        let prompt_history = transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message { text, kind: MessageRenderKind::User, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .rev()
+            .take(AGENT_PROMPT_HISTORY_MAX)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let next_response_group = transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message { response_group, .. } => *response_group,
+                TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let restored = persisted.is_some() || archived_record.is_some();
+        self.agents.threads.push(AgentThreadUi {
+            index,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.clone(),
+            fork_parent_session_id: None,
+            nick,
+            display_name: thread_display_name(
+                index,
+                session_name.as_deref(),
+                session_title.as_deref(),
+            ),
+            state: if ready { ThreadUiState::Ready } else { ThreadUiState::Starting },
+            unread: 0,
+            activity: false,
+            host: thread,
+            transcript,
+            transcript_archive_loaded,
+            optimistic_message: None,
+            draft: std::mem::take(&mut self.agents.pending_draft),
+            draft_cursor: 0,
+            prompt_history,
+            prompt_history_cursor: None,
+            prompt_history_restore_draft: None,
+            queued_prompts: VecDeque::new(),
+            stashed_draft: None,
+            transcript_raw: false,
+            transcript_detail: false,
+            scroll: 0,
+            stick_to_bottom: true,
+            usage: None,
+            stop_reason: None,
+            turn_started_at: None,
+            turn_metrics: BTreeMap::new(),
+            last_turn_metrics: None,
+            terminal_evidence: None,
+            verification_paths: Vec::new(),
+            verification_revision: None,
+            active_response_group: None,
+            next_response_group,
+            selected_response_group: None,
+            selected_final_response: None,
+            collapsed_response_groups: BTreeSet::new(),
+            collapse_incoming_response_groups: restored,
+            expanded_tool_details: BTreeSet::new(),
+            current_plan: Vec::new(),
+            plan_modal_open: false,
+            prompt_editor_snapshot: None,
+            last_error: None,
+            pending_recovery: None,
+            last_prompt: None,
+            context_files: Vec::new(),
+            next_prompt_context_files: Vec::new(),
+            available_commands: snapshot.available_commands,
+            session_name: session_name.clone(),
+            session_title,
+            session_updated_at,
+        });
+        if self.agents.workspace_restore.is_none() {
+            self.agents.active_thread = Some(self.agents.threads.len() - 1);
+        }
+        self.agents.error = None;
+        let restored_thread = self.agents.threads.last_mut().expect("thread pushed");
+        if restored {
+            restored_thread.collapse_restored_response_groups();
+        }
+        restored_thread.push_system(format!(
+            "session {} ({session_id})",
+            if restored { "restored" } else { "started" }
+        ));
+        self.persist_agent_workspace();
     }
 }

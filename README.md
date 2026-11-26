@@ -506,6 +506,40 @@ Distinct agent ids launch isolated connections/processes, including same ACP bin
 
 Providers supporting contrasting-model critique may advertise exact `/rubber-duck [question]`. A configured `[agents.rubber_duck] external_agent_id` also enables this command in production Agents UI: EE starts one isolated ephemeral ACP critic session, verifies its bounded report, closes it, then asks root for one synthesis. Manual internal critique remains rollout default; automatic internal mode remains replay-gated, and external ACP critique remains manual-only without host-owned sandbox proof. Critique adds call/cost/latency and receives bounded, revision-checked, redacted workspace evidence. Internal critics have enforced read-only tools; external forwarding is read-only but agent-native tools remain outside EE control, shown as visible warning. Critic output stays advisory and never counts as validation evidence; root alone decides and writes. See [parallel agent sessions and rubber duck policy](docs/upgrades/parallel-agent-sessions.md) plus [agent configuration examples](wiki/config.md#agent-process-examples).
 
+### Durable agent transcripts and session logs
+
+Agent transcript history is kept outside the workspace, in the platform user
+data directory (`$XDG_DATA_HOME/ee/agent-sessions`, or the platform equivalent):
+
+- Every live and archived session gets an owner-only transcript journal under
+  `agent-sessions/transcripts/<workspace-digest>/`.
+- The journal is append-only and rotates by bytes (`transcript.jsonl` plus
+  `segment-*.jsonl`). Rotation never trims or deletes transcript items; old
+  segments stay until an explicit prune.
+- Archiving a session keeps its full transcript. `/archive list` shows archived
+  sessions after a restart, and `/archive restore <N>` reconnects the session and
+  restores the stored transcript while ignoring the bounded provider load replay
+  until the next user turn.
+- The provider durable session log is on by default under
+  `agent-sessions/session-log`. Set `EE_SESSION_LOG_DISABLE=1` or
+  `EE_SESSION_LOG_DURABLE=false` to opt out; `EE_SESSION_LOG_DIR` overrides the
+  root.
+- Large tool results are bounded inline at 2,000 lines / 50 KiB. The full result
+  is retained in the session log and the inline result carries the saved path
+  and truncation metadata.
+
+Prune stale history with:
+
+```sh
+ee do agent sessions prune --older-than-days 30 --dry-run
+ee do agent sessions prune --older-than-days 30
+```
+
+`--all` removes every inactive entry regardless of age. Live sessions named in
+`agent-sessions.json` are always protected, and symlinks are never followed.
+`/export` still writes a redacted Markdown snapshot for sharing or handing off a
+single transcript.
+
 ### ee MCP proxy contract
 
 The editor proxy uses stable `ee_` tool names. Call `ee_tools_manifest` with no arguments first; its versioned, session-cacheable response lists only tools current host supports. Manifest is normative tool reference: each entry includes `inputSchema` (every argument, type, and required field), schema version, `read`/`write`/`execute` side-effect class, approval requirement, transport availability (`stdio` and/or ACP-native `acp`), required host capabilities, output cap kind and maximum, redaction rules, typed error classes, deprecation/replacement metadata, and minimal schema-valid arguments. Existing names and schemas stay compatible. Incompatible argument or result changes require a new tool name. The full in-repo inventory, including the remote-control MCP server, is in [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).

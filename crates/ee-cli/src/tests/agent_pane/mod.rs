@@ -46,6 +46,7 @@ use crate::registers::RegisterName;
 use crate::tests::helpers::*;
 use crate::ui::ui;
 
+mod archive_tests;
 mod flaky_regressions;
 
 const WAIT: Duration = Duration::from_secs(20);

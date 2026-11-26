@@ -1455,3 +1455,41 @@ action = "request_hover"
         "config-unbound K should be visible: {lines:?}"
     );
 }
+
+#[test]
+fn agent_sessions_prune_parses() {
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "sessions",
+        "prune",
+        "--older-than-days",
+        "7",
+        "--all",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Sessions {
+                    command: crate::AgentSessionsCommands::Prune(args)
+                }
+            }
+        }) if args.older_than_days == 7 && args.all && args.dry_run
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "sessions", "prune"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Sessions {
+                    command: crate::AgentSessionsCommands::Prune(args)
+                }
+            }
+        }) if args.older_than_days == 30 && !args.all && !args.dry_run
+    ));
+}

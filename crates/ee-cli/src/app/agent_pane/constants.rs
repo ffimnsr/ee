@@ -11,10 +11,6 @@ pub(crate) const AGENTS_PANE_BOTTOM_HEIGHT: u16 = 14;
 pub(crate) const AGENT_DISPLAY_NAME: &str = "agent";
 /// Nick column width inside transcript lines.
 pub(crate) const AGENTS_NICK_COL_WIDTH: usize = 10;
-/// Maximum transcript items retained per thread.
-pub(crate) const AGENTS_TRANSCRIPT_MAX: usize = 1500;
-/// Maximum stderr/debug lines retained per thread.
-pub(crate) const AGENTS_STDERR_MAX: usize = 200;
 /// Lines scrolled per PageUp/PageDown key press.
 pub(crate) const AGENTS_SCROLL_PAGE: usize = 10;
 /// Maximum explicitly attached context files per agent session.

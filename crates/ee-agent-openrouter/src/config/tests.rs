@@ -578,3 +578,21 @@ fn config_file_body_overlay_reaches_the_profile() {
     let extensions = profile.extensions.expect("extensions");
     assert_eq!(extensions["provider"]["sort"], "throughput");
 }
+
+#[test]
+fn durable_session_log_defaults_on_and_can_be_disabled() {
+    let parsed = Args::try_parse_from(["ee-agent-openrouter"]).expect("parse defaults");
+    assert!(parsed.session_log_durable, "durable session log is on by default");
+    let parsed = Args::try_parse_from(["ee-agent-openrouter", "--session-log-durable=false"])
+        .expect("parse opt-out");
+    assert!(!parsed.session_log_durable);
+}
+
+#[test]
+fn session_log_disable_env_opts_out() {
+    let _guard = EnvGuard::set("EE_SESSION_LOG_DISABLE", "1");
+    let mut parsed = args();
+    parsed.session_log_durable = true;
+    let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new()).expect("configured");
+    assert!(config.session_log_root(std::path::Path::new("/tmp/session-state")).is_none());
+}

@@ -100,10 +100,20 @@ impl App {
                         .thread_index(session_id)
                         .zip(self.agents.pending_replay.remove(session_id))
                     {
-                        if index.1.iter().any(session_update_replays_transcript) {
+                        let archive_loaded = self.agents.threads[index.0].transcript_archive_loaded;
+                        if !archive_loaded && index.1.iter().any(session_update_replays_transcript)
+                        {
                             self.agents.threads[index.0].clear_transcript_state();
                         }
                         for update in index.1 {
+                            if archive_loaded && session_update_replays_transcript(&update) {
+                                // The durable journal already holds the full
+                                // local transcript. A provider replay is a
+                                // bounded request view, so replacing local
+                                // history with it would silently truncate the
+                                // record the journal exists to preserve.
+                                continue;
+                            }
                             self.apply_session_update(index.0, &update);
                         }
                         // A load replay may recreate the transcript after the

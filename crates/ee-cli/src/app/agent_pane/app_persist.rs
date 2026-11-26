@@ -10,6 +10,7 @@ use super::state::{
     PendingSession, PersistedAgentSession, PersistedAgentWorkspace,
     PersistedAgentWorkspaceDocument, WorkspaceRestore, persisted_agent_workspace_version,
 };
+use crate::agent_session_store::{SessionArchiveRecord, WorkspaceSessionArchive};
 impl App {
     /// Starts restoring every persisted workspace thread. Returns `true` when
     /// at least one session was queued instead of creating a fresh session.
@@ -18,8 +19,12 @@ impl App {
             return false;
         };
         if workspace.sessions.is_empty() {
+            self.agents.archived_persisted = workspace.archived_sessions.clone();
+            self.migrate_archived_transcripts();
             return false;
         }
+        self.agents.archived_persisted = workspace.archived_sessions.clone();
+        self.migrate_archived_transcripts();
         let order = workspace
             .sessions
             .iter()
@@ -137,6 +142,62 @@ impl App {
             Some(format!("reconnecting session {}...", record.session_id));
     }
 
+    /// Opens the per-workspace transcript journal lazily. The store owns
+    /// rotating owner-only files under the user data directory; tests use the
+    /// injected state base so they never touch real user data.
+    pub(super) fn workspace_session_archive(&self) -> Option<&WorkspaceSessionArchive> {
+        self.agents
+            .session_archive
+            .get_or_init(|| {
+                let root = self.session_archive_root()?;
+                match WorkspaceSessionArchive::open(root, self.primary_workspace_identity()) {
+                    Ok(archive) => Some(archive),
+                    Err(error) => {
+                        eprintln!("ee: agent transcript archive unavailable: {error}");
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    fn session_archive_root(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.agents.test_session_state_base.as_ref().map(|base| base.join("agent-sessions"))
+        }
+        #[cfg(not(test))]
+        {
+            WorkspaceSessionArchive::default_root()
+        }
+    }
+
+    /// Imports legacy JSON transcript fields into the journal once, so the
+    /// registry can drop them on the next successful save without data loss.
+    fn migrate_archived_transcripts(&self) {
+        let Some(archive) = self.workspace_session_archive() else {
+            return;
+        };
+        for record in &self.agents.archived_persisted {
+            if record.transcript.is_empty() {
+                continue;
+            }
+            if archive.load_transcript(&record.session_id).ok().flatten().is_none() {
+                let archive_record = SessionArchiveRecord {
+                    agent_id: record.agent_id.clone(),
+                    session_id: record.session_id.clone(),
+                    session_name: record.session_name.clone(),
+                    archived: true,
+                };
+                if let Err(error) = archive.save(&archive_record, &record.transcript) {
+                    eprintln!(
+                        "ee: agent transcript migration failed for {}: {error}",
+                        record.session_id
+                    );
+                }
+            }
+        }
+    }
     /// The path of the client-persisted agent session record (per-workspace
     /// entries under the platform state directory).
     fn agents_session_record_path(&self) -> Option<std::path::PathBuf> {
@@ -190,8 +251,8 @@ impl App {
     }
 
     /// Persists current open-thread ordering, local names, selected thread,
-    /// and per-thread recoverable prompts. Archived/deleted local threads are
-    /// intentionally omitted so they do not reopen after process restart.
+    /// and per-thread recoverable prompts. Archived threads are stored as
+    /// metadata here; their transcript bodies live in the rotating journal.
     pub(super) fn persist_agent_workspace(&self) {
         // Keep queued restore records intact until every ACP load completes.
         // Otherwise registering the first restored thread would erase peers
@@ -200,6 +261,7 @@ impl App {
             return;
         }
         let existing = self.load_persisted_agent_workspace().unwrap_or_default();
+        let archive = self.workspace_session_archive();
         let sessions = self
             .agents
             .threads
@@ -213,7 +275,31 @@ impl App {
                     .find(|record| record.session_id == thread.session_id)
                     .and_then(|record| record.last_prompt.clone()),
                 session_name: thread.session_name.clone(),
-                transcript: thread.transcript.clone(),
+                transcript: match archive {
+                    Some(archive) => {
+                        let record = SessionArchiveRecord::new(
+                            thread.agent_id.clone(),
+                            thread.session_id.clone(),
+                            thread.session_name.clone(),
+                        );
+                        match archive.save(&record, &thread.transcript) {
+                            Ok(()) => Vec::new(),
+                            Err(error) => {
+                                eprintln!(
+                                    "ee: agent transcript save failed for {}: {error}",
+                                    thread.session_id
+                                );
+                                // Keep a full registry fallback rather than
+                                // silently losing a transcript the journal
+                                // could not accept.
+                                thread.transcript.clone()
+                            }
+                        }
+                    }
+                    // No durable store (tests without an injected base, or an
+                    // unusable data directory): keep the current fallback.
+                    None => thread.transcript.clone(),
+                },
             })
             .collect();
         let active_session_id = self
@@ -231,6 +317,7 @@ impl App {
             version: persisted_agent_workspace_version(),
             active_session_id,
             sessions,
+            archived_sessions: self.agents.archived_persisted.clone(),
         }));
     }
 

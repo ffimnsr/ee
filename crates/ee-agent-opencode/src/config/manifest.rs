@@ -228,7 +228,7 @@ pub fn setup_manifest() -> SetupManifest {
             ),
             advanced_input(
                 "session_log_dir",
-                "Durable session-log directory (optional)",
+                "Durable session-log directory (defaults to user data; EE_SESSION_LOG_DISABLE=1 opts out)",
                 None,
                 "EE_SESSION_LOG_DIR",
             ),

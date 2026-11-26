@@ -198,6 +198,32 @@ pub(crate) enum AgentCommands {
         #[command(subcommand)]
         command: HarnessCommands,
     },
+    /// Inspect or prune durable agent session history
+    Sessions {
+        #[command(subcommand)]
+        command: AgentSessionsCommands,
+    },
+}
+
+/// `ee do agent sessions` subcommands.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AgentSessionsCommands {
+    /// Prune archived transcripts and provider session logs
+    Prune(AgentSessionsPruneArgs),
+}
+
+/// `ee do agent sessions prune` options.
+#[derive(Debug, Args)]
+pub(crate) struct AgentSessionsPruneArgs {
+    /// Remove entries not updated in this many days (default 30)
+    #[arg(long = "older-than-days", default_value_t = 30, value_name = "DAYS")]
+    pub(crate) older_than_days: u64,
+    /// Remove every inactive entry regardless of age
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) all: bool,
+    /// Report candidates without deleting anything
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) dry_run: bool,
 }
 
 /// `ee do agent harness` subcommands.

@@ -1063,3 +1063,33 @@ fn catalog_rows_drive_the_cache_directive_per_dialect() {
     assert!(!directive.places_markers(), "implicit-only row carries no markers");
     assert!(directive.support.implicit);
 }
+
+#[test]
+fn durable_session_log_defaults_on_and_can_be_disabled() {
+    let parsed = Args::try_parse_from(["ee-agent-opencode"]).expect("parse defaults");
+    assert!(parsed.session_log_durable, "durable session log is on by default");
+    let parsed = Args::try_parse_from(["ee-agent-opencode", "--session-log-durable=false"])
+        .expect("parse opt-out");
+    assert!(!parsed.session_log_durable);
+}
+
+#[test]
+fn session_log_disable_env_opts_out() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: the test holds LOCK until after this restore runs.
+            unsafe { std::env::remove_var("EE_SESSION_LOG_DISABLE") };
+        }
+    }
+    let _lock = LOCK.lock().unwrap();
+    // SAFETY: the test holds LOCK and restores the variable before unlocking.
+    unsafe { std::env::set_var("EE_SESSION_LOG_DISABLE", "1") };
+    let _restore = Restore;
+    let mut parsed = args(Some("zen"), Some("gpt-5.5"));
+    parsed.session_log_durable = true;
+    let config = Config::from_args_and_dotenv(parsed, &dotenv(&[(API_KEY_ENV, "sk-test")]))
+        .expect("configured");
+    assert!(config.session_log_root(std::path::Path::new("/tmp/session-state")).is_none());
+}

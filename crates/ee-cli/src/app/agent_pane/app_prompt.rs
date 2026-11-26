@@ -482,6 +482,10 @@ impl App {
             thread.turn_started_at = Some(Instant::now());
             thread.active_response_group = None;
             thread.selected_final_response = None;
+            // A user turn ends the load-replay window: streamed chunks for
+            // this new turn are live transcript, not a bounded provider
+            // replay, and must reach the journal.
+            thread.transcript_archive_loaded = false;
             thread.push_message("you", &display_text, MessageRenderKind::User, None, None);
             thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
             thread.last_prompt = Some(blocks.clone());
@@ -509,6 +513,7 @@ impl App {
         let thread = &mut self.agents.threads[active];
         thread.state = ThreadUiState::Running;
         thread.turn_started_at = Some(Instant::now());
+        thread.transcript_archive_loaded = false;
         thread.push_system(String::from("resuming paused turn"));
         let host = self.agents.host.as_ref().expect("host present");
         host.resume_prompt(thread.host.clone(), blocks, baseline);
@@ -526,6 +531,7 @@ impl App {
             return;
         }
         thread.state = ThreadUiState::Running;
+        thread.transcript_archive_loaded = false;
         thread.push_system(String::from("discarding paused turn"));
         let host = self.agents.host.as_ref().expect("host present");
         let blocks = vec![ContentBlock::Text(TextContent::new(String::from("/discard")))];

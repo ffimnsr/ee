@@ -7,6 +7,8 @@ pub(crate) mod agent_bridge;
 pub(crate) mod agent_mcp;
 #[cfg(feature = "agents")]
 pub(crate) mod agent_pane;
+#[cfg(feature = "agents")]
+pub(crate) mod agent_sessions_cmd;
 pub(crate) mod always_allow_trust_gate;
 pub(crate) mod always_rule_extraction;
 pub(crate) mod app;

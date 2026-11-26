@@ -65,9 +65,9 @@ pub(crate) fn coalesce_input_events(events: Vec<Event>) -> Vec<Event> {
         .collect()
 }
 use crate::args::{
-    AgentCommands, AgentTrustCommands, Cli, Commands, ConfigCommands, ConfigSetupCommands,
-    DoCommands, FileCommands, LanguageCommands, McpCommands, McpTrustCommands, PluginCommands,
-    RuntimeCommands, SchemaCommands, WorkspaceTrustCommands,
+    AgentCommands, AgentSessionsCommands, AgentTrustCommands, Cli, Commands, ConfigCommands,
+    ConfigSetupCommands, DoCommands, FileCommands, LanguageCommands, McpCommands, McpTrustCommands,
+    PluginCommands, RuntimeCommands, SchemaCommands, WorkspaceTrustCommands,
 };
 use crate::config_cmd::{
     cmd_config_get, cmd_config_init, cmd_config_set, cmd_config_setup_agent, cmd_config_setup_mcp,
@@ -262,6 +262,14 @@ pub fn run_cli() -> io::Result<()> {
                         std::process::exit(1);
                     }
                 }
+                DoCommands::Agent { command: AgentCommands::Sessions { command } } => match command
+                {
+                    AgentSessionsCommands::Prune(args) => {
+                        crate::agent_sessions_cmd::prune(&args).map_err(|error| {
+                            io::Error::new(error.kind(), format!("agent sessions prune: {error}"))
+                        })?;
+                    }
+                },
                 DoCommands::Agent {
                     command:
                         AgentCommands::Mcp { allow_roots, permission_mode, audit_log, session_log_dir },
