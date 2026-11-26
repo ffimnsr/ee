@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "atlas": {
+      "type": "stdio",
+      "command": "atlas",
+      "args": ["--repo", "~/Projects/ee", "serve", "--direct-stdio"]
+    }
+  }
+}

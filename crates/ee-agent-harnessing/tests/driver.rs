@@ -71,6 +71,10 @@ fn reflection_notes() -> String {
     )
 }
 
+fn no_entry_notes() -> String {
+    String::from("<edits></edits>\n<experience>\nNO_ENTRY\n</experience>")
+}
+
 fn record(label: &str, text: &str) -> RunRecord {
     RunRecord {
         label: label.to_string(),
@@ -694,6 +698,33 @@ async fn invocation_consent_writes_the_library_entry_and_leaves_active_agents_un
     assert!(summary.contains("\"reflection_write\": \"written\""), "{summary}");
     assert!(summary.contains("\"reflection_source\": \"invocation\""), "{summary}");
     assert!(summary.contains("library"), "{summary}");
+}
+
+#[tokio::test]
+async fn no_change_reflection_is_no_entry_not_failure() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = prepare_workspace(root.path());
+    let library = root.path().join("library");
+    let calls = Arc::new(Mutex::new(0));
+    let writer = RecordingWriter { library: library.clone(), calls: calls.clone() };
+    let notes = no_entry_notes();
+    let channel = channel(
+        Arc::new(|request| Ok(record(&request.label, "delivered"))),
+        Arc::new(move |request| {
+            if request.role == ImproverRole::Reflector {
+                return Ok(ImproverReply { tree: HarnessTree::default(), notes: notes.clone() });
+            }
+            Ok(standard_reply(request))
+        }),
+    );
+    let run =
+        run_task(&channel, &task(&workspace), &config(1), &root.path().join("run"), Some(&writer))
+            .await
+            .expect("run");
+    assert_eq!(run.reflection_write, ReflectionWrite::NoEntry);
+    assert!(run.reflected_path.is_none());
+    assert_eq!(*calls.lock().expect("calls"), 0);
+    assert!(!library.exists(), "NO_ENTRY must not create a library entry");
 }
 
 #[tokio::test]

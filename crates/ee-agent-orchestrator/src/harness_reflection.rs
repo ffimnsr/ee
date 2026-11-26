@@ -10,7 +10,9 @@
 //!
 //! The output contract is a tag-fenced reply: an `<edits>` block with one
 //! five-line row per changed component and at most one `<experience>` block.
-//! `NO_ENTRY` is the valid answer when no contrast supports a lesson.
+//! A run with no component changes emits an empty `<edits>` block plus
+//! `NO_ENTRY`; that is a valid no-op. `NO_ENTRY` is also the valid answer when
+//! no contrast supports a lesson.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -339,6 +341,11 @@ pub fn parse_reflection(reply: &str) -> Result<ReflectionOutput, String> {
     }
     let experience =
         experience_blocks.first().and_then(|block| parse_lesson(block).transpose()).transpose()?;
+    if edits.is_empty() && experience.is_some() {
+        return Err(String::from(
+            "`<edits>` has no rows but the reply carries an experience lesson; add the edit rows or emit NO_ENTRY",
+        ));
+    }
     for edit in &edits {
         assert_no_grader_material(
             "edit row",
@@ -406,9 +413,9 @@ fn parse_edit_rows(block: &str) -> Result<Vec<EditRow>, String> {
             verdict,
         });
     }
-    if rows.is_empty() {
-        return Err(String::from("`<edits>` has no rows"));
-    }
+    // A run with no component changes is a valid reflection: the reply carries
+    // an empty <edits> block and a NO_ENTRY experience. Rejecting the empty
+    // block made every no-change run end as reflection_write=failed.
     Ok(rows)
 }
 
@@ -609,6 +616,23 @@ mod tests {
         let output = parse_reflection(&reply("NO_ENTRY")).expect("parses");
         assert!(output.experience.is_none());
         assert_eq!(output.edits.len(), 1);
+    }
+
+    #[test]
+    fn empty_edits_with_no_entry_is_a_valid_no_change_reflection() {
+        let output = parse_reflection("<edits></edits>\n<experience>\nNO_ENTRY\n</experience>")
+            .expect("parses");
+        assert!(output.edits.is_empty());
+        assert!(output.experience.is_none());
+    }
+
+    #[test]
+    fn empty_edits_with_a_lesson_is_rejected() {
+        let error = parse_reflection(
+            "<edits></edits>\n<experience>\ncue: cue\nlesson: lesson\nevidence: evidence\n</experience>",
+        )
+        .expect_err("lesson needs edit rows");
+        assert!(error.contains("no rows"), "{error}");
     }
 
     #[test]

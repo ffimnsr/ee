@@ -64,6 +64,14 @@ fn missing_script_reference_is_rejected_by_name() {
 }
 
 #[test]
+fn workspace_script_reference_is_allowed_when_declared_external() {
+    let candidate = tree(&[("guardrails.md", "Run scripts/run-affected-tests.sh first.\n")]);
+    let external = BTreeSet::from([String::from("scripts/run-affected-tests.sh")]);
+    let verdict = validate_with_external_scripts(&candidate, None, &external);
+    assert!(verdict.ok, "{:?}", verdict.errors);
+}
+
+#[test]
 fn invalid_frontmatter_is_rejected() {
     let candidate = tree(&[("skills/broken/SKILL.md", "---\nname: [unterminated\n---\nbody\n")]);
     let verdict = validate(&candidate, None);

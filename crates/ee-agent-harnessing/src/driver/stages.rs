@@ -13,8 +13,8 @@ use ee_agent_orchestrator::harness_reflection::{
     build_entry,
 };
 use ee_agent_orchestrator::harness_validation::{
-    HarnessTree, ValidationError, ValidationRule, Verdict, check_script_syntax, materialize,
-    validate,
+    HarnessTree, ValidationError, ValidationRule, Verdict, check_script_syntax, external_scripts,
+    materialize, validate_with_external_scripts,
 };
 use ee_agent_orchestrator::user_experience::{ExperienceConfidence, ExperienceRegistry};
 
@@ -484,6 +484,13 @@ impl StageRuntime<'_> {
                 });
             }
         };
+        if output.edits.is_empty() && output.experience.is_none() {
+            return Ok(ReflectionOutcome {
+                output: Some(output),
+                path: None,
+                write: ReflectionWrite::NoEntry,
+            });
+        }
         let registry = ExperienceRegistry::discover_at(&self.task.library_root());
         let seq = registry.next_seq(self.task.domain_of());
         let entry = match build_entry(
@@ -572,7 +579,8 @@ impl StageRuntime<'_> {
         base: &HarnessTree,
         candidate_dir: &Path,
     ) -> HarnessResult<Verdict> {
-        let mut verdict = validate(tree, Some(base));
+        let external = external_scripts(&self.task.workspace);
+        let mut verdict = validate_with_external_scripts(tree, Some(base), &external);
         if !verdict.ok {
             return Ok(verdict);
         }

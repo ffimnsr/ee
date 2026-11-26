@@ -323,6 +323,17 @@ pub struct Verdict {
 /// always-on size feeds [`Verdict::always_on_char_delta`].
 #[must_use]
 pub fn validate(tree: &HarnessTree, base: Option<&HarnessTree>) -> Verdict {
+    validate_with_external_scripts(tree, base, &BTreeSet::new())
+}
+
+/// Validates one candidate tree while allowing references to workspace-level
+/// scripts that are not part of the editable `.agents` surface.
+#[must_use]
+pub fn validate_with_external_scripts(
+    tree: &HarnessTree,
+    base: Option<&HarnessTree>,
+    external_scripts: &BTreeSet<String>,
+) -> Verdict {
     let mut verdict = Verdict {
         ok: false,
         tree: tree.clone(),
@@ -346,7 +357,7 @@ pub fn validate(tree: &HarnessTree, base: Option<&HarnessTree>) -> Verdict {
     validate_names(&working, &mut verdict);
     validate_frontmatter(&working, &mut verdict);
     validate_scripts(&working, &mut verdict);
-    validate_script_references(&working, &mut verdict);
+    validate_script_references(&working, external_scripts, &mut verdict);
     repair_trigger_lines(&mut working, &mut verdict);
     validate_always_on(&working, base, &mut verdict);
     verdict.census = census(&working);
@@ -630,7 +641,11 @@ fn validate_scripts(tree: &HarnessTree, verdict: &mut Verdict) {
     }
 }
 
-fn validate_script_references(tree: &HarnessTree, verdict: &mut Verdict) {
+fn validate_script_references(
+    tree: &HarnessTree,
+    external_scripts: &BTreeSet<String>,
+    verdict: &mut Verdict,
+) {
     let mut sources = BTreeMap::new();
     for (path, content) in &tree.files {
         let is_prose_source = path == "guardrails.md"
@@ -643,7 +658,8 @@ fn validate_script_references(tree: &HarnessTree, verdict: &mut Verdict) {
     }
     for (source, text) in sources {
         for reference in script_references(&text) {
-            let exists = tree.files.contains_key(&reference);
+            let exists =
+                tree.files.contains_key(&reference) || external_scripts.contains(&reference);
             if !exists {
                 verdict.errors.push(error(
                     &source,
@@ -653,6 +669,31 @@ fn validate_script_references(tree: &HarnessTree, verdict: &mut Verdict) {
             }
         }
     }
+}
+
+/// Collects top-level workspace script references that a harness may call but
+/// does not own (for example `scripts/run-affected-tests.sh`).
+#[must_use]
+pub fn external_scripts(workspace: &Path) -> BTreeSet<String> {
+    let mut scripts = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(workspace.join("scripts")) else {
+        return scripts;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            continue;
+        };
+        if !SCRIPT_EXTENSIONS.contains(&extension) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+        scripts.insert(format!("scripts/{name}"));
+    }
+    scripts
 }
 
 /// Extracts normalized `scripts/<name>.<ext>` references from prose.

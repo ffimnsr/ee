@@ -231,13 +231,52 @@ pub fn build(root: &Path, evidence: &StageEvidence) -> HarnessResult<PathBuf> {
         ));
     }
 
+    present.push("INDEX.md");
     let mission = format!(
-        "# Mission\n\n{}\n\n## Evidence present\n\n{}\n",
+        "# Mission\n\n{}\n\n## Evidence present\n\n{}\n\nStart with `INDEX.md`; it lists every file in this directory.",
         evidence.mission.trim(),
         present.iter().map(|entry| format!("- {entry}")).collect::<Vec<_>>().join("\n")
     );
     write_checked(&directory.join("mission.md"), &mission, &redactor)?;
+    write_index(&directory, &redactor)?;
     Ok(directory)
+}
+
+fn write_index(directory: &Path, redactor: &Redactor) -> HarnessResult<()> {
+    let mut files = Vec::new();
+    collect_index_files(directory, directory, 0, &mut files);
+    files.sort();
+    let mut text = String::from("# Context index\n\nEvery file in this evidence tree:\n\n");
+    for relative in files {
+        let bytes =
+            std::fs::metadata(directory.join(&relative)).map(|meta| meta.len()).unwrap_or(0);
+        text.push_str(&format!("- `{}` ({bytes} bytes)\n", relative.display()));
+    }
+    write_checked(&directory.join("INDEX.md"), &text, redactor)
+}
+
+fn collect_index_files(root: &Path, directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    let mut paths = entries.filter_map(Result::ok).map(|entry| entry.path()).collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        if name == "INDEX.md" {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_index_files(root, &path, depth + 1, files);
+        } else if metadata.is_file() {
+            files.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
 }
 
 fn redacted_tree(tree: &HarnessTree, redactor: &Redactor) -> HarnessTree {
@@ -399,6 +438,7 @@ mod tests {
         for file in [
             "task.md",
             "mission.md",
+            "INDEX.md",
             "decisions/step-0.md",
             "rollouts/ref-0.md",
             "deliverables/ref-0.md",
@@ -413,7 +453,12 @@ mod tests {
         assert!(mission.contains("deliverables/"));
         assert!(mission.contains("decisions/"));
         assert!(mission.contains("library/"));
+        assert!(mission.contains("INDEX.md"));
         assert!(!mission.contains("observations.md"));
+        let index = std::fs::read_to_string(directory.join("INDEX.md")).expect("index");
+        assert!(index.contains("task.md"));
+        assert!(index.contains("rollouts/ref-0.md"));
+        assert!(index.contains("library/rust/1-prior/EXPERIENCE.md"));
     }
 
     #[test]

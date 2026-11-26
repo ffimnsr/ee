@@ -95,6 +95,33 @@ pub(super) async fn handle_reflect_command(
         .map_err(ProviderError::from)?;
     let output = harness_reflection::parse_reflection(&result.handoff.summary)
         .map_err(ProviderError::InvalidRequest)?;
+    if output.edits.is_empty() && output.experience.is_none() {
+        let summary = serde_json::json!({
+            "command": ee_agent_protocol::REFLECT_COMMAND_NAME,
+            "session_id": session,
+            "domain": domain,
+            "seq": null,
+            "library_root": library_root.display().to_string(),
+            "edits": 0,
+            "no_entry": true,
+            "approved": false,
+            "path": null,
+        });
+        let _ = ctx.sink.agent_message_chunk("reflect", summary.to_string());
+        finish_provider_telemetry(
+            ctx.telemetry,
+            ProviderTelemetryTurn {
+                turn_id: ctx.telemetry_turn,
+                started_at: ctx.telemetry_started_at,
+                events: &ctx.runtime.event_snapshot()[ctx.telemetry_event_start..],
+                outcome: TelemetryTurnOutcome::Succeeded,
+                terminal_state: None,
+                evidence_ids: Vec::new(),
+                usage: None,
+            },
+        );
+        return Ok(PromptResult::new(StopReason::EndTurn));
+    }
     let registry = ExperienceRegistry::discover_at(&library_root);
     let seq = registry.next_seq(&domain);
     let entry =

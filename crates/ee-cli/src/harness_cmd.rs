@@ -1,10 +1,11 @@
 //! `ee do agent harness`: the recursive harness improvement driver.
 //!
 //! Rollouts and improver sessions run through the configured headless agent
-//! host. Each session gets an isolated, bounded workspace under the run root;
-//! the user's workspace harness is never mounted read-write. Improver sessions
-//! copy the curated evidence dir in and the edited `.agents` tree is harvested
-//! back after the turn.
+//! host. Each session gets an isolated workspace under the run root; the user's
+//! workspace harness is never mounted read-write. Improver sessions copy the
+//! curated evidence dir in and the edited `.agents` tree is harvested back after
+//! the turn. Child sessions run in `write` mode so they can edit `.agents` and
+//! use `context/` as scratch instead of being silently read-only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -27,13 +28,17 @@ use tokio::sync::Notify;
 
 use crate::args::{HarnessCommands, HarnessModeArg, ReflectionChoiceArg};
 
-const MAX_WORKSPACE_FILES: usize = 512;
-const MAX_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_WORKSPACE_DEPTH: usize = 4;
+mod workspace;
+
+const MAX_SNAPSHOT_DEPTH: usize = 64;
 const MAX_ASSET_BYTES: usize = 64 * 1024;
 const MAX_ASSETS: usize = 32;
 const MAX_OUTPUT_CHARS: usize = 256 * 1024;
 const MAX_SELECTOR_ASSET_TOTAL_BYTES: usize = 256 * 1024;
+/// Harness child sessions are isolated under the run root, so they get the
+/// write-capable mode. `ask` mode denies writes before approval and made every
+/// improver session read-only.
+const HARNESS_SESSION_MODE: &str = "write";
 
 /// Runs one `ee do agent harness` subcommand.
 pub(crate) fn run(command: HarnessCommands) -> io::Result<()> {
@@ -275,6 +280,7 @@ fn print_run(run: &HarnessRun, run_root: &Path) {
     let reflected_path = run.reflected_path.as_ref().map(|path| path.display().to_string());
     match serde_json::to_string(&serde_json::json!({
         "task_id": run.task_id,
+        "selected_label": run.selection.chosen,
         "run_root": run_root.display().to_string(),
         "library_root": run.library_root.display().to_string(),
         "reflection_write": run.reflection_write.as_str(),
@@ -489,6 +495,10 @@ impl HostChannel {
                 .map_err(|error| HarnessError::Channel(error.to_string()))?,
         )
         .map_err(|error| HarnessError::Channel(format!("session/new reply: {error}")))?;
+        if let Err(error) = self.apply_session_mode(&session.session_id).await {
+            self.close_session(&session.session_id).await;
+            return Err(error);
+        }
         // Effort and step budgets are advisories the host cannot enforce; the
         // model id is applied through the agent's `session/set_model`.
         if let Some(model_id) = model.and_then(|model| model.model_id.as_deref())
@@ -503,13 +513,7 @@ impl HostChannel {
                 )
                 .await
         {
-            let _ = self
-                .host
-                .dispatch(
-                    Method::SessionClose,
-                    Some(serde_json::json!({ "sessionId": session.session_id })),
-                )
-                .await;
+            self.close_session(&session.session_id).await;
             return Err(HarnessError::Channel(format!(
                 "cannot apply improver model {model_id:?}: {error}"
             )));
@@ -534,17 +538,36 @@ impl HostChannel {
             Err(_) => String::from("failed"),
         };
         let updates = self.collector.take(&session.session_id);
-        let _ = self
-            .host
-            .dispatch(
-                Method::SessionClose,
-                Some(serde_json::json!({ "sessionId": session.session_id })),
-            )
-            .await;
+        self.close_session(&session.session_id).await;
         self.collector.active.lock().expect("active sessions").remove(&session.session_id);
         result?;
         let text = assistant_text(&updates);
         Ok(SessionOutcome { session_id: session.session_id, stop_reason, text, updates })
+    }
+
+    async fn apply_session_mode(&self, session: &str) -> Result<(), HarnessError> {
+        self.host
+            .dispatch(
+                Method::SessionSetMode,
+                Some(serde_json::json!({
+                    "sessionId": session,
+                    "modeId": HARNESS_SESSION_MODE,
+                })),
+            )
+            .await
+            .map_err(|error| {
+                HarnessError::Channel(format!(
+                    "cannot apply harness session mode {HARNESS_SESSION_MODE:?}: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    async fn close_session(&self, session: &str) {
+        let _ = self
+            .host
+            .dispatch(Method::SessionClose, Some(serde_json::json!({ "sessionId": session })))
+            .await;
     }
 
     async fn wait_for_terminal(&self, session: &str) -> Result<String, HarnessError> {
@@ -587,9 +610,10 @@ struct SessionOutcome {
 fn improver_prompt(request: &ImproverRequest) -> String {
     format!(
         "{}\n\nThis workspace is isolated to this session.\n\
-         - `context/` contains the curated evidence for this stage.\n\
+         - Read `context/INDEX.md` first; it lists every evidence file.\n\
+         - `context/` is writable scratch for notes while you work.\n\
          - `.agents/` is the harness you may edit.\n\
-         Edit files under `.agents/` only and return a short summary of the changes.\n\
+         Edit `.agents/` and return a short summary of the changes.\n\
          Never read or write outside this workspace.\n",
         request.mission.trim()
     )
@@ -742,7 +766,7 @@ fn prepare_rollout_workspace(request: &RunRequest) -> Result<PathBuf, HarnessErr
         std::fs::remove_dir_all(&workspace)?;
     }
     std::fs::create_dir_all(&workspace)?;
-    copy_workspace(&request.task.workspace, &workspace)?;
+    workspace::copy_workspace(&request.task.workspace, &workspace)?;
     let agents = workspace.join(".agents");
     if agents.exists() {
         std::fs::remove_dir_all(&agents)?;
@@ -753,68 +777,6 @@ fn prepare_rollout_workspace(request: &RunRequest) -> Result<PathBuf, HarnessErr
     Ok(workspace)
 }
 
-fn copy_workspace(source: &Path, target: &Path) -> Result<(), HarnessError> {
-    let mut budget = CopyBudget { files: 0, bytes: 0 };
-    copy_dir(source, target, source, 0, &mut budget)
-}
-
-struct CopyBudget {
-    files: usize,
-    bytes: u64,
-}
-
-fn copy_dir(
-    root: &Path,
-    target: &Path,
-    directory: &Path,
-    depth: usize,
-    budget: &mut CopyBudget,
-) -> Result<(), HarnessError> {
-    const IGNORED: &[&str] =
-        &["target", "node_modules", ".git", ".atlas", "dist", "build", ".agents"];
-    if depth > MAX_WORKSPACE_DEPTH || budget.files >= MAX_WORKSPACE_FILES {
-        return Ok(());
-    }
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-    let mut paths = entries.filter_map(Result::ok).map(|entry| entry.path()).collect::<Vec<_>>();
-    paths.sort();
-    for path in paths {
-        if budget.files >= MAX_WORKSPACE_FILES || budget.bytes >= MAX_WORKSPACE_BYTES {
-            return Ok(());
-        }
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if IGNORED.contains(&name) {
-            continue;
-        }
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let destination = target.join(relative);
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&destination)?;
-            copy_dir(root, target, &path, depth + 1, budget)?;
-        } else if file_type.is_file() {
-            if metadata.len() > MAX_ASSET_BYTES as u64 {
-                continue;
-            }
-            if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            if std::fs::copy(&path, &destination).is_ok() {
-                budget.files += 1;
-                budget.bytes += metadata.len();
-            }
-        }
-    }
-    Ok(())
-}
-
 fn snapshot_files(workspace: &Path) -> BTreeSet<PathBuf> {
     let mut files = BTreeSet::new();
     collect_files(workspace, workspace, 0, &mut files);
@@ -822,7 +784,7 @@ fn snapshot_files(workspace: &Path) -> BTreeSet<PathBuf> {
 }
 
 fn collect_files(root: &Path, directory: &Path, depth: usize, files: &mut BTreeSet<PathBuf>) {
-    if depth > MAX_WORKSPACE_DEPTH || files.len() >= MAX_WORKSPACE_FILES {
+    if depth > MAX_SNAPSHOT_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(directory) else { return };
@@ -932,7 +894,7 @@ fn collect_copy_files(
     depth: usize,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), HarnessError> {
-    if depth > 4 || files.len() > 256 {
+    if depth > MAX_SNAPSHOT_DEPTH {
         return Ok(());
     }
     let entries = std::fs::read_dir(directory)?;

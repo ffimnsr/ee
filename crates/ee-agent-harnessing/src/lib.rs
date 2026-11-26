@@ -33,7 +33,9 @@ pub use driver::{
     ReflectionWriter, StreamTaskRun, run_stream, run_task, stream_order_path,
 };
 pub use ee_agent_orchestrator::harness_reflection::ReflectionToolRecord;
-pub use ee_agent_orchestrator::harness_validation::{HarnessTree, materialize, validate};
+pub use ee_agent_orchestrator::harness_validation::{
+    HarnessTree, external_scripts, materialize, validate, validate_with_external_scripts,
+};
 pub use ee_agent_orchestrator::rollout_view::{
     RolloutDiffFile, RolloutToolRecord, RolloutTurn, RolloutView,
 };

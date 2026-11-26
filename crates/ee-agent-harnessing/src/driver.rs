@@ -35,8 +35,8 @@ pub const MISSION_INV: &str = concat!(
     "Keeping the current harness unchanged (KEEP_BASE) is a valid answer. ",
     "Prefer a triggered skill, then a script, then a subagent, then a middleware hook, ",
     "and always-on prose last. Harness changes alter how the agent works, never the shape ",
-    "of what it delivers. Write only inside candidate_dir/.agents and return a complete ",
-    "candidate harness tree; do not delete every file."
+    "of what it delivers. Write only inside this isolated workspace; edit `.agents/` and ",
+    "return a complete candidate harness tree; do not delete every file."
 );
 
 /// Layered editor contract: domain and artifact knowledge.
@@ -45,7 +45,7 @@ pub const MISSION_DOM: &str = concat!(
     "knowledge, artifact contracts, and decision rules. Name the trajectory moment each ",
     "change addresses; KEEP_BASE is valid. Prefer a skill or script over always-on prose. ",
     "Never change the delivered artifact shape as a substitute for better work. Write only ",
-    "inside candidate_dir/.agents and return a complete candidate harness tree."
+    "inside this isolated workspace; edit `.agents/` and return a complete candidate harness tree."
 );
 
 /// Composer contract.
@@ -55,7 +55,7 @@ pub const MISSION_COMPOSER: &str = concat!(
     "Emit one note line per decision exactly as `kept|revised|dropped -> <edit> -> ",
     "<trajectory moment with counts>`. An edit whose source rollout did not deliver is unsafe ",
     "unless the rest of the evidence is overwhelming; state that evidence in the note. ",
-    "Write only inside candidate_dir/.agents and return the composed tree."
+    "Write only inside this isolated workspace; edit `.agents/` and return the composed tree."
 );
 
 /// Selector contract.
@@ -71,9 +71,10 @@ pub const MISSION_SELECTOR: &str = concat!(
 pub const MISSION_REFLECTOR: &str = "Reflect on the improvement run from the curated evidence. Emit exactly one <edits> block \
     with one five-line row per changed component (component, candidates, change, observed, \
     verdict), then at most one <experience> block with cue, lesson, evidence, and optional \
-    confidence (low, medium, or high). NO_ENTRY is the valid answer when no execution contrast \
-    supports a lesson. Never invent a trajectory moment, never treat selection as transfer \
-    evidence, and never emit more than one lesson.";
+    confidence (low, medium, or high). When no component changed, emit an empty <edits> block \
+    and NO_ENTRY; NO_ENTRY is also the valid answer when no execution contrast supports a \
+    lesson. Never invent a trajectory moment, never treat selection as transfer evidence, and \
+    never emit more than one lesson.";
 
 /// Execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +102,9 @@ impl HarnessMode {
 pub enum ReflectionWrite {
     /// The experience entry was written.
     Written,
+    /// Reflection produced no component changes and no lesson. This is a valid
+    /// no-op, not a failure.
+    NoEntry,
     /// Reflection ran but no write was requested.
     Declined,
     /// Reflection or the write failed.
@@ -115,6 +119,7 @@ impl ReflectionWrite {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Written => "written",
+            Self::NoEntry => "no-entry",
             Self::Declined => "declined",
             Self::Failed => "failed",
             Self::Disabled => "disabled",
@@ -126,6 +131,7 @@ impl ReflectionWrite {
     pub fn parse(value: &str) -> Self {
         match value {
             "written" => Self::Written,
+            "no-entry" | "no_entry" => Self::NoEntry,
             "declined" => Self::Declined,
             "failed" => Self::Failed,
             _ => Self::Disabled,

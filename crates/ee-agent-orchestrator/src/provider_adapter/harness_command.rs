@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ee_agent_acp_server::{PromptResult, ProviderError, UpdateSink};
-use ee_agent_protocol::{HARNESS_COMMAND_NAME, SessionId, StopReason};
+use ee_agent_protocol::{ADOPT_COMMAND_NAME, HARNESS_COMMAND_NAME, SessionId, StopReason};
 use tokio::sync::watch;
 
 use super::{ProviderTelemetryTurn, finish_provider_telemetry};
@@ -28,8 +28,8 @@ use crate::session_log::{HarnessLedgerReport, SessionLog};
 
 /// Wall-clock bound for one `/harness` child process.
 const HARNESS_TIMEOUT: Duration = Duration::from_secs(3_600);
-/// Bound retained from each child stream.
-const MAX_CHILD_OUTPUT_BYTES: usize = 32 * 1024;
+/// Bound retained from a failure diagnostic.
+const MAX_ERROR_BYTES: usize = 640;
 /// Maximum recursion depth accepted from the command line.
 const MAX_K: usize = 16;
 /// Maximum cross-domain workers accepted from the command line.
@@ -128,11 +128,12 @@ pub(super) async fn handle_harness_command(
     };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let parsed = parse_child_report(&stdout);
     if let Some(log) = &ctx.session_log
-        && let Some(report) = parse_child_report(&stdout)
+        && let Some(report) = parsed.as_ref()
         && let Err(error) = log.record_harness_ledger(HarnessLedgerReport {
-            task_id: report.task_id,
-            run_root: report.run_root,
+            task_id: report.task_id.clone(),
+            run_root: report.run_root.clone(),
             rollouts: report.rollouts,
             sessions: report.sessions,
             selection_sessions: report.selection_sessions,
@@ -144,17 +145,13 @@ pub(super) async fn handle_harness_command(
     {
         tracing::warn!(%error, "harness ledger report could not be recorded");
     }
-    let report = format!(
-        "`/{HARNESS_COMMAND_NAME}` session={} k={} mode={} workers={}{}\n\
-         exit: {}\n\nstdout:\n{}\nstderr:\n{}\n",
-        ctx.session_id,
-        args.k,
-        args.mode,
-        args.workers,
-        if args.dry_run { " dry-run" } else { "" },
-        output.status,
-        truncate_child(&stdout),
-        truncate_child(&stderr)
+    let report = status_report(
+        &ctx.session_id.to_string(),
+        &args,
+        output.status.success(),
+        &output.status.to_string(),
+        parsed.as_ref(),
+        &stderr,
     );
     let _ = ctx.sink.agent_message_chunk("harness", report);
     let outcome = if output.status.success() {
@@ -167,7 +164,7 @@ pub(super) async fn handle_harness_command(
         Ok(PromptResult::new(StopReason::EndTurn))
     } else {
         Err(ProviderError::BackendFailure(format!(
-            "`/harness` exited with {}; see the bounded output above",
+            "`/harness` exited with {}; see status above",
             output.status
         )))
     }
@@ -358,7 +355,19 @@ fn child_args(
 struct ChildReport {
     task_id: String,
     #[serde(default)]
+    selected_label: Option<String>,
+    #[serde(default)]
     run_root: Option<String>,
+    #[serde(default)]
+    library_root: Option<String>,
+    #[serde(default)]
+    reflection_write: Option<String>,
+    #[serde(default)]
+    reflection_source: Option<String>,
+    #[serde(default)]
+    adopted_path: Option<String>,
+    #[serde(default)]
+    reflected_path: Option<String>,
     rollouts: u64,
     sessions: u64,
     selection_sessions: u64,
@@ -375,15 +384,94 @@ fn parse_child_report(stdout: &str) -> Option<ChildReport> {
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
-fn truncate_child(text: &str) -> String {
-    if text.len() <= MAX_CHILD_OUTPUT_BYTES {
-        return text.to_string();
+fn status_report(
+    session: &str,
+    args: &HarnessArgs,
+    success: bool,
+    exit: &str,
+    report: Option<&ChildReport>,
+    stderr: &str,
+) -> String {
+    let state = if success { "completed" } else { "failed" };
+    let mut lines = vec![
+        format!("`/{HARNESS_COMMAND_NAME}` {state}"),
+        format!(
+            "session={session} k={} mode={} workers={}{}",
+            args.k,
+            args.mode,
+            args.workers,
+            if args.dry_run { " dry-run" } else { "" }
+        ),
+    ];
+    if let Some(report) = report {
+        lines.push(format!(
+            "task={} chosen={}",
+            report.task_id,
+            report.selected_label.as_deref().unwrap_or("none")
+        ));
+        if let Some(run_root) = &report.run_root {
+            lines.push(format!("run root: {run_root}"));
+        }
+        if let Some(library_root) = &report.library_root {
+            lines.push(format!("library: {library_root}"));
+        }
+        lines.push(format!(
+            "rollouts={} sessions={} selection={} retries={} reflection={} dead={} base_failed={}",
+            report.rollouts,
+            report.sessions,
+            report.selection_sessions,
+            report.retry_sessions,
+            report.reflection_sessions,
+            report.dead_rollouts,
+            report.base_failed
+        ));
+        if let Some(write) = &report.reflection_write {
+            let source = report.reflection_source.as_deref().unwrap_or("unknown");
+            lines.push(format!("experience: {write} (source: {source})"));
+        }
+        if let Some(path) = &report.adopted_path {
+            lines.push(format!("adopted tree: {path}"));
+        }
+        if let Some(path) = &report.reflected_path {
+            lines.push(format!("experience entry: {path}"));
+        }
+    } else {
+        lines.push(format!("exit: {exit}"));
+        if success {
+            lines.push(String::from("report: missing"));
+        }
     }
-    let mut cut = MAX_CHILD_OUTPUT_BYTES.min(text.len());
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
+    if !success {
+        lines.push(format!("reason: {}", error_excerpt(stderr)));
+        lines.push(format!(
+            "next: fix the failure, then rerun `/{HARNESS_COMMAND_NAME}`; do not `/{ADOPT_COMMAND_NAME}` this run"
+        ));
+    } else if args.dry_run {
+        lines.push(format!(
+            "next: rerun `/{HARNESS_COMMAND_NAME}` without dry-run to produce a candidate"
+        ));
+    } else if report.is_none() {
+        lines.push(String::from("next: inspect the run root; report missing, nothing was adopted"));
+    } else if report.is_some_and(|report| report.selected_label.is_some()) {
+        lines.push(format!(
+            "next: run `/{ADOPT_COMMAND_NAME}` to apply the chosen harness; current `.agents` stays active"
+        ));
+    } else {
+        lines.push(String::from("next: keep the current harness; no selected tree to adopt"));
     }
-    format!("{}\n… [truncated]\n", &text[..cut])
+    lines.join("\n")
+}
+
+fn error_excerpt(stderr: &str) -> String {
+    let text = stderr.trim();
+    if text.is_empty() {
+        return String::from("no diagnostic output");
+    }
+    let mut start = text.len().saturating_sub(MAX_ERROR_BYTES);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    if start == 0 { text.to_string() } else { format!("…{}", &text[start..]) }
 }
 
 #[cfg(test)]
@@ -406,6 +494,60 @@ mod tests {
         assert!(parse_harness_args(Some("mode=fast")).is_err());
         assert!(parse_harness_args(Some("workers=0")).is_err());
         assert!(parse_harness_args(Some("verbose")).is_err());
+    }
+
+    fn sample_report() -> ChildReport {
+        ChildReport {
+            task_id: String::from("t"),
+            selected_label: Some(String::from("composed-0")),
+            run_root: Some(String::from("/tmp/run")),
+            library_root: Some(String::from("/tmp/library")),
+            reflection_write: Some(String::from("written")),
+            reflection_source: Some(String::from("invocation")),
+            adopted_path: Some(String::from("/tmp/run/adopted")),
+            reflected_path: Some(String::from("/tmp/library/entry")),
+            rollouts: 4,
+            sessions: 3,
+            selection_sessions: 0,
+            retry_sessions: 1,
+            reflection_sessions: 1,
+            dead_rollouts: 0,
+            base_failed: false,
+        }
+    }
+
+    #[test]
+    fn success_status_is_compact_and_ends_with_adopt_hint() {
+        let text = status_report(
+            "session-1",
+            &HarnessArgs::default(),
+            true,
+            "exit status: 0",
+            Some(&sample_report()),
+            "noise that must not be posted",
+        );
+        assert!(text.contains("completed"), "{text}");
+        assert!(text.contains("task=t chosen=composed-0"), "{text}");
+        assert!(text.contains("rollouts=4"), "{text}");
+        assert!(text.contains("next: run `/adopt`"), "{text}");
+        assert!(!text.contains("stdout"), "{text}");
+        assert!(!text.contains("noise that must not be posted"), "{text}");
+    }
+
+    #[test]
+    fn failure_status_is_compact_and_says_not_to_adopt() {
+        let text = status_report(
+            "session-1",
+            &HarnessArgs::default(),
+            false,
+            "exit status: 1",
+            None,
+            "fatal: child failed",
+        );
+        assert!(text.contains("failed"), "{text}");
+        assert!(text.contains("reason: fatal: child failed"), "{text}");
+        assert!(text.contains("do not `/adopt`"), "{text}");
+        assert!(!text.contains("stdout"), "{text}");
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub struct RunSummary {
     /// Experience-library root used by both reader and writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_root: Option<String>,
-    /// Reflection persistence outcome (`written`, `declined`, `failed`, `disabled`).
+    /// Reflection persistence outcome (`written`, `no-entry`, `declined`, `failed`, `disabled`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reflection_write: String,
     /// Reflection consent provenance (`invocation`, `flag`, `none`).

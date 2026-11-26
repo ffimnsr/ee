@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ee_agent_harnessing::{
-    ExperienceRegistry, HarnessTree, WORKSPACE_EXPERIENCE_DIR, materialize, validate,
+    ExperienceRegistry, HarnessTree, WORKSPACE_EXPERIENCE_DIR, external_scripts, materialize,
+    validate_with_external_scripts,
 };
 use serde::Serialize;
 
@@ -57,7 +58,7 @@ pub(crate) fn run(args: HarnessAdoptArgs) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--workspace is not a directory"));
     }
     let source = load_source(&args, &workspace)?;
-    let adopted = validate_source(source, args.include_memories)?;
+    let adopted = validate_source(source, &workspace, args.include_memories)?;
     let plan = plan(&workspace, &adopted, args.include_memories)?;
     print_plan(&plan, args.dry_run);
     if args.dry_run {
@@ -162,8 +163,13 @@ fn invalid_data(error: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-fn validate_source(source: HarnessTree, include_memories: bool) -> io::Result<HarnessTree> {
-    let verdict = validate(&source, None);
+fn validate_source(
+    source: HarnessTree,
+    workspace: &Path,
+    include_memories: bool,
+) -> io::Result<HarnessTree> {
+    let external = external_scripts(workspace);
+    let verdict = validate_with_external_scripts(&source, None, &external);
     if !verdict.ok {
         for error in &verdict.errors {
             eprintln!("ee: adopt rejected {} [{:?}] {}", error.file, error.rule, error.message);
@@ -467,15 +473,17 @@ mod tests {
 
     #[test]
     fn invalid_or_empty_managed_trees_are_rejected() {
+        let workspace = workspace_with(&[]);
         let invalid = tree(&[("skills/Bad Name/SKILL.md", "x\n")]);
-        let error = validate_source(invalid, false).expect_err("invalid tree");
+        let error = validate_source(invalid, workspace.path(), false).expect_err("invalid tree");
         assert!(error.to_string().contains("validation"), "{error}");
 
         let empty = tree(&[("memories/note.md", "kept\n")]);
-        let error = validate_source(empty, false).expect_err("no managed files");
+        let error = validate_source(empty, workspace.path(), false).expect_err("no managed files");
         assert!(error.to_string().contains("managed surface"), "{error}");
         assert!(
-            validate_source(tree(&[("memories/note.md", "kept\n")]), true).is_ok(),
+            validate_source(tree(&[("memories/note.md", "kept\n")]), workspace.path(), true)
+                .is_ok(),
             "--include-memories makes the memory surface managed"
         );
     }
