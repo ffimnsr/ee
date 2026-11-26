@@ -959,7 +959,7 @@
           }
         },
         "env": {
-          "description": "Environment variables for the agent subprocess. An exact\n`secret://<name>` value is resolved from the host-bound encrypted\nsecrets store (`ee do secrets`) only when the agent launches.\nUser-layer values resolve unconditionally; workspace (`Ancestor`)\nvalues resolve only when the host-local workspace trust decision\nallows it (`ee do trust`), and system-layer references are rejected.\nEnv values are exact-reference-only: a value that merely embeds the\nprefix is rejected so a mistaken template never reaches the agent\nprocess unresolved.",
+          "description": "Environment variables for the agent subprocess. An exact\n`secret://<name>` value is resolved from the host-bound encrypted\nsecrets store (`ee do secrets`) only when the agent launches.\nUser-layer values resolve unconditionally; workspace (`Ancestor`)\nvalues resolve only when the host-local workspace trust decision\nallows it (`ee do agent trust workspace`), and system-layer references are rejected.\nEnv values are exact-reference-only: a value that merely embeds the\nprefix is rejected so a mistaken template never reaches the agent\nprocess unresolved.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
