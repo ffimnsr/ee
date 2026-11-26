@@ -38,7 +38,7 @@ pub(crate) struct PolicyInput<'a> {
     /// Host-local workspace gate; required for read and curated-profile
     /// operations, and never sufficient by itself.
     pub(crate) workspace_enabled: bool,
-    /// Injected host-local workspace trust decision (`ee do trust`): enables
+    /// Injected host-local workspace trust decision (`ee do agent trust workspace`): enables
     /// the built-in read-only safe allowlist for `safe_read` profile
     /// operations. The evaluator never reads the decision itself.
     pub(crate) safe_read_enabled: bool,

@@ -66,7 +66,7 @@ pub(crate) fn coalesce_input_events(events: Vec<Event>) -> Vec<Event> {
 }
 use crate::args::{
     AgentCommands, AgentSessionsCommands, AgentTrustCommands, Cli, Commands, ConfigCommands,
-    ConfigSetupCommands, DoCommands, FileCommands, LanguageCommands, McpCommands, McpTrustCommands,
+    ConfigSetupCommands, DoCommands, FileCommands, LanguageCommands, McpTrustCommands,
     PluginCommands, RuntimeCommands, SchemaCommands, WorkspaceTrustCommands,
 };
 use crate::config_cmd::{
@@ -310,10 +310,6 @@ pub fn run_cli() -> io::Result<()> {
                         eprintln!("ee: agents feature is disabled in this build");
                         std::process::exit(1);
                     }
-                }
-                DoCommands::Trust { command } => run_workspace_trust(command)?,
-                DoCommands::Mcp { command: McpCommands::Trust { command } } => {
-                    run_mcp_trust(command)?
                 }
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),

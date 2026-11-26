@@ -186,7 +186,7 @@ fn configure_agent_setup(
             if has_secret_references {
                 println!(
                     "This workspace now references stored secrets; ee asks once whether the \
-                     workspace is trusted (`ee do trust grant|revoke|status`)."
+                     workspace is trusted (`ee do agent trust workspace grant|revoke|status`)."
                 );
             }
         }

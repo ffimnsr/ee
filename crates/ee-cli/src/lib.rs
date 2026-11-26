@@ -140,8 +140,8 @@ pub use entry::run_cli as run;
 pub(crate) use args::{
     ALL_AGENT_TRUST_PROFILES, AgentCommands, AgentMcpCommands, AgentSessionsCommands,
     AgentTrustCommands, AgentTrustProfile, Cli, Commands, ConfigCommands, DoCommands, FileCommands,
-    HarnessCommands, HarnessModeArg, LanguageCommands, McpCommands, McpTrustCommands,
-    McpTrustTransport, PluginCommands, RuntimeCommands, SecretsCommands, WorkspaceTrustCommands,
+    HarnessCommands, HarnessModeArg, LanguageCommands, McpTrustCommands, McpTrustTransport,
+    PluginCommands, RuntimeCommands, SecretsCommands, WorkspaceTrustCommands,
 };
 #[cfg(test)]
 pub(crate) use doctor::doctor_report;

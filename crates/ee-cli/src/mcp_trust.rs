@@ -441,7 +441,9 @@ pub(crate) fn cmd_mcp_trust_status(server: Option<&str>) -> io::Result<()> {
     }
     println!("host-local store: {}", store.path().display());
     if decision != Some(WorkspaceTrustDecision::Trusted) {
-        println!("server grants are inert until the workspace is trusted (`ee do trust grant`)");
+        println!(
+            "server grants are inert until the workspace is trusted (`ee do agent trust workspace grant`)"
+        );
     }
     Ok(())
 }
@@ -454,10 +456,10 @@ fn require_trusted_workspace(workspace: &Path) -> io::Result<()> {
     match decision {
         Some(WorkspaceTrustDecision::Trusted) => Ok(()),
         Some(WorkspaceTrustDecision::Untrusted) => Err(io::Error::other(
-            "workspace is untrusted; run `ee do trust grant` before granting MCP server trust",
+            "workspace is untrusted; run `ee do agent trust workspace grant` before granting MCP server trust",
         )),
         None => Err(io::Error::other(
-            "workspace trust is undecided; run `ee do trust grant` before granting MCP server trust",
+            "workspace trust is undecided; run `ee do agent trust workspace grant` before granting MCP server trust",
         )),
     }
 }

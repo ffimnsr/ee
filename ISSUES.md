@@ -385,7 +385,7 @@ Work items:
 - [x] Add `McpServerTrust`, pinned `McpServerGrant`/tool grants, candidate preview, and manifest-derived tool eligibility.
 - [x] Add the evaluator `mcp_server_allow` layer between workspace gating and session/persistent allows; deny and mandatory-confirm layers still win.
 - [x] Add the owner-only workspace-keyed MCP trust store with strict parsing, duplicate rejection, identity checks, atomic writes, and revocation.
-- [x] Add `ee do mcp trust grant|revoke|status` with workspace-trust enforcement.
+- [x] Add `ee do agent trust mcp grant|revoke|status` with workspace-trust enforcement.
 - [x] Add the `Trust MCP server (pinned tools)` approval option with preview/confirmation and persistence-failure denial.
 - [x] Manage server grants from `/permissions` list/inspect/revoke/reset and include them in the summary.
 - [x] Cover pinned matching, cross-transport and cross-workspace misses, persisted-tool drift, deny precedence, untrusted inertness, store permissions, malformed documents, and end-to-end approval/auto-allow behavior.
@@ -495,8 +495,8 @@ Goal: let a user explicitly authorize prompt-free native ACP `terminal/create` c
 Rules:
 
 - Workspace trust alone is not enough. The grant is a separate explicit opt-in on the same owner-only, host-local workspace trust document; repository configuration cannot create it.
-- Revoking workspace trust clears and inerts the terminal grant. `ee do trust revoke --execute` removes only the terminal grant and keeps the workspace trust decision.
-- Applies only to native ACP v1 `terminal/create`. MCP `ee_terminal_create` keeps its separate `ee do mcp trust grant --execute` opt-in; neither grant crosses into the other route.
+- Revoking workspace trust clears and inerts the terminal grant. `ee do agent trust workspace revoke --execute` removes only the terminal grant and keeps the workspace trust decision.
+- Applies only to native ACP v1 `terminal/create`. MCP `ee_terminal_create` keeps its separate `ee do agent trust mcp grant --execute` opt-in; neither grant crosses into the other route.
 - Auto-allow requires a validated simple command: shell syntax and shell wrappers are rejected, the command text/args normalize to structured executable + argv, the executable must be a bare `PATH` name, every path-like argv operand must resolve inside the primary workspace root, and the canonical cwd must stay inside that root. Explicit-path executables, external/traversal operands, ambiguous option-embedded paths, extra workspace roots, and external directories still prompt.
 - A leading environment assignment, loader/path environment overrides, an invalid request, a read-only agent mode (`agents.read_only_modes`, default `ask`/`plan`), a safeguard, a persistent deny, or a mandatory-confirm rule still wins; the grant is implicit consent for routine commands, not for unbounded ones.
 - ACP v2 agent-owned command permissions stay on the existing curated `safe_read` reply path: the agent runs those commands itself, so the host cannot enforce workspace containment. MCP terminal tools remain covered by the MCP execute grant.
@@ -507,7 +507,7 @@ Work items:
 
 - [x] Extend the workspace trust document with `terminal_execution` in schema v2, accepting v1 documents as "not granted", preserving owner-only/atomic/identity invariants, and writing v2 only.
 - [x] Add `WorkspaceTrustStore::terminal_execution` and `set_terminal_execution`; `set_decision(Untrusted)` clears the grant, and granting it requires a trusted workspace.
-- [x] Add `ee do trust grant --execute`, `ee do trust revoke --execute`, and a status line that distinguishes granted, not granted, and inert (workspace not trusted).
+- [x] Add `ee do agent trust workspace grant --execute`, `ee do agent trust workspace revoke --execute`, and a status line that distinguishes granted, not granted, and inert (workspace not trusted).
 - [x] Tests: v2 round trip, v1 compatibility, untrusted clearing, grant-requires-trust, malformed/identity behavior unchanged, and CLI flag parsing.
 
 ### Phase T2 — Native terminal evaluation
@@ -532,11 +532,11 @@ Acceptance:
 - [x] `cargo test --quiet -p ee-cli --features agents --lib terminal_exec_trust` passes.
 - [x] `cargo test --quiet -p ee-cli --features agents --lib command_trust` and `safe_read_profile` pass unchanged except for intentional parser coverage.
 - [x] `cargo clippy --quiet -p ee-cli --features agents --lib --tests -- -D warnings` passes.
-- [x] Plain workspace trust remains inert for terminal execution; the explicit grant and its revoke are observable through `ee do trust status` and tests.
+- [x] Plain workspace trust remains inert for terminal execution; the explicit grant and its revoke are observable through `ee do agent trust workspace status` and tests.
 
 Deferred boundaries:
 
-- MCP `ee_terminal_create` keeps its own pinned `ee do mcp trust grant --execute` grant; the native workspace grant never auto-allows proxy-originated terminal calls, and the MCP grant never auto-allows ACP v1 `terminal/create`.
+- MCP `ee_terminal_create` keeps its own pinned `ee do agent trust mcp grant --execute` grant; the native workspace grant never auto-allows proxy-originated terminal calls, and the MCP grant never auto-allows ACP v1 `terminal/create`.
 - ACP v2 agent-owned command permissions keep the curated `safe_read` reply path. Widening them would be advisory only because the agent, not ee, runs the command; revisit only with an explicit v2 execution contract.
 
 ### Phase T4 — Sandboxed trusted auto-run and classifier hand-off (2026-11-26)
@@ -556,7 +556,7 @@ Context: real `ee agent shell` sessions showed approval fatigue because common `
 Context: real agent turns routinely emit pipes, redirects, globs, and shell wrappers. The simple-command grant rejects all of them, so users still approve most commands. `--yolo` adds an explicit, host-local stronger grant without weakening the default layers.
 
 - [x] Bump the workspace trust document to schema v3 with `terminal_execution = "none" | "simple" | "unrestricted"`; v1 and v2 documents stay readable, with a v2 boolean `true` mapping to `simple`.
-- [x] Add `ee do trust grant --yolo` (implies terminal execution), preserve an existing unrestricted grant across plain `--execute` and trust re-grants, and clear either grant with `ee do trust revoke --execute`; status prints simple/unrestricted.
+- [x] Add `ee do agent trust workspace grant --yolo` (implies terminal execution), preserve an existing unrestricted grant across plain `--execute` and trust re-grants, and clear either grant with `ee do agent trust workspace revoke --execute`; status prints simple/unrestricted.
 - [x] Add `workspace_execute_unrestricted` to the policy evaluator and honor it for `Execute` operations even when the shell text has no normalizable command identity; explicit/session denies, mandatory confirms, and safeguards still run before it.
 - [x] Keep the yolo path limited to native ACP v1 terminal, a workspace-contained cwd, a trusted workspace, and non-read-only agent modes; MCP terminal tools and ACP v2 command permissions stay on their own routes.
 - [x] Force yolo auto-runs through the terminal sandbox when `mode != off`; `mode = off` is called out as an explicit unsandboxed combination in the grant output and docs.
@@ -676,7 +676,7 @@ Work items:
 
 - [x] Add `network = "deny" | "allow"` enforcement. Start with all-or-nothing; defer host allowlists to a proxy phase and document SSH/raw socket limitations.
 - [x] Add canonical `write_paths` grants with fd-pinned validation where supported; reject non-canonical, symlinked, or escaping paths.
-- [x] Show sandbox mode, backend, effective network, writable paths, and probe failures in `ee do trust status` and `ee do doctor`.
+- [x] Show sandbox mode, backend, effective network, writable paths, and probe failures in `ee do agent trust workspace status` and `ee do doctor`.
 - [x] Decide whether AI-triggered sandbox escalation is representable. ACP v1 has no sandbox request; start with static grants/config and approved-command fallback, not fabricated host/path requests.
 - [x] Tests: network deny vs allow, write-path grant accepted/escape rejected, status output, config parsing and defaults.
 
@@ -713,7 +713,7 @@ Acceptance:
 - Workspace, Git metadata, and agent state/cache paths are canonicalized before sandbox creation; the creation-time caveat is documented.
 - Sandboxed commands do not reuse the persistent shell; each command gets fresh temp state and a fresh mount policy.
 - Resource limits default to unlimited, and a configured wall-time or aggregate breach terminates the whole process group with a visible reason.
-- `ee do doctor` and `ee do trust status` report backend capability and effective policy.
+- `ee do doctor` and `ee do agent trust workspace status` report backend capability and effective policy.
 - Full targeted test gates and file-size checks pass.
 
 Deferred boundaries:
@@ -721,7 +721,7 @@ Deferred boundaries:
 - Host-specific network allowlists and HTTP/HTTPS proxy enforcement (include raw-socket/SSH caveats when added); ACP v2 agent network stays all-or-nothing.
 - Windows/WSL sandboxing; native Windows out of scope.
 - ACP v2 per-command interception without an agent-process sandbox: ACP v2 has no client terminal methods, so the host cannot wrap an agent-owned command directly.
-- MCP terminal tools keep their own `ee do mcp trust grant --execute` route; no cross-route nesting.
+- MCP terminal tools keep their own `ee do agent trust mcp grant --execute` route; no cross-route nesting.
 - Optional Linux cgroup v2 aggregate limits remain future work; current limits use inherited rlimits plus process-tree sampling. The plugin runtime now delegates breach policy and process-tree sampling to the shared `ee-sandbox` monitor while retaining its platform-specific raw samplers and Windows job objects.
 
 ## Unified Agent Trust CLI (2026-11-26)
@@ -731,7 +731,7 @@ Goal: put every agent-related trust decision under one command root, and stop MC
 Rules:
 
 - Canonical commands are `ee do agent trust workspace grant|revoke|status` and `ee do agent trust mcp grant|revoke|status`.
-- Top-level `ee do trust ...` and `ee do mcp trust ...` remain aliases for the workspace and MCP halves respectively; they are not separate policy surfaces.
+- Trust commands live only under `ee do agent trust ...`; there are no top-level `do trust` or `do mcp` aliases.
 - `ee do agent trust mcp grant` and `revoke` require an explicit `--server <id>`. No default server is applied, so a command can never silently trust the built-in server or every configured server.
 - `--transport all` means both stdio and ACP transports for the selected server, never all servers.
 - Only the built-in `ee` server has an application-owned pinned tool manifest; other server ids stay rejected until they gain one.
@@ -739,12 +739,13 @@ Rules:
 
 Work items:
 
-- [x] Add `Workspace` and `Mcp` branches under `AgentTrustCommands` and route both the canonical and alias paths through the same dispatch helpers.
+- [x] Add `Workspace` and `Mcp` branches under `AgentTrustCommands` and route only the canonical `ee do agent trust ...` commands through the same dispatch helpers.
+- [x] Remove the temporary top-level `ee do trust` and `ee do mcp` aliases; only the canonical `ee do agent trust workspace|mcp` commands remain.
 - [x] Rename the agent-driver MCP server command from `ee do agent mcp` to `ee do agent serve-mcp`, freeing `ee do agent mcp` for server management.
 - [x] Add non-interactive `ee do agent mcp add|list|rm` management over the existing scoped `[mcp.servers]` config helpers; `add` requires `--command` or `--url`, secret-like env/header values require `secret://`, and `list` never prints env/header values or URL queries.
 - [x] Remove the implicit `--server ee` default from MCP grant and revoke; require the id explicitly and update help text.
 - [x] Keep `--transport` scoped to the selected server and document that `all` is transport-wide, not server-wide.
-- [x] Add CLI parse tests for both canonical paths, the missing-server rejection, and preserved aliases.
+- [x] Add CLI parse tests for both canonical paths, the missing-server rejection, and removed top-level aliases.
 - [x] Add MCP terminal `--yolo` parity: `ee do agent trust mcp grant --server ee --yolo` stores an unrestricted execute pin, auto-runs arbitrary `ee_terminal_create` text only in a non-read-only mode with a workspace cwd and a ready sandbox, and preserves the pin across simple re-trust until `revoke --execute`.
 - [x] Extract the shared unrestricted-terminal gates (read-only mode, sandbox readiness, workspace cwd) used by workspace yolo and MCP yolo, plus one shared sandbox-policy notice for both grant CLIs.
 - [x] Run `cargo fmt --all -- --check`, targeted `cargo clippy`, and the CLI/trust/MCP test filters.

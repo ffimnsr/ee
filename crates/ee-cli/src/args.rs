@@ -66,18 +66,6 @@ pub(crate) enum DoCommands {
         #[command(subcommand)]
         command: AgentCommands,
     },
-    /// Manage host-local workspace trust for secret references and terminal execution
-    /// (alias for `ee do agent trust workspace`)
-    Trust {
-        #[command(subcommand)]
-        command: WorkspaceTrustCommands,
-    },
-    /// Manage host-local MCP server trust grants
-    /// (alias for `ee do agent trust mcp`)
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommands,
-    },
     /// List installed plugins from configured plugin directories
     Plugins {
         #[command(subcommand)]
@@ -512,15 +500,6 @@ pub(crate) enum McpTrustTransport {
     Stdio,
     Acp,
     All,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum McpCommands {
-    /// Grant, revoke, or inspect MCP server trust
-    Trust {
-        #[command(subcommand)]
-        command: McpTrustCommands,
-    },
 }
 
 /// Workspace trust decision for the current directory.

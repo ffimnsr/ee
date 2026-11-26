@@ -195,7 +195,7 @@ pub(super) const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # alignment = "exact"
 #
 # A `secret://` reference in a workspace `.ee.toml` resolves only after the
-# workspace is trusted (`ee do trust grant|revoke|status`); ee asks once on
+# workspace is trusted (`ee do agent trust workspace grant|revoke|status`); ee asks once on
 # first open. User-config references resolve without that decision. Env values
 # take exact references only; embedding one inside a longer value is rejected.
 #

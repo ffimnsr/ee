@@ -651,7 +651,6 @@ ee do agent trust workspace revoke --execute  # remove either terminal opt-in
 ee do agent trust workspace status
 ```
 
-`ee do trust grant|revoke|status` remains as an alias for these commands.
 
 The opt-in is stored on the same owner-only, host-local workspace trust document (`$XDG_STATE_HOME/ee/workspace-trust/`) and is inert unless the workspace decision is `trusted`. Revoking workspace trust clears it. It applies only to native ACP v1 `terminal/create`: a command is auto-spawned without `--yolo` only when it normalizes to a simple executable + argv (no shell syntax, shell wrappers, or leading environment assignments), the executable is a bare `PATH` name, the canonical cwd stays inside the primary workspace root, every path-like argv operand resolves inside the primary workspace root, the agent mode is not in `agents.read_only_modes` (default `ask`/`plan`), and no loader/path environment override is requested. Extra workspace roots, external directories, external or traversal operands, explicit-path executables, ambiguous option-embedded paths (`--out=/tmp/x`, `-I/usr/include`), protected paths, built-in safeguards, persistent command denies, and mandatory-confirm rules still prompt or deny.
 
@@ -699,7 +698,7 @@ ee do agent trust mcp revoke --server ee
 ee do agent trust mcp revoke --server ee --execute
 ```
 
-`--server` is required for both grant and revoke: the command never infers a server or trusts every configured MCP server. `--transport all` (the default) means both stdio and ACP for the selected server. Only the built-in `ee` server has an application-owned pinned tool manifest; other server ids are rejected until they gain one. `ee do mcp trust ...` remains as an alias for these commands. MCP server entries themselves are managed with `ee do agent mcp add|list|rm`.
+`--server` is required for both grant and revoke: the command never infers a server or trusts every configured MCP server. `--transport all` (the default) means both stdio and ACP for the selected server. Only the built-in `ee` server has an application-owned pinned tool manifest; other server ids are rejected until they gain one. MCP server entries themselves are managed with `ee do agent mcp add|list|rm`.
 
 The grant is host-local (`$XDG_STATE_HOME/ee/mcp-trust/`), bound to the canonical workspace identity, and inert unless the workspace trust decision is `trusted`. It covers every pinned read tool plus every workspace write tool in the stable `ee` manifest on the selected transport: edit tools, content-bearing file writes, filesystem create/copy/move/delete, and workspace-memory mutations. Content writes still obey the workspace write safety maxima, and built-in safeguards still deny protected paths, path escapes, secret-store writes, and catastrophic deletion. External-network tools are never included; outbound network access keeps its dedicated approval path. New tools or schema changes require a new grant; cross-transport and cross-workspace calls still prompt. Approval prompts for eligible MCP operations offer `Trust MCP server (pinned tools)` with the same preview/confirmation step as `Allow always`. After the grant persists, covered tools dispatch without a per-tool prompt (the status names the workspace or server grant that authorized it) until the grant is revoked or workspace trust is withdrawn.
 

@@ -203,7 +203,7 @@ impl WorkspaceTrustStore {
         let Some(record) = self.record()? else {
             if granted {
                 return Err(TrustStoreError::ValidationFailure(
-                    "workspace trust decision is not recorded; run `ee do trust grant` first"
+                    "workspace trust decision is not recorded; run `ee do agent trust workspace grant` first"
                         .into(),
                 ));
             }
@@ -224,13 +224,14 @@ impl WorkspaceTrustStore {
         self.write_record(record.decision, terminal_execution)
     }
 
-    /// Records the unrestricted grant (`ee do trust grant --yolo`). It still
+    /// Records the unrestricted grant (`ee do agent trust workspace grant --yolo`). It still
     /// requires a trusted workspace and never widens scope beyond native ACP
     /// v1 terminal requests.
     pub(crate) fn grant_terminal_execution_unrestricted(&self) -> Result<(), TrustStoreError> {
         let Some(record) = self.record()? else {
             return Err(TrustStoreError::ValidationFailure(
-                "workspace trust decision is not recorded; run `ee do trust grant` first".into(),
+                "workspace trust decision is not recorded; run `ee do agent trust workspace grant` first"
+                    .into(),
             ));
         };
         if record.decision != WorkspaceTrustDecision::Trusted {
@@ -278,7 +279,7 @@ pub(crate) fn store_policy(store: &WorkspaceTrustStore) -> WorkspaceRefPolicy {
 /// Startup gate: when the merged config contains workspace-layer secret
 /// references and no decision was recorded yet, ask once whether the
 /// workspace is trusted. Non-interactive runs never prompt; references stay
-/// blocked until `ee do trust grant` records a decision.
+/// blocked until `ee do agent trust workspace grant` records a decision.
 pub(crate) fn ensure_workspace_secret_trust(
     config: &EditorSettings,
     workspace_root: &Path,
@@ -299,7 +300,7 @@ pub(crate) fn ensure_workspace_secret_trust(
             if !io::stdin().is_terminal() {
                 return Err(String::from(
                     "workspace secret references are blocked until this workspace is trusted; \
-                     run `ee do trust grant` from the workspace",
+                     run `ee do agent trust workspace grant` from the workspace",
                 ));
             }
             println!("{}", trust_prompt_text(workspace_root, &references));
@@ -312,11 +313,13 @@ pub(crate) fn ensure_workspace_secret_trust(
             store.set_decision(decision).map_err(|error| error.to_string())?;
             match decision {
                 WorkspaceTrustDecision::Trusted => {
-                    println!("Workspace trusted. Change this later with `ee do trust revoke`.")
+                    println!(
+                        "Workspace trusted. Change this later with `ee do agent trust workspace revoke`."
+                    )
                 }
                 WorkspaceTrustDecision::Untrusted => println!(
                     "Workspace untrusted: its secret references stay blocked; \
-                     use `ee do trust grant` to allow them."
+                     use `ee do agent trust workspace grant` to allow them."
                 ),
             }
             Ok(())
@@ -472,13 +475,14 @@ pub(crate) fn cmd_trust_status() -> io::Result<()> {
     if decision.is_none() {
         println!(
             "workspace secret references stay blocked until the workspace is trusted \
-             (`ee do trust grant`)"
+             (`ee do agent trust workspace grant`)"
         );
     }
     if !terminal {
         println!(
             "terminal commands stay on the approval path; grant simple execution with \
-             `ee do trust grant --execute` or unrestricted execution with `ee do trust grant --yolo`"
+             `ee do agent trust workspace grant --execute` or unrestricted execution with \
+             `ee do agent trust workspace grant --yolo`"
         );
     }
     Ok(())

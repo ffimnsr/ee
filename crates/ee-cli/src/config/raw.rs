@@ -487,7 +487,7 @@ pub(crate) struct AgentServerToml {
     /// secrets store (`ee do secrets`) only when the agent launches.
     /// User-layer values resolve unconditionally; workspace (`Ancestor`)
     /// values resolve only when the host-local workspace trust decision
-    /// allows it (`ee do trust`), and system-layer references are rejected.
+    /// allows it (`ee do agent trust workspace`), and system-layer references are rejected.
     /// Env values are exact-reference-only: a value that merely embeds the
     /// prefix is rejected so a mistaken template never reaches the agent
     /// process unresolved.

@@ -20,7 +20,7 @@
 //! - References are exact `secret://<name>` strings: no interpolation,
 //!   concatenation, environment expansion, percent-decoding, or recursion.
 //! - Workspace-layer references resolve only when the host-local workspace
-//!   trust decision for that repository is `trusted` (`ee do trust`); a
+//!   trust decision for that repository is `trusted` (`ee do agent trust workspace`); a
 //!   missing or denied decision fails the consumer before any value is read.
 //! - Consumers: agent environment, MCP stdio `env` (exact references), and
 //!   MCP HTTP `headers` (exact references or one embedded token such as
@@ -222,7 +222,7 @@ impl fmt::Display for SecretStoreError {
             Self::WorkspaceUntrusted => write!(
                 f,
                 "workspace is not trusted; workspace secret references are blocked \
-                 (trust this workspace with `ee do trust grant`)"
+                 (trust this workspace with `ee do agent trust workspace grant`)"
             ),
             Self::DataDirUnavailable => write!(f, "user data directory is unavailable"),
             Self::VaultCorruption => write!(f, "vault content is corrupt or failed authentication"),
