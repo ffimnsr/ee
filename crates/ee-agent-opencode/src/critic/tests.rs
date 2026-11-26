@@ -1,7 +1,7 @@
 //! Critic tests: exact-route resolution, family contrast, registry roles, and
 //! the bounded degrade-to-root-only path. No test performs a network call.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ee_agent_orchestrator::{ContrastUnavailable, ModelInfo};
 
@@ -165,10 +165,11 @@ fn production_builder_degrades_to_root_only_with_one_bounded_warning() {
         let (provider, warning) = opencode_multi_model_provider(
             &config,
             PathBuf::from("/tmp/ee-opencode-critic-degrade"),
+            &BTreeMap::new(),
         )
         .expect("root provider still builds");
 
-        assert_eq!(provider.registered_models().len(), 1, "root-only for {critic:?}");
+        assert_eq!(provider.inner().registered_models().len(), 1, "root-only for {critic:?}");
         let warning = warning.expect("unavailable critic explains itself");
         assert!(warning.starts_with("rubber duck unavailable: "), "{warning}");
         assert!(warning.contains(expected), "{warning}");
@@ -179,12 +180,15 @@ fn production_builder_degrades_to_root_only_with_one_bounded_warning() {
 #[test]
 fn production_builder_registers_the_configured_critic_route() {
     let config = config_with_critic("gpt-5.5", Some("kimi-k3"));
-    let (provider, warning) =
-        opencode_multi_model_provider(&config, PathBuf::from("/tmp/ee-opencode-critic-valid"))
-            .expect("provider builds");
+    let (provider, warning) = opencode_multi_model_provider(
+        &config,
+        PathBuf::from("/tmp/ee-opencode-critic-valid"),
+        &BTreeMap::new(),
+    )
+    .expect("provider builds");
 
     assert!(warning.is_none(), "{warning:?}");
-    let ids = model_ids(&provider.registered_models());
+    let ids = model_ids(&provider.inner().registered_models());
     assert_eq!(ids.len(), 2, "{ids:?}");
     assert!(ids.contains(&String::from(RUBBER_DUCK_ROLE)), "{ids:?}");
 }

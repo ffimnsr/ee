@@ -26,6 +26,19 @@ impl ProcessLimits {
             || self.max_processes.is_some()
     }
 
+    /// Returns the first RSS/CPU breach for one sample. Wall time is checked
+    /// by [`ProcessTreeMonitor`].
+    #[must_use]
+    pub fn breach(&self, rss_bytes: u64, cpu_seconds: f64) -> Option<LimitBreach> {
+        if self.max_rss_bytes.is_some_and(|limit| rss_bytes > limit) {
+            return Some(LimitBreach::Rss);
+        }
+        if self.max_cpu_seconds.is_some_and(|limit| cpu_seconds > limit as f64) {
+            return Some(LimitBreach::Cpu);
+        }
+        None
+    }
+
     /// Human-readable summary for status/doctor output.
     #[must_use]
     pub fn summary(&self) -> String {
@@ -105,11 +118,8 @@ impl ProcessTreeMonitor {
             return Some(LimitBreach::WallTime);
         }
         let sample = sample_tree(root_pid)?;
-        if self.limits.max_rss_bytes.is_some_and(|limit| sample.rss_bytes > limit) {
-            return Some(LimitBreach::Rss);
-        }
-        if self.limits.max_cpu_seconds.is_some_and(|limit| sample.cpu_seconds > limit as f64) {
-            return Some(LimitBreach::Cpu);
+        if let Some(breach) = self.limits.breach(sample.rss_bytes, sample.cpu_seconds) {
+            return Some(breach);
         }
         None
     }
@@ -140,9 +150,74 @@ fn sample_tree(root_pid: u32) -> Option<TreeSample> {
     Some(TreeSample { rss_bytes, cpu_seconds: ticks as f64 / 100.0 })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn sample_tree(_root_pid: u32) -> Option<TreeSample> {
     None
+}
+
+#[cfg(target_os = "macos")]
+fn sample_tree(root_pid: u32) -> Option<TreeSample> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,rss=,time="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid), Ok(rss), Some(cpu)) = (
+            fields[0].parse::<u32>(),
+            fields[1].parse::<u32>(),
+            fields[2].parse::<u64>(),
+            parse_ps_cpu_seconds(fields[3]),
+        ) else {
+            continue;
+        };
+        rows.push((pid, ppid, rss.saturating_mul(1024), cpu));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let mut selected = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(pid) = stack.pop() {
+        selected.push(pid);
+        for (child, parent, _, _) in &rows {
+            if *parent == pid && !selected.contains(child) {
+                stack.push(*child);
+            }
+        }
+    }
+    let mut rss_bytes = 0u64;
+    let mut cpu_seconds = 0f64;
+    for pid in selected {
+        if let Some((_, _, rss, cpu)) = rows.iter().find(|(row_pid, _, _, _)| *row_pid == pid) {
+            rss_bytes = rss_bytes.saturating_add(*rss);
+            cpu_seconds += *cpu;
+        }
+    }
+    Some(TreeSample { rss_bytes, cpu_seconds })
+}
+
+#[cfg(target_os = "macos")]
+fn parse_ps_cpu_seconds(value: &str) -> Option<f64> {
+    let parts: Vec<&str> = value.split(':').collect();
+    match parts.as_slice() {
+        [minutes, seconds] => {
+            Some(minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?)
+        }
+        [hours, minutes, seconds] => Some(
+            hours.parse::<f64>().ok()? * 3600.0
+                + minutes.parse::<f64>().ok()? * 60.0
+                + seconds.parse::<f64>().ok()?,
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -234,5 +309,12 @@ mod tests {
     fn stat_fields_parse_ppid_and_cpu() {
         let stat = "42 (name with ) paren) S 7 0 0 0 0 0 0 0 0 0 250 50 0 0";
         assert_eq!(parse_stat_fields(stat), Some((7, 300)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ps_cpu_time_parses() {
+        assert_eq!(parse_ps_cpu_seconds("01:02"), Some(62.0));
+        assert_eq!(parse_ps_cpu_seconds("01:02:03"), Some(3723.0));
     }
 }

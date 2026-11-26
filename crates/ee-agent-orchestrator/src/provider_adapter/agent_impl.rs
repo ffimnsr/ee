@@ -2,7 +2,7 @@
 use super::conversation::McpTurnCleanup;
 use super::conversation::default_model_labels;
 use super::conversation::emit_mcp_diagnostics;
-use super::conversation::initial_commands;
+use super::conversation::initial_commands_with;
 use super::conversation::model_history;
 use super::conversation::next_session_number;
 use super::conversation::normalize_workspace_roots;
@@ -41,6 +41,7 @@ impl AgentProvider for OrchestratorProvider {
         let implementation = self.config.implementation.clone();
         let next_session = self.next_session.clone();
         let recovery_enabled = config.recovery.enabled;
+        let additional_commands = self.config.additional_commands.clone();
         let plugins = self.plugins.clone();
         let config_options =
             super::reasoning_config::config_options(self.config.reasoning_effort.as_ref());
@@ -93,7 +94,7 @@ impl AgentProvider for OrchestratorProvider {
                 .expect("adapter sessions poisoned")
                 .insert(session_id.to_string(), entry);
             Ok(SessionInit::new(session_id)
-                .commands(initial_commands(recovery_enabled))
+                .commands(initial_commands_with(recovery_enabled, &additional_commands))
                 .modes(session_modes(mode))
                 .config_options(config_options))
         })
@@ -112,6 +113,7 @@ impl AgentProvider for OrchestratorProvider {
         let session_store = self.session_store.clone();
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
+        let additional_commands = self.config.additional_commands.clone();
         let plugins = self.plugins.clone();
         let reasoning_control = self.config.reasoning_effort.clone();
         Box::pin(async move {
@@ -132,7 +134,7 @@ impl AgentProvider for OrchestratorProvider {
                     entry.runtime.selected_reasoning_effort(),
                 );
                 return Ok(SessionInit::new(session_id)
-                    .commands(initial_commands(recovery_enabled))
+                    .commands(initial_commands_with(recovery_enabled, &additional_commands))
                     .modes(session_modes(entry.mode.clone()))
                     .config_options(live_options));
             }
@@ -283,7 +285,7 @@ impl AgentProvider for OrchestratorProvider {
                 selected_effort,
             );
             Ok(SessionInit::new(session_id)
-                .commands(initial_commands(recovery_enabled))
+                .commands(initial_commands_with(recovery_enabled, &additional_commands))
                 .modes(session_modes(mode))
                 .config_options(config_options))
         })
@@ -301,6 +303,7 @@ impl AgentProvider for OrchestratorProvider {
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
         let recovery_durable = config.recovery.is_durable();
+        let additional_commands = self.config.additional_commands.clone();
         let plugins = self.plugins.clone();
         let reasoning_control = self.config.reasoning_effort.clone();
         Box::pin(async move {
@@ -381,7 +384,7 @@ impl AgentProvider for OrchestratorProvider {
                 selected_effort,
             );
             Ok(SessionInit::new(session_id)
-                .commands(initial_commands(recovery_enabled))
+                .commands(initial_commands_with(recovery_enabled, &additional_commands))
                 .modes(session_modes(mode))
                 .config_options(config_options))
         })
@@ -401,6 +404,7 @@ impl AgentProvider for OrchestratorProvider {
         let implementation_name = self.config.implementation.name.clone();
         let next_final_response = self.next_final_response.clone();
         let validation_workspace = self.config.validation_workspace.clone();
+        let additional_commands = self.config.additional_commands.clone();
         let telemetry = self.telemetry.clone();
         let telemetry_attribution = self.config.telemetry_attribution.clone();
         let next_telemetry_turn = self.next_telemetry_turn.clone();
@@ -490,13 +494,15 @@ impl AgentProvider for OrchestratorProvider {
             let user_commands = runtime.user_commands_snapshot();
             // Refresh completion when the template set changed; builtins are
             // always included so the list replaces the previous session state.
-            let mut command_names = initial_commands(runtime.config().recovery.enabled)
-                .into_iter()
-                .map(|command| command.name)
-                .collect::<Vec<_>>();
+            let mut command_names =
+                initial_commands_with(runtime.config().recovery.enabled, &additional_commands)
+                    .into_iter()
+                    .map(|command| command.name)
+                    .collect::<Vec<_>>();
             command_names.extend(user_commands.iter().map(|command| command.name.clone()));
             if runtime.commands_were_advertised() || !user_commands.is_empty() {
-                let mut commands = initial_commands(runtime.config().recovery.enabled);
+                let mut commands =
+                    initial_commands_with(runtime.config().recovery.enabled, &additional_commands);
                 commands.extend(user_commands.available_commands());
                 if runtime.mark_commands_advertised(&command_names) {
                     sink.available_commands_replace(commands).map_err(|error| {

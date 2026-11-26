@@ -892,6 +892,28 @@
               "type": "null"
             }
           ]
+        },
+        "terminal_sandbox": {
+          "description": "OS sandbox policy for prompt-free terminal commands.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalSandboxToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sandbox": {
+          "description": "OS sandbox policy for the agent subprocess itself (ACP v2 containment).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentProcessSandboxToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -1512,6 +1534,141 @@
         "basic",
         "advanced"
       ]
+    },
+    "TerminalSandboxToml": {
+      "description": "Raw `[agents.terminal_sandbox]` table.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "`off`, `granted` (default), or `all`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "`broad` (default) or `workspace`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "description": "`deny` (default) or `allow`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_unavailable": {
+          "description": "`prompt` (default) or `deny` when the backend is unavailable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "write_paths": {
+          "description": "Additional host write paths; validated to stay inside the workspace.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "description": "Resource ceilings for sandboxed commands.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalSandboxLimitsToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TerminalSandboxLimitsToml": {
+      "description": "Raw `[agents.terminal_sandbox.limits]` table.",
+      "type": "object",
+      "properties": {
+        "wall_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_rss_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_cpu_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_open_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_file_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_processes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentProcessSandboxToml": {
+      "description": "Raw `[agents.sandbox]` table.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "`off` (default) or `workspace-write`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "write_paths": {
+          "description": "Additional canonical writable paths for the agent process.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "McpToml": {
       "type": "object",

@@ -289,10 +289,16 @@ pub(super) fn restore_runtime_from_checkpoint(
     Ok(runtime.into_shared())
 }
 
-/// Initial slash commands for orchestrated sessions. `/rubber-duck` is
-/// advertised because this provider owns the verified critic flow; a registry
-/// without contrast still returns a typed unavailable reason.
-pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableCommand> {
+/// Initial slash commands for orchestrated sessions plus provider-supplied
+/// commands, deduplicated by name. The provider crate owns execution for its
+/// additional commands; the orchestrator only keeps their advertisement stable
+/// when it replaces the session command list. `/rubber-duck` is advertised
+/// because this provider owns the verified critic flow; a registry without
+/// contrast still returns a typed unavailable reason.
+pub(super) fn initial_commands_with(
+    recovery_enabled: bool,
+    additional: &[ee_agent_protocol::AvailableCommand],
+) -> Vec<ee_agent_protocol::AvailableCommand> {
     let mut commands = vec![
         compact_available_command(),
         primary_agent_available_command(),
@@ -309,6 +315,11 @@ pub(super) fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol:
     if recovery_enabled {
         commands.push(discard_available_command());
         commands.push(resume_available_command());
+    }
+    for command in additional {
+        if !commands.iter().any(|existing| existing.name == command.name) {
+            commands.push(command.clone());
+        }
     }
     commands
 }

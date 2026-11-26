@@ -1,5 +1,5 @@
 //! Provider-adapter tests: session.
-use super::conversation::initial_commands;
+use super::conversation::initial_commands_with;
 use super::conversation::record_agent_message;
 use super::conversation::record_user_message;
 use super::*;
@@ -47,8 +47,28 @@ async fn reasoning_effort_config_option_round_trips_through_the_provider() {
 }
 
 #[test]
+fn additional_provider_commands_are_advertised_without_duplicates() {
+    let usage = ee_agent_protocol::AvailableCommand::new("usage", "provider-owned usage report");
+    let commands = initial_commands_with(false, std::slice::from_ref(&usage));
+    assert_eq!(
+        commands.iter().filter(|command| command.name == "usage").count(),
+        1,
+        "provider command is appended once"
+    );
+    assert_eq!(commands.last().map(|command| command.name.as_str()), Some("usage"));
+
+    let compact = ee_agent_protocol::compact_available_command();
+    let commands = initial_commands_with(false, std::slice::from_ref(&compact));
+    assert_eq!(
+        commands.iter().filter(|command| command.name == COMPACT_COMMAND_NAME).count(),
+        1,
+        "a built-in name is never duplicated"
+    );
+}
+
+#[test]
 fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
-    let commands = initial_commands(false);
+    let commands = initial_commands_with(false, &[]);
     assert_eq!(
         commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
         vec![
@@ -65,7 +85,7 @@ fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
             IMPORT_SESSION_COMMAND_NAME,
         ]
     );
-    let recovery_commands = initial_commands(true);
+    let recovery_commands = initial_commands_with(true, &[]);
     assert_eq!(
         recovery_commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
         vec![

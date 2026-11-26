@@ -23,6 +23,7 @@ wasm = ["dep:wasmtime"]
 
 [dependencies]
 ee-plugin-api.workspace = true
+ee-sandbox = { path = "../ee-sandbox" }
 jsonschema.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["derive"] }

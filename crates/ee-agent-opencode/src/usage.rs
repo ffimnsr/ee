@@ -1,8 +1,9 @@
 //! Read-only OpenCode usage and quota visibility.
 //!
-//! Reachable only through the explicit `--usage` action: no startup path calls
-//! this module, so an ordinary session performs exactly the requests its turns
-//! require. Two documented endpoints share the OpenCode origin:
+//! Reachable through the explicit `--usage` action or the advertised `/usage`
+//! session command: no startup path calls this module, so an ordinary session
+//! performs exactly the requests its turns require. Two documented endpoints
+//! share the OpenCode origin:
 //!
 //! - `GET https://opencode.ai/console/api/policies/current-budgets` reports
 //!   workspace policy budgets. Service-account keys get `403`, which means "no
@@ -225,7 +226,8 @@ pub fn go_usage_endpoint() -> String {
     crate::routes::OpenCodeSurface::Go.quota_url().unwrap_or(GO_USAGE_PATH).to_string()
 }
 
-/// Fetches the usage report. One explicit invocation, no caching.
+/// Fetches the usage report for one explicit `--usage` or `/usage`
+/// invocation. No caching.
 ///
 /// # Errors
 ///

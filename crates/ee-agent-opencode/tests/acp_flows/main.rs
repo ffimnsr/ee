@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use ee_agent_acp_server::{
-    AcpAgentServer, AcpAgentServerConfig, JsonRpcFrame, MemoryTransport, MemoryTransportHandle,
+    AcpAgentServer, AcpAgentServerConfig, AgentProvider, JsonRpcFrame, MemoryTransport,
+    MemoryTransportHandle,
 };
 use ee_agent_opencode::adapter::test_support::{ScriptedAnswer, ScriptedCodec, test_config};
 use ee_agent_opencode::config::Config;
@@ -20,7 +21,7 @@ use ee_agent_opencode::critic::opencode_multi_model_provider_with_codecs;
 use ee_agent_opencode::routes::{
     OpenCodeDialect, OpenCodeRoute, OpenCodeSurface, catalog, resolve_route,
 };
-use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, ModelRole, OrchestratorProvider};
+use ee_agent_orchestrator::{CritiqueReport, CritiqueTarget, ModelRole};
 use ee_agent_protocol::{Error as RpcError, RawJsonRpcMessage, RequestId, Response};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -231,8 +232,8 @@ fn spawn_agent_with_config(
 }
 
 /// Serves one already-built provider over the framework's memory transport.
-fn spawn_provider(
-    provider: OrchestratorProvider,
+fn spawn_provider<P: AgentProvider>(
+    provider: P,
     dirs: &TestDirs,
 ) -> (Harness, tokio::task::JoinHandle<Result<(), ee_agent_acp_server::AcpServerError>>) {
     let server = AcpAgentServer::new(provider, AcpAgentServerConfig::default());
@@ -376,3 +377,4 @@ mod critic;
 mod dialects;
 mod redaction;
 mod single_dialect;
+mod usage;

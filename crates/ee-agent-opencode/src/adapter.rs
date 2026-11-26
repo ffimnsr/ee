@@ -579,6 +579,10 @@ fn forward_error(error: ModelError) -> ProviderError {
 /// rubber-duck mode reaches the runtime unchanged, so an unusable or absent
 /// critic is reported by the orchestrator as contrast unavailable rather than
 /// silently ignored.
+///
+/// The configuration also advertises the provider-owned `/usage` command;
+/// serve the provider through [`crate::usage_command::UsageCommandProvider`]
+/// so the command is answered instead of leaking into the model prompt.
 #[must_use]
 pub fn opencode_orchestrator_config(
     config: &Config,
@@ -622,6 +626,7 @@ pub fn opencode_orchestrator_config(
         session_state_dir: Some(session_state_dir),
         session_log_dir: session_log_root.clone(),
         remote_instruction_fetcher: Some(ee_chat_completions::http_instruction_fetcher()),
+        additional_commands: vec![crate::usage_command::usage_available_command()],
         ..OrchestratorProviderConfig::default()
     };
     if let Some(root) = session_log_root {

@@ -45,6 +45,10 @@
 //!   rejected.
 //! - [`usage`] is the explicit `--usage` probe for workspace budgets and the Go
 //!   meter. No startup path calls it, and no result is cached.
+//! - [`usage_command`] advertises the provider-scoped `/usage` ACP command from
+//!   that probe and answers it before the orchestrator or model sees the
+//!   prompt. Only this crate installs the wrapper, so other orchestrator-backed
+//!   agents never advertise the command.
 //!
 //! `OPENCODE_API_KEY` is never read here: route resolution performs no I/O, and
 //! no endpoint can be supplied through the environment, so a rejected model
@@ -64,3 +68,4 @@ pub mod reasoning;
 pub mod responses;
 pub mod routes;
 pub mod usage;
+pub mod usage_command;

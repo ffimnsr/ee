@@ -671,7 +671,7 @@ Work items:
 - [x] Extend shared `ee-sandbox` with `ProcessLimits` and a generic `ProcessTreeMonitor` extracted from `ee-plugin-runtime`; the plugin runtime keeps its `Limits` adapter and termination reasons compatible.
 - [x] Add `ProcessLimits` for sandboxed terminal commands: wall time, aggregate RSS, CPU seconds, open files, file size, and process count; zero/absent means unlimited. Apply kernel rlimits before exec (bwrap `--rlimit-*` where supported, Unix `setrlimit` in `pre_exec` otherwise) and kill the whole process group on wall-time or aggregate breach.
 - [x] Sample the entire process tree, not just the shell pid: Linux `/proc` descendants and macOS child enumeration plus process accounting. Surface the breach reason in terminal output/status; never silently truncate or kill without a reason.
-- [x] Optional Linux cgroup v2 backend (`systemd --user` scope or a delegated cgroup) for aggregate memory/CPU/PID limits where available; fall back to rlimits plus sampling. macOS uses rlimits plus sampling.
+- [ ] Optional Linux cgroup v2 backend (`systemd --user` scope or a delegated cgroup) for aggregate memory/CPU/PID limits where available; fall back to rlimits plus sampling. macOS uses rlimits plus sampling. _(Deferred: rlimits plus process-tree sampling is the current backend; tracked in Deferred boundaries.)_
 - [x] Add `[agents.terminal_sandbox.limits]` config with unlimited defaults and a `strict` preset; document that builds may need raised limits. Keep the existing output-byte cap independent.
 - [x] Tests: process-tree sampling, wall-time kill, rlimit application, plugin monitor compatibility, sandboxed command breaches, and no regression with limits disabled.
 
@@ -699,4 +699,4 @@ Deferred boundaries:
 - Windows/WSL sandboxing; native Windows out of scope.
 - ACP v2 per-command interception without an agent-process sandbox: ACP v2 has no client terminal methods, so the host cannot wrap an agent-owned command directly.
 - MCP terminal tools keep their own `ee do mcp trust grant --execute` route; no cross-route nesting.
-- Optional Linux cgroup v2 aggregate limits remain future work; current limits use inherited rlimits plus process-tree sampling. The plugin runtime keeps its existing monitor; `ee-sandbox` provides the shared generic monitor for terminal/agent paths.
+- Optional Linux cgroup v2 aggregate limits remain future work; current limits use inherited rlimits plus process-tree sampling. The plugin runtime now delegates breach policy and process-tree sampling to the shared `ee-sandbox` monitor while retaining its platform-specific raw samplers and Windows job objects.

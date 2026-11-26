@@ -389,7 +389,6 @@ impl AgentTerminals {
                 request,
                 owner_agent_id,
                 terminal_id,
-                cap,
                 output,
                 readers,
                 Some(child),
@@ -416,7 +415,6 @@ impl AgentTerminals {
             request,
             owner_agent_id,
             terminal_id,
-            cap,
             output,
             output_readers,
             child,
@@ -439,13 +437,11 @@ impl AgentTerminals {
         request: &CreateTerminalRequest,
         owner_agent_id: Option<&str>,
         terminal_id: String,
-        cap: usize,
         output: Arc<Mutex<BoundedOutput>>,
         output_readers: Vec<thread::JoinHandle<()>>,
         child: Option<Child>,
         persistent: Option<PersistentCommandHandle>,
     ) -> Result<CreateTerminalResponse, AgentError> {
-        let _ = cap;
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
             owner: TerminalOwner {

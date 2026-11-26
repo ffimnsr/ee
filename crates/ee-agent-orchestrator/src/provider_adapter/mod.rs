@@ -45,13 +45,13 @@ use ee_agent_acp_server::{
     SetModeContext, SetModelContext, UpdateSink,
 };
 use ee_agent_protocol::{
-    ADOPT_COMMAND_NAME, AgentCapabilities, BRANCH_COMMAND_NAME, COMPACT_COMMAND_NAME, ContentBlock,
-    ContentChunk, DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME, EXPORT_SESSION_COMMAND_NAME,
-    FINAL_RESPONSE_MESSAGE_ID_PREFIX, HARNESS_COMMAND_NAME, IMPORT_SESSION_COMMAND_NAME,
-    Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME, REFLECT_COMMAND_NAME,
-    REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionConfigOption, SessionId, SessionMode,
-    SessionModeId, SessionModeState, SessionUpdate, StopReason, TextContent,
-    adopt_available_command, branch_available_command, compact_available_command,
+    ADOPT_COMMAND_NAME, AgentCapabilities, AvailableCommand, BRANCH_COMMAND_NAME,
+    COMPACT_COMMAND_NAME, ContentBlock, ContentChunk, DIFF_COMMAND_NAME, DISCARD_COMMAND_NAME,
+    EXPORT_SESSION_COMMAND_NAME, FINAL_RESPONSE_MESSAGE_ID_PREFIX, HARNESS_COMMAND_NAME,
+    IMPORT_SESSION_COMMAND_NAME, Implementation, MessageId, PRIMARY_AGENT_COMMAND_NAME,
+    REFLECT_COMMAND_NAME, REVERT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME, SessionConfigOption,
+    SessionId, SessionMode, SessionModeId, SessionModeState, SessionUpdate, StopReason,
+    TextContent, adopt_available_command, branch_available_command, compact_available_command,
     diff_available_command, discard_available_command, export_session_available_command,
     harness_available_command, import_session_available_command, is_resume_command,
     parse_slash_command, primary_agent_available_command, reflect_available_command,
@@ -129,6 +129,11 @@ pub struct OrchestratorProviderConfig {
     /// `effort` session config option. `None` advertises nothing, so agents
     /// without a reasoning field never show a dead selector.
     pub reasoning_effort: Option<ReasoningEffortControl>,
+    /// Extra slash commands advertised by the provider instance that owns this
+    /// wrapper. The orchestrator keeps their advertisement stable across
+    /// session creation and command-list refreshes; prompt execution stays in
+    /// the provider crate.
+    pub additional_commands: Vec<AvailableCommand>,
     /// Network client for configured remote instruction URLs.
     ///
     /// The orchestrator holds no HTTP client; a provider binary injects one.
@@ -153,6 +158,7 @@ impl Default for OrchestratorProviderConfig {
             telemetry: TelemetryConfig::default(),
             telemetry_attribution: default_telemetry_attribution(),
             reasoning_effort: None,
+            additional_commands: Vec::new(),
             remote_instruction_fetcher: None,
         }
     }

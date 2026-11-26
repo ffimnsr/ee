@@ -42,12 +42,11 @@ pub fn seatbelt_command(
 
     let mut args = vec![String::from("-p"), profile, String::from("sh"), String::from("-c")];
     args.push(command.to_string());
-    let mut command_env = env.to_vec();
-    set_default(&mut command_env, "PATH", DEFAULT_SANDBOX_PATH);
-    set_default(&mut command_env, "TMPDIR", &temp_dir.to_string_lossy());
-    set_default(&mut command_env, "TMP", &temp_dir.to_string_lossy());
-    set_default(&mut command_env, "TEMP", &temp_dir.to_string_lossy());
-    set_default(&mut command_env, "HOME", &temp_dir.to_string_lossy());
+    let mut command_env = default_env(env, temp_dir);
+    override_env(&mut command_env, "TMPDIR", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "TMP", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "TEMP", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "HOME", &temp_dir.to_string_lossy());
     Ok(SandboxCommand { program: sandbox_exec.to_path_buf(), args, env: command_env })
 }
 
@@ -80,6 +79,11 @@ pub fn seatbelt_direct_command(
     let mut args = vec![String::from("-p"), profile, program.to_string()];
     args.extend(program_args.iter().cloned());
     let command_env = default_env(env, temp_dir);
+    let mut command_env = command_env;
+    override_env(&mut command_env, "TMPDIR", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "TMP", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "TEMP", &temp_dir.to_string_lossy());
+    override_env(&mut command_env, "HOME", &temp_dir.to_string_lossy());
     Ok(SandboxCommand { program: sandbox_exec.to_path_buf(), args, env: command_env })
 }
 
@@ -146,13 +150,28 @@ fn profile(
 }
 
 fn seatbelt_path(path: &Path) -> Result<String, SandboxError> {
-    path.to_str().map(|value| value.replace('\\', "\\\\").replace('"', "\\\"")).ok_or_else(|| {
+    let value = path.to_str().ok_or_else(|| {
         SandboxError::Invalid(format!("sandbox path is not valid UTF-8: {}", path.display()))
-    })
+    })?;
+    if value.chars().any(char::is_control) {
+        return Err(SandboxError::Invalid(format!(
+            "sandbox path contains control characters: {}",
+            path.display()
+        )));
+    }
+    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn set_default(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     if !env.iter().any(|(key, _)| key == name) {
+        env.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn override_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(existing) = env.iter_mut().find(|(key, _)| key == name) {
+        existing.1 = value.to_string();
+    } else {
         env.push((name.to_string(), value.to_string()));
     }
 }

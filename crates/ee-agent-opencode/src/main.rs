@@ -249,8 +249,8 @@ async fn print_discovered_models(args: Args) -> Result<(), String> {
     print_json(&report.to_json())
 }
 
-/// Queries workspace budgets and the Go allowance. Reachable only through
-/// `--usage`: no startup path performs this request.
+/// Queries workspace budgets and the Go allowance. Reachable through `--usage`
+/// or the advertised `/usage` command: no startup path performs this request.
 async fn print_usage() -> Result<(), String> {
     let dotenv = read_dotenv();
     let probe = UsageProbe::resolve(&mut |name| env_or_dotenv(name, &dotenv))?;
@@ -261,8 +261,8 @@ async fn print_usage() -> Result<(), String> {
 /// Runs the production path: resolve config, build the routed adapter (plus the
 /// configured critic), serve ACP over stdio.
 async fn run(args: Args) -> Result<(), String> {
-    let config =
-        Config::from_args_and_dotenv(args, &read_dotenv()).map_err(|error| error.to_string())?;
+    let dotenv = read_dotenv();
+    let config = Config::from_args_and_dotenv(args, &dotenv).map_err(|error| error.to_string())?;
     if !config.has_api_key() {
         return Err(String::from(config::MISSING_API_KEY));
     }
@@ -270,7 +270,7 @@ async fn run(args: Args) -> Result<(), String> {
         eprintln!("ee-agent-opencode: warning: {note}");
     }
     let (provider, critic_warning) =
-        opencode_multi_model_provider(&config, default_session_state_dir()?)?;
+        opencode_multi_model_provider(&config, default_session_state_dir()?, &dotenv)?;
     if let Some(warning) = critic_warning {
         eprintln!("ee-agent-opencode: warning: {warning}");
     }

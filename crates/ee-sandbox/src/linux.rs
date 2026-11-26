@@ -121,10 +121,12 @@ fn base_args(spec: &SandboxSpec, env: &[(String, String)]) -> Result<Vec<String>
 
     let mut sandbox_env = env.to_vec();
     set_default(&mut sandbox_env, "PATH", DEFAULT_SANDBOX_PATH);
-    set_default(&mut sandbox_env, "TMPDIR", SANDBOX_TEMP_DIR);
-    set_default(&mut sandbox_env, "TMP", SANDBOX_TEMP_DIR);
-    set_default(&mut sandbox_env, "TEMP", SANDBOX_TEMP_DIR);
-    set_default(&mut sandbox_env, "HOME", SANDBOX_TEMP_DIR);
+    // Temp and HOME are always sandbox-owned, even when the parent env has
+    // values for them; otherwise tools write to a read-only host path.
+    override_env(&mut sandbox_env, "TMPDIR", SANDBOX_TEMP_DIR);
+    override_env(&mut sandbox_env, "TMP", SANDBOX_TEMP_DIR);
+    override_env(&mut sandbox_env, "TEMP", SANDBOX_TEMP_DIR);
+    override_env(&mut sandbox_env, "HOME", SANDBOX_TEMP_DIR);
     for (name, value) in &sandbox_env {
         args.extend([String::from("--setenv"), name.clone(), value.clone()]);
     }
@@ -133,6 +135,14 @@ fn base_args(spec: &SandboxSpec, env: &[(String, String)]) -> Result<Vec<String>
 
 fn set_default(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     if !env.iter().any(|(key, _)| key == name) {
+        env.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn override_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(existing) = env.iter_mut().find(|(key, _)| key == name) {
+        existing.1 = value.to_string();
+    } else {
         env.push((name.to_string(), value.to_string()));
     }
 }
@@ -160,7 +170,11 @@ mod tests {
             Path::new("/usr/bin/bwrap"),
             &spec,
             "printf ok",
-            &[("PATH".into(), DEFAULT_SANDBOX_PATH.into())],
+            &[
+                ("PATH".into(), DEFAULT_SANDBOX_PATH.into()),
+                ("HOME".into(), "/root".into()),
+                ("TMPDIR".into(), "/var/tmp".into()),
+            ],
         )
         .unwrap();
         assert!(contains(&command.args, "--unshare-net"));
@@ -181,6 +195,9 @@ mod tests {
         assert_eq!(command.args.last().map(String::as_str), Some("printf ok"));
         assert!(command.args.windows(3).any(|window| {
             window[0] == "--setenv" && window[1] == "TMPDIR" && window[2] == "/tmp"
+        }));
+        assert!(command.args.windows(3).any(|window| {
+            window[0] == "--setenv" && window[1] == "HOME" && window[2] == "/tmp"
         }));
     }
 

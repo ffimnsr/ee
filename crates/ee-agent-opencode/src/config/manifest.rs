@@ -159,7 +159,7 @@ pub fn setup_manifest() -> SetupManifest {
                 required: false,
                 secret: false,
                 description: String::from(
-                    "Optional OpenCode workspace organization id used only by --usage to read subscription budgets and the Go meter; never inferred from the API key.",
+                    "Optional OpenCode workspace organization id used by --usage and the /usage command to read subscription budgets and the Go meter; never inferred from the API key.",
                 ),
             },
         ],

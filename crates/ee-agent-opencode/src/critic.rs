@@ -11,6 +11,7 @@
 //! warning, exactly like the OpenRouter agent. Routing, credentials, and the
 //! root model are unaffected by anything in this module.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use crate::adapter::{OpenCodeModelAdapter, opencode_orchestrator_config};
 use crate::config::Config;
 use crate::family;
 use crate::routes::{self, OpenCodeRoute};
+use crate::usage_command::{ConfigUsageReporter, UsageCommandProvider, UsageReporter};
 
 /// Capabilities declared for both root and critic routes: the codecs speak chat,
 /// tools, and streaming for every dialect.
@@ -63,16 +65,21 @@ pub fn resolve_critic(config: &Config) -> Result<OpenCodeRoute, String> {
 }
 
 /// Builds the production provider: root route plus the configured critic when it
-/// is usable.
+/// is usable. The returned provider advertises and answers the OpenCode
+/// `/usage` command.
+///
+/// `dotenv` is the same parsed map used to build `config`; the usage reporter
+/// resolves its key and workspace id with the same lookup order as `--usage`.
 ///
 /// # Errors
 ///
-/// Returns a diagnostic only when the root route itself cannot be built; an
-/// unusable critic becomes the returned warning instead.
+/// Returns a diagnostic when the root route or usage reporter cannot be built;
+/// an unusable critic becomes the returned warning instead.
 pub fn opencode_multi_model_provider(
     config: &Config,
     session_state_dir: PathBuf,
-) -> Result<(OrchestratorProvider, Option<String>), String> {
+    dotenv: &BTreeMap<String, String>,
+) -> Result<(UsageCommandProvider<OrchestratorProvider>, Option<String>), String> {
     let root = OpenCodeModelAdapter::new(config)?;
     let (critic, warning) = match resolve_critic(config) {
         Err(reason) => (None, Some(format!("rubber duck unavailable: {reason}"))),
@@ -92,6 +99,7 @@ pub fn opencode_multi_model_provider(
         session_state_dir,
         Arc::new(root),
         critic.map(|(route, adapter)| (route, Arc::new(adapter) as Arc<dyn ModelAdapter>)),
+        Arc::new(ConfigUsageReporter::resolve(dotenv)?),
     )?;
     Ok((provider, warning))
 }
@@ -111,7 +119,7 @@ pub fn opencode_multi_model_provider_with_codecs(
     session_state_dir: PathBuf,
     root: (OpenCodeRoute, Arc<dyn crate::adapter::DialectCodec>),
     critic: Option<(OpenCodeRoute, Arc<dyn crate::adapter::DialectCodec>)>,
-) -> Result<(OrchestratorProvider, Option<String>), String> {
+) -> Result<(UsageCommandProvider<OrchestratorProvider>, Option<String>), String> {
     let (root_route, root_codec) = root;
     let token = config.token_source();
     let root = OpenCodeModelAdapter::with_codec(root_route, token.clone(), root_codec);
@@ -122,8 +130,28 @@ pub fn opencode_multi_model_provider_with_codecs(
             (Some((route, Arc::new(adapter) as Arc<dyn ModelAdapter>)), None)
         }
     };
-    let provider = provider_from_adapters(config, session_state_dir, Arc::new(root), critic)?;
+    let provider = provider_from_adapters(
+        config,
+        session_state_dir,
+        Arc::new(root),
+        critic,
+        Arc::new(DisabledUsageReporter),
+    )?;
     Ok((provider, warning))
+}
+
+/// Deterministic reporter for tests and test-utils builds: the command is
+/// advertised and intercepted, but never contacts the network.
+#[cfg(any(test, feature = "test-utils"))]
+struct DisabledUsageReporter;
+
+#[cfg(any(test, feature = "test-utils"))]
+impl UsageReporter for DisabledUsageReporter {
+    fn report(
+        &self,
+    ) -> ee_agent_acp_server::ProviderFuture<Result<crate::usage::UsageReport, String>> {
+        Box::pin(async { Err(String::from("usage probing is disabled in this test fixture")) })
+    }
 }
 
 /// Assembles the provider from resolved adapters, sharing one code path for the
@@ -133,7 +161,8 @@ fn provider_from_adapters(
     session_state_dir: PathBuf,
     root: Arc<dyn ModelAdapter>,
     critic: Option<(OpenCodeRoute, Arc<dyn ModelAdapter>)>,
-) -> Result<OrchestratorProvider, String> {
+    reporter: Arc<dyn UsageReporter>,
+) -> Result<UsageCommandProvider<OrchestratorProvider>, String> {
     let registry = registry_with_root(root, config.route, critic)?;
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let plugins = Arc::new(
@@ -144,13 +173,14 @@ fn provider_from_adapters(
         .map_err(|error| error.to_string())?,
     );
     plugins.models().adopt_registry(&registry).map_err(|error| error.to_string())?;
-    OrchestratorProvider::with_model_registry_and_host(
+    let provider = OrchestratorProvider::with_model_registry_and_host(
         opencode_orchestrator_config(config, session_state_dir),
         registry,
         ee_agent_orchestrator::default_agent_policy(),
         plugins,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(UsageCommandProvider::new(provider, reporter))
 }
 
 /// Registers the root route and, when present, the critic route.

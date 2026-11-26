@@ -7,11 +7,14 @@
 //! Resource sampling is opportunistic: the client samples the child on each
 //! pump or timeout tick instead of running a monitor thread. That keeps
 //! termination ordering deterministic and avoids a thread that can outlive the
-//! child. Linux reads `/proc`; macOS reads `proc_pid_rusage`.
+//! child. Sampling and breach policy are delegated to the shared
+//! `ee-sandbox` process monitor; platform-specific raw samplers remain for
+//! compatibility and tests.
 
 use std::time::{Duration, Instant};
 
 use ee_plugin_api::manifest::{Limits, Permissions};
+use ee_sandbox::{LimitBreach, ProcessLimits, ProcessTreeMonitor};
 
 use crate::health::TerminationReason;
 
@@ -62,28 +65,33 @@ pub struct ResourceSample {
 /// Stateful resource monitor.
 ///
 /// Pure `observe` makes RSS/CPU breach tests deterministic; `poll_process`
-/// supplies real samples on Linux.
+/// samples through the shared `ee-sandbox` process-tree monitor.
 #[derive(Debug, Clone)]
 pub struct ResourceMonitor {
-    limits: Limits,
+    limits: ProcessLimits,
+    monitor: ProcessTreeMonitor,
     sample_interval: Duration,
     last_sample: Option<Instant>,
 }
 
 impl ResourceMonitor {
     pub fn new(limits: &Limits, config: SandboxConfig) -> Self {
-        Self { limits: *limits, sample_interval: config.sample_interval, last_sample: None }
+        let limits = ProcessLimits {
+            max_rss_bytes: Some(limits.max_memory_bytes),
+            max_cpu_seconds: Some(limits.max_cpu_seconds),
+            ..ProcessLimits::default()
+        };
+        Self {
+            limits,
+            monitor: ProcessTreeMonitor::started_now(limits),
+            sample_interval: config.sample_interval,
+            last_sample: None,
+        }
     }
 
     /// Returns a termination reason when a sample breaches a manifest limit.
     pub fn observe(&self, sample: ResourceSample) -> Option<TerminationReason> {
-        if sample.rss_bytes > self.limits.max_memory_bytes {
-            return Some(TerminationReason::RssLimit);
-        }
-        if sample.cpu_seconds > self.limits.max_cpu_seconds as f64 {
-            return Some(TerminationReason::CpuLimit);
-        }
-        None
+        termination_reason(self.limits.breach(sample.rss_bytes, sample.cpu_seconds))
     }
 
     /// Whether enough time elapsed since the last refresh.
@@ -97,20 +105,20 @@ impl ResourceMonitor {
         }
     }
 
-    /// Sample the process and return a breach, if any.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Sample the process tree and return a breach, if any.
     pub fn poll_process(&mut self, pid: u32, now: Instant) -> Option<TerminationReason> {
         if !self.sample_due(now) {
             return None;
         }
-        read_process_sample(pid).and_then(|sample| self.observe(sample))
+        termination_reason(self.monitor.observe(pid))
     }
+}
 
-    /// Best-effort platforms without a process sampling API report no breach.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub fn poll_process(&mut self, _pid: u32, now: Instant) -> Option<TerminationReason> {
-        let _ = self.sample_due(now);
-        None
+fn termination_reason(breach: Option<LimitBreach>) -> Option<TerminationReason> {
+    match breach? {
+        LimitBreach::Rss => Some(TerminationReason::RssLimit),
+        LimitBreach::Cpu => Some(TerminationReason::CpuLimit),
+        LimitBreach::WallTime | LimitBreach::Exited => None,
     }
 }
 
