@@ -529,9 +529,6 @@ impl App {
     /// execute pin and may skip command-shape validation. Requires the same
     /// workspace, read-only-mode, cwd, and sandbox gates as native yolo.
     fn mcp_unrestricted_terminal_eligible(&self, prompt: &ApprovalPrompt) -> bool {
-        let ApprovalKind::TerminalCreate { request } = &prompt.kind else {
-            return false;
-        };
         let Some(invocation) = prompt.mcp.as_ref() else {
             return false;
         };
@@ -541,9 +538,6 @@ impl App {
         {
             return false;
         }
-        if !self.trusted_mode_allows(&prompt.session_id) {
-            return false;
-        }
         let Some(trust) = self.effective_mcp_server_trust() else {
             return false;
         };
@@ -551,8 +545,7 @@ impl App {
             return false;
         };
         grant.includes_unrestricted_execution()
-            && self.auto_sandbox_ready(prompt)
-            && self.terminal_cwd_within_primary(request)
+            && self.unrestricted_terminal_gates_allow(&prompt.session_id, prompt)
     }
 
     /// Whether a pending approval may skip the prompt because the host-local

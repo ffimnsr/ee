@@ -372,12 +372,7 @@ pub(crate) fn cmd_mcp_trust_grant(
     }
     println!("host-local store: {}", store.path().display());
     if yolo {
-        let settings = crate::config::load_config(None);
-        if settings.agents.terminal_sandbox.mode == crate::config::TerminalSandboxMode::Off {
-            println!(
-                "warning: --yolo is active while terminal sandbox mode is off; accepted MCP terminal commands run unsandboxed"
-            );
-        }
+        crate::trust_notice::print_yolo_sandbox_notice("MCP terminal");
         println!(
             "--yolo covers native ee_terminal_create only; MCP writes and other execute tools keep their pinned trust categories"
         );
@@ -784,6 +779,40 @@ mod tests {
 
         assert_eq!(store.revoke_execute("ee", "stdio:ee --mcp-proxy").unwrap(), 1);
         assert!(!store.load().unwrap().grants()[0].includes_unrestricted_execution());
+    }
+
+    #[test]
+    fn schema_v1_tools_without_unrestricted_load_as_simple() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = workspace_root(temp.path(), "repo");
+        let base = temp.path().join("state");
+        let store = McpTrustStore::at(&base, &root).unwrap();
+        let mut tools = pinned_server_tools(ee_mcp::ToolTransport::Stdio);
+        tools.extend(pinned_execution_tools(ee_mcp::ToolTransport::Stdio));
+        store
+            .add_grant(
+                McpServerGrant::new(
+                    String::from("mcp_server_v1"),
+                    *store.workspace(),
+                    String::from("ee"),
+                    String::from("stdio:ee --mcp-proxy"),
+                    crate::policy::mcp_server_trust::granted_at_now(),
+                    tools,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let legacy = fs::read_to_string(store.path())
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("unrestricted ="))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("schema_version = 2", "schema_version = 1");
+        fs::write(store.path(), legacy).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(loaded.grants()[0].includes_execution());
+        assert!(!loaded.grants()[0].includes_unrestricted_execution());
     }
 
     #[test]

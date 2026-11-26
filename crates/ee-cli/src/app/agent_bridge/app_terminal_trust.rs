@@ -3,7 +3,7 @@
 //!
 //! This is a separate explicit opt-in on top of the host-local workspace
 //! trust decision. It never applies to MCP-originated terminal tools (those
-//! keep their own `ee do mcp trust grant --execute` grant), to ACP v2
+//! keep their own `ee do agent trust mcp grant --server ee --execute` grant), to ACP v2
 //! agent-owned command permissions (the agent runs those itself), or to
 //! commands whose validated identity leaves the primary workspace.
 
@@ -50,20 +50,11 @@ impl App {
         if prompt.mcp.is_some() {
             return false;
         }
-        if !self.workspace_trusted()
-            || !self.workspace_terminal_execution_granted()
-            || !self.trusted_mode_allows(&prompt.session_id)
-        {
+        if !self.workspace_trusted() || !self.workspace_terminal_execution_granted() {
             return false;
         }
-        let mode = self.config.agents.terminal_sandbox.mode;
-        if mode != crate::config::TerminalSandboxMode::Off {
-            if !ee_sandbox::cached_probe().available {
-                return false;
-            }
-            if self.terminal_sandbox_spec(request).is_err() {
-                return false;
-            }
+        if !self.terminal_auto_gates_allow(&prompt.session_id, prompt) {
+            return false;
         }
         if self.workspace_terminal_unrestricted_granted() {
             // Unrestricted grant: any command text, but keep the workspace cwd
@@ -72,6 +63,31 @@ impl App {
             return self.terminal_cwd_within_primary(request);
         }
         self.terminal_trust_invocation(request).is_some()
+    }
+
+    /// Common gates for every auto-dispatched terminal approval: non-read-only
+    /// agent mode and a ready sandbox when the sandbox mode is not off.
+    pub(super) fn terminal_auto_gates_allow(
+        &self,
+        session_id: &str,
+        prompt: &ApprovalPrompt,
+    ) -> bool {
+        self.trusted_mode_allows(session_id) && self.auto_sandbox_ready(prompt)
+    }
+
+    /// Common gates for unrestricted terminal grants (workspace `--yolo` and
+    /// MCP unrestricted execute pins): auto gates plus a workspace-contained
+    /// cwd, because these paths skip command-shape validation.
+    pub(super) fn unrestricted_terminal_gates_allow(
+        &self,
+        session_id: &str,
+        prompt: &ApprovalPrompt,
+    ) -> bool {
+        let ApprovalKind::TerminalCreate { request } = &prompt.kind else {
+            return false;
+        };
+        self.terminal_auto_gates_allow(session_id, prompt)
+            && self.terminal_cwd_within_primary(request)
     }
 
     /// Whether a terminal request's cwd stays inside the primary workspace.

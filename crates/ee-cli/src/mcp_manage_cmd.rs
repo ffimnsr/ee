@@ -148,6 +148,11 @@ fn remove(args: &AgentMcpRemoveArgs) -> io::Result<()> {
     config::remove_mcp_server(scope, id).map_err(io::Error::other)?;
     if existed {
         println!("removed mcp server {id} from {} ({})", path.display(), scope_label(scope));
+        if id == "ee" {
+            println!(
+                "pinned trust grants are separate; remove them with `ee do agent trust mcp revoke --server ee`"
+            );
+        }
     } else {
         println!("no mcp server {id} in {} ({})", path.display(), scope_label(scope));
     }

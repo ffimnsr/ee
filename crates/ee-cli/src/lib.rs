@@ -122,6 +122,7 @@ mod text;
 #[allow(dead_code)]
 mod theme;
 mod trust_cmd;
+mod trust_notice;
 #[allow(dead_code)]
 mod ui;
 pub mod vlf_bench_support;

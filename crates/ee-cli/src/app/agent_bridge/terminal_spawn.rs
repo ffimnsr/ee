@@ -9,7 +9,7 @@ use std::thread;
 
 use ee_agent_host::AgentError;
 use ee_agent_protocol::CreateTerminalRequest;
-use ee_sandbox::{ProcessLimits, ProcessTreeMonitor, SandboxSpec};
+use ee_sandbox::{ProcessLimits, ProcessTreeMonitor, ReadAccess, SandboxSpec};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -48,9 +48,16 @@ pub(super) fn spawn_terminal_process(
 /// installation from HOME (rustup, cargo) would lose the host toolchain and try
 /// to reinstall it. Point those well-known homes at the host-owned directories
 /// instead; the sandbox still mounts them read-only, so this adds no write
-/// authority. Explicit request env always wins.
-fn sandbox_toolchain_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
-    if let Some(home) = std::env::var_os("HOME") {
+/// authority. Explicit request env always wins. With `read = workspace` the
+/// host home tree is masked, so leave the variables unset rather than pointing
+/// at paths that do not exist inside the sandbox.
+fn sandbox_toolchain_env(
+    mut env: Vec<(String, String)>,
+    read: ReadAccess,
+) -> Vec<(String, String)> {
+    if read == ReadAccess::Broad
+        && let Some(home) = std::env::var_os("HOME")
+    {
         apply_sandbox_toolchain_homes(&mut env, Path::new(&home));
     }
     env
@@ -83,7 +90,7 @@ pub(super) fn spawn_sandboxed_terminal_process(
         .clone()
         .ok_or_else(|| AgentError::Io(String::from("terminal sandbox backend path is missing")))?;
     let env = terminal_child_env(request);
-    let env = sandbox_toolchain_env(env);
+    let env = sandbox_toolchain_env(env, spec.read);
 
     #[cfg(target_os = "linux")]
     let sandbox = ee_sandbox::bwrap_command(&program, spec, command_line, &env)

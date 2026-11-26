@@ -424,19 +424,7 @@ fn set_current_workspace_decision(
         );
     }
     if unrestricted {
-        let settings = crate::config::load_config(None);
-        let sandbox = &settings.agents.terminal_sandbox;
-        if sandbox.mode == crate::config::TerminalSandboxMode::Off {
-            println!(
-                "warning: --yolo is active while terminal sandbox mode is off; accepted commands run unsandboxed"
-            );
-        } else {
-            println!(
-                "--yolo commands run inside the terminal sandbox (mode={}, network={})",
-                sandbox.mode.label(),
-                sandbox.network.label()
-            );
-        }
+        crate::trust_notice::print_yolo_sandbox_notice("native ACP v1 terminal");
         println!(
             "--yolo covers native ACP v1 terminal only; MCP terminal tools and ACP v2 command permissions keep their own routes"
         );
