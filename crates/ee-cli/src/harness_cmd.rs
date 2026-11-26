@@ -180,13 +180,34 @@ pub(crate) fn start_host_channel(
     timeout: Duration,
 ) -> io::Result<(RemoteHost, Arc<ee_agent_remote::HeadlessHandler>, HostChannel)> {
     let (host, handler, agent_id) = start_host(workspace, run_root)?;
-    let events = host.take_events().ok_or_else(|| {
-        io::Error::other("agent host did not expose its event stream; cannot watch rollouts")
-    })?;
+    let channel = bind_host_channel(&host, agent_id, timeout)?;
+    Ok((host, handler, channel))
+}
+
+/// Binds a rollout channel to a host's pump-backed event tap. Kept separate so
+/// the single-owner stream contract is testable without configured agents.
+fn bind_host_channel(
+    host: &RemoteHost,
+    agent_id: String,
+    timeout: Duration,
+) -> io::Result<HostChannel> {
+    let events = claim_event_stream(host)?;
     let collector = Arc::new(EventCollector::default());
     spawn_collector(events, host.clone(), collector.clone());
-    let channel = HostChannel { host: host.clone(), collector, agent_id, timeout };
-    Ok((host, handler, channel))
+    Ok(HostChannel { host: host.clone(), collector, agent_id, timeout })
+}
+
+/// Claims the pump-backed event tap. The pump stays the sole owner of the
+/// host receiver, so approval registration, session history, and bus
+/// notifications keep working while the collector observes the same events.
+fn claim_event_stream(
+    host: &RemoteHost,
+) -> io::Result<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>> {
+    host.start_with_events()
+        .map_err(|error| io::Error::other(format!("agent host: {error}")))?
+        .ok_or_else(|| {
+            io::Error::other("agent host did not expose its event stream; cannot watch rollouts")
+        })
 }
 
 fn start_host(
@@ -216,7 +237,9 @@ fn start_host(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no configured agents"))?;
     let (host, handler) = RemoteHost::headless_with_options(config, options)
         .map_err(|error| io::Error::other(format!("agent host: {error}")))?;
-    host.start().map_err(|error| io::Error::other(format!("agent host: {error}")))?;
+    // Do not call `host.start()` here: `start_host_channel` starts the pump and
+    // claims its event tap. Starting early would consume the receiver and the
+    // harness collector would never see rollout events.
     Ok((host, handler, agent_id))
 }
 

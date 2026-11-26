@@ -294,21 +294,47 @@ impl RemoteHost {
     ///
     /// Returns `internal` when called outside a Tokio runtime.
     pub fn start(&self) -> Result<(), RemoteError> {
+        self.start_inner(false).map(|_| ())
+    }
+
+    /// Starts the event pump and returns a tap of the same stream.
+    ///
+    /// The pump keeps sole ownership of the host's event receiver, so approval
+    /// registration, session history, and bus notifications stay intact while
+    /// a driver (for example the harness rollout collector) observes every
+    /// event. Returns `None` when the host already started; use [`Self::start`]
+    /// instead then.
+    ///
+    /// # Errors
+    ///
+    /// Returns `internal` when called outside a Tokio runtime.
+    pub fn start_with_events(
+        &self,
+    ) -> Result<Option<mpsc::UnboundedReceiver<AgentEvent>>, RemoteError> {
+        self.start_inner(true)
+    }
+
+    fn start_inner(
+        &self,
+        tap: bool,
+    ) -> Result<Option<mpsc::UnboundedReceiver<AgentEvent>>, RemoteError> {
         if self.inner.started.swap(true, Ordering::AcqRel) {
-            return Ok(());
+            return Ok(None);
         }
         let Some(receiver) = self.take_events() else {
-            return Ok(());
+            return Ok(None);
         };
+        let handle = tokio::runtime::Handle::try_current().map_err(|error| {
+            RemoteError::internal(format!("remote host start requires a Tokio runtime: {error}"))
+        })?;
         let host = self.clone();
-        tokio::runtime::Handle::try_current()
-            .map_err(|error| {
-                RemoteError::internal(format!(
-                    "remote host start requires a Tokio runtime: {error}"
-                ))
-            })?
-            .spawn(async move { host.pump_events(receiver).await });
-        Ok(())
+        if !tap {
+            handle.spawn(async move { host.pump_events(receiver).await });
+            return Ok(None);
+        }
+        let (tap_tx, tap_rx) = mpsc::unbounded_channel();
+        handle.spawn(async move { host.pump_events_with_tap(receiver, tap_tx).await });
+        Ok(Some(tap_rx))
     }
 
     /// Loaded sessions.
@@ -431,6 +457,21 @@ impl RemoteHost {
     async fn pump_events(&self, mut receiver: mpsc::UnboundedReceiver<AgentEvent>) {
         while let Some(event) = receiver.recv().await {
             self.handle_agent_event(event);
+        }
+    }
+
+    /// Pumps into the host exactly like [`Self::pump_events`] while forwarding
+    /// a copy to the tap. Host processing runs first so approval registration
+    /// and session history exist before a tap consumer reacts. A dropped tap
+    /// never stops host processing.
+    async fn pump_events_with_tap(
+        &self,
+        mut receiver: mpsc::UnboundedReceiver<AgentEvent>,
+        tap: mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        while let Some(event) = receiver.recv().await {
+            self.handle_agent_event(event.clone());
+            let _ = tap.send(event);
         }
     }
 

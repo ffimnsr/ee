@@ -1,5 +1,26 @@
 use super::*;
 use ee_agent_harnessing::save_entry_at;
+
+#[tokio::test]
+async fn host_channel_binds_a_fresh_host_event_tap() {
+    let host = RemoteHost::deny_all(ee_agent_remote::RemoteHostConfig::default());
+    let channel = bind_host_channel(&host, String::from("agent"), Duration::from_secs(1));
+    assert!(channel.is_ok(), "fresh host must expose the rollout stream");
+    assert!(host.take_events().is_none(), "the pump owns the receiver");
+}
+
+// Regression: the harness used to start the host pump before claiming the
+// stream, so `take_events` returned `None` and every `/harness` invocation
+// failed with "agent host did not expose its event stream".
+#[tokio::test]
+async fn host_channel_rejects_a_host_whose_pump_already_owns_events() {
+    let host = RemoteHost::deny_all(ee_agent_remote::RemoteHostConfig::default());
+    host.start().expect("pump starts");
+    let error = bind_host_channel(&host, String::from("agent"), Duration::from_secs(1))
+        .err()
+        .expect("already-started host cannot serve rollouts");
+    assert!(error.to_string().contains("cannot watch rollouts"), "error: {error}");
+}
 use ee_agent_orchestrator::user_experience::{
     EditRow, EditVerdict, ExperienceConfidence, ExperienceScope,
 };
